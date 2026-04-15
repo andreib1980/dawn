@@ -20,10 +20,11 @@
  *
  * Image Store Module
  *
- * Provides SQLite BLOB storage for uploaded images.
- * Images are stored directly in the database as BLOBs.
+ * Provides filesystem-backed image storage with SQLite metadata.
+ * Images are stored as files on disk; the database holds metadata only.
  *
- * Thread Safety: All functions are thread-safe via auth_db mutex.
+ * Thread Safety: All functions are thread-safe. File I/O happens outside
+ * the auth_db mutex; only metadata operations hold the lock.
  */
 
 #ifndef IMAGE_STORE_H
@@ -44,6 +45,12 @@
 /** @brief Maximum MIME type length */
 #define IMAGE_MIME_MAX 32
 
+/** @brief Maximum filename length (id + '.' + ext + null) */
+#define IMAGE_FILENAME_MAX 32
+
+/** @brief Maximum filesystem path length for image files */
+#define IMAGE_PATH_MAX 512
+
 /** @brief Default max image size (4MB) */
 #define IMAGE_MAX_SIZE_DEFAULT (4 * 1024 * 1024)
 
@@ -52,6 +59,9 @@
 
 /** @brief Default retention days (90 days, 0 = forever) */
 #define IMAGE_RETENTION_DAYS_DEFAULT 90
+
+/** @brief Default cache size cap in MB for RETAIN_CACHE images */
+#define IMAGE_CACHE_SIZE_MB_DEFAULT 200
 
 /* =============================================================================
  * Error Codes
@@ -70,6 +80,26 @@
  * ============================================================================= */
 
 /**
+ * @brief Image source — how the image entered the system
+ */
+typedef enum {
+   IMAGE_SOURCE_UPLOAD = 0,    /* User upload (vision) */
+   IMAGE_SOURCE_GENERATED = 1, /* sd.cpp output */
+   IMAGE_SOURCE_SEARCH = 2,    /* Web image search cache */
+   IMAGE_SOURCE_MMS = 3,       /* Received MMS */
+   IMAGE_SOURCE_DOCUMENT = 4,  /* Extracted from document */
+} image_source_t;
+
+/**
+ * @brief Retention policy — how long to keep the image
+ */
+typedef enum {
+   IMAGE_RETAIN_DEFAULT = 0,   /* Global retention_days applies */
+   IMAGE_RETAIN_PERMANENT = 1, /* Never auto-delete */
+   IMAGE_RETAIN_CACHE = 2,     /* LRU eviction at size cap */
+} image_retention_t;
+
+/**
  * @brief Image metadata structure
  */
 typedef struct {
@@ -77,6 +107,9 @@ typedef struct {
    int user_id;
    char mime_type[IMAGE_MIME_MAX];
    size_t size;
+   char filename[IMAGE_FILENAME_MAX];
+   image_source_t source;
+   image_retention_t retention_policy;
    time_t created_at;
    time_t last_accessed;
 } image_metadata_t;
@@ -85,9 +118,11 @@ typedef struct {
  * @brief Image store configuration
  */
 typedef struct {
-   size_t max_size;    /**< Maximum image size in bytes */
-   int max_per_user;   /**< Maximum images per user */
-   int retention_days; /**< Auto-delete after N days (0 = forever) */
+   size_t max_size;      /**< Maximum image size in bytes */
+   int max_per_user;     /**< Maximum images per user */
+   int retention_days;   /**< Auto-delete DEFAULT images after N days (0 = forever) */
+   int cache_size_mb;    /**< LRU cache cap for RETAIN_CACHE images in MB */
+   const char *data_dir; /**< Base data directory (images stored in <data_dir>/images/) */
 } image_store_config_t;
 
 /* =============================================================================
@@ -97,7 +132,7 @@ typedef struct {
 /**
  * @brief Initialize the image store
  *
- * Must be called after auth_db_init().
+ * Must be called after auth_db_init(). Creates <data_dir>/images/ if needed.
  *
  * @param config Configuration (NULL for defaults)
  * @return IMAGE_STORE_SUCCESS or IMAGE_STORE_FAILURE
@@ -123,17 +158,9 @@ bool image_store_is_ready(void);
  * ============================================================================= */
 
 /**
- * @brief Save an image
+ * @brief Save an image (backward-compatible wrapper)
  *
- * Generates a unique ID and stores image as BLOB in database.
- *
- * @param user_id User who owns the image
- * @param data Image binary data
- * @param size Size of image data in bytes
- * @param mime_type MIME type (e.g., "image/jpeg")
- * @param id_out Buffer to receive generated ID (must be IMAGE_ID_LEN bytes)
- * @return IMAGE_STORE_SUCCESS, IMAGE_STORE_TOO_LARGE, IMAGE_STORE_LIMIT_EXCEEDED,
- *         IMAGE_STORE_INVALID, or IMAGE_STORE_FAILURE
+ * Calls image_store_save_ex() with SOURCE_UPLOAD, RETAIN_DEFAULT.
  */
 int image_store_save(int user_id,
                      const void *data,
@@ -142,23 +169,43 @@ int image_store_save(int user_id,
                      char *id_out);
 
 /**
- * @brief Load an image
+ * @brief Save an image with source and retention policy
  *
- * Retrieves image BLOB from database. Updates last_accessed timestamp.
+ * Writes file to disk atomically (tmp+fsync+rename), then inserts metadata
+ * into the database. File I/O happens outside the auth_db mutex.
+ *
+ * @param user_id User who owns the image (0 for system-wide)
+ * @param data Image binary data
+ * @param size Size of image data in bytes
+ * @param mime_type MIME type (e.g., "image/jpeg")
+ * @param source How the image entered the system
+ * @param retention Retention policy for cleanup
+ * @param id_out Buffer to receive generated ID (must be IMAGE_ID_LEN bytes)
+ * @return IMAGE_STORE_SUCCESS, IMAGE_STORE_TOO_LARGE, IMAGE_STORE_LIMIT_EXCEEDED,
+ *         IMAGE_STORE_INVALID, or IMAGE_STORE_FAILURE
+ */
+int image_store_save_ex(int user_id,
+                        const void *data,
+                        size_t size,
+                        const char *mime_type,
+                        image_source_t source,
+                        image_retention_t retention,
+                        char *id_out);
+
+/**
+ * @brief Get the filesystem path for an image
+ *
+ * Returns the full path for zero-copy HTTP serving via lws_serve_http_file().
+ * Updates last_accessed timestamp.
  *
  * @param id Image ID
  * @param user_id User ID for access check (0 to skip check)
- * @param data_out Pointer to receive allocated data (caller must free)
- * @param size_out Receives size of data
+ * @param path_out Buffer to receive path (must be IMAGE_PATH_MAX bytes)
  * @param mime_out Buffer for MIME type (must be IMAGE_MIME_MAX bytes, can be NULL)
  * @return IMAGE_STORE_SUCCESS, IMAGE_STORE_NOT_FOUND, IMAGE_STORE_FORBIDDEN,
  *         or IMAGE_STORE_FAILURE
  */
-int image_store_load(const char *id,
-                     int user_id,
-                     void **data_out,
-                     size_t *size_out,
-                     char *mime_out);
+int image_store_get_path(const char *id, int user_id, char *path_out, char *mime_out);
 
 /**
  * @brief Get image metadata without loading data
@@ -170,9 +217,7 @@ int image_store_load(const char *id,
 int image_store_get_metadata(const char *id, image_metadata_t *metadata_out);
 
 /**
- * @brief Delete an image
- *
- * Removes image from database.
+ * @brief Delete an image (file + metadata)
  *
  * @param id Image ID
  * @param user_id User ID for access check (0 to skip check, admin only)
@@ -219,9 +264,13 @@ bool image_store_validate_mime(const char *mime_type);
  * ============================================================================= */
 
 /**
- * @brief Run cleanup of old images
+ * @brief Run cleanup of images based on retention policies
  *
- * Deletes images older than retention period.
+ * - RETAIN_DEFAULT: delete images older than retention_days
+ * - RETAIN_CACHE: LRU eviction when total cache exceeds cache_size_mb
+ * - RETAIN_PERMANENT: never deleted
+ *
+ * Deletes both files and metadata within a transaction.
  *
  * @return Number of images deleted, or -1 on error
  */

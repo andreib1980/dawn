@@ -20,10 +20,11 @@
  *
  * Image Store Module
  *
- * Provides SQLite BLOB storage for uploaded images.
- * Images are stored directly in the database.
+ * Provides filesystem-backed image storage with SQLite metadata.
+ * Images are stored as files on disk; the database holds metadata only.
  *
- * Thread Safety: Uses auth_db mutex for all database operations.
+ * Thread Safety: File I/O happens outside the auth_db mutex.
+ * Only metadata operations (INSERT/UPDATE/DELETE) hold the lock.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -31,9 +32,13 @@
 #undef AUTH_DB_INTERNAL_ALLOWED
 
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "image_store.h"
 #include "logging.h"
@@ -47,11 +52,14 @@ static struct {
    size_t max_size;
    int max_per_user;
    int retention_days;
+   int cache_size_mb;
+   char images_dir[IMAGE_PATH_MAX]; /* <data_dir>/images/ */
 } s_store = {
    .initialized = false,
    .max_size = IMAGE_MAX_SIZE_DEFAULT,
    .max_per_user = IMAGE_MAX_PER_USER_DEFAULT,
    .retention_days = IMAGE_RETENTION_DAYS_DEFAULT,
+   .cache_size_mb = IMAGE_CACHE_SIZE_MB_DEFAULT,
 };
 
 /* =============================================================================
@@ -63,18 +71,15 @@ static struct {
  *
  * Format: "img_" + 12 alphanumeric characters
  */
-static void generate_image_id(char *out) {
+static int generate_image_id(char *out) {
    static const char charset[] = "0123456789"
                                  "abcdefghijklmnopqrstuvwxyz"
                                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
    unsigned char random_bytes[12];
 
-   /* Use getrandom for cryptographically secure random bytes */
    if (getrandom(random_bytes, sizeof(random_bytes), 0) != sizeof(random_bytes)) {
-      /* Fallback to less secure random if getrandom fails */
-      for (size_t i = 0; i < sizeof(random_bytes); i++) {
-         random_bytes[i] = (unsigned char)rand();
-      }
+      LOG_ERROR("Image store: getrandom failed");
+      return IMAGE_STORE_FAILURE;
    }
 
    out[0] = 'i';
@@ -86,6 +91,86 @@ static void generate_image_id(char *out) {
       out[4 + i] = charset[random_bytes[i] % 62];
    }
    out[16] = '\0';
+   return IMAGE_STORE_SUCCESS;
+}
+
+/**
+ * @brief Get file extension from MIME type
+ */
+static const char *mime_to_ext(const char *mime_type) {
+   if (!mime_type)
+      return "bin";
+   if (strcmp(mime_type, "image/jpeg") == 0)
+      return "jpg";
+   if (strcmp(mime_type, "image/png") == 0)
+      return "png";
+   if (strcmp(mime_type, "image/gif") == 0)
+      return "gif";
+   if (strcmp(mime_type, "image/webp") == 0)
+      return "webp";
+   return "bin";
+}
+
+/**
+ * @brief Build filename from ID and MIME type
+ */
+static void build_filename(const char *id, const char *mime_type, char *out, size_t out_size) {
+   snprintf(out, out_size, "%s.%s", id, mime_to_ext(mime_type));
+}
+
+/**
+ * @brief Build full filesystem path for an image file
+ */
+static void build_filepath(const char *filename, char *out, size_t out_size) {
+   snprintf(out, out_size, "%s/%s", s_store.images_dir, filename);
+}
+
+/**
+ * @brief Write data to file atomically (tmp + fsync + rename)
+ *
+ * Uses O_NOFOLLOW to prevent symlink attacks.
+ */
+static int write_file_atomic(const char *final_path,
+                             const char *filename,
+                             const void *data,
+                             size_t size) {
+   char tmppath[IMAGE_PATH_MAX + 16];
+   snprintf(tmppath, sizeof(tmppath), "%s/.%s.tmp", s_store.images_dir, filename);
+
+   int fd = open(tmppath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0640);
+   if (fd < 0) {
+      LOG_ERROR("Image store: failed to create temp file %s: %s", tmppath, strerror(errno));
+      return IMAGE_STORE_FAILURE;
+   }
+
+   const unsigned char *p = (const unsigned char *)data;
+   size_t remaining = size;
+   while (remaining > 0) {
+      ssize_t written = write(fd, p, remaining);
+      if (written < 0) {
+         if (errno == EINTR)
+            continue;
+         LOG_ERROR("Image store: write failed for %s: %s", tmppath, strerror(errno));
+         close(fd);
+         unlink(tmppath);
+         return IMAGE_STORE_FAILURE;
+      }
+      p += written;
+      remaining -= (size_t)written;
+   }
+
+   if (fsync(fd) != 0) {
+      LOG_WARNING("Image store: fsync failed for %s: %s", tmppath, strerror(errno));
+   }
+   close(fd);
+
+   if (rename(tmppath, final_path) != 0) {
+      LOG_ERROR("Image store: rename failed %s -> %s: %s", tmppath, final_path, strerror(errno));
+      unlink(tmppath);
+      return IMAGE_STORE_FAILURE;
+   }
+
+   return IMAGE_STORE_SUCCESS;
 }
 
 /* =============================================================================
@@ -112,11 +197,38 @@ int image_store_init(const image_store_config_t *config) {
          s_store.max_per_user = config->max_per_user;
       }
       s_store.retention_days = config->retention_days;
+      if (config->cache_size_mb > 0) {
+         s_store.cache_size_mb = config->cache_size_mb;
+      }
+
+      /* Set up images directory */
+      if (config->data_dir && config->data_dir[0]) {
+         snprintf(s_store.images_dir, sizeof(s_store.images_dir), "%s/images", config->data_dir);
+      }
+   }
+
+   if (s_store.images_dir[0] == '\0') {
+      LOG_ERROR("Image store: no data_dir configured");
+      return IMAGE_STORE_FAILURE;
+   }
+
+   /* Verify path leaves room for filename: images_dir + '/' + filename (max 32) */
+   if (strlen(s_store.images_dir) + 1 + IMAGE_FILENAME_MAX >= IMAGE_PATH_MAX) {
+      LOG_ERROR("Image store: data_dir path too long (%zu chars)", strlen(s_store.images_dir));
+      return IMAGE_STORE_FAILURE;
+   }
+
+   /* Create images directory if needed */
+   if (mkdir(s_store.images_dir, 0750) != 0 && errno != EEXIST) {
+      LOG_ERROR("Image store: failed to create %s: %s", s_store.images_dir, strerror(errno));
+      return IMAGE_STORE_FAILURE;
    }
 
    s_store.initialized = true;
-   LOG_INFO("Image store initialized: max_size=%zu, max_per_user=%d, retention=%d days",
-            s_store.max_size, s_store.max_per_user, s_store.retention_days);
+   LOG_INFO("Image store initialized: dir=%s, max_size=%zu, max_per_user=%d, "
+            "retention=%d days, cache=%d MB",
+            s_store.images_dir, s_store.max_size, s_store.max_per_user, s_store.retention_days,
+            s_store.cache_size_mb);
 
    return IMAGE_STORE_SUCCESS;
 }
@@ -173,6 +285,17 @@ int image_store_save(int user_id,
                      size_t size,
                      const char *mime_type,
                      char *id_out) {
+   return image_store_save_ex(user_id, data, size, mime_type, IMAGE_SOURCE_UPLOAD,
+                              IMAGE_RETAIN_DEFAULT, id_out);
+}
+
+int image_store_save_ex(int user_id,
+                        const void *data,
+                        size_t size,
+                        const char *mime_type,
+                        image_source_t source,
+                        image_retention_t retention,
+                        char *id_out) {
    if (!data || size == 0 || !mime_type || !id_out) {
       return IMAGE_STORE_INVALID;
    }
@@ -191,29 +314,47 @@ int image_store_save(int user_id,
       return IMAGE_STORE_TOO_LARGE;
    }
 
-   /* Check user image count */
-   int count = image_store_count_user(user_id);
-   if (count < 0) {
+   /* Check user image count (skip for system-wide images) */
+   if (user_id > 0) {
+      int count = image_store_count_user(user_id);
+      if (count < 0) {
+         return IMAGE_STORE_FAILURE;
+      }
+      if (count >= s_store.max_per_user) {
+         return IMAGE_STORE_LIMIT_EXCEEDED;
+      }
+   }
+
+   /* Generate unique ID and filename */
+   if (generate_image_id(id_out) != IMAGE_STORE_SUCCESS) {
       return IMAGE_STORE_FAILURE;
    }
-   if (count >= s_store.max_per_user) {
-      return IMAGE_STORE_LIMIT_EXCEEDED;
+
+   char filename[IMAGE_FILENAME_MAX];
+   build_filename(id_out, mime_type, filename, sizeof(filename));
+
+   char filepath[IMAGE_PATH_MAX];
+   build_filepath(filename, filepath, sizeof(filepath));
+
+   /* Write file to disk OUTSIDE the mutex */
+   int write_result = write_file_atomic(filepath, filename, data, size);
+   if (write_result != IMAGE_STORE_SUCCESS) {
+      return write_result;
    }
 
-   /* Generate unique ID */
-   generate_image_id(id_out);
-
-   /* Insert into database */
+   /* Insert metadata into database */
    AUTH_DB_LOCK_OR_FAIL();
 
    time_t now = time(NULL);
    sqlite3_reset(s_db.stmt_image_create);
    sqlite3_bind_text(s_db.stmt_image_create, 1, id_out, -1, SQLITE_STATIC);
    sqlite3_bind_int(s_db.stmt_image_create, 2, user_id);
-   sqlite3_bind_text(s_db.stmt_image_create, 3, mime_type, -1, SQLITE_STATIC);
-   sqlite3_bind_int64(s_db.stmt_image_create, 4, (int64_t)size);
-   sqlite3_bind_blob(s_db.stmt_image_create, 5, data, (int)size, SQLITE_STATIC);
-   sqlite3_bind_int64(s_db.stmt_image_create, 6, (int64_t)now);
+   sqlite3_bind_int(s_db.stmt_image_create, 3, (int)source);
+   sqlite3_bind_int(s_db.stmt_image_create, 4, (int)retention);
+   sqlite3_bind_text(s_db.stmt_image_create, 5, mime_type, -1, SQLITE_STATIC);
+   sqlite3_bind_int64(s_db.stmt_image_create, 6, (int64_t)size);
+   sqlite3_bind_text(s_db.stmt_image_create, 7, filename, -1, SQLITE_STATIC);
+   sqlite3_bind_int64(s_db.stmt_image_create, 8, (int64_t)now);
 
    int rc = sqlite3_step(s_db.stmt_image_create);
    sqlite3_reset(s_db.stmt_image_create);
@@ -221,99 +362,84 @@ int image_store_save(int user_id,
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
-      LOG_ERROR("Image store: failed to save %s: %s", id_out, sqlite3_errmsg(s_db.db));
+      LOG_ERROR("Image store: failed to save metadata for %s: %s", id_out, sqlite3_errmsg(s_db.db));
+      unlink(filepath); /* Clean up orphan file */
       return IMAGE_STORE_FAILURE;
    }
 
-   LOG_INFO("Image store: saved %s (%zu bytes, %s) for user %d", id_out, size, mime_type, user_id);
+   LOG_INFO("Image store: saved %s (%zu bytes, %s, source=%d, retention=%d)", id_out, size,
+            mime_type, (int)source, (int)retention);
    return IMAGE_STORE_SUCCESS;
 }
 
-int image_store_load(const char *id,
-                     int user_id,
-                     void **data_out,
-                     size_t *size_out,
-                     char *mime_out) {
-   if (!id || !data_out || !size_out) {
+int image_store_get_path(const char *id, int user_id, char *path_out, char *mime_out) {
+   if (!id || !path_out) {
       return IMAGE_STORE_INVALID;
    }
 
-   /* Validate ID format (prevents injection) */
    if (!image_store_validate_id(id)) {
       return IMAGE_STORE_INVALID;
    }
 
-   *data_out = NULL;
-   *size_out = 0;
-
-   /* Single query for metadata + data (reduces lock contention) */
    AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_reset(s_db.stmt_image_get_data);
-   sqlite3_bind_text(s_db.stmt_image_get_data, 1, id, -1, SQLITE_STATIC);
+   sqlite3_reset(s_db.stmt_image_get_file);
+   sqlite3_bind_text(s_db.stmt_image_get_file, 1, id, -1, SQLITE_STATIC);
 
-   int rc = sqlite3_step(s_db.stmt_image_get_data);
+   int rc = sqlite3_step(s_db.stmt_image_get_file);
    if (rc != SQLITE_ROW) {
-      sqlite3_reset(s_db.stmt_image_get_data);
+      sqlite3_reset(s_db.stmt_image_get_file);
       AUTH_DB_UNLOCK();
       return IMAGE_STORE_NOT_FOUND;
    }
 
-   /* Extract user_id for access check (column 0) */
-   int owner_id = sqlite3_column_int(s_db.stmt_image_get_data, 0);
+   /* Column 0: filename, 1: user_id, 2: source, 3: mime_type, 4: last_accessed */
+   const char *filename = (const char *)sqlite3_column_text(s_db.stmt_image_get_file, 0);
+   int owner_id = sqlite3_column_int(s_db.stmt_image_get_file, 1);
+   int source = sqlite3_column_int(s_db.stmt_image_get_file, 2);
+   const char *mime = (const char *)sqlite3_column_text(s_db.stmt_image_get_file, 3);
+   time_t last_acc = (time_t)sqlite3_column_int64(s_db.stmt_image_get_file, 4);
 
-   /* Check access permission */
-   if (user_id != 0 && owner_id != user_id) {
-      sqlite3_reset(s_db.stmt_image_get_data);
+   /* Access check: UPLOAD and MMS require ownership; others are accessible to any auth'd user */
+   if (user_id != 0 && (source == IMAGE_SOURCE_UPLOAD || source == IMAGE_SOURCE_MMS) &&
+       owner_id != user_id) {
+      sqlite3_reset(s_db.stmt_image_get_file);
       AUTH_DB_UNLOCK();
       return IMAGE_STORE_FORBIDDEN;
    }
 
-   /* Extract mime_type (column 1) */
-   const char *mime = (const char *)sqlite3_column_text(s_db.stmt_image_get_data, 1);
-   char mime_buffer[IMAGE_MIME_MAX] = { 0 };
-   if (mime) {
-      strncpy(mime_buffer, mime, IMAGE_MIME_MAX - 1);
-   }
-
-   /* Get BLOB pointer and size (column 2) */
-   const void *blob = sqlite3_column_blob(s_db.stmt_image_get_data, 2);
-   int blob_size = sqlite3_column_bytes(s_db.stmt_image_get_data, 2);
-
-   if (!blob || blob_size <= 0) {
-      sqlite3_reset(s_db.stmt_image_get_data);
+   /* Copy filename before resetting statement */
+   char filename_buf[IMAGE_FILENAME_MAX];
+   if (filename) {
+      strncpy(filename_buf, filename, sizeof(filename_buf) - 1);
+      filename_buf[sizeof(filename_buf) - 1] = '\0';
+   } else {
+      sqlite3_reset(s_db.stmt_image_get_file);
       AUTH_DB_UNLOCK();
       return IMAGE_STORE_FAILURE;
    }
 
-   /* Copy data (must be done while holding lock) */
-   void *buffer = malloc((size_t)blob_size);
-   if (!buffer) {
-      sqlite3_reset(s_db.stmt_image_get_data);
-      AUTH_DB_UNLOCK();
-      return IMAGE_STORE_FAILURE;
+   if (mime_out && mime) {
+      strncpy(mime_out, mime, IMAGE_MIME_MAX - 1);
+      mime_out[IMAGE_MIME_MAX - 1] = '\0';
    }
-   memcpy(buffer, blob, (size_t)blob_size);
 
-   sqlite3_reset(s_db.stmt_image_get_data);
+   sqlite3_reset(s_db.stmt_image_get_file);
 
-   /* Update last_accessed timestamp */
+   /* Rate-limit last_accessed updates: only write if >15 min stale (reduces flash wear) */
    time_t now = time(NULL);
-   sqlite3_reset(s_db.stmt_image_update_access);
-   sqlite3_bind_int64(s_db.stmt_image_update_access, 1, (int64_t)now);
-   sqlite3_bind_text(s_db.stmt_image_update_access, 2, id, -1, SQLITE_STATIC);
-   sqlite3_step(s_db.stmt_image_update_access);
-   sqlite3_reset(s_db.stmt_image_update_access);
+   if (now - last_acc > 900) {
+      sqlite3_reset(s_db.stmt_image_update_access);
+      sqlite3_bind_int64(s_db.stmt_image_update_access, 1, (int64_t)now);
+      sqlite3_bind_text(s_db.stmt_image_update_access, 2, id, -1, SQLITE_STATIC);
+      sqlite3_step(s_db.stmt_image_update_access);
+      sqlite3_reset(s_db.stmt_image_update_access);
+   }
 
    AUTH_DB_UNLOCK();
 
-   /* Return data */
-   *data_out = buffer;
-   *size_out = (size_t)blob_size;
-   if (mime_out) {
-      strncpy(mime_out, mime_buffer, IMAGE_MIME_MAX - 1);
-      mime_out[IMAGE_MIME_MAX - 1] = '\0';
-   }
+   /* Build full path */
+   build_filepath(filename_buf, path_out, IMAGE_PATH_MAX);
 
    return IMAGE_STORE_SUCCESS;
 }
@@ -334,6 +460,8 @@ int image_store_get_metadata(const char *id, image_metadata_t *metadata_out) {
 
    int rc = sqlite3_step(s_db.stmt_image_get);
    if (rc == SQLITE_ROW) {
+      /* Columns: id, user_id, mime_type, size, filename, source, retention_policy,
+       *          created_at, last_accessed */
       strncpy(metadata_out->id, (const char *)sqlite3_column_text(s_db.stmt_image_get, 0),
               IMAGE_ID_LEN - 1);
       metadata_out->id[IMAGE_ID_LEN - 1] = '\0';
@@ -349,8 +477,20 @@ int image_store_get_metadata(const char *id, image_metadata_t *metadata_out) {
       }
 
       metadata_out->size = (size_t)sqlite3_column_int64(s_db.stmt_image_get, 3);
-      metadata_out->created_at = (time_t)sqlite3_column_int64(s_db.stmt_image_get, 4);
-      metadata_out->last_accessed = (time_t)sqlite3_column_int64(s_db.stmt_image_get, 5);
+
+      const char *fname = (const char *)sqlite3_column_text(s_db.stmt_image_get, 4);
+      if (fname) {
+         strncpy(metadata_out->filename, fname, IMAGE_FILENAME_MAX - 1);
+         metadata_out->filename[IMAGE_FILENAME_MAX - 1] = '\0';
+      } else {
+         metadata_out->filename[0] = '\0';
+      }
+
+      metadata_out->source = (image_source_t)sqlite3_column_int(s_db.stmt_image_get, 5);
+      metadata_out->retention_policy = (image_retention_t)sqlite3_column_int(s_db.stmt_image_get,
+                                                                             6);
+      metadata_out->created_at = (time_t)sqlite3_column_int64(s_db.stmt_image_get, 7);
+      metadata_out->last_accessed = (time_t)sqlite3_column_int64(s_db.stmt_image_get, 8);
 
       sqlite3_reset(s_db.stmt_image_get);
       AUTH_DB_UNLOCK();
@@ -371,31 +511,57 @@ int image_store_delete(const char *id, int user_id) {
       return IMAGE_STORE_INVALID;
    }
 
-   /* Get metadata to check ownership */
-   image_metadata_t metadata;
-   int result = image_store_get_metadata(id, &metadata);
-   if (result != IMAGE_STORE_SUCCESS) {
-      return result;
+   /* Single lock: fetch metadata + check ownership + delete in one acquisition */
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Get filename and owner for access check */
+   sqlite3_reset(s_db.stmt_image_get_file);
+   sqlite3_bind_text(s_db.stmt_image_get_file, 1, id, -1, SQLITE_STATIC);
+
+   int rc = sqlite3_step(s_db.stmt_image_get_file);
+   if (rc != SQLITE_ROW) {
+      sqlite3_reset(s_db.stmt_image_get_file);
+      AUTH_DB_UNLOCK();
+      return IMAGE_STORE_NOT_FOUND;
    }
 
+   const char *filename = (const char *)sqlite3_column_text(s_db.stmt_image_get_file, 0);
+   int owner_id = sqlite3_column_int(s_db.stmt_image_get_file, 1);
+
    /* Check access permission (user_id=0 bypasses check for admin) */
-   if (user_id != 0 && metadata.user_id != user_id) {
+   if (user_id != 0 && owner_id != user_id) {
+      sqlite3_reset(s_db.stmt_image_get_file);
+      AUTH_DB_UNLOCK();
       return IMAGE_STORE_FORBIDDEN;
    }
 
-   /* Delete from database */
-   AUTH_DB_LOCK_OR_FAIL();
+   /* Copy filename before resetting */
+   char filename_buf[IMAGE_FILENAME_MAX] = { 0 };
+   if (filename) {
+      strncpy(filename_buf, filename, sizeof(filename_buf) - 1);
+   }
+   sqlite3_reset(s_db.stmt_image_get_file);
 
+   /* Delete row */
    sqlite3_reset(s_db.stmt_image_delete);
    sqlite3_bind_text(s_db.stmt_image_delete, 1, id, -1, SQLITE_STATIC);
-   sqlite3_bind_int(s_db.stmt_image_delete, 2, metadata.user_id);
-   int rc = sqlite3_step(s_db.stmt_image_delete);
+   sqlite3_bind_int(s_db.stmt_image_delete, 2, owner_id);
+   rc = sqlite3_step(s_db.stmt_image_delete);
    sqlite3_reset(s_db.stmt_image_delete);
 
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
       return IMAGE_STORE_FAILURE;
+   }
+
+   /* Delete file from disk (outside lock) */
+   if (filename_buf[0]) {
+      char filepath[IMAGE_PATH_MAX];
+      build_filepath(filename_buf, filepath, sizeof(filepath));
+      if (unlink(filepath) != 0 && errno != ENOENT) {
+         LOG_WARNING("Image store: failed to unlink %s: %s", filepath, strerror(errno));
+      }
    }
 
    LOG_INFO("Image store: deleted %s", id);
@@ -424,31 +590,134 @@ int image_store_count_user(int user_id) {
  * ============================================================================= */
 
 int image_store_cleanup(void) {
-   if (!s_store.initialized || s_store.retention_days <= 0) {
-      return 0; /* Nothing to do */
+   if (!s_store.initialized) {
+      return 0;
    }
 
-   time_t cutoff = time(NULL) - (s_store.retention_days * 86400);
+   int total_deleted = 0;
 
+   /* Phase 1: DEFAULT retention — delete images older than retention_days */
+   if (s_store.retention_days > 0) {
+      time_t cutoff = time(NULL) - (s_store.retention_days * 86400);
+
+      AUTH_DB_LOCK_OR_RETURN(-1);
+
+      /* Collect expired IDs + filenames first */
+      sqlite3_reset(s_db.stmt_image_get_expired_ids);
+      sqlite3_bind_int64(s_db.stmt_image_get_expired_ids, 1, (int64_t)cutoff);
+
+      /* Collect up to 100 at a time to avoid unbounded memory */
+      char ids[100][IMAGE_ID_LEN];
+      char filenames[100][IMAGE_FILENAME_MAX];
+      int batch_count = 0;
+
+      while (sqlite3_step(s_db.stmt_image_get_expired_ids) == SQLITE_ROW && batch_count < 100) {
+         const char *id = (const char *)sqlite3_column_text(s_db.stmt_image_get_expired_ids, 0);
+         const char *fn = (const char *)sqlite3_column_text(s_db.stmt_image_get_expired_ids, 1);
+         if (id && fn) {
+            strncpy(ids[batch_count], id, IMAGE_ID_LEN - 1);
+            ids[batch_count][IMAGE_ID_LEN - 1] = '\0';
+            strncpy(filenames[batch_count], fn, IMAGE_FILENAME_MAX - 1);
+            filenames[batch_count][IMAGE_FILENAME_MAX - 1] = '\0';
+            batch_count++;
+         }
+      }
+      sqlite3_reset(s_db.stmt_image_get_expired_ids);
+
+      /* Delete from DB (both params are the cutoff — outer WHERE + inner LIMIT subquery) */
+      sqlite3_reset(s_db.stmt_image_delete_old);
+      sqlite3_bind_int64(s_db.stmt_image_delete_old, 1, (int64_t)cutoff);
+      sqlite3_bind_int64(s_db.stmt_image_delete_old, 2, (int64_t)cutoff);
+      sqlite3_step(s_db.stmt_image_delete_old);
+      int deleted = sqlite3_changes(s_db.db);
+      sqlite3_reset(s_db.stmt_image_delete_old);
+
+      AUTH_DB_UNLOCK();
+
+      /* Unlink files outside the lock */
+      for (int i = 0; i < batch_count; i++) {
+         char filepath[IMAGE_PATH_MAX];
+         build_filepath(filenames[i], filepath, sizeof(filepath));
+         if (unlink(filepath) != 0 && errno != ENOENT) {
+            LOG_WARNING("Image store: cleanup failed to unlink %s: %s", filepath, strerror(errno));
+         }
+      }
+
+      total_deleted += deleted;
+   }
+
+   /* Phase 2: CACHE retention — LRU eviction if total exceeds cap */
    AUTH_DB_LOCK_OR_RETURN(-1);
 
-   sqlite3_reset(s_db.stmt_image_delete_old);
-   sqlite3_bind_int64(s_db.stmt_image_delete_old, 1, (int64_t)cutoff);
-
-   int rc = sqlite3_step(s_db.stmt_image_delete_old);
-   int deleted = 0;
-   if (rc == SQLITE_DONE) {
-      deleted = sqlite3_changes(s_db.db);
+   sqlite3_reset(s_db.stmt_image_cache_total_size);
+   int64_t cache_bytes = 0;
+   if (sqlite3_step(s_db.stmt_image_cache_total_size) == SQLITE_ROW) {
+      cache_bytes = sqlite3_column_int64(s_db.stmt_image_cache_total_size, 0);
    }
-   sqlite3_reset(s_db.stmt_image_delete_old);
+   sqlite3_reset(s_db.stmt_image_cache_total_size);
 
-   AUTH_DB_UNLOCK();
+   int64_t cap = (int64_t)s_store.cache_size_mb * 1024 * 1024;
 
-   if (deleted > 0) {
-      LOG_INFO("Image store: cleaned up %d old images", deleted);
+   if (cache_bytes > cap) {
+      /* Pass 1: collect LRU items to evict using running size total */
+      sqlite3_reset(s_db.stmt_image_get_cache_lru_ids);
+
+      char cache_ids[100][IMAGE_ID_LEN];
+      char cache_filenames[100][IMAGE_FILENAME_MAX];
+      int cache_evict_count = 0;
+
+      while (sqlite3_step(s_db.stmt_image_get_cache_lru_ids) == SQLITE_ROW && cache_bytes > cap &&
+             cache_evict_count < 100) {
+         /* Columns: 0=id, 1=filename, 2=size */
+         const char *cid = (const char *)sqlite3_column_text(s_db.stmt_image_get_cache_lru_ids, 0);
+         const char *fn = (const char *)sqlite3_column_text(s_db.stmt_image_get_cache_lru_ids, 1);
+         int64_t row_size = sqlite3_column_int64(s_db.stmt_image_get_cache_lru_ids, 2);
+         if (cid && fn) {
+            strncpy(cache_ids[cache_evict_count], cid, IMAGE_ID_LEN - 1);
+            cache_ids[cache_evict_count][IMAGE_ID_LEN - 1] = '\0';
+            strncpy(cache_filenames[cache_evict_count], fn, IMAGE_FILENAME_MAX - 1);
+            cache_filenames[cache_evict_count][IMAGE_FILENAME_MAX - 1] = '\0';
+            cache_evict_count++;
+            cache_bytes -= row_size;
+         }
+      }
+      sqlite3_reset(s_db.stmt_image_get_cache_lru_ids);
+
+      /* Pass 2: delete collected rows by ID */
+      sqlite3_stmt *del_stmt = NULL;
+      int prep_rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE id = ?", -1, &del_stmt,
+                                       NULL);
+      if (prep_rc == SQLITE_OK) {
+         for (int i = 0; i < cache_evict_count; i++) {
+            sqlite3_reset(del_stmt);
+            sqlite3_bind_text(del_stmt, 1, cache_ids[i], -1, SQLITE_STATIC);
+            if (sqlite3_step(del_stmt) == SQLITE_DONE) {
+               total_deleted++;
+            }
+         }
+         sqlite3_finalize(del_stmt);
+      }
+
+      AUTH_DB_UNLOCK();
+
+      /* Pass 3: unlink cache files outside the lock */
+      for (int i = 0; i < cache_evict_count; i++) {
+         char filepath[IMAGE_PATH_MAX];
+         build_filepath(cache_filenames[i], filepath, sizeof(filepath));
+         if (unlink(filepath) != 0 && errno != ENOENT) {
+            LOG_WARNING("Image store: cache cleanup failed to unlink %s: %s", filepath,
+                        strerror(errno));
+         }
+      }
+   } else {
+      AUTH_DB_UNLOCK();
    }
 
-   return deleted;
+   if (total_deleted > 0) {
+      LOG_INFO("Image store: cleaned up %d images", total_deleted);
+   }
+
+   return total_deleted;
 }
 
 int image_store_stats(int *total_count, int64_t *total_bytes) {
@@ -461,20 +730,13 @@ int image_store_stats(int *total_count, int64_t *total_bytes) {
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   const char *sql = "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM images";
-   sqlite3_stmt *stmt = NULL;
-
-   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return IMAGE_STORE_FAILURE;
+   sqlite3_reset(s_db.stmt_image_stats);
+   if (sqlite3_step(s_db.stmt_image_stats) == SQLITE_ROW) {
+      *total_count = sqlite3_column_int(s_db.stmt_image_stats, 0);
+      *total_bytes = sqlite3_column_int64(s_db.stmt_image_stats, 1);
    }
+   sqlite3_reset(s_db.stmt_image_stats);
 
-   if (sqlite3_step(stmt) == SQLITE_ROW) {
-      *total_count = sqlite3_column_int(stmt, 0);
-      *total_bytes = sqlite3_column_int64(stmt, 1);
-   }
-
-   sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
 
    return IMAGE_STORE_SUCCESS;

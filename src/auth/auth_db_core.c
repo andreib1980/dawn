@@ -62,7 +62,7 @@ auth_db_state_t s_db = {
  * Forward Declarations
  * ============================================================================= */
 
-static int create_schema(void);
+static int create_schema(const char *db_path);
 static int prepare_statements(void);
 static void finalize_statements(void);
 
@@ -224,13 +224,15 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_metrics_providers_session ON "
     "session_metrics_providers(session_metrics_id);"
 
-    /* Images table for vision uploads (added in schema v12) */
+    /* Images table — filesystem-backed metadata (v30, migrated from BLOB in v12-v29) */
     "CREATE TABLE IF NOT EXISTS images ("
     "   id TEXT PRIMARY KEY,"
     "   user_id INTEGER NOT NULL,"
+    "   source INTEGER NOT NULL DEFAULT 0,"
+    "   retention_policy INTEGER NOT NULL DEFAULT 0,"
     "   mime_type TEXT NOT NULL,"
     "   size INTEGER NOT NULL,"
-    "   data BLOB NOT NULL,"
+    "   filename TEXT NOT NULL,"
     "   created_at INTEGER NOT NULL,"
     "   last_accessed INTEGER,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
@@ -550,7 +552,8 @@ static const char *SCHEMA_SQL =
     "  contact_name TEXT DEFAULT '',"
     "  body TEXT NOT NULL,"
     "  timestamp INTEGER NOT NULL,"
-    "  read INTEGER DEFAULT 0"
+    "  read INTEGER DEFAULT 0,"
+    "  image_id TEXT DEFAULT NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_phone_sms_user_ts "
     "  ON phone_sms_log(user_id, timestamp DESC);"
@@ -576,7 +579,7 @@ static int get_current_schema_version(void) {
    return version;
 }
 
-static int create_schema(void) {
+static int create_schema(const char *db_path) {
    char *errmsg = NULL;
 
    /* Check current schema version (0 if fresh install) */
@@ -1364,14 +1367,187 @@ static int create_schema(void) {
       }
    }
 
-   /* Create continuation index (runs for both new databases and migrations) */
+   /* v30 migration: image store BLOB → filesystem + phone_sms_log image_id column
+    * Export image BLOBs to <data_dir>/images/ files, rebuild table without BLOB column.
+    * Also add image_id column to phone_sms_log for MMS attachment references. */
+   if (current_version >= 12 && current_version < 30) {
+      /* Derive images directory from db_path parent */
+      char images_dir[PATH_MAX];
+      char db_path_copy[PATH_MAX];
+      strncpy(db_path_copy, db_path, sizeof(db_path_copy) - 1);
+      db_path_copy[sizeof(db_path_copy) - 1] = '\0';
+      char *parent = dirname(db_path_copy);
+      snprintf(images_dir, sizeof(images_dir), "%s/images", parent);
+
+      /* Create images directory */
+      if (mkdir(images_dir, 0750) != 0 && errno != EEXIST) {
+         LOG_ERROR("auth_db: v30 migration - failed to create %s: %s", images_dir, strerror(errno));
+         return AUTH_DB_FAILURE;
+      }
+
+      /* Export BLOBs to files */
+      sqlite3_stmt *export_stmt = NULL;
+      rc = sqlite3_prepare_v2(s_db.db,
+                              "SELECT id, mime_type, data FROM images WHERE data IS NOT NULL", -1,
+                              &export_stmt, NULL);
+      if (rc != SQLITE_OK) {
+         LOG_ERROR("auth_db: v30 migration - prepare export failed: %s", sqlite3_errmsg(s_db.db));
+         return AUTH_DB_FAILURE;
+      }
+
+      int exported = 0;
+      int export_failed = 0;
+      while (sqlite3_step(export_stmt) == SQLITE_ROW) {
+         const char *id = (const char *)sqlite3_column_text(export_stmt, 0);
+         const char *mime = (const char *)sqlite3_column_text(export_stmt, 1);
+         const void *blob = sqlite3_column_blob(export_stmt, 2);
+         int blob_size = sqlite3_column_bytes(export_stmt, 2);
+
+         if (!id || !blob || blob_size <= 0)
+            continue;
+
+         /* Determine file extension from MIME */
+         const char *ext = "bin";
+         if (mime) {
+            if (strcmp(mime, "image/jpeg") == 0)
+               ext = "jpg";
+            else if (strcmp(mime, "image/png") == 0)
+               ext = "png";
+            else if (strcmp(mime, "image/gif") == 0)
+               ext = "gif";
+            else if (strcmp(mime, "image/webp") == 0)
+               ext = "webp";
+         }
+
+         /* Write to tmp file, fsync, rename for atomicity */
+         char filepath[PATH_MAX + 32];
+         char tmppath[PATH_MAX + 32];
+         snprintf(filepath, sizeof(filepath), "%s/%s.%s", images_dir, id, ext);
+         snprintf(tmppath, sizeof(tmppath), "%s/.%s.%s.tmp", images_dir, id, ext);
+
+         int fd = open(tmppath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0640);
+         if (fd < 0) {
+            LOG_WARNING("auth_db: v30 migration - failed to create %s: %s", tmppath,
+                        strerror(errno));
+            export_failed++;
+            continue;
+         }
+
+         const unsigned char *wp = (const unsigned char *)blob;
+         size_t remaining = (size_t)blob_size;
+         bool write_ok = true;
+         while (remaining > 0) {
+            ssize_t written = write(fd, wp, remaining);
+            if (written < 0) {
+               if (errno == EINTR)
+                  continue;
+               LOG_WARNING("auth_db: v30 migration - write failed for %s: %s", id, strerror(errno));
+               write_ok = false;
+               break;
+            }
+            wp += written;
+            remaining -= (size_t)written;
+         }
+         if (!write_ok) {
+            close(fd);
+            unlink(tmppath);
+            export_failed++;
+            continue;
+         }
+
+         fsync(fd);
+         close(fd);
+
+         if (rename(tmppath, filepath) != 0) {
+            LOG_WARNING("auth_db: v30 migration - rename failed for %s: %s", id, strerror(errno));
+            unlink(tmppath);
+            export_failed++;
+            continue;
+         }
+
+         exported++;
+      }
+      sqlite3_finalize(export_stmt);
+
+      if (export_failed > 0) {
+         LOG_ERROR("auth_db: v30 migration - %d/%d images failed to export", export_failed,
+                   exported + export_failed);
+         return AUTH_DB_FAILURE;
+      }
+
+      /* Rebuild images table without BLOB column */
+      const char *v30_images_sql =
+          "CREATE TABLE IF NOT EXISTS images_new ("
+          "   id TEXT PRIMARY KEY,"
+          "   user_id INTEGER NOT NULL,"
+          "   source INTEGER NOT NULL DEFAULT 0,"
+          "   retention_policy INTEGER NOT NULL DEFAULT 0,"
+          "   mime_type TEXT NOT NULL,"
+          "   size INTEGER NOT NULL,"
+          "   filename TEXT NOT NULL,"
+          "   created_at INTEGER NOT NULL,"
+          "   last_accessed INTEGER,"
+          "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "INSERT INTO images_new (id, user_id, source, retention_policy, mime_type, size, "
+          "filename, created_at, last_accessed) "
+          "SELECT id, user_id, 0, 0, mime_type, size, "
+          "id || '.' || CASE mime_type "
+          "  WHEN 'image/jpeg' THEN 'jpg' "
+          "  WHEN 'image/png' THEN 'png' "
+          "  WHEN 'image/gif' THEN 'gif' "
+          "  WHEN 'image/webp' THEN 'webp' "
+          "  ELSE 'bin' END, "
+          "created_at, last_accessed FROM images;"
+          "DROP TABLE images;"
+          "ALTER TABLE images_new RENAME TO images;"
+          "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
+          "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
+          "CREATE INDEX IF NOT EXISTS idx_images_retention ON images(retention_policy);";
+
+      rc = sqlite3_exec(s_db.db, v30_images_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         LOG_ERROR("auth_db: v30 migration (images table rebuild) failed: %s",
+                   errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+
+      LOG_INFO("auth_db: migrated %d images from BLOB to filesystem (v30)", exported);
+   }
+
+   /* v30 migration: add image_id to phone_sms_log (for MMS attachments) */
+   if (current_version >= 29 && current_version < 30) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE phone_sms_log ADD COLUMN image_id TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         LOG_WARNING("auth_db: v30 migration (sms image_id) failed: %s",
+                     errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         LOG_INFO("auth_db: added image_id column to phone_sms_log (v30)");
+      }
+   }
+
+   /* Create indexes that depend on migration-added columns.
+    * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
                      "CREATE INDEX IF NOT EXISTS idx_conversations_continued "
                      "ON conversations(continued_from)",
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
-      /* Non-fatal - index is just for performance */
       LOG_WARNING("auth_db: could not create continuation index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_images_retention "
+                     "ON images(retention_policy)",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      LOG_WARNING("auth_db: could not create retention index: %s", errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
@@ -1809,29 +1985,33 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Image statements */
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "INSERT INTO images (id, user_id, mime_type, size, data, created_at) "
-                           "VALUES (?, ?, ?, ?, ?, ?)",
-                           -1, &s_db.stmt_image_create, NULL);
+   /* Image statements (v30: filesystem-backed, no BLOB) */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "INSERT INTO images (id, user_id, source, retention_policy, mime_type, size, filename, "
+       "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       -1, &s_db.stmt_image_create, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_create failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, user_id, mime_type, size, created_at, last_accessed "
-                           "FROM images WHERE id = ?",
-                           -1, &s_db.stmt_image_get, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, mime_type, size, filename, source, retention_policy, "
+       "created_at, last_accessed FROM images WHERE id = ?",
+       -1, &s_db.stmt_image_get, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_get failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db, "SELECT user_id, mime_type, data FROM images WHERE id = ?", -1,
-                           &s_db.stmt_image_get_data, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT filename, user_id, source, mime_type, last_accessed FROM images WHERE id = ?", -1,
+       &s_db.stmt_image_get_file, NULL);
    if (rc != SQLITE_OK) {
-      LOG_ERROR("auth_db: prepare image_get_data failed: %s", sqlite3_errmsg(s_db.db));
+      LOG_ERROR("auth_db: prepare image_get_file failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -1856,10 +2036,55 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE created_at < ?", -1,
-                           &s_db.stmt_image_delete_old, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "DELETE FROM images WHERE retention_policy = 0 AND created_at < ? "
+       "AND id IN (SELECT id FROM images WHERE retention_policy = 0 AND created_at < ? LIMIT 100)",
+       -1, &s_db.stmt_image_delete_old, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_delete_old failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT COALESCE(SUM(size), 0) FROM images WHERE retention_policy = 2",
+                           -1, &s_db.stmt_image_cache_total_size, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare image_cache_total_size failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM images WHERE retention_policy = 2 AND id = "
+                           "(SELECT id FROM images WHERE retention_policy = 2 "
+                           "ORDER BY COALESCE(last_accessed, created_at) ASC LIMIT 1)",
+                           -1, &s_db.stmt_image_delete_cache_lru, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare image_delete_cache_lru failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db, "SELECT id, filename FROM images WHERE retention_policy = 0 AND created_at < ?", -1,
+       &s_db.stmt_image_get_expired_ids, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare image_get_expired_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, filename, size FROM images WHERE retention_policy = 2 "
+                           "ORDER BY COALESCE(last_accessed, created_at) ASC",
+                           -1, &s_db.stmt_image_get_cache_lru_ids, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare image_get_cache_lru_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM images", -1,
+                           &s_db.stmt_image_stats, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare image_stats failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -3065,8 +3290,8 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_create);
    if (s_db.stmt_image_get)
       sqlite3_finalize(s_db.stmt_image_get);
-   if (s_db.stmt_image_get_data)
-      sqlite3_finalize(s_db.stmt_image_get_data);
+   if (s_db.stmt_image_get_file)
+      sqlite3_finalize(s_db.stmt_image_get_file);
    if (s_db.stmt_image_delete)
       sqlite3_finalize(s_db.stmt_image_delete);
    if (s_db.stmt_image_update_access)
@@ -3075,6 +3300,16 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_count_user);
    if (s_db.stmt_image_delete_old)
       sqlite3_finalize(s_db.stmt_image_delete_old);
+   if (s_db.stmt_image_cache_total_size)
+      sqlite3_finalize(s_db.stmt_image_cache_total_size);
+   if (s_db.stmt_image_delete_cache_lru)
+      sqlite3_finalize(s_db.stmt_image_delete_cache_lru);
+   if (s_db.stmt_image_get_expired_ids)
+      sqlite3_finalize(s_db.stmt_image_get_expired_ids);
+   if (s_db.stmt_image_get_cache_lru_ids)
+      sqlite3_finalize(s_db.stmt_image_get_cache_lru_ids);
+   if (s_db.stmt_image_stats)
+      sqlite3_finalize(s_db.stmt_image_stats);
 
    /* Memory statements */
    if (s_db.stmt_memory_fact_create)
@@ -3465,7 +3700,7 @@ int auth_db_init(const char *db_path) {
    sqlite3_create_function(s_db.db, "powf", 2, SQLITE_UTF8, NULL, sqlite_powf, NULL, NULL);
 
    /* Create schema if needed */
-   if (create_schema() != AUTH_DB_SUCCESS) {
+   if (create_schema(path) != AUTH_DB_SUCCESS) {
       sqlite3_close(s_db.db);
       s_db.db = NULL;
       pthread_mutex_unlock(&s_db.mutex);

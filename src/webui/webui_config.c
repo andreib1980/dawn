@@ -761,6 +761,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "retention_days", config->images.retention_days);
       JSON_TO_CONFIG_INT(section, "max_size_mb", config->images.max_size_mb);
       JSON_TO_CONFIG_INT(section, "max_per_user", config->images.max_per_user);
+      JSON_TO_CONFIG_INT(section, "cache_size_mb", config->images.cache_size_mb);
    }
 
    /* [documents] */

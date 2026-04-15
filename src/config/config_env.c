@@ -1338,6 +1338,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->images.retention_days));
    json_object_object_add(images, "max_size_mb", json_object_new_int(config->images.max_size_mb));
    json_object_object_add(images, "max_per_user", json_object_new_int(config->images.max_per_user));
+   json_object_object_add(images, "cache_size_mb",
+                          json_object_new_int(config->images.cache_size_mb));
    json_object_object_add(root, "images", images);
 
    /* [documents] */
@@ -1863,6 +1865,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "retention_days = %d\n", config->images.retention_days);
    fprintf(fp, "max_size_mb = %d\n", config->images.max_size_mb);
    fprintf(fp, "max_per_user = %d\n", config->images.max_per_user);
+   fprintf(fp, "cache_size_mb = %d\n", config->images.cache_size_mb);
 
    /* [documents] controls document upload and extraction limits */
    fprintf(fp, "\n[documents]\n");

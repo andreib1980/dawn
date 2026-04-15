@@ -317,9 +317,10 @@
 # =============================================================================
 
 [images]
-# retention_days = 0              # Delete images older than N days (0 = never delete)
+# retention_days = 0              # Delete DEFAULT-retention images after N days (0 = never)
 # max_size_mb = 4                 # Maximum size per uploaded image in MB
 # max_per_user = 1000             # Maximum stored images per user
+# cache_size_mb = 200             # LRU cache cap for search/cached images in MB
 
 # =============================================================================
 # Document Library (RAG)

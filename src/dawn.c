@@ -2322,6 +2322,8 @@ mqtt_disabled:
          .max_size = (size_t)g_config.images.max_size_mb * 1024 * 1024,
          .max_per_user = g_config.images.max_per_user,
          .retention_days = g_config.images.retention_days,
+         .cache_size_mb = g_config.images.cache_size_mb,
+         .data_dir = expanded_data_dir,
       };
       if (image_store_init(&img_config) != IMAGE_STORE_SUCCESS) {
          LOG_WARNING("Failed to initialize image store - vision uploads disabled");

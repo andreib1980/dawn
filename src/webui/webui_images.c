@@ -465,12 +465,11 @@ int webui_images_handle_download(struct lws *wsi, const char *image_id, int user
       return send_json_error(wsi, HTTP_STATUS_BAD_REQUEST, "Invalid image ID");
    }
 
-   /* Load image */
-   void *data = NULL;
-   size_t size = 0;
+   /* Get filesystem path (also does access check and updates last_accessed) */
+   char filepath[IMAGE_PATH_MAX];
    char mime_type[IMAGE_MIME_MAX];
 
-   int result = image_store_load(image_id, user_id, &data, &size, mime_type);
+   int result = image_store_get_path(image_id, user_id, filepath, mime_type);
 
    switch (result) {
       case IMAGE_STORE_SUCCESS:
@@ -486,79 +485,19 @@ int webui_images_handle_download(struct lws *wsi, const char *image_id, int user
          return send_json_error(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Failed to load image");
    }
 
-   /* Send image response */
-   /* Note: For large images, this should use chunked transfer.
-    * For now, we send the entire image in one response since
-    * our images are limited to 4MB (compressed thumbnails are ~100-150KB). */
+   /* Build extra headers for lws_serve_http_file() */
+   char extra_headers[512];
+   int hdr_len = snprintf(extra_headers, sizeof(extra_headers),
+                          "Cache-Control: private, max-age=31536000\r\n"
+                          "X-Content-Type-Options: nosniff\r\n"
+                          "Content-Disposition: inline\r\n");
 
-   /* Header buffer only - body is written from separate data pointer */
-   unsigned char *buffer = malloc(LWS_PRE + 1024);
-   if (!buffer) {
-      free(data);
-      return send_json_error(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Memory allocation failed");
-   }
-
-   unsigned char *start = &buffer[LWS_PRE];
-   unsigned char *p = start;
-   unsigned char *end = &buffer[LWS_PRE + 1024];
-
-   if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end)) {
-      free(buffer);
-      free(data);
-      return -1;
-   }
-
-   if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE, (unsigned char *)mime_type,
-                                    (int)strlen(mime_type), &p, end)) {
-      free(buffer);
-      free(data);
-      return -1;
-   }
-
-   if (lws_add_http_header_content_length(wsi, (unsigned long)size, &p, end)) {
-      free(buffer);
-      free(data);
-      return -1;
-   }
-
-   /* Cache control - private, long-lived (images don't change) */
-   const char *cache_control = "private, max-age=31536000";
-   if (lws_add_http_header_by_name(wsi, (unsigned char *)"Cache-Control:",
-                                   (unsigned char *)cache_control, (int)strlen(cache_control), &p,
-                                   end)) {
-      free(buffer);
-      free(data);
-      return -1;
-   }
-
-   if (webui_add_security_headers(wsi, &p, end)) {
-      free(buffer);
-      free(data);
-      return -1;
-   }
-
-   if (lws_finalize_http_header(wsi, &p, end)) {
-      free(buffer);
-      free(data);
-      return -1;
-   }
-
-   /* Write headers */
-   int n = lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
+   /* Zero-copy file serving via kernel sendfile */
+   int n = lws_serve_http_file(wsi, filepath, mime_type, extra_headers, hdr_len);
    if (n < 0) {
-      free(buffer);
-      free(data);
-      return -1;
+      return send_json_error(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Failed to serve image");
    }
 
-   /* Write body */
-   n = lws_write(wsi, (unsigned char *)data, size, LWS_WRITE_HTTP);
-
-   free(buffer);
-   free(data);
-
-   if (n < 0)
-      return -1;
-
-   return -1; /* Close connection */
+   /* n == 0 means file is being served asynchronously (completion via LWS_CALLBACK) */
+   return 0;
 }

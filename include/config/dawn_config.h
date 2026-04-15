@@ -357,9 +357,10 @@ typedef struct {
  * Images Configuration (storage retention settings)
  * ============================================================================= */
 typedef struct {
-   int retention_days; /* Auto-delete images after N days (0 = never, default: 0) */
+   int retention_days; /* Auto-delete DEFAULT images after N days (0 = never, default: 0) */
    int max_size_mb;    /* Max image size in MB (default: 4) */
    int max_per_user;   /* Max images per user (default: 1000) */
+   int cache_size_mb;  /* LRU cache cap for CACHE-retention images in MB (default: 200) */
 } images_config_t;
 
 /* =============================================================================

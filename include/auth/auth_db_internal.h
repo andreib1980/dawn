@@ -48,7 +48,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 29
+#define AUTH_DB_SCHEMA_VERSION 30
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -131,11 +131,16 @@ typedef struct {
    /* === Image module statements (image_store.c) === */
    sqlite3_stmt *stmt_image_create;
    sqlite3_stmt *stmt_image_get;
-   sqlite3_stmt *stmt_image_get_data;
+   sqlite3_stmt *stmt_image_get_file; /* filename + user_id + source for path + access check */
    sqlite3_stmt *stmt_image_delete;
    sqlite3_stmt *stmt_image_update_access;
    sqlite3_stmt *stmt_image_count_user;
-   sqlite3_stmt *stmt_image_delete_old;
+   sqlite3_stmt *stmt_image_delete_old;        /* DEFAULT retention: created_at < cutoff */
+   sqlite3_stmt *stmt_image_cache_total_size;  /* SUM(size) for RETAIN_CACHE images */
+   sqlite3_stmt *stmt_image_delete_cache_lru;  /* oldest CACHE image by last_accessed */
+   sqlite3_stmt *stmt_image_get_expired_ids;   /* IDs + filenames of expired images */
+   sqlite3_stmt *stmt_image_get_cache_lru_ids; /* IDs + filenames of LRU cache overflow */
+   sqlite3_stmt *stmt_image_stats;             /* COUNT + SUM(size) for all images */
 
    /* === Memory module statements (memory_db.c) === */
    sqlite3_stmt *stmt_memory_fact_create;

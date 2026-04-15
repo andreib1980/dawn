@@ -223,6 +223,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->images.retention_days = 0; /* 0 = never delete (user preference) */
    config->images.max_size_mb = 4;    /* 4MB max per image */
    config->images.max_per_user = 1000;
+   config->images.cache_size_mb = 200; /* 200MB LRU cache cap */
 
    /* Documents - upload and extraction limits */
    config->documents.max_file_size_kb = 512;

@@ -851,12 +851,13 @@ static void parse_images(toml_table_t *table, images_config_t *config) {
       return;
 
    static const char *const known_keys[] = { "retention_days", "max_size_mb", "max_per_user",
-                                             NULL };
+                                             "cache_size_mb", NULL };
    warn_unknown_keys(table, "images", known_keys);
 
    PARSE_INT(table, "retention_days", config->retention_days);
    PARSE_INT(table, "max_size_mb", config->max_size_mb);
    PARSE_INT(table, "max_per_user", config->max_per_user);
+   PARSE_INT(table, "cache_size_mb", config->cache_size_mb);
 
    /* Clamp retention_days to valid range (0 = never delete) */
    if (config->retention_days < 0) {
@@ -875,6 +876,13 @@ static void parse_images(toml_table_t *table, images_config_t *config) {
       config->max_per_user = 1;
    } else if (config->max_per_user > 10000) {
       config->max_per_user = 10000;
+   }
+
+   /* Clamp cache_size_mb to valid range */
+   if (config->cache_size_mb < 10) {
+      config->cache_size_mb = 10;
+   } else if (config->cache_size_mb > 2048) {
+      config->cache_size_mb = 2048;
    }
 }
 
