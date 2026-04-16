@@ -1476,9 +1476,11 @@ static int create_schema(const char *db_path) {
          return AUTH_DB_FAILURE;
       }
 
-      /* Rebuild images table without BLOB column */
+      /* Rebuild images table without BLOB column (transactional) */
       const char *v30_images_sql =
-          "CREATE TABLE IF NOT EXISTS images_new ("
+          "BEGIN TRANSACTION;"
+          "DROP TABLE IF EXISTS images_new;"
+          "CREATE TABLE images_new ("
           "   id TEXT PRIMARY KEY,"
           "   user_id INTEGER NOT NULL,"
           "   source INTEGER NOT NULL DEFAULT 0,"
@@ -1504,13 +1506,15 @@ static int create_schema(const char *db_path) {
           "ALTER TABLE images_new RENAME TO images;"
           "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
           "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
-          "CREATE INDEX IF NOT EXISTS idx_images_retention ON images(retention_policy);";
+          "CREATE INDEX IF NOT EXISTS idx_images_retention ON images(retention_policy);"
+          "COMMIT;";
 
       rc = sqlite3_exec(s_db.db, v30_images_sql, NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
          LOG_ERROR("auth_db: v30 migration (images table rebuild) failed: %s",
                    errmsg ? errmsg : "unknown");
          sqlite3_free(errmsg);
+         sqlite3_exec(s_db.db, "ROLLBACK;", NULL, NULL, NULL);
          return AUTH_DB_FAILURE;
       }
 
@@ -2064,7 +2068,8 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "DELETE FROM images WHERE retention_policy = 0 AND created_at < ? "
-       "AND id IN (SELECT id FROM images WHERE retention_policy = 0 AND created_at < ? LIMIT 100)",
+       "AND id IN (SELECT id FROM images WHERE retention_policy = 0 AND created_at < ? "
+       "ORDER BY created_at ASC LIMIT 100)",
        -1, &s_db.stmt_image_delete_old, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_delete_old failed: %s", sqlite3_errmsg(s_db.db));

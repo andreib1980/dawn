@@ -678,12 +678,23 @@ void handle_entity_set_photo(ws_connection_t *conn, json_object *payload) {
 
    int rc = memory_db_entity_set_photo(conn->auth_user_id, entity_id, photo_id);
    if (rc == MEMORY_DB_SUCCESS) {
-      /* Upgrade new photo to permanent, downgrade old to default */
+      /* Upgrade new photo to permanent, downgrade old to default.
+       * Non-critical — photo still works if retention update fails. */
       if (photo_id && photo_id[0]) {
-         image_store_update_retention(photo_id, conn->auth_user_id, IMAGE_RETAIN_PERMANENT);
+         int ret_rc = image_store_update_retention(photo_id, conn->auth_user_id,
+                                                   IMAGE_RETAIN_PERMANENT);
+         if (ret_rc != IMAGE_STORE_SUCCESS) {
+            LOG_WARNING("webui_contacts: failed to upgrade retention for %s (rc=%d)", photo_id,
+                        ret_rc);
+         }
       }
       if (old_photo_id[0] && (!photo_id || strcmp(old_photo_id, photo_id) != 0)) {
-         image_store_update_retention(old_photo_id, conn->auth_user_id, IMAGE_RETAIN_DEFAULT);
+         int ret_rc = image_store_update_retention(old_photo_id, conn->auth_user_id,
+                                                   IMAGE_RETAIN_DEFAULT);
+         if (ret_rc != IMAGE_STORE_SUCCESS) {
+            LOG_WARNING("webui_contacts: failed to downgrade retention for %s (rc=%d)",
+                        old_photo_id, ret_rc);
+         }
       }
 
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
