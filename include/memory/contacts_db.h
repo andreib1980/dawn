@@ -33,7 +33,8 @@ typedef struct {
    char canonical_name[64];
    char field_type[16]; /* "email", "phone", "address" */
    char value[256];
-   char label[32]; /* "work", "personal", "mobile" */
+   char label[32];    /* "work", "personal", "mobile" */
+   char photo_id[32]; /* image store ID or empty */
 } contact_result_t;
 
 /**

@@ -1731,6 +1731,67 @@ int memory_db_entity_search(int user_id, const char *keywords, memory_entity_t *
    return count;
 }
 
+int memory_db_entity_set_photo(int user_id, int64_t entity_id, const char *photo_id) {
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_entity_set_photo;
+   sqlite3_reset(stmt);
+
+   if (photo_id && photo_id[0]) {
+      sqlite3_bind_text(stmt, 1, photo_id, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(stmt, 1);
+   }
+   sqlite3_bind_int64(stmt, 2, entity_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+
+   int rc = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_reset(stmt);
+
+   if (rc != SQLITE_DONE) {
+      LOG_ERROR("memory_db: entity_set_photo failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   AUTH_DB_UNLOCK();
+   return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_entity_get_photo(int user_id,
+                               int64_t entity_id,
+                               char *out_photo_id,
+                               size_t photo_id_size) {
+   if (!out_photo_id || photo_id_size == 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   out_photo_id[0] = '\0';
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_entity_get_photo;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int64(stmt, 1, entity_id);
+   sqlite3_bind_int(stmt, 2, user_id);
+
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      const char *val = (const char *)sqlite3_column_text(stmt, 0);
+      if (val) {
+         snprintf(out_photo_id, photo_id_size, "%s", val);
+      }
+      sqlite3_reset(stmt);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_SUCCESS;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+
+   return (rc == SQLITE_DONE) ? MEMORY_DB_NOT_FOUND : MEMORY_DB_FAILURE;
+}
+
 int memory_db_entity_delete(int64_t entity_id, int user_id) {
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 

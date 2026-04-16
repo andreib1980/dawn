@@ -48,7 +48,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 30
+#define AUTH_DB_SCHEMA_VERSION 31
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -134,6 +134,7 @@ typedef struct {
    sqlite3_stmt *stmt_image_get_file; /* filename + user_id + source for path + access check */
    sqlite3_stmt *stmt_image_delete;
    sqlite3_stmt *stmt_image_update_access;
+   sqlite3_stmt *stmt_image_update_retention;
    sqlite3_stmt *stmt_image_count_user;
    sqlite3_stmt *stmt_image_delete_old;        /* DEFAULT retention: created_at < cutoff */
    sqlite3_stmt *stmt_image_cache_total_size;  /* SUM(size) for RETAIN_CACHE images */
@@ -209,6 +210,8 @@ typedef struct {
    sqlite3_stmt *stmt_memory_relation_list_by_object;
    sqlite3_stmt *stmt_memory_entity_search;
    sqlite3_stmt *stmt_memory_entity_delete;
+   sqlite3_stmt *stmt_memory_entity_set_photo;
+   sqlite3_stmt *stmt_memory_entity_get_photo;
    sqlite3_stmt *stmt_memory_relation_delete_by_entity;
 
    /* === Document search statements (document_db.c) === */

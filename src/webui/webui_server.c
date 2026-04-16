@@ -3101,6 +3101,14 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (payload) {
          handle_contacts_search_entities(conn, payload);
       }
+   } else if (strcmp(type, "entity_set_photo") == 0) {
+      if (payload) {
+         handle_entity_set_photo(conn, payload);
+      }
+   } else if (strcmp(type, "entity_ensure") == 0) {
+      if (payload) {
+         handle_entity_ensure(conn, payload);
+      }
    }
    /* Document library (RAG) */
    else if (strcmp(type, "doc_library_list") == 0) {

@@ -43,6 +43,7 @@ typedef struct {
    bool enabled;
    bool confirm_outbound;
    char audio_device[64];
+   int user_id; /* owner of the modem — contacts/logs scoped to this user */
    int sms_retention_days;
    int call_log_retention_days;
    int rate_limit_sms_per_min;

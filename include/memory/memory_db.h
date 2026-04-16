@@ -705,6 +705,31 @@ int memory_db_entity_search(int user_id, const char *keywords, memory_entity_t *
 int memory_db_entity_delete(int64_t entity_id, int user_id);
 
 /**
+ * @brief Set an entity's photo (image store reference).
+ *
+ * @param user_id User ID (ownership check)
+ * @param entity_id Entity ID
+ * @param photo_id Image store ID, or NULL to clear
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_set_photo(int user_id, int64_t entity_id, const char *photo_id);
+
+/**
+ * @brief Get an entity's photo ID.
+ *
+ * @param user_id User ID (ownership check)
+ * @param entity_id Entity ID
+ * @param out_photo_id Output buffer for photo ID
+ * @param photo_id_size Size of output buffer
+ * @return MEMORY_DB_SUCCESS (photo_id may be empty if none set),
+ *         MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_get_photo(int user_id,
+                               int64_t entity_id,
+                               char *out_photo_id,
+                               size_t photo_id_size);
+
+/**
  * @brief Merge source entity into target entity
  *
  * Reassigns all relations and contacts from source to target,

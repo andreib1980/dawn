@@ -71,6 +71,9 @@ static void row_to_contact(sqlite3_stmt *st, contact_result_t *out) {
 
    const char *lbl = (const char *)sqlite3_column_text(st, 6);
    snprintf(out->label, sizeof(out->label), "%s", lbl ? lbl : "");
+
+   const char *photo = (const char *)sqlite3_column_text(st, 7);
+   snprintf(out->photo_id, sizeof(out->photo_id), "%s", photo ? photo : "");
 }
 
 /* =============================================================================

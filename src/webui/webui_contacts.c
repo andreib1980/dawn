@@ -26,6 +26,7 @@
 #include <json-c/json.h>
 #include <string.h>
 
+#include "image_store.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
@@ -140,6 +141,9 @@ static json_object *contact_to_json(const contact_result_t *c) {
    json_object_object_add(obj, "field_type", json_object_new_string(c->field_type));
    json_object_object_add(obj, "value", json_object_new_string(c->value));
    json_object_object_add(obj, "label", json_object_new_string(c->label));
+   if (c->photo_id[0]) {
+      json_object_object_add(obj, "photo_id", json_object_new_string(c->photo_id));
+   }
    return obj;
 }
 
@@ -423,6 +427,7 @@ void handle_contacts_add(ws_connection_t *conn, json_object *payload) {
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "entity_created", json_object_new_boolean(created));
+      json_object_object_add(resp_payload, "entity_id", json_object_new_int64(entity_id));
    }
 
 done:
@@ -614,6 +619,133 @@ void handle_contacts_search_entities(ws_connection_t *conn, json_object *payload
    json_object_object_add(resp_payload, "entities", arr);
 
 search_entities_done:
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* =============================================================================
+ * Set Entity Photo
+ * ============================================================================= */
+
+void handle_entity_set_photo(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+   if (!payload)
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("entity_set_photo_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Required: entity_id */
+   json_object *entity_id_obj;
+   if (!json_object_object_get_ex(payload, "entity_id", &entity_id_obj)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Missing 'entity_id' field"));
+      goto set_photo_done;
+   }
+   int64_t entity_id = json_object_get_int64(entity_id_obj);
+
+   /* Optional: photo_id (null/empty = clear photo) */
+   const char *photo_id = NULL;
+   json_object *photo_id_obj;
+   if (json_object_object_get_ex(payload, "photo_id", &photo_id_obj)) {
+      photo_id = json_object_get_string(photo_id_obj);
+   }
+
+   /* If setting a photo, verify image exists and belongs to this user */
+   if (photo_id && photo_id[0]) {
+      image_metadata_t meta;
+      int img_rc = image_store_get_metadata(photo_id, &meta);
+      if (img_rc != 0) {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error", json_object_new_string("Image not found"));
+         goto set_photo_done;
+      }
+      if (meta.user_id != conn->auth_user_id) {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error",
+                                json_object_new_string("Image does not belong to you"));
+         goto set_photo_done;
+      }
+   }
+
+   /* Fetch old photo_id before updating (for retention downgrade) */
+   char old_photo_id[32] = "";
+   memory_db_entity_get_photo(conn->auth_user_id, entity_id, old_photo_id, sizeof(old_photo_id));
+
+   int rc = memory_db_entity_set_photo(conn->auth_user_id, entity_id, photo_id);
+   if (rc == MEMORY_DB_SUCCESS) {
+      /* Upgrade new photo to permanent, downgrade old to default */
+      if (photo_id && photo_id[0]) {
+         image_store_update_retention(photo_id, conn->auth_user_id, IMAGE_RETAIN_PERMANENT);
+      }
+      if (old_photo_id[0] && (!photo_id || strcmp(old_photo_id, photo_id) != 0)) {
+         image_store_update_retention(old_photo_id, conn->auth_user_id, IMAGE_RETAIN_DEFAULT);
+      }
+
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "entity_id", json_object_new_int64(entity_id));
+      if (photo_id && photo_id[0]) {
+         json_object_object_add(resp_payload, "photo_id", json_object_new_string(photo_id));
+      }
+   } else if (rc == MEMORY_DB_NOT_FOUND) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Entity not found or not owned by you"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error", json_object_new_string("Database error"));
+   }
+
+set_photo_done:
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* =============================================================================
+ * Ensure Entity (find or create by name — lightweight upsert for photo-only flow)
+ * ============================================================================= */
+
+void handle_entity_ensure(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+   if (!payload)
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("entity_ensure_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *name_obj;
+   if (!json_object_object_get_ex(payload, "name", &name_obj) ||
+       !json_object_get_string(name_obj) || !json_object_get_string(name_obj)[0]) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error", json_object_new_string("Missing 'name' field"));
+      goto ensure_done;
+   }
+
+   const char *name = json_object_get_string(name_obj);
+   char canonical[64];
+   memory_make_canonical_name(name, canonical, sizeof(canonical));
+
+   bool created = false;
+   int64_t entity_id = memory_db_entity_upsert(conn->auth_user_id, name, "person", canonical,
+                                               &created);
+   if (entity_id < 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to create entity"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "entity_id", json_object_new_int64(entity_id));
+      json_object_object_add(resp_payload, "created", json_object_new_boolean(created));
+   }
+
+ensure_done:
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

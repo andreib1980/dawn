@@ -224,6 +224,144 @@
 }
 
 /* =============================================================================
+ * Contact Photo (in modal + card thumbnails)
+ * ============================================================================= */
+.contact-photo-area {
+   display: flex;
+   flex-direction: column;
+   align-items: center;
+   gap: 0.5rem;
+   margin-bottom: 0.75rem;
+}
+
+.contact-photo-circle {
+   width: 96px;
+   height: 96px;
+   border-radius: 50%;
+   border: 2px solid var(--accent);
+   overflow: hidden;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   background: var(--bg-secondary);
+   cursor: pointer;
+   transition: border-color var(--transition-fast);
+}
+
+.contact-photo-circle:hover {
+   border-color: var(--text-primary);
+}
+
+.contact-photo-circle:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.contact-photo-placeholder {
+   width: 48px;
+   height: 48px;
+   color: var(--text-secondary);
+}
+
+.contact-photo-placeholder.hidden {
+   display: none;
+}
+
+.contact-photo-preview {
+   width: 100%;
+   height: 100%;
+   object-fit: cover;
+}
+
+.contact-photo-preview.hidden {
+   display: none;
+}
+
+#contact-photo-input.hidden {
+   display: none;
+}
+
+.contact-photo-upload-btn {
+   background: none;
+   border: 1px solid var(--border-color);
+   color: var(--text-secondary);
+   font-size: 0.75rem;
+   padding: 0.2rem 0.5rem;
+   border-radius: 6px;
+   cursor: pointer;
+   transition:
+      color var(--transition-fast),
+      border-color var(--transition-fast);
+}
+
+.contact-photo-upload-btn:hover {
+   color: var(--accent);
+   border-color: var(--accent);
+}
+
+.contact-photo-upload-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.contact-photo-buttons {
+   display: flex;
+   gap: 0.5rem;
+   align-items: center;
+}
+
+.contact-photo-remove-btn {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   font-size: 0.75rem;
+   padding: 0.2rem 0.5rem;
+   cursor: pointer;
+   transition: color var(--transition-fast);
+}
+
+.contact-photo-remove-btn:hover {
+   color: var(--error, #ef4444);
+}
+
+.contact-photo-remove-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.contact-photo-remove-btn.hidden {
+   display: none;
+}
+
+/* Thumbnail in contact card list */
+.contact-photo-thumb {
+   width: 28px;
+   height: 28px;
+   border-radius: 50%;
+   border: 1px solid var(--border-color);
+   object-fit: cover;
+   flex-shrink: 0;
+}
+
+.contact-photo-thumb-placeholder {
+   width: 28px;
+   height: 28px;
+   border-radius: 50%;
+   border: 1px solid var(--border-color);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   flex-shrink: 0;
+   color: var(--text-secondary);
+   background: var(--bg-secondary);
+}
+
+.contact-photo-thumb-placeholder svg {
+   width: 16px;
+   height: 16px;
+}
+
+/* =============================================================================
  * Typeahead Dropdown
  * ============================================================================= */
 .contact-typeahead-dropdown {
@@ -342,6 +480,16 @@
 
    .contact-modal-content {
       max-width: 95vw;
+   }
+
+   .contact-photo-upload-btn {
+      padding: 0.5rem 1rem;
+      font-size: 0.85rem;
+   }
+
+   .contact-photo-remove-btn {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.85rem;
    }
 
    #contact-value,

@@ -44,4 +44,10 @@ void handle_contacts_delete(ws_connection_t *conn, json_object *payload);
 /** Search entities by name for typeahead (returns person entities matching query) */
 void handle_contacts_search_entities(ws_connection_t *conn, json_object *payload);
 
+/** Set or clear an entity's contact photo */
+void handle_entity_set_photo(ws_connection_t *conn, json_object *payload);
+
+/** Find or create a person entity by name (lightweight upsert for photo-only flow) */
+void handle_entity_ensure(ws_connection_t *conn, json_object *payload);
+
 #endif /* WEBUI_CONTACTS_H */

@@ -101,7 +101,7 @@ DAWN remembers facts, preferences, and relationships about its users across sess
 - **Automated Extraction** — Facts, preferences, entities, and relations extracted at session end.
 - **Privacy Toggle** — Mark conversations as private to prevent memory extraction (Ctrl+Shift+P in WebUI).
 - **Confidence Decay** — Unused memories naturally fade; accessed memories are reinforced.
-- **Contacts** — Store email addresses, phone numbers, and addresses for people DAWN knows. Linked to the entity graph. Used by the email system for recipient resolution, with more tools coming soon (SMS, phone calls). Managed via voice ("Save Bob's email") or the WebUI Contacts tab.
+- **Contacts** — Store email addresses, phone numbers, and addresses for people DAWN knows. Upload contact photos (compressed and circular-cropped in the WebUI) that appear as thumbnails in the contact list and are sent as base64 in HUD notifications for incoming calls and SMS. Linked to the entity graph. Used by the email and phone systems for contact resolution. Managed via voice ("Save Bob's email") or the WebUI Contacts tab.
 - **Entity Merge** — Combine duplicate entities ("Shelley" + "Shelley Kersey"), transferring all relations and contacts. Available via voice or WebUI.
 - **Memory Viewer** — Browse, search, and manage all memory types in the WebUI. Five tabs: Facts, Preferences, Summaries, Graph, Contacts.
 - **Import / Export** — Export memories as DAWN JSON (lossless backup) or human-readable text (portable). Import from Claude, ChatGPT, or other AIs — paste text or upload a file. Preview before committing with automatic duplicate detection.

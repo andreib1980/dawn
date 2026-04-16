@@ -27,6 +27,9 @@
 
 #include <json-c/json.h>
 #include <mosquitto.h>
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+#include <openssl/evp.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,8 +39,10 @@
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/worker_pool.h"
+#include "image_store.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
+#include "memory/memory_db.h"
 #include "tools/phone_db.h"
 #include "tts/text_to_speech.h"
 
@@ -48,6 +53,7 @@
 static phone_service_config_t s_config = {
    .enabled = true,
    .confirm_outbound = true,
+   .user_id = 1,
    .sms_retention_days = 90,
    .call_log_retention_days = 90,
    .rate_limit_sms_per_min = 5,
@@ -60,6 +66,7 @@ static pthread_mutex_t s_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Active call tracking — protected by s_state_mutex (same as s_state) */
 static int64_t s_active_call_log_id = -1;
+static int64_t s_active_entity_id = -1;
 static time_t s_call_start_time = 0;
 static char s_active_number[24] = "";
 static char s_active_contact[64] = "";
@@ -91,7 +98,8 @@ static void set_state(phone_state_t new_state) {
 static void set_state_with_call(phone_state_t new_state,
                                 const char *number,
                                 const char *contact,
-                                int64_t call_log_id) {
+                                int64_t call_log_id,
+                                int64_t entity_id) {
    pthread_mutex_lock(&s_state_mutex);
    s_state = new_state;
    if (number) {
@@ -101,6 +109,7 @@ static void set_state_with_call(phone_state_t new_state,
       snprintf(s_active_contact, sizeof(s_active_contact), "%s", contact);
    }
    s_active_call_log_id = call_log_id;
+   s_active_entity_id = entity_id;
    pthread_mutex_unlock(&s_state_mutex);
 }
 
@@ -111,6 +120,7 @@ static void clear_call_tracking(void) {
    pthread_mutex_lock(&s_state_mutex);
    s_state = PHONE_STATE_IDLE;
    s_active_call_log_id = -1;
+   s_active_entity_id = -1;
    s_call_start_time = 0;
    s_active_number[0] = '\0';
    s_active_contact[0] = '\0';
@@ -177,8 +187,15 @@ static int resolve_number(int user_id,
  * a LIKE match on entity name, so we search all phone contacts and check
  * value equality. This avoids the O(N) scan of contacts_list.
  */
-static void reverse_lookup(int user_id, const char *number, char *name_out, size_t name_size) {
+static void reverse_lookup(int user_id,
+                           const char *number,
+                           char *name_out,
+                           size_t name_size,
+                           int64_t *entity_id_out) {
    name_out[0] = '\0';
+   if (entity_id_out) {
+      *entity_id_out = -1;
+   }
    if (!number || number[0] == '\0') {
       return;
    }
@@ -197,6 +214,9 @@ static void reverse_lookup(int user_id, const char *number, char *name_out, size
       for (int i = 0; i < count; i++) {
          if (strcmp(results[i].value, number) == 0) {
             snprintf(name_out, name_size, "%s", results[i].entity_name);
+            if (entity_id_out) {
+               *entity_id_out = results[i].entity_id;
+            }
             return;
          }
       }
@@ -280,6 +300,86 @@ static int publish_echo_cmd(const char *action,
 }
 
 /**
+ * @brief Read an entity's photo and return a json-c object with base64-encoded data.
+ *
+ * @param user_id  User ID for ownership check
+ * @param entity_id  Entity ID to fetch photo for (-1 = no entity)
+ * @return json_object with "data" and "mime" keys, or NULL if no photo.
+ *         Caller takes ownership via json_object_get / publish_hud merge.
+ */
+static struct json_object *build_contact_photo_json(int user_id, int64_t entity_id) {
+   if (entity_id < 0) {
+      return NULL;
+   }
+
+   char photo_id[32] = "";
+   if (memory_db_entity_get_photo(user_id, entity_id, photo_id, sizeof(photo_id)) !=
+           MEMORY_DB_SUCCESS ||
+       photo_id[0] == '\0') {
+      return NULL;
+   }
+
+   /* Get the file path */
+   char filepath[512];
+   if (image_store_get_path(photo_id, user_id, filepath, NULL) != 0) {
+      return NULL;
+   }
+
+   /* Read the file */
+   FILE *fp = fopen(filepath, "rb");
+   if (!fp) {
+      return NULL;
+   }
+   fseek(fp, 0, SEEK_END);
+   long file_size = ftell(fp);
+   if (file_size <= 0 || file_size > 256 * 1024) { /* 256KB max for MQTT photo */
+      fclose(fp);
+      return NULL;
+   }
+   fseek(fp, 0, SEEK_SET);
+
+   unsigned char *file_data = malloc((size_t)file_size);
+   if (!file_data) {
+      fclose(fp);
+      return NULL;
+   }
+   size_t nread = fread(file_data, 1, (size_t)file_size, fp);
+   fclose(fp);
+   if ((long)nread != file_size) {
+      free(file_data);
+      return NULL;
+   }
+
+   /* Base64 encode using OpenSSL BIO */
+   BIO *b64 = BIO_new(BIO_f_base64());
+   BIO *mem = BIO_new(BIO_s_mem());
+   if (!b64 || !mem) {
+      free(file_data);
+      if (b64)
+         BIO_free(b64);
+      if (mem)
+         BIO_free(mem);
+      return NULL;
+   }
+   BIO_push(b64, mem);
+   BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+   BIO_write(b64, file_data, (int)file_size);
+   BIO_flush(b64);
+   free(file_data);
+
+   BUF_MEM *bptr;
+   BIO_get_mem_ptr(b64, &bptr);
+
+   struct json_object *photo_obj = json_object_new_object();
+   json_object_object_add(photo_obj, "data",
+                          json_object_new_string_len(bptr->data, (int)bptr->length));
+   json_object_object_add(photo_obj, "mime", json_object_new_string("image/jpeg"));
+
+   BIO_free_all(b64);
+   return photo_obj;
+}
+
+/**
  * @brief Publish a HUD notification via MQTT using json-c for proper escaping.
  *
  * @param event_str   HUD event name (OCP v1.4: indicative, e.g. "incoming_call").
@@ -355,14 +455,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
 
       /* Reverse lookup */
       char contact_name[64] = "";
-      reverse_lookup(1, number, contact_name, sizeof(contact_name));
+      int64_t entity_id = -1;
+      reverse_lookup(s_config.user_id, number, contact_name, sizeof(contact_name), &entity_id);
 
       /* Insert call log (initially missed — updated on answer/connect) */
-      int64_t log_id = phone_db_call_log_insert(1, PHONE_DIR_INCOMING, number, contact_name, 0,
-                                                time(NULL), PHONE_CALL_MISSED);
+      int64_t log_id = phone_db_call_log_insert(s_config.user_id, PHONE_DIR_INCOMING, number,
+                                                contact_name, 0, time(NULL), PHONE_CALL_MISSED);
 
       /* Set state + tracking atomically */
-      set_state_with_call(PHONE_STATE_RINGING_IN, number, contact_name, log_id);
+      set_state_with_call(PHONE_STATE_RINGING_IN, number, contact_name, log_id, entity_id);
 
       /* TTS announce */
       char announce[256];
@@ -380,6 +481,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       json_object_object_add(hud, "number", json_object_new_string(number));
       json_object_object_add(hud, "name", json_object_new_string(contact_name));
       json_object_object_add(hud, "ring_timeout", json_object_new_int(30));
+      struct json_object *photo = build_contact_photo_json(s_config.user_id, entity_id);
+      if (photo) {
+         json_object_object_add(hud, "photo", photo);
+      }
       publish_hud("incoming_call", hud);
 
       LOG_INFO("phone_service: incoming call from %s (%s)", number,
@@ -395,6 +500,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       snprintf(num_copy, sizeof(num_copy), "%s", s_active_number);
       snprintf(name_copy, sizeof(name_copy), "%s", s_active_contact);
       int64_t log_id = s_active_call_log_id;
+      int64_t eid = s_active_entity_id;
       pthread_mutex_unlock(&s_state_mutex);
 
       /* Update call log to answered */
@@ -406,6 +512,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       struct json_object *hud = json_object_new_object();
       json_object_object_add(hud, "number", json_object_new_string(num_copy));
       json_object_object_add(hud, "name", json_object_new_string(name_copy));
+      struct json_object *photo2 = build_contact_photo_json(s_config.user_id, eid);
+      if (photo2) {
+         json_object_object_add(hud, "photo", photo2);
+      }
       publish_hud("call_active", hud);
 
       LOG_INFO("phone_service: call connected");
@@ -423,6 +533,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       snprintf(name_copy, sizeof(name_copy), "%s", s_active_contact);
       s_state = PHONE_STATE_IDLE;
       s_active_call_log_id = -1;
+      s_active_entity_id = -1;
       s_call_start_time = 0;
       s_active_number[0] = '\0';
       s_active_contact[0] = '\0';
@@ -474,14 +585,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
 
       /* Reverse lookup sender */
       char contact_name[64] = "";
-      reverse_lookup(1, sender, contact_name, sizeof(contact_name));
+      int64_t sms_entity_id = -1;
+      reverse_lookup(s_config.user_id, sender, contact_name, sizeof(contact_name), &sms_entity_id);
 
       /* Insert SMS log — prefix body for LLM safety */
       char safe_body[1024];
       snprintf(safe_body, sizeof(safe_body), "[Incoming SMS - external content] %s", body);
 
-      int64_t sms_id = phone_db_sms_log_insert(1, PHONE_DIR_INCOMING, sender, contact_name,
-                                               safe_body, time(NULL));
+      int64_t sms_id = phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender,
+                                               contact_name, safe_body, time(NULL));
 
       /* Delete from SIM after successful DB commit */
       if (sms_id >= 0 && sms_index >= 0) {
@@ -543,6 +655,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       json_object_object_add(hud, "body_length", json_object_new_int((int)body_len));
       json_object_object_add(hud, "priority", json_object_new_string("normal"));
       json_object_object_add(hud, "ttl", json_object_new_int(15));
+      struct json_object *sms_photo = build_contact_photo_json(s_config.user_id, sms_entity_id);
+      if (sms_photo) {
+         json_object_object_add(hud, "photo", sms_photo);
+      }
       publish_hud("sms_received", hud);
 
       LOG_INFO("phone_service: SMS from %s (%s): %zu bytes", sender,
@@ -559,6 +675,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          }
          s_state = PHONE_STATE_IDLE;
          s_active_call_log_id = -1;
+         s_active_entity_id = -1;
          s_call_start_time = 0;
          s_active_number[0] = '\0';
          s_active_contact[0] = '\0';
@@ -638,8 +755,15 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
    int64_t log_id = phone_db_call_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, 0,
                                              time(NULL), PHONE_CALL_FAILED);
 
+   /* Lookup entity_id for outgoing contact (for photo in HUD) */
+   int64_t out_entity_id = -1;
+   {
+      char tmp_name[64];
+      reverse_lookup(user_id, number, tmp_name, sizeof(tmp_name), &out_entity_id);
+   }
+
    /* Set state + tracking atomically */
-   set_state_with_call(PHONE_STATE_DIALING, number, name, log_id);
+   set_state_with_call(PHONE_STATE_DIALING, number, name, log_id, out_entity_id);
 
    if (publish_echo_cmd("dial", number, command_router_get_id(req), NULL) != 0) {
       command_router_cancel(req);

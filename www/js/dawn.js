@@ -561,6 +561,14 @@
                if (typeof DawnContacts !== 'undefined')
                   DawnContacts.handleSearchEntitiesResponse(msg.payload);
                break;
+            case 'entity_set_photo_response':
+               if (typeof DawnContacts !== 'undefined')
+                  DawnContacts.handleSetPhotoResponse(msg.payload);
+               break;
+            case 'entity_ensure_response':
+               if (typeof DawnContacts !== 'undefined')
+                  DawnContacts.handleEnsureEntityResponse(msg.payload);
+               break;
             // Document library (RAG) responses
             case 'doc_library_list_response':
                if (typeof DawnDocLibrary !== 'undefined')

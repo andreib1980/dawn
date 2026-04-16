@@ -316,6 +316,7 @@ static const char *SCHEMA_SQL =
     "  canonical_name TEXT NOT NULL,"
     "  embedding BLOB DEFAULT NULL,"
     "  embedding_norm REAL DEFAULT NULL,"
+    "  photo_id TEXT DEFAULT NULL,"
     "  first_seen INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "  last_seen INTEGER,"
     "  mention_count INTEGER DEFAULT 1,"
@@ -1530,6 +1531,21 @@ static int create_schema(const char *db_path) {
       }
    }
 
+   /* v31 migration: add photo_id to memory_entities for contact photos */
+   if (current_version >= 19 && current_version < 31) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_entities ADD COLUMN photo_id TEXT DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         LOG_WARNING("auth_db: v31 migration (entity photo_id) failed: %s",
+                     errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         LOG_INFO("auth_db: added photo_id column to memory_entities (v31)");
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2026,6 +2042,15 @@ static int prepare_statements(void) {
                            &s_db.stmt_image_update_access, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_update_access failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE images SET retention_policy = ? "
+                           "WHERE id = ? AND (? = 0 OR user_id = ?)",
+                           -1, &s_db.stmt_image_update_retention, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare image_update_retention failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2528,6 +2553,24 @@ static int prepare_statements(void) {
                            &s_db.stmt_memory_entity_delete, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare entity_delete failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_entities SET photo_id = ? "
+                           "WHERE id = ? AND user_id = ?",
+                           -1, &s_db.stmt_memory_entity_set_photo, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare entity_set_photo failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT photo_id FROM memory_entities "
+                           "WHERE id = ? AND user_id = ?",
+                           -1, &s_db.stmt_memory_entity_get_photo, NULL);
+   if (rc != SQLITE_OK) {
+      LOG_ERROR("auth_db: prepare entity_get_photo failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -3058,8 +3101,8 @@ static int prepare_statements(void) {
    /* === Contacts statements === */
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label "
-       "FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
+       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "
+       "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
        "WHERE c.user_id = ? AND e.canonical_name LIKE ? ESCAPE '\\' "
        "AND c.field_type LIKE ? ORDER BY e.name LIMIT ?",
        -1, &s_db.stmt_contacts_find, NULL);
@@ -3088,8 +3131,8 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label "
-       "FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
+       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "
+       "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
        "WHERE c.user_id = ? AND (? IS NULL OR c.field_type = ?) "
        "ORDER BY e.name LIMIT ? OFFSET ?",
        -1, &s_db.stmt_contacts_list, NULL);
@@ -3295,6 +3338,8 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_delete);
    if (s_db.stmt_image_update_access)
       sqlite3_finalize(s_db.stmt_image_update_access);
+   if (s_db.stmt_image_update_retention)
+      sqlite3_finalize(s_db.stmt_image_update_retention);
    if (s_db.stmt_image_count_user)
       sqlite3_finalize(s_db.stmt_image_count_user);
    if (s_db.stmt_image_delete_old)

@@ -513,6 +513,31 @@ int image_store_get_metadata(const char *id, image_metadata_t *metadata_out) {
    return IMAGE_STORE_NOT_FOUND;
 }
 
+int image_store_update_retention(const char *id, int user_id, image_retention_t retention) {
+   if (!id || !image_store_validate_id(id)) {
+      return IMAGE_STORE_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_reset(s_db.stmt_image_update_retention);
+   sqlite3_bind_int(s_db.stmt_image_update_retention, 1, (int)retention);
+   sqlite3_bind_text(s_db.stmt_image_update_retention, 2, id, -1, SQLITE_STATIC);
+   sqlite3_bind_int(s_db.stmt_image_update_retention, 3, user_id);
+   sqlite3_bind_int(s_db.stmt_image_update_retention, 4, user_id);
+
+   int rc = sqlite3_step(s_db.stmt_image_update_retention);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_reset(s_db.stmt_image_update_retention);
+
+   AUTH_DB_UNLOCK();
+
+   if (rc != SQLITE_DONE) {
+      return IMAGE_STORE_FAILURE;
+   }
+   return (changes > 0) ? IMAGE_STORE_SUCCESS : IMAGE_STORE_NOT_FOUND;
+}
+
 int image_store_delete(const char *id, int user_id) {
    if (!id) {
       return IMAGE_STORE_INVALID;

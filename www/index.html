@@ -545,6 +545,50 @@ Format rules:
                   <button id="contact-modal-close" class="modal-close-btn">&times;</button>
                </div>
                <div class="dawn-form" id="contact-form">
+                  <div class="contact-photo-area" id="contact-photo-area">
+                     <div
+                        class="contact-photo-circle"
+                        id="contact-photo-circle"
+                        tabindex="0"
+                        role="button"
+                        aria-label="Upload contact photo"
+                     >
+                        <svg
+                           class="contact-photo-placeholder"
+                           id="contact-photo-placeholder"
+                           viewBox="0 0 64 64"
+                           fill="none"
+                           stroke="currentColor"
+                           stroke-width="2"
+                        >
+                           <circle cx="32" cy="24" r="12" />
+                           <path d="M12 56c0-11 9-20 20-20s20 9 20 20" />
+                        </svg>
+                        <img
+                           id="contact-photo-preview"
+                           class="contact-photo-preview hidden"
+                           alt="Contact photo"
+                        />
+                     </div>
+                     <input type="file" id="contact-photo-input" accept="image/*" class="hidden" />
+                     <div class="contact-photo-buttons">
+                        <button
+                           type="button"
+                           id="contact-photo-btn"
+                           class="contact-photo-upload-btn"
+                        >
+                           Upload Photo
+                        </button>
+                        <button
+                           type="button"
+                           id="contact-photo-remove-btn"
+                           class="contact-photo-remove-btn hidden"
+                           aria-label="Remove photo"
+                        >
+                           Remove
+                        </button>
+                     </div>
+                  </div>
                   <div class="form-group">
                      <label for="contact-entity-name">Person Name</label>
                      <input

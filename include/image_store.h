@@ -227,6 +227,17 @@ int image_store_get_metadata(const char *id, image_metadata_t *metadata_out);
 int image_store_delete(const char *id, int user_id);
 
 /**
+ * @brief Update an image's retention policy
+ *
+ * @param id Image ID
+ * @param user_id User ID for ownership check (0 to skip)
+ * @param retention New retention policy
+ * @return IMAGE_STORE_SUCCESS, IMAGE_STORE_NOT_FOUND, IMAGE_STORE_FORBIDDEN,
+ *         or IMAGE_STORE_FAILURE
+ */
+int image_store_update_retention(const char *id, int user_id, image_retention_t retention);
+
+/**
  * @brief Count images for a user
  *
  * @param user_id User ID

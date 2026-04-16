@@ -502,6 +502,7 @@
 [phone]
 # enabled = true                    # Enable phone tool
 # confirm_outbound = true           # Require "confirm" before dialing or sending SMS
+# user_id = 1                       # User who owns the modem (contacts/logs scoped to this user)
 # audio_device = ""                 # USB sound card device for call audio (e.g. "hw:2,0")
 # sms_retention_days = 90           # Auto-delete SMS logs older than N days
 # call_log_retention_days = 90      # Auto-delete call logs older than N days

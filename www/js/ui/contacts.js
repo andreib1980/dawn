@@ -52,6 +52,13 @@
       '<circle cx="8.5" cy="7" r="4"/>' +
       '<line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>';
 
+   const ICON_PERSON_SMALL =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+      '<circle cx="12" cy="8" r="5"/>' +
+      '<path d="M3 21c0-4.97 4.03-9 9-9s9 4.03 9 9"/></svg>';
+
+   const PHOTO_MAX_DIM = 256;
+
    /* =============================================================================
     * API Requests
     * ============================================================================= */
@@ -113,6 +120,14 @@
       });
    }
 
+   function requestSetPhoto(entityId, photoId) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({
+         type: 'entity_set_photo',
+         payload: { entity_id: entityId, photo_id: photoId || null },
+      });
+   }
+
    /* =============================================================================
     * Response Handlers
     * ============================================================================= */
@@ -166,23 +181,20 @@
          return;
       }
       if (typeof DawnToast !== 'undefined') DawnToast.show('Contact saved', 'success');
+
+      // If we have a pending photo and the server returned an entity_id, set it now
+      if (state.pendingPhotoId && payload.entity_id) {
+         requestSetPhoto(payload.entity_id, state.pendingPhotoId);
+         state.pendingPhotoId = null;
+      }
+
       // Keep modal open for rapid entry — clear value but keep name/type
       const valueInput = document.getElementById('contact-value');
       if (valueInput) {
          valueInput.value = '';
          valueInput.focus();
       }
-      // Flash save button green with "Saved!" confirmation
-      const saveBtn = document.getElementById('contact-modal-save');
-      if (saveBtn) {
-         const origText = saveBtn.textContent;
-         saveBtn.textContent = 'Saved!';
-         saveBtn.classList.add('btn-saved');
-         setTimeout(() => {
-            saveBtn.textContent = origText;
-            saveBtn.classList.remove('btn-saved');
-         }, 1500);
-      }
+      flashSaveButton();
       reload();
    }
 
@@ -212,6 +224,51 @@
       if (!payload.success) return;
       state.typeaheadResults = payload.entities || [];
       renderTypeaheadDropdown();
+   }
+
+   function handleEnsureEntityResponse(payload) {
+      if (state.pendingAction !== 'photo_only') return;
+      state.pendingAction = null;
+      setSaveButtonEnabled(true);
+
+      if (!payload.success) {
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show('Failed to create entity: ' + (payload.error || ''), 'error');
+         return;
+      }
+
+      if (state.pendingPhotoId && payload.entity_id) {
+         requestSetPhoto(payload.entity_id, state.pendingPhotoId);
+         state.pendingPhotoId = null;
+         state.selectedEntityId = payload.entity_id;
+         /* Don't flash/reload yet — wait for handleSetPhotoResponse */
+      }
+   }
+
+   function handleSetPhotoResponse(payload) {
+      const wasPhotoOnly = state.pendingAction === 'photo_only';
+      const wasRemove = state.pendingAction === 'photo_remove';
+      if (wasPhotoOnly || wasRemove) {
+         state.pendingAction = null;
+         setSaveButtonEnabled(true);
+      }
+
+      if (!payload.success) {
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show('Failed to set photo: ' + (payload.error || ''), 'error');
+         return;
+      }
+
+      if (wasRemove) {
+         resetPhotoUI();
+         if (state.editingContact) {
+            state.editingContact.photo_id = null;
+         }
+      }
+      if (wasPhotoOnly) {
+         flashSaveButton();
+      }
+      reload();
    }
 
    /* =============================================================================
@@ -263,13 +320,34 @@
       container.insertAdjacentHTML('beforeend', html);
    }
 
+   function renderPhotoThumb(contact) {
+      if (contact.photo_id) {
+         return (
+            '<img class="contact-photo-thumb" src="/api/images/' +
+            encodeURIComponent(contact.photo_id) +
+            '" alt="" loading="lazy">'
+         );
+      }
+      return '<span class="contact-photo-thumb-placeholder">' + ICON_PERSON_SMALL + '</span>';
+   }
+
+   function handleThumbError(e) {
+      if (e.target.classList.contains('contact-photo-thumb')) {
+         const span = document.createElement('span');
+         span.className = 'contact-photo-thumb-placeholder';
+         span.innerHTML = ICON_PERSON_SMALL;
+         e.target.replaceWith(span);
+      }
+   }
+
    function renderContactCard(contact) {
       return (
          '<div class="contact-card" data-contact-id="' +
          contact.contact_id +
          '">' +
-         // Row 1: Name, label badge, action buttons
+         // Row 1: Photo thumb, Name, label badge, action buttons
          '<div class="contact-card-header">' +
+         renderPhotoThumb(contact) +
          '<span class="contact-entity-name">' +
          escapeHtml(contact.entity_name) +
          '</span>' +
@@ -323,6 +401,7 @@
       state.editingContact = contact || null;
       state.selectedEntityId = null;
       state.typeaheadResults = [];
+      state.pendingPhotoId = null;
 
       const modal = document.getElementById('contact-modal');
       const title = document.getElementById('contact-modal-title');
@@ -336,6 +415,24 @@
 
       // Clear any existing typeahead dropdown
       closeTypeaheadDropdown();
+
+      // Reset photo UI and show existing photo if available
+      resetPhotoUI();
+      if (contact && contact.photo_id) {
+         const preview = document.getElementById('contact-photo-preview');
+         const placeholder = document.getElementById('contact-photo-placeholder');
+         if (preview) {
+            preview.src = '/api/images/' + encodeURIComponent(contact.photo_id);
+            preview.classList.remove('hidden');
+            preview.onerror = () => {
+               preview.classList.add('hidden');
+               if (placeholder) placeholder.classList.remove('hidden');
+               showRemoveButton(false);
+            };
+         }
+         if (placeholder) placeholder.classList.add('hidden');
+         showRemoveButton(true);
+      }
 
       if (contact) {
          title.textContent = 'Edit Contact';
@@ -377,6 +474,26 @@
    function handleModalKeydown(e) {
       if (e.key === 'Escape') {
          closeModal();
+         return;
+      }
+      if (e.key === 'Tab') {
+         const modal = document.getElementById('contact-modal');
+         if (!modal) return;
+         const focusable = [
+            ...modal.querySelectorAll(
+               'input:not(.hidden), select, button:not(.hidden), [tabindex]:not([tabindex="-1"])'
+            ),
+         ].filter((el) => el.offsetParent !== null && !el.disabled);
+         if (focusable.length === 0) return;
+         const first = focusable[0];
+         const last = focusable[focusable.length - 1];
+         if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+         } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+         }
       }
    }
 
@@ -407,6 +524,24 @@
          nameInput.focus();
          return;
       }
+
+      /* Photo-only save: name + photo but no contact value */
+      if (!value && state.pendingPhotoId) {
+         setSaveButtonEnabled(false);
+         state.pendingAction = 'photo_only';
+         if (state.selectedEntityId) {
+            requestSetPhoto(state.selectedEntityId, state.pendingPhotoId);
+            state.pendingPhotoId = null;
+         } else {
+            /* Create entity via upsert, then set photo on response */
+            DawnWS.send({
+               type: 'entity_ensure',
+               payload: { name: entityName },
+            });
+         }
+         return;
+      }
+
       if (!value) {
          if (typeof DawnToast !== 'undefined') DawnToast.show('Value is required', 'error');
          valueInput.focus();
@@ -442,6 +577,156 @@
    function setSaveButtonEnabled(enabled) {
       const btn = document.getElementById('contact-modal-save');
       if (btn) btn.disabled = !enabled;
+   }
+
+   let flashTimeout = null;
+   function flashSaveButton() {
+      const saveBtn = document.getElementById('contact-modal-save');
+      if (!saveBtn) return;
+      if (flashTimeout) {
+         clearTimeout(flashTimeout);
+         flashTimeout = null;
+      }
+      saveBtn.textContent = 'Saved!';
+      saveBtn.classList.add('btn-saved');
+      flashTimeout = setTimeout(() => {
+         saveBtn.textContent = 'Save';
+         saveBtn.classList.remove('btn-saved');
+         flashTimeout = null;
+      }, 1500);
+   }
+
+   /* =============================================================================
+    * Photo Upload
+    * ============================================================================= */
+
+   function compressContactPhoto(file) {
+      return new Promise((resolve, reject) => {
+         const img = new Image();
+         img.onload = () => {
+            let { width, height } = img;
+            if (width > PHOTO_MAX_DIM || height > PHOTO_MAX_DIM) {
+               const scale = Math.min(PHOTO_MAX_DIM / width, PHOTO_MAX_DIM / height);
+               width = Math.round(width * scale);
+               height = Math.round(height * scale);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            canvas.toBlob(
+               (blob) => (blob ? resolve(blob) : reject(new Error('toBlob failed'))),
+               'image/jpeg',
+               0.85
+            );
+            URL.revokeObjectURL(img.src);
+         };
+         img.onerror = () => {
+            URL.revokeObjectURL(img.src);
+            reject(new Error('Image load failed'));
+         };
+         img.src = URL.createObjectURL(file);
+      });
+   }
+
+   async function handlePhotoUpload(file) {
+      if (!file || !file.type.startsWith('image/')) {
+         if (typeof DawnToast !== 'undefined') DawnToast.show('Not an image file', 'error');
+         return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show('Image too large (max 10 MB)', 'error');
+         return;
+      }
+
+      const photoBtn = document.getElementById('contact-photo-btn');
+      if (photoBtn) {
+         photoBtn.textContent = 'Uploading...';
+         photoBtn.disabled = true;
+      }
+
+      try {
+         const compressed = await compressContactPhoto(file);
+
+         const formData = new FormData();
+         formData.append('image', compressed, 'contact-photo.jpg');
+         const response = await fetch('/api/images', {
+            method: 'POST',
+            credentials: 'include',
+            body: formData,
+         });
+
+         if (!response.ok) throw new Error('Upload failed: ' + response.status);
+         const result = await response.json();
+
+         // Show preview
+         const preview = document.getElementById('contact-photo-preview');
+         const placeholder = document.getElementById('contact-photo-placeholder');
+         if (preview) {
+            preview.src = '/api/images/' + encodeURIComponent(result.id);
+            preview.classList.remove('hidden');
+         }
+         if (placeholder) placeholder.classList.add('hidden');
+         showRemoveButton(true);
+
+         // If editing an existing contact with a known entity, set the photo immediately
+         if (state.editingContact && state.editingContact.entity_id) {
+            requestSetPhoto(state.editingContact.entity_id, result.id);
+         } else if (state.selectedEntityId) {
+            requestSetPhoto(state.selectedEntityId, result.id);
+         } else {
+            // Store for later — will set after entity is created
+            state.pendingPhotoId = result.id;
+         }
+      } catch (err) {
+         console.error('Contact photo upload error:', err);
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show('Photo upload failed: ' + err.message, 'error');
+      } finally {
+         if (photoBtn) {
+            photoBtn.textContent = 'Upload Photo';
+            photoBtn.disabled = false;
+         }
+      }
+   }
+
+   function showRemoveButton(show) {
+      const btn = document.getElementById('contact-photo-remove-btn');
+      if (btn) {
+         if (show) {
+            btn.classList.remove('hidden');
+         } else {
+            btn.classList.add('hidden');
+         }
+      }
+   }
+
+   function handleRemovePhoto() {
+      const entityId =
+         (state.editingContact && state.editingContact.entity_id) || state.selectedEntityId;
+      if (entityId) {
+         state.pendingAction = 'photo_remove';
+         requestSetPhoto(entityId, null);
+      } else {
+         /* No entity yet (new contact) — just clear the pending upload */
+         resetPhotoUI();
+      }
+   }
+
+   function resetPhotoUI() {
+      const preview = document.getElementById('contact-photo-preview');
+      const placeholder = document.getElementById('contact-photo-placeholder');
+      if (preview) {
+         preview.src = '';
+         preview.classList.add('hidden');
+      }
+      if (placeholder) placeholder.classList.remove('hidden');
+      showRemoveButton(false);
+      state.pendingPhotoId = null;
    }
 
    /* =============================================================================
@@ -774,6 +1059,7 @@
       const list = document.getElementById('memory-list');
       if (list) {
          list.addEventListener('click', handleListClick);
+         list.addEventListener('error', handleThumbError, true); /* capture phase for img errors */
       }
 
       // Modal events
@@ -806,6 +1092,33 @@
             setTimeout(closeTypeaheadDropdown, 200);
          });
       }
+
+      // Photo upload
+      const photoBtn = document.getElementById('contact-photo-btn');
+      const photoInput = document.getElementById('contact-photo-input');
+      const photoCircle = document.getElementById('contact-photo-circle');
+      if (photoBtn && photoInput) {
+         photoBtn.addEventListener('click', () => photoInput.click());
+         if (photoCircle) {
+            photoCircle.addEventListener('click', () => photoInput.click());
+            photoCircle.addEventListener('keydown', (e) => {
+               if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  photoInput.click();
+               }
+            });
+         }
+         photoInput.addEventListener('change', (e) => {
+            if (e.target.files && e.target.files[0]) {
+               handlePhotoUpload(e.target.files[0]);
+            }
+            e.target.value = '';
+         });
+      }
+
+      // Photo remove
+      const removeBtn = document.getElementById('contact-photo-remove-btn');
+      if (removeBtn) removeBtn.addEventListener('click', handleRemovePhoto);
 
       console.log('DawnContacts: Initialized');
    }
@@ -840,5 +1153,7 @@
       handleUpdateResponse,
       handleDeleteResponse,
       handleSearchEntitiesResponse,
+      handleSetPhotoResponse,
+      handleEnsureEntityResponse,
    };
 })();

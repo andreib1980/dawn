@@ -446,15 +446,15 @@ Manual testing covers:
 - `docs/GOOGLE_OAUTH_SETUP.md`: Google OAuth setup guide
 
 **Memory System:**
-- `include/memory/memory_db.h`: Entity/relation CRUD, entity merge API
+- `include/memory/memory_db.h`: Entity/relation CRUD, entity merge API, entity photo get/set
 - `src/memory/memory_db.c`: SQLite operations, transactional entity merge with dedup
 - `src/memory/memory_callback.c`: LLM tool callback (9 actions incl. merge_entities)
-- `include/memory/contacts_db.h`: Contacts CRUD API (find, add, update, delete, list)
+- `include/memory/contacts_db.h`: Contacts CRUD API (find, add, update, delete, list), photo_id in results
 - `src/memory/contacts_db.c`: Contacts SQLite operations with LIKE escape
 - `include/webui/webui_contacts.h`: Contacts WebSocket handler declarations
-- `src/webui/webui_contacts.c`: Contacts WebSocket handlers (list, add, update, delete, search)
-- `www/js/ui/contacts.js`: Contacts tab UI + add/edit modal
-- `www/css/components/contacts.css`: Contact card and modal styles
+- `src/webui/webui_contacts.c`: Contacts WebSocket handlers (list, add, update, delete, search, set_photo, entity_ensure)
+- `www/js/ui/contacts.js`: Contacts tab UI + add/edit modal + photo upload/thumbnails
+- `www/css/components/contacts.css`: Contact card, modal, and photo styles
 - `docs/MEMORY_SYSTEM_DESIGN.md`: Full design document (Phases 1-6.5, S4, entity merge)
 
 **Email (IMAP/SMTP):**
@@ -500,16 +500,16 @@ Manual testing covers:
 **Phone (Call & SMS via ECHO modem daemon):**
 - `include/tools/phone_tool.h`: Phone tool registration header
 - `src/tools/phone_tool.c`: LLM tool interface (10 actions, two-step confirmation, contact resolution)
-- `include/tools/phone_service.h`: Phone service API (state machine, events, MQTT)
-- `src/tools/phone_service.c`: Call state machine, ECHO MQTT event handling, TTS, HUD, rate limiting
+- `include/tools/phone_service.h`: Phone service API (state machine, events, MQTT, config with user_id)
+- `src/tools/phone_service.c`: Call state machine, ECHO MQTT event handling, TTS, HUD with contact photos (base64), rate limiting
 - `include/tools/phone_db.h`: Phone DB types (call_log, sms_log) and CRUD declarations
 - `src/tools/phone_db.c`: SQLite operations for call/SMS logs (Pattern A, shared auth_db handle)
 - `tests/test_phone_db.c`: Phone DB unit tests (26 assertions)
 - `docs/PHONE_SMS_DESIGN.md`: Full design document (ECHO + DAWN integration, Phases 1-6)
 
 **Image Store + Image Search:**
-- `include/image_store.h`: Image store API (save/save_ex/get_path/delete, source/retention enums)
-- `src/image_store.c`: Filesystem-backed storage, atomic writes, LRU cache cleanup, retention policies
+- `include/image_store.h`: Image store API (save/save_ex/get_path/delete/update_retention, source/retention enums)
+- `src/image_store.c`: Filesystem-backed storage, atomic writes, LRU cache cleanup, retention policies, retention lifecycle
 - `src/webui/webui_images.c`: HTTP endpoints (upload + zero-copy download via lws_serve_http_file)
 - `include/tools/image_search_tool.h`: Image search tool registration header
 - `src/tools/image_search_tool.c`: SearXNG image search, curl_multi fetch, SSRF DNS pinning, redirect-with-revalidation, magic byte validation
@@ -602,6 +602,9 @@ Manual testing covers:
 - Image store filesystem migration: BLOB→filesystem, zero-copy HTTP serving via lws_serve_http_file(), source/retention enums (upload/generated/search/MMS/document × default/permanent/cache), schema v30, atomic writes (tmp+fsync+rename), LRU cache eviction, rate-limited last_accessed
 - Image search tool: SearXNG image search via `web_search_query_images_raw()`, curl_multi concurrent fetch (4 parallel connections, 10s wall-clock cap), SSRF DNS pinning + manual redirect-with-revalidation, magic byte validation (JPEG/PNG/GIF/WebP), 1MB fetch cap, image store caching (SOURCE_SEARCH + RETAIN_CACHE)
 - WebUI image lightbox: click-to-enlarge overlay with blur backdrop, Escape/backdrop/X close, focus trap, ARIA dialog, prefers-reduced-motion, WCAG touch target
+- Contact photos: schema v31 (photo_id on memory_entities), entity_set_photo/entity_ensure WebSocket handlers, WebUI upload with compression (256px, JPEG 85%), circular thumbnails in contact cards, photo-only save flow, image retention lifecycle (PERMANENT when bound, DEFAULT when replaced), `image_store_update_retention()` API
+- Phone HUD contact photos: base64-encoded photo in MQTT HUD messages (incoming_call, call_active, sms_received), entity_id tracking in call state machine, `phone_service_config_t.user_id` replacing hardcoded user IDs
+- Contacts modal accessibility: keyboard focus trap (Tab/Shift+Tab wrap), focus-visible outlines, ARIA roles, mobile touch targets, image error fallbacks
 
 ## Development Lifecycle
 
