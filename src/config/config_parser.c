@@ -1423,6 +1423,12 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          PARSE_STRING(google, "client_secret", secrets->google_client_secret);
          PARSE_STRING(google, "redirect_url", secrets->google_redirect_url);
       }
+
+      PARSE_STRING(secrets_section, "service_token", secrets->service_token);
+      if (secrets->service_token[0] && strlen(secrets->service_token) < 32) {
+         LOG_WARNING("config: service_token is too short (min 32 chars) — ignoring");
+         secrets->service_token[0] = '\0';
+      }
    }
 
    /* Legacy: Parse [api_keys] section (old format) */

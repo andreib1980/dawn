@@ -411,9 +411,10 @@ int image_store_get_path(const char *id, int user_id, char *path_out, char *mime
    const char *mime = (const char *)sqlite3_column_text(s_db.stmt_image_get_file, 3);
    time_t last_acc = (time_t)sqlite3_column_int64(s_db.stmt_image_get_file, 4);
 
-   /* Access check: UPLOAD and MMS require ownership; others are accessible to any auth'd user */
-   if (user_id != 0 && (source == IMAGE_SOURCE_UPLOAD || source == IMAGE_SOURCE_MMS) &&
-       owner_id != user_id) {
+   /* Access check: UPLOAD and MMS require ownership; others are accessible to any auth'd user.
+    * user_id=0 (service token) skips owner match but still blocks private sources. */
+   if ((source == IMAGE_SOURCE_UPLOAD || source == IMAGE_SOURCE_MMS) &&
+       (user_id == 0 || owner_id != user_id)) {
       sqlite3_reset(s_db.stmt_image_get_file);
       AUTH_DB_UNLOCK();
       return IMAGE_STORE_FORBIDDEN;

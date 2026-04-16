@@ -541,6 +541,9 @@ typedef struct {
    char google_client_id[CONFIG_API_KEY_MAX];
    char google_client_secret[CONFIG_API_KEY_MAX];
    char google_redirect_url[CONFIG_PATH_MAX]; /* e.g. https://myhost:3000/oauth/callback */
+
+   /* Service token for machine-to-machine image API access (MIRAGE, etc.) */
+   char service_token[CONFIG_API_KEY_MAX];
 } secrets_config_t;
 
 /* =============================================================================

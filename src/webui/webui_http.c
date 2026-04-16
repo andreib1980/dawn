@@ -68,6 +68,10 @@
 #define CSRF_RATE_LIMIT_WINDOW_SEC 60 /* 1 minute */
 #define CSRF_RATE_LIMIT_MAX 30        /* Max 30 tokens per minute per IP */
 
+/* Service token rate limiting (machine-to-machine image API) */
+#define SERVICE_RATE_LIMIT_WINDOW_SEC 60 /* 1 minute */
+#define SERVICE_RATE_LIMIT_MAX 120       /* Max 120 image fetches per minute */
+
 #ifdef ENABLE_AUTH
 /* CSRF nonce tracking for single-use tokens */
 #define CSRF_USED_NONCE_SIZE 16    /* Nonce size in bytes */
@@ -115,6 +119,14 @@ static rate_limiter_t s_login_rate = RATE_LIMITER_STATIC_INIT(s_login_rate_entri
                                                               LOGIN_RATE_LIMIT_SLOTS,
                                                               RATE_LIMIT_MAX_ATTEMPTS,
                                                               RATE_LIMIT_WINDOW_SEC);
+
+/* Service token rate limiting (machine-to-machine image API) */
+#define SERVICE_RATE_LIMIT_SLOTS 32
+static rate_limit_entry_t s_service_rate_entries[SERVICE_RATE_LIMIT_SLOTS];
+static rate_limiter_t s_service_rate = RATE_LIMITER_STATIC_INIT(s_service_rate_entries,
+                                                                SERVICE_RATE_LIMIT_SLOTS,
+                                                                SERVICE_RATE_LIMIT_MAX,
+                                                                SERVICE_RATE_LIMIT_WINDOW_SEC);
 #endif /* ENABLE_AUTH */
 
 /* =============================================================================
@@ -261,6 +273,53 @@ bool is_request_authenticated(struct lws *wsi, auth_session_t *session_out) {
       *session_out = session;
    }
    return true;
+}
+
+/**
+ * @brief Check if request has a valid service Bearer token.
+ *
+ * Used for machine-to-machine access (MIRAGE fetching images).
+ * Validates against g_secrets.service_token with constant-time comparison.
+ *
+ * @param wsi HTTP connection
+ * @return true if valid Bearer token present, false otherwise
+ */
+static size_t s_service_token_len = 0; /* cached at first use */
+
+static bool is_service_token_authenticated(struct lws *wsi) {
+   if (g_secrets.service_token[0] == '\0') {
+      return false; /* no service token configured */
+   }
+
+   /* Cache token length on first call (token is immutable after config load) */
+   if (s_service_token_len == 0) {
+      s_service_token_len = strlen(g_secrets.service_token);
+   }
+
+   char auth_buf[512];
+   int len = lws_hdr_copy(wsi, auth_buf, sizeof(auth_buf), WSI_TOKEN_HTTP_AUTHORIZATION);
+   if (len <= 7) {
+      return false;
+   }
+
+   /* Check "Bearer " prefix (case-sensitive per RFC 6750) */
+   if (strncmp(auth_buf, "Bearer ", 7) != 0) {
+      return false;
+   }
+
+   /* Constant-time comparison over fixed size to prevent length leaking.
+    * Pad both values into CONFIG_API_KEY_MAX buffers so timing is independent
+    * of actual token length. */
+   const char *token = auth_buf + 7;
+   size_t token_len = strlen(token);
+
+   char padded_token[CONFIG_API_KEY_MAX] = { 0 };
+   char padded_expected[CONFIG_API_KEY_MAX] = { 0 };
+   size_t copy_len = token_len < sizeof(padded_token) ? token_len : sizeof(padded_token) - 1;
+   memcpy(padded_token, token, copy_len);
+   memcpy(padded_expected, g_secrets.service_token, s_service_token_len);
+
+   return sodium_memcmp(padded_token, padded_expected, sizeof(padded_token)) == 0;
 }
 
 /**
@@ -879,11 +938,41 @@ int callback_http(struct lws *wsi,
          /* Image API endpoints (require auth) */
          /* GET /api/images/:id - download image */
          if (strncmp(path, "/api/images/", 12) == 0 && pss && !pss->is_post) {
+            const char *image_id = path + 12;
+
+            /* Try session auth first (normal browser path) */
             auth_session_t session;
             if (is_request_authenticated(wsi, &session)) {
-               const char *image_id = path + 12;
                return webui_images_handle_download(wsi, image_id, session.user_id);
             }
+
+            /* Try Bearer token (machine-to-machine: MIRAGE, etc.)
+             * Rate limit ALL Bearer attempts (valid or not) to throttle brute-force. */
+            {
+               char auth_probe[16];
+               int hlen = lws_hdr_copy(wsi, auth_probe, sizeof(auth_probe),
+                                       WSI_TOKEN_HTTP_AUTHORIZATION);
+               if (hlen > 7 && strncmp(auth_probe, "Bearer ", 7) == 0) {
+                  char peer_ip[64] = "unknown";
+                  lws_get_peer_simple(wsi, peer_ip, sizeof(peer_ip));
+                  char norm_ip[RATE_LIMIT_IP_SIZE];
+                  rate_limiter_normalize_ip(peer_ip, norm_ip, sizeof(norm_ip));
+                  if (rate_limiter_check(&s_service_rate, norm_ip)) {
+                     LOG_WARNING("webui_http: Bearer rate limit exceeded from %s", peer_ip);
+                     lws_return_http_status(wsi, HTTP_STATUS_TOO_MANY_REQUESTS, NULL);
+                     return -1;
+                  }
+                  if (is_service_token_authenticated(wsi)) {
+                     if (!lws_is_ssl(wsi)) {
+                        LOG_WARNING("webui_http: Bearer token used without TLS from %s", peer_ip);
+                     }
+                     /* user_id=0: service token can access non-private images (generated,
+                      * search, document) but not private uploads or MMS */
+                     return webui_images_handle_download(wsi, image_id, 0);
+                  }
+               }
+            }
+
             /* Fall through to auth redirect */
          }
 

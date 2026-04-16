@@ -510,7 +510,7 @@ Manual testing covers:
 **Image Store + Image Search:**
 - `include/image_store.h`: Image store API (save/save_ex/get_path/delete/update_retention, source/retention enums)
 - `src/image_store.c`: Filesystem-backed storage, atomic writes, LRU cache cleanup, retention policies, retention lifecycle
-- `src/webui/webui_images.c`: HTTP endpoints (upload + zero-copy download via lws_serve_http_file)
+- `src/webui/webui_images.c`: HTTP endpoints (upload + zero-copy download via lws_serve_http_file, Bearer token auth for service access)
 - `include/tools/image_search_tool.h`: Image search tool registration header
 - `src/tools/image_search_tool.c`: SearXNG image search, curl_multi fetch, SSRF DNS pinning, redirect-with-revalidation, magic byte validation
 - `docs/UNIFIED_IMAGE_STORE_DESIGN.md`: Full design document (Phases 1-6)
@@ -605,6 +605,7 @@ Manual testing covers:
 - Contact photos: schema v31 (photo_id on memory_entities), entity_set_photo/entity_ensure WebSocket handlers, WebUI upload with compression (256px, JPEG 85%), circular thumbnails in contact cards, photo-only save flow, image retention lifecycle (PERMANENT when bound, DEFAULT when replaced), `image_store_update_retention()` API
 - Phone HUD contact photos: base64-encoded photo in MQTT HUD messages (incoming_call, call_active, sms_received), entity_id tracking in call state machine, `phone_service_config_t.user_id` replacing hardcoded user IDs
 - Contacts modal accessibility: keyboard focus trap (Tab/Shift+Tab wrap), focus-visible outlines, ARIA roles, mobile touch targets, image error fallbacks
+- Service token Bearer auth: machine-to-machine image API access for MIRAGE, constant-time `sodium_memcmp` over padded buffer, rate-limit-before-auth (120/min, 32 IP slots), scoped access (blocks private uploads/MMS), min 32-char token, TLS warning
 
 ## Development Lifecycle
 

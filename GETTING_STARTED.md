@@ -334,6 +334,28 @@ After installing, restart your browser and access `https://<dawn-ip>:3000` — n
 
 This appends a `satellite_registration_key` to `secrets.toml`. Copy the key to each satellite's config. See [DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md#registration-key) for details.
 
+**Service token for MIRAGE** (optional): If running a MIRAGE HUD that needs to fetch images from DAWN, generate a service token:
+
+```bash
+openssl rand -hex 32
+```
+
+Add to DAWN's `secrets.toml`:
+```toml
+[secrets]
+service_token = "<paste the 64-character hex string>"
+```
+
+Add the same token to MIRAGE's `secrets.json`:
+```json
+{
+  "dawn_url": "https://127.0.0.1:3000",
+  "dawn_service_token": "<same 64-character hex string>"
+}
+```
+
+The token grants read-only access to non-private images (search results, generated images) via Bearer auth on the image API. Minimum 32 characters required. TLS recommended.
+
 ## 8. Run DAWN
 
 ```bash
