@@ -28,6 +28,9 @@
 
 #include <stddef.h>
 
+/* Forward declaration — callers that use web_search_query_images_raw() include json-c themselves */
+struct json_object;
+
 #define SEARXNG_DEFAULT_URL "http://localhost:8384"
 #define SEARXNG_MAX_RESULTS 8
 #define SEARXNG_TIMEOUT_SEC 10
@@ -46,7 +49,8 @@ typedef enum {
    SEARCH_TYPE_SOCIAL,      // Social media (categories=social media)
    SEARCH_TYPE_QA,          // Q&A sites (categories=q&a)
    SEARCH_TYPE_DICTIONARY,  // Definitions (categories=dictionaries)
-   SEARCH_TYPE_PAPERS       // Academic papers (categories=scientific publications)
+   SEARCH_TYPE_PAPERS,      // Academic papers (categories=scientific publications)
+   SEARCH_TYPE_IMAGES       // Image search (categories=images, safesearch=1)
 } search_type_t;
 
 /**
@@ -113,6 +117,19 @@ int web_search_format_for_llm(const search_response_t *response, char *buffer, s
  * @param response Response to free
  */
 void web_search_free_response(search_response_t *response);
+
+/**
+ * @brief Perform an image search and return raw JSON response
+ *
+ * Returns the parsed json_object* root from SearXNG. Caller owns the reference
+ * and must call json_object_put() when done. Image results have fields:
+ * img_src, thumbnail_src, title, source, resolution.
+ *
+ * @param query Search query string
+ * @param max_results Maximum results to request
+ * @return Parsed JSON root (caller must json_object_put), or NULL on error
+ */
+struct json_object *web_search_query_images_raw(const char *query, int max_results);
 
 /**
  * @brief Cleanup web search module

@@ -507,6 +507,15 @@ Manual testing covers:
 - `tests/test_phone_db.c`: Phone DB unit tests (26 assertions)
 - `docs/PHONE_SMS_DESIGN.md`: Full design document (ECHO + DAWN integration, Phases 1-6)
 
+**Image Store + Image Search:**
+- `include/image_store.h`: Image store API (save/save_ex/get_path/delete, source/retention enums)
+- `src/image_store.c`: Filesystem-backed storage, atomic writes, LRU cache cleanup, retention policies
+- `src/webui/webui_images.c`: HTTP endpoints (upload + zero-copy download via lws_serve_http_file)
+- `include/tools/image_search_tool.h`: Image search tool registration header
+- `src/tools/image_search_tool.c`: SearXNG image search, curl_multi fetch, SSRF DNS pinning, redirect-with-revalidation, magic byte validation
+- `docs/UNIFIED_IMAGE_STORE_DESIGN.md`: Full design document (Phases 1-6)
+- `docs/WEB_IMAGE_SEARCH.md`: Image search tool design document
+
 **Satellite (DAP2):**
 - `dawn_satellite/`: Standalone satellite binary for Raspberry Pi
 - `dawn_satellite/config/satellite.toml`: Default satellite configuration
@@ -590,6 +599,9 @@ Manual testing covers:
 - UCS2/emoji SMS: modem kept in UCS2 charset with AT+CSMP DCS=8, UTF-8↔UCS2 hex encoding in ECHO
 - Contacts validation: email format check, phone E.164 normalization (10-digit US → +1), client + server validation
 - Entity search fix: memory_db_entity_search missing OFFSET bind on shared prepared statement
+- Image store filesystem migration: BLOB→filesystem, zero-copy HTTP serving via lws_serve_http_file(), source/retention enums (upload/generated/search/MMS/document × default/permanent/cache), schema v30, atomic writes (tmp+fsync+rename), LRU cache eviction, rate-limited last_accessed
+- Image search tool: SearXNG image search via `web_search_query_images_raw()`, curl_multi concurrent fetch (4 parallel connections, 10s wall-clock cap), SSRF DNS pinning + manual redirect-with-revalidation, magic byte validation (JPEG/PNG/GIF/WebP), 1MB fetch cap, image store caching (SOURCE_SEARCH + RETAIN_CACHE)
+- WebUI image lightbox: click-to-enlarge overlay with blur backdrop, Escape/backdrop/X close, focus trap, ARIA dialog, prefers-reduced-motion, WCAG touch target
 
 ## Development Lifecycle
 

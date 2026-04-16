@@ -2054,19 +2054,18 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "DELETE FROM images WHERE retention_policy = 2 AND id = "
-                           "(SELECT id FROM images WHERE retention_policy = 2 "
-                           "ORDER BY COALESCE(last_accessed, created_at) ASC LIMIT 1)",
-                           -1, &s_db.stmt_image_delete_cache_lru, NULL);
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE id = ?", -1,
+                           &s_db.stmt_image_delete_cache_lru, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_delete_cache_lru failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
    rc = sqlite3_prepare_v2(
-       s_db.db, "SELECT id, filename FROM images WHERE retention_policy = 0 AND created_at < ?", -1,
-       &s_db.stmt_image_get_expired_ids, NULL);
+       s_db.db,
+       "SELECT id, filename FROM images WHERE retention_policy = 0 AND created_at < ? "
+       "ORDER BY created_at ASC LIMIT 100",
+       -1, &s_db.stmt_image_get_expired_ids, NULL);
    if (rc != SQLITE_OK) {
       LOG_ERROR("auth_db: prepare image_get_expired_ids failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;

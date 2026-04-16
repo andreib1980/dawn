@@ -846,6 +846,82 @@
    // Export Module
    // =============================================================================
 
+   // =============================================================================
+   // Image Lightbox (click-to-enlarge for chat images)
+   // =============================================================================
+
+   function setupImageLightbox() {
+      var lightbox = document.createElement('div');
+      lightbox.className = 'image-lightbox';
+      lightbox.setAttribute('role', 'dialog');
+      lightbox.setAttribute('aria-modal', 'true');
+      lightbox.setAttribute('aria-label', 'Enlarged image');
+      lightbox.innerHTML =
+         '<button class="image-lightbox-close" aria-label="Close">&times;</button>' +
+         '<img alt="Enlarged view">';
+      document.body.appendChild(lightbox);
+
+      var lightboxImg = lightbox.querySelector('img');
+      var closeBtn = lightbox.querySelector('.image-lightbox-close');
+      var previousFocus = null;
+
+      function closeLightbox() {
+         lightbox.classList.remove('visible');
+         setTimeout(function () {
+            lightbox.style.display = 'none';
+         }, 200);
+         if (previousFocus) {
+            previousFocus.focus();
+            previousFocus = null;
+         }
+      }
+
+      /* Delegated click on transcript — catches all images including dynamically added */
+      document.addEventListener('click', function (e) {
+         var img = e.target.closest('.transcript-entry img');
+         if (!img || !img.src) return;
+
+         /* Skip vision upload thumbnails (tiny preview images) */
+         if (img.classList.contains('transcript-image')) return;
+
+         previousFocus = document.activeElement;
+         lightboxImg.src = img.src;
+         lightboxImg.alt = img.alt || 'Enlarged view';
+         lightbox.style.display = 'flex';
+         /* Trigger reflow for transition */
+         lightbox.offsetHeight;
+         lightbox.classList.add('visible');
+         closeBtn.focus();
+      });
+
+      /* Close on backdrop click or close button */
+      lightbox.addEventListener('click', function (e) {
+         if (e.target === lightbox || e.target === closeBtn) {
+            closeLightbox();
+         }
+      });
+
+      /* Keyboard: Escape to close, Tab trap within lightbox */
+      document.addEventListener('keydown', function (e) {
+         if (!lightbox.classList.contains('visible')) return;
+
+         if (e.key === 'Escape') {
+            closeLightbox();
+         } else if (e.key === 'Tab') {
+            /* Trap focus within lightbox — only focusable element is close button */
+            e.preventDefault();
+            closeBtn.focus();
+         }
+      });
+   }
+
+   /* Init lightbox after DOM is ready */
+   if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', setupImageLightbox);
+   } else {
+      setupImageLightbox();
+   }
+
    global.DawnTranscript = {
       addEntry: addTranscriptEntry,
       addDebug: addDebugEntry,

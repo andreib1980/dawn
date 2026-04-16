@@ -119,6 +119,17 @@ static void build_filename(const char *id, const char *mime_type, char *out, siz
 }
 
 /**
+ * @brief Validate a filename from the database contains no path traversal
+ */
+static bool validate_db_filename(const char *filename) {
+   if (!filename || filename[0] == '\0')
+      return false;
+   if (strchr(filename, '/') || strstr(filename, ".."))
+      return false;
+   return true;
+}
+
+/**
  * @brief Build full filesystem path for an image file
  */
 static void build_filepath(const char *filename, char *out, size_t out_size) {
@@ -408,9 +419,9 @@ int image_store_get_path(const char *id, int user_id, char *path_out, char *mime
       return IMAGE_STORE_FORBIDDEN;
    }
 
-   /* Copy filename before resetting statement */
+   /* Copy and validate filename (defense-in-depth against DB corruption) */
    char filename_buf[IMAGE_FILENAME_MAX];
-   if (filename) {
+   if (filename && validate_db_filename(filename)) {
       strncpy(filename_buf, filename, sizeof(filename_buf) - 1);
       filename_buf[sizeof(filename_buf) - 1] = '\0';
    } else {
@@ -535,9 +546,9 @@ int image_store_delete(const char *id, int user_id) {
       return IMAGE_STORE_FORBIDDEN;
    }
 
-   /* Copy filename before resetting */
+   /* Copy and validate filename (defense-in-depth against DB corruption) */
    char filename_buf[IMAGE_FILENAME_MAX] = { 0 };
-   if (filename) {
+   if (filename && validate_db_filename(filename)) {
       strncpy(filename_buf, filename, sizeof(filename_buf) - 1);
    }
    sqlite3_reset(s_db.stmt_image_get_file);
@@ -683,19 +694,14 @@ int image_store_cleanup(void) {
       }
       sqlite3_reset(s_db.stmt_image_get_cache_lru_ids);
 
-      /* Pass 2: delete collected rows by ID */
-      sqlite3_stmt *del_stmt = NULL;
-      int prep_rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE id = ?", -1, &del_stmt,
-                                       NULL);
-      if (prep_rc == SQLITE_OK) {
-         for (int i = 0; i < cache_evict_count; i++) {
-            sqlite3_reset(del_stmt);
-            sqlite3_bind_text(del_stmt, 1, cache_ids[i], -1, SQLITE_STATIC);
-            if (sqlite3_step(del_stmt) == SQLITE_DONE) {
-               total_deleted++;
-            }
+      /* Pass 2: delete collected rows by ID (uses pre-prepared statement) */
+      for (int i = 0; i < cache_evict_count; i++) {
+         sqlite3_reset(s_db.stmt_image_delete_cache_lru);
+         sqlite3_bind_text(s_db.stmt_image_delete_cache_lru, 1, cache_ids[i], -1, SQLITE_STATIC);
+         if (sqlite3_step(s_db.stmt_image_delete_cache_lru) == SQLITE_DONE) {
+            total_deleted++;
          }
-         sqlite3_finalize(del_stmt);
+         sqlite3_reset(s_db.stmt_image_delete_cache_lru);
       }
 
       AUTH_DB_UNLOCK();

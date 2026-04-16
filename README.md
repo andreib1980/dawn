@@ -70,6 +70,7 @@ DAWN runs on platforms from a Jetson Orin to a Raspberry Pi 5 and supports multi
 DAWN's LLM automatically invokes tools and incorporates results into responses. Multiple tool calls execute concurrently for faster answers.
 
 - **Web Search** — Voice-activated search via SearXNG (self-hosted, privacy-focused). Categories: web, news, social, science, IT, Q&A, dictionary, academic papers. Time filtering for recent results (today, this week, this month).
+- **Image Search** — Search and display images from the web. Images are fetched server-side (SSRF-protected with DNS pinning), cached locally, and served via zero-copy file serving. Click-to-enlarge lightbox in WebUI. Results displayed as inline markdown images.
 - **URL Fetcher** — Fetch and read web pages. Large pages auto-summarized. Optional FlareSolverr for JavaScript-heavy sites.
 - **Weather** — Real-time weather and forecasts via Open-Meteo API (free, no API key required).
 - **Calculator** — Mathematical expression evaluation.

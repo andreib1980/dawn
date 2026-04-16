@@ -41,6 +41,7 @@ option(DAWN_ENABLE_EMAIL_TOOL "Enable IMAP/SMTP email integration" ON)
 option(DAWN_ENABLE_SFX_TOOL "Enable sound effect playback tool" ON)
 option(DAWN_ENABLE_RENDER_VISUAL_TOOL "Enable visual rendering tool (SVG/HTML diagrams)" ON)
 option(DAWN_ENABLE_PHONE_TOOL "Enable phone call and SMS tool (requires ECHO daemon)" ON)
+option(DAWN_ENABLE_IMAGE_SEARCH_TOOL "Enable image search tool (requires SearXNG + image store)" ON)
 
 # =============================================================================
 # Mutual Exclusion: Home Assistant and SmartThings
@@ -327,6 +328,15 @@ if(DAWN_ENABLE_PHONE_TOOL)
     message(STATUS "DAWN: Phone tool ENABLED")
 else()
     message(STATUS "DAWN: Phone tool DISABLED")
+endif()
+
+# Image Search Tool (SearXNG image search + image store caching)
+if(DAWN_ENABLE_IMAGE_SEARCH_TOOL)
+    add_definitions(-DDAWN_ENABLE_IMAGE_SEARCH_TOOL)
+    list(APPEND TOOL_SOURCES src/tools/image_search_tool.c)
+    message(STATUS "DAWN: Image Search tool ENABLED")
+else()
+    message(STATUS "DAWN: Image Search tool DISABLED")
 endif()
 
 # =============================================================================

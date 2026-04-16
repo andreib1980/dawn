@@ -864,6 +864,79 @@ search_response_t *web_search_query(const char *query, int max_results) {
    return web_search_query_typed(query, max_results, SEARCH_TYPE_WEB, NULL);
 }
 
+struct json_object *web_search_query_images_raw(const char *query, int max_results) {
+   if (!module_initialized) {
+      LOG_ERROR("web_search: Module not initialized");
+      return NULL;
+   }
+
+   if (!query || query[0] == '\0') {
+      LOG_ERROR("web_search: Empty query");
+      return NULL;
+   }
+
+   if (max_results <= 0) {
+      max_results = SEARXNG_MAX_RESULTS;
+   }
+
+   CURL *curl = curl_easy_init();
+   if (!curl) {
+      LOG_ERROR("web_search: Failed to create CURL handle");
+      return NULL;
+   }
+
+   char *encoded_query = curl_easy_escape(curl, query, 0);
+   if (!encoded_query) {
+      LOG_ERROR("web_search: Failed to encode query");
+      curl_easy_cleanup(curl);
+      return NULL;
+   }
+
+   char url[SEARCH_URL_MAX_LEN];
+   snprintf(url, sizeof(url), "%s/search?q=%s&format=json&categories=images&safesearch=1",
+            searxng_base_url, encoded_query);
+   curl_free(encoded_query);
+   LOG_INFO("web_search: Image query: %s", url);
+
+   curl_buffer_t buffer;
+   curl_buffer_init_with_max(&buffer, CURL_BUFFER_MAX_WEB_SEARCH);
+
+   curl_easy_setopt(curl, CURLOPT_URL, url);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT, SEARXNG_TIMEOUT_SEC);
+   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5);
+   curl_easy_setopt(curl, CURLOPT_USERAGENT, "DAWN/1.0");
+
+   CURLcode res = curl_easy_perform(curl);
+   if (res != CURLE_OK) {
+      LOG_ERROR("web_search: Image search request failed: %s", curl_easy_strerror(res));
+      curl_easy_cleanup(curl);
+      curl_buffer_free(&buffer);
+      return NULL;
+   }
+
+   long http_code = 0;
+   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+   curl_easy_cleanup(curl);
+
+   if (http_code != 200) {
+      LOG_ERROR("web_search: Image search HTTP error %ld", http_code);
+      curl_buffer_free(&buffer);
+      return NULL;
+   }
+
+   struct json_object *root = json_tokener_parse(buffer.data);
+   curl_buffer_free(&buffer);
+
+   if (!root) {
+      LOG_ERROR("web_search: Failed to parse image search JSON response");
+      return NULL;
+   }
+
+   return root; /* Caller owns the reference — must json_object_put() */
+}
+
 // =============================================================================
 // Format for LLM
 // =============================================================================

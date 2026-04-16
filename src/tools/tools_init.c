@@ -105,6 +105,9 @@
 #ifdef DAWN_ENABLE_PHONE_TOOL
 #include "tools/phone_tool.h"
 #endif
+#ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
+#include "tools/image_search_tool.h"
+#endif
 
 #include "tools/plan_executor.h"
 
@@ -284,6 +287,12 @@ int tools_register_all(void) {
 #ifdef DAWN_ENABLE_PHONE_TOOL
    if (phone_tool_register() != 0) {
       LOG_WARNING("Failed to register phone tool");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
+   if (image_search_tool_register() != 0) {
+      LOG_WARNING("Failed to register image_search tool");
    }
 #endif
 

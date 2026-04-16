@@ -764,9 +764,9 @@ On replay, transcript.js extractVisuals splits and renders inline
 
 ### 8. Vision/Image Subsystem (`src/image_store.c`, `src/webui/webui_images.c`, `www/js/ui/vision.js`)
 
-**Purpose**: Image upload, storage, and vision AI integration for the WebUI
+**Purpose**: Image upload, storage, vision AI integration, and image search for the WebUI
 
-#### Architecture: **Client-Side Compression + Server-Side BLOB Storage**
+#### Architecture: **Client-Side Compression + Server-Side Filesystem Storage**
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -798,16 +798,19 @@ On replay, transcript.js extractVisuals splits and renders inline
 │  │ webui_images.c - HTTP Endpoint Handler                        │    │
 │  │                                                               │    │
 │  │  POST /api/images  → Validate → Store → Return image ID       │    │
-│  │  GET /api/images/:id → Retrieve BLOB → Return image data      │    │
+│  │  GET /api/images/:id → get_path() → lws_serve_http_file()     │    │
 │  └───────────────────────────┬───────────────────────────────────┘    │
 │                              │                                        │
 │  ┌───────────────────────────▼───────────────────────────────────┐    │
-│  │ image_store.c - SQLite BLOB Storage                           │    │
+│  │ image_store.c - Filesystem Storage + SQLite Metadata          │    │
 │  │                                                               │    │
-│  │  Table: images (id, user_id, mime_type, data BLOB, created)   │    │
-│  │  - Thread-safe via auth_db mutex                              │    │
-│  │  - Automatic cleanup of old images (retention policy)         │    │
-│  │  - Per-user image limits                                      │    │
+│  │  Files: <data_dir>/images/<id>.<ext>                          │    │
+│  │  Table: images (id, user_id, source, retention_policy, ...)   │    │
+│  │  Sources: upload, generated, search, MMS, document            │    │
+│  │  Retention: default (age-based), permanent, cache (LRU)       │    │
+│  │  - Thread-safe: file I/O outside mutex, metadata ops inside   │    │
+│  │  - Atomic writes (tmp + fsync + rename + O_NOFOLLOW)          │    │
+│  │  - Zero-copy HTTP serving via kernel sendfile                 │    │
 │  └───────────────────────────────────────────────────────────────┘    │
 │                                                                        │
 │  ┌───────────────────────────────────────────────────────────────┐    │
@@ -831,15 +834,26 @@ On replay, transcript.js extractVisuals splits and renders inline
    - Accessibility: ARIA announcements, keyboard navigation
 
 - **image_store.c/h**: Server-side image storage
-   - SQLite BLOB storage (uses auth_db for thread safety)
-   - Image ID format: `img_` + 12 alphanumeric characters
-   - Configurable limits: max size, max per user, retention days
-   - Automatic cleanup of expired images
+   - Filesystem-backed: images stored as files in `<data_dir>/images/`, SQLite holds metadata only
+   - Image ID format: `img_` + 12 alphanumeric characters (getrandom)
+   - Source tracking: `IMAGE_SOURCE_UPLOAD`, `_GENERATED`, `_SEARCH`, `_MMS`, `_DOCUMENT`
+   - Retention policies: `IMAGE_RETAIN_DEFAULT` (age-based), `_PERMANENT` (never delete), `_CACHE` (LRU at size cap)
+   - Atomic file writes: O_NOFOLLOW tmp + fsync + rename, file I/O outside auth_db mutex
+   - Source-aware access control: UPLOAD/MMS require ownership, SEARCH/GENERATED/DOCUMENT accessible to any auth'd user
+   - Configurable limits: max size, max per user, retention days, cache size (MB)
 
 - **webui_images.c/h**: HTTP endpoint handlers
    - `POST /api/images`: Upload image, returns `{id, mime_type, size}`
-   - `GET /api/images/:id`: Retrieve image by ID
-   - Authentication required (uses session validation)
+   - `GET /api/images/:id`: Zero-copy file serving via `lws_serve_http_file()` (kernel sendfile)
+   - Authentication required, source-aware access check
+   - Security headers: Cache-Control, X-Content-Type-Options, Content-Disposition
+
+- **image_search_tool.c/h**: Web image search via SearXNG
+   - Queries `web_search_query_images_raw()` (shared SearXNG backend)
+   - Concurrent image fetching via `curl_multi` (4 parallel connections, 10s wall-clock cap)
+   - SSRF protection: DNS pinning via CURLOPT_RESOLVE, manual redirect-with-revalidation (1 hop max)
+   - Magic byte validation (JPEG, PNG, GIF87a/89a, WebP) — Content-Type ignored
+   - Cached as `IMAGE_SOURCE_SEARCH` + `IMAGE_RETAIN_CACHE` (LRU eviction at configurable cap)
 
 #### Data Flow (Image Upload)
 
@@ -852,7 +866,7 @@ On replay, transcript.js extractVisuals splits and renders inline
    ↓
 4. POST /api/images with multipart form data
    ↓
-5. Server validates auth, stores BLOB in SQLite
+5. Server validates auth, writes file atomically to <data_dir>/images/, stores metadata in SQLite
    ↓
 6. Server returns image ID (e.g., "img_a1b2c3d4e5f6")
    ↓

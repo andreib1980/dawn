@@ -422,7 +422,7 @@ endpoint = "http://127.0.0.1:8080"  # llama.cpp default
 
 ### SearXNG Setup (for Web Search)
 
-DAWN can perform web searches via voice commands using [SearXNG](https://docs.searxng.org/), a self-hosted metasearch engine. Search categories include web, news, social, science, IT, Q&A, dictionary, and academic papers.
+DAWN can perform web searches via voice commands using [SearXNG](https://docs.searxng.org/), a self-hosted metasearch engine. Search categories include web, news, social, science, IT, Q&A, dictionary, academic papers, and images. The image search tool fetches and caches images server-side so clients never contact external servers directly.
 
 #### Prerequisites
 
@@ -526,6 +526,14 @@ engines:
   - name: duckduckgo news
     disabled: true
   - name: yahoo news
+    disabled: false
+
+  # Image search engines (for image_search tool)
+  - name: google images
+    disabled: false
+  - name: bing images
+    disabled: false
+  - name: duckduckgo images
     disabled: false
 EOF
 
