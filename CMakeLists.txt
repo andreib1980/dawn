@@ -505,6 +505,7 @@ set(DAWN_SOURCES
     src/audio/audio_backend.c
     src/audio/audio_alsa.c
     src/audio/audio_pulse.c
+    src/audio/ringtone.c
     src/audio/audio_converter.c
     src/audio/music_db.c
     src/audio/music_scanner.c

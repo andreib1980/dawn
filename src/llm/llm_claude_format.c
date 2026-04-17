@@ -930,10 +930,14 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          json_object_object_add(system_block, "text", json_object_get(content_obj));
 
 #if CLAUDE_ENABLE_PROMPT_CACHING
-         // Add cache control to system prompt for 90% cost savings
-         json_object *cache_control = json_object_new_object();
-         json_object_object_add(cache_control, "type", json_object_new_string("ephemeral"));
-         json_object_object_add(system_block, "cache_control", cache_control);
+         // Cache control on first system block only (main prompt).
+         // Claude allows max 4 cache_control blocks per request — injected
+         // context messages (phone events, etc.) don't need caching.
+         if (json_object_array_length(system_array) == 0) {
+            json_object *cache_control = json_object_new_object();
+            json_object_object_add(cache_control, "type", json_object_new_string("ephemeral"));
+            json_object_object_add(system_block, "cache_control", cache_control);
+         }
 #endif
 
          json_object_array_add(system_array, system_block);
