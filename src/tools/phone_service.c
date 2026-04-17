@@ -282,7 +282,9 @@ static int publish_echo_cmd(const char *action,
    if (value && value[0]) {
       json_object_object_add(cmd, "value", json_object_new_string(value));
    }
-   json_object_object_add(cmd, "request_id", json_object_new_string(request_id));
+   if (request_id) {
+      json_object_object_add(cmd, "request_id", json_object_new_string(request_id));
+   }
    json_object_object_add(cmd, "timestamp", json_object_new_int64(ocp_get_timestamp_ms()));
 
    if (data_json && data_json[0]) {
@@ -681,38 +683,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       int64_t sms_id = phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender,
                                                contact_name, safe_body, time(NULL));
 
-      /* Delete from SIM after successful DB commit */
-      if (sms_id >= 0 && sms_index >= 0) {
-         char idx_str[8];
-         snprintf(idx_str, sizeof(idx_str), "%d", sms_index);
-
-         pending_request_t *del_req = command_router_register(0);
-         if (del_req) {
-            if (publish_echo_cmd("delete_sms", idx_str, command_router_get_id(del_req), NULL) ==
-                0) {
-               char *del_result = command_router_wait(del_req, 10000);
-               if (del_result) {
-                  struct json_object *resp = json_tokener_parse(del_result);
-                  free(del_result);
-                  if (resp) {
-                     struct json_object *j_status;
-                     if (json_object_object_get_ex(resp, "status", &j_status) &&
-                         strcmp(json_object_get_string(j_status), "error") == 0) {
-                        LOG_WARNING("phone_service: failed to delete SMS index %d from SIM",
-                                    sms_index);
-                     }
-                     json_object_put(resp);
-                  }
-               } else {
-                  LOG_WARNING("phone_service: delete_sms timed out for index %d", sms_index);
-               }
-            } else {
-               command_router_cancel(del_req);
-            }
-         }
-      }
-
-      /* TTS announce */
+      /* TTS announce (before SIM delete so notification is immediate) */
       char announce[256];
       if (contact_name[0]) {
          snprintf(announce, sizeof(announce), "New text message from %s", contact_name);
@@ -759,6 +730,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
 
       LOG_INFO("phone_service: SMS from %s (%s): %zu bytes", sender,
                contact_name[0] ? contact_name : "unknown", body_len);
+
+      /* Delete from SIM after all processing (fire-and-forget — SMS is already in DB) */
+      if (sms_id >= 0 && sms_index >= 0) {
+         char idx_str[8];
+         snprintf(idx_str, sizeof(idx_str), "%d", sms_index);
+         if (publish_echo_cmd("delete_sms", idx_str, "fire_and_forget", NULL) != 0) {
+            LOG_WARNING("phone_service: failed to send delete_sms for index %d", sms_index);
+         }
+      }
    }
 
    /* --- modem_lost --- */
