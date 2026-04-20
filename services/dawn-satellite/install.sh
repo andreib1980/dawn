@@ -386,7 +386,13 @@ if [ -n "$MODELS_DIR" ]; then
         ln -sfn "$MODELS_DIR" "$DATA_DIR/models"
     else
         log "Copying models from $MODELS_DIR"
-        cp -r "$MODELS_DIR"/. "$DATA_DIR/models/"
+        # cp -rL (dereference symlinks): $PROJECT_ROOT/models/whisper.cpp is
+        # a symlink to ../whisper.cpp/models. A plain `cp -r` would copy the
+        # symlink as-is, leaving a broken link under /var/lib/dawn-satellite/
+        # (it would point at ../whisper.cpp/models relative to DATA_DIR,
+        # which doesn't exist there). -L materializes the actual model
+        # files into the destination.
+        cp -rL "$MODELS_DIR"/. "$DATA_DIR/models/"
     fi
 fi
 
