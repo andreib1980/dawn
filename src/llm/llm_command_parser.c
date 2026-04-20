@@ -731,9 +731,11 @@ static void initialize_command_prompt(void) {
  * @return The local command prompt string
  */
 const char *get_local_command_prompt(void) {
-   if (!prompt_initialized) {
-      initialize_command_prompt();
-   }
+   /* Always delegate to the initializer — it takes system_instructions_mutex
+    * and early-returns if already initialized. Reading prompt_initialized
+    * here without the lock is a data race because invalidate_system_instructions()
+    * (runnable from MQTT callback threads) writes the flag under the mutex. */
+   initialize_command_prompt();
    return command_prompt;
 }
 
@@ -778,9 +780,9 @@ static void initialize_remote_command_prompt(void) {
  * @return The remote command prompt string
  */
 const char *get_remote_command_prompt(void) {
-   if (!remote_prompt_initialized) {
-      initialize_remote_command_prompt();
-   }
+   /* Always delegate to the initializer — it takes system_instructions_mutex
+    * and early-returns if already initialized. See get_local_command_prompt(). */
+   initialize_remote_command_prompt();
    return remote_command_prompt;
 }
 

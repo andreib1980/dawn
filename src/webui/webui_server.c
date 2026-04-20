@@ -1612,20 +1612,30 @@ bool conn_require_admin(ws_connection_t *conn) {
  * @return Allocated prompt string (caller must free)
  */
 char *build_user_prompt(int user_id) {
-   const char *base_prompt = get_remote_command_prompt();
+   /* Take an owned copy of the base prompt up-front. get_remote_command_prompt()
+    * returns a pointer into a shared static buffer that can be rebuilt in place
+    * by invalidate_system_instructions() firing from MQTT callback threads
+    * (HUD status / discovery). We may do DB I/O and memory_build_context()
+    * below — holding the static pointer across that work would race against
+    * a concurrent rebuild and read a torn buffer. */
+   const char *source = get_remote_command_prompt();
+   if (!source) {
+      return NULL;
+   }
+   char *base_prompt = strdup(source);
    if (!base_prompt) {
       return NULL;
    }
 
-   /* No user ID - return copy of base prompt */
+   /* No user ID - return the owned base prompt (transfer ownership) */
    if (user_id <= 0) {
-      return strdup(base_prompt);
+      return base_prompt;
    }
 
    /* Load user settings */
    auth_user_settings_t settings;
    if (auth_db_get_user_settings(user_id, &settings) != AUTH_DB_SUCCESS) {
-      return strdup(base_prompt);
+      return base_prompt;
    }
 
    /* Check if any settings are customized */
@@ -1636,7 +1646,7 @@ char *build_user_prompt(int user_id) {
    bool is_replace_mode = (strcmp(settings.persona_mode, "replace") == 0);
 
    if (!has_persona && !has_location && !has_timezone && !has_units) {
-      return strdup(base_prompt);
+      return base_prompt;
    }
 
    size_t base_len = strlen(base_prompt);
@@ -1689,7 +1699,7 @@ char *build_user_prompt(int user_id) {
       /* Allocate: prefix + base + suffix + memory */
       char *combined = malloc(prefix_len + base_len + suffix_len + memory_len + 1);
       if (!combined) {
-         return strdup(base_prompt);
+         return base_prompt; /* fallback: transfer ownership of base copy */
       }
 
       memcpy(combined, prefix, prefix_len);
@@ -1703,6 +1713,7 @@ char *build_user_prompt(int user_id) {
       OLOG_INFO("Built REPLACE prompt for user_id=%d (%zu + %zu + %zu + %zu bytes)", user_id,
                 prefix_len, base_len, suffix_len, memory_len);
 
+      free(base_prompt);
       return combined;
    }
 
@@ -1731,7 +1742,7 @@ char *build_user_prompt(int user_id) {
    size_t context_len = strlen(user_context);
    char *combined = malloc(base_len + context_len + memory_len + 1);
    if (!combined) {
-      return strdup(base_prompt);
+      return base_prompt; /* fallback: transfer ownership of base copy */
    }
 
    memcpy(combined, base_prompt, base_len);
@@ -1744,6 +1755,7 @@ char *build_user_prompt(int user_id) {
    OLOG_INFO("Built APPEND prompt for user_id=%d (%zu + %zu + %zu bytes)", user_id, base_len,
              context_len, memory_len);
 
+   free(base_prompt);
    return combined;
 }
 
