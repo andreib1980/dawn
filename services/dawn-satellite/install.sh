@@ -250,6 +250,86 @@ find_models() {
     warn "No models directory found. You will need to copy models manually to $DATA_DIR/models/"
 }
 
+# Extract a TOML string value for KEY under [SECTION] from FILE.
+# Prints the unquoted value, or nothing if not found.
+parse_toml_str() {
+    local section="$1" key="$2" file="$3"
+    awk -v want_section="[$section]" -v key="$key" '
+        /^\[.*\][[:space:]]*$/ { in_section = ($0 == want_section); next }
+        in_section && $1 == key && $2 == "=" {
+            # everything after the =
+            v = substr($0, index($0, "=") + 1)
+            # strip leading/trailing whitespace
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            # strip surrounding double quotes if present
+            gsub(/^"|"$/, "", v)
+            print v
+            exit
+        }
+    ' "$file"
+}
+
+# Copy only the model files/dirs that the satellite config actually
+# references (VAD, ASR, TTS model, TTS config). Avoids dragging in ~2GB
+# of unused Vosk data or broken symlinks for models the user never
+# downloaded. Source paths are relative to $MODELS_DIR; config paths
+# are expected to look like "models/foo/bar".
+install_selected_models() {
+    local cfg="$1"
+
+    local -a model_paths=()
+    local vad_path asr_path tts_model tts_config
+    vad_path=$(parse_toml_str vad model_path "$cfg")
+    asr_path=$(parse_toml_str asr model_path "$cfg")
+    tts_model=$(parse_toml_str tts model_path "$cfg")
+    tts_config=$(parse_toml_str tts config_path "$cfg")
+
+    [ -n "$vad_path" ] && model_paths+=("$vad_path")
+    [ -n "$asr_path" ] && model_paths+=("$asr_path")
+    [ -n "$tts_model" ] && model_paths+=("$tts_model")
+    [ -n "$tts_config" ] && model_paths+=("$tts_config")
+
+    if [ ${#model_paths[@]} -eq 0 ]; then
+        warn "No model paths found in config — skipping model install"
+        return 0
+    fi
+
+    local installed=0 missing=0
+    for path in "${model_paths[@]}"; do
+        # Expect "models/..." — anything else is either absolute or ~/-style,
+        # which won't resolve at runtime anyway. Log and skip.
+        if [[ "$path" != models/* ]]; then
+            warn "Skipping non-relative model path: $path"
+            continue
+        fi
+        local rel="${path#models/}"
+        local src="$MODELS_DIR/$rel"
+        local dst="$DATA_DIR/models/$rel"
+
+        if [ ! -e "$src" ]; then
+            warn "Referenced model not found in source: $path"
+            missing=$((missing + 1))
+            continue
+        fi
+
+        mkdir -p "$(dirname "$dst")"
+        if [ -d "$src" ]; then
+            # Vosk model is a directory bundle — copy recursively
+            rm -rf "$dst"
+            cp -rL "$src" "$dst"
+        else
+            cp -Lf "$src" "$dst"
+        fi
+        log "  + ${rel}"
+        installed=$((installed + 1))
+    done
+
+    log "Installed $installed referenced model(s)${missing:+, $missing missing}"
+    if [ "$missing" -gt 0 ]; then
+        warn "Some referenced models were missing — run setup_models.sh on the source host and re-deploy"
+    fi
+}
+
 # Find fonts directory
 find_fonts() {
     if [ -n "$FONTS_DIR" ]; then
@@ -337,6 +417,18 @@ mkdir -p "$DATA_DIR/assets/fonts"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$LOG_DIR"
 
+# Resolve config source early — model install below reads it to pick
+# the correct subset of models to copy. --config wins if given;
+# otherwise fall back to the shipped template.
+if [ -n "$CONFIG_SRC" ]; then
+    if [ ! -f "$CONFIG_SRC" ]; then
+        error "Config source not found: $CONFIG_SRC"
+    fi
+    log "Using custom config: $CONFIG_SRC"
+else
+    CONFIG_SRC="$SCRIPT_DIR/satellite.toml"
+fi
+
 # Stop the running service before touching binaries / libraries. Linux
 # refuses `cp` over a running executable (Text file busy), and stopping
 # here also means we don't have to worry about the service reloading a
@@ -385,14 +477,21 @@ if [ -n "$MODELS_DIR" ]; then
         fi
         ln -sfn "$MODELS_DIR" "$DATA_DIR/models"
     else
-        log "Copying models from $MODELS_DIR"
-        # cp -rL (dereference symlinks): $PROJECT_ROOT/models/whisper.cpp is
-        # a symlink to ../whisper.cpp/models. A plain `cp -r` would copy the
-        # symlink as-is, leaving a broken link under /var/lib/dawn-satellite/
-        # (it would point at ../whisper.cpp/models relative to DATA_DIR,
-        # which doesn't exist there). -L materializes the actual model
-        # files into the destination.
-        cp -rL "$MODELS_DIR"/. "$DATA_DIR/models/"
+        # Selective model install: read the satellite config and copy only
+        # the models it references (VAD, ASR, TTS model+config). This skips
+        # the other TTS voice, any unused Vosk/Whisper variants, the
+        # embedding model (not used by satellites), and any broken
+        # symlinks left behind by previous setup_models.sh runs.
+        #
+        # Wipe the destination models dir first — stale broken symlinks
+        # from earlier `cp -r` deploys would otherwise block the copy
+        # ("cannot overwrite non-directory with directory").
+        if [ -d "$DATA_DIR/models" ]; then
+            find "$DATA_DIR/models" -mindepth 1 -delete 2>/dev/null || true
+        fi
+
+        log "Installing models referenced by $CONFIG_SRC"
+        install_selected_models "$CONFIG_SRC"
     fi
 fi
 
@@ -402,17 +501,8 @@ if [ -n "$FONTS_DIR" ]; then
     cp -r "$FONTS_DIR"/. "$DATA_DIR/assets/fonts/"
 fi
 
-# Resolve config source: prefer --config, fall back to the shipped template.
-if [ -n "$CONFIG_SRC" ]; then
-    if [ ! -f "$CONFIG_SRC" ]; then
-        error "Config source not found: $CONFIG_SRC"
-    fi
-    log "Using custom config: $CONFIG_SRC"
-else
-    CONFIG_SRC="$SCRIPT_DIR/satellite.toml"
-fi
-
-# Install configuration (never overwrite existing — preserve user edits)
+# Install configuration (never overwrite existing — preserve user edits).
+# $CONFIG_SRC was resolved above, before the model install.
 if [ -f "$CONFIG_DIR/satellite.toml" ]; then
     warn "Config file already exists: $CONFIG_DIR/satellite.toml (not overwriting)"
     warn "New version saved to: $CONFIG_DIR/satellite.toml.new"
