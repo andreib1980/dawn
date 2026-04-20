@@ -27,3 +27,40 @@ FEATURES="ssl,mqtt"
 # OPENAI_KEY=""
 # CLAUDE_KEY=""
 # GEMINI_KEY=""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Satellite-specific keys (used only when INSTALL_TARGET="satellite").
+# Overrides the interactive prompts in present_satellite_choices().
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Daemon connection
+# SAT_SERVER_HOST="192.168.1.100"
+# SAT_SERVER_PORT="3000"
+# SAT_SSL="true"
+# SAT_SSL_VERIFY="true"
+
+# Identity — must be unique per satellite
+# SAT_NAME="Kitchen"
+# SAT_LOCATION="kitchen"
+
+# ASR engine: "vosk" (streaming, recommended on Pi) or "whisper" (batch)
+# SAT_ASR_ENGINE="vosk"
+
+# Vosk model (used when SAT_ASR_ENGINE="vosk"): "small" or "large"
+# SAT_VOSK_MODEL="small"
+
+# Whisper model (used when SAT_ASR_ENGINE="whisper"): "tiny-q5_1" or "base"
+# SAT_WHISPER_MODEL="tiny-q5_1"
+
+# Optional features
+# SAT_ENABLE_SDL_UI="false"   # Set to "true" for touchscreen UI
+# SAT_ENABLE_OPUS="true"      # Music streaming (requires libopus-dev)
+
+# ALSA devices — run `arecord -l` / `aplay -l` on the Pi to find these
+# SAT_CAPTURE_DEVICE="plughw:1,0"
+# SAT_PLAYBACK_DEVICE="plughw:1,0"
+
+# Registration key (optional) — matches the key generated on the daemon via
+# `./generate_ssl_cert.sh --gen-key`. Leave unset if the daemon has no key.
+# Treat as a secret; do not commit a filled-in value to version control.
+# SAT_REGISTRATION_KEY=""

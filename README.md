@@ -198,8 +198,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/LLM_INTEGRATION_GUIDE.md](docs/LLM_INTEGRATION_GUIDE.md)** | LLM setup for cloud and local providers |
 | **[docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md)** | Home Assistant integration setup |
 | **[docs/WEBSOCKET_PROTOCOL.md](docs/WEBSOCKET_PROTOCOL.md)** | WebSocket protocol reference (all message types) |
-| **[docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** | Satellite architecture and deployment guide |
-| **[dawn_satellite/README.md](dawn_satellite/README.md)** | Tier 1 satellite (RPi) build, config, and usage |
+| **[docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** | Tier 1 satellite (RPi) install, build, config, deployment, troubleshooting |
 | **[dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)** | Tier 2 satellite (ESP32-S3, Arduino) setup |
 | **[docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md)** | Google OAuth 2.0 setup for Calendar and Email |
 | **[docs/TOOL_DEVELOPMENT_GUIDE.md](docs/TOOL_DEVELOPMENT_GUIDE.md)** | Guide for adding new LLM tools |

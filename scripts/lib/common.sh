@@ -222,6 +222,7 @@ CUDA_VERSION=""
 HAS_AUDIO_CAPTURE=false
 HAS_AUDIO_PLAYBACK=false
 HEADLESS=false
+SYSTEM_MEM_GB=0
 
 detect_arch() {
    ARCH=$(uname -m)
@@ -283,6 +284,20 @@ detect_audio() {
    fi
    if [ "$HAS_AUDIO_CAPTURE" = false ]; then
       HEADLESS=true
+   fi
+}
+
+detect_system_memory() {
+   # Populates SYSTEM_MEM_GB with total system memory rounded down to the
+   # nearest GB. Used by satellite installer to recommend ASR engine and
+   # model size, and available to future daemon tuning.
+   SYSTEM_MEM_GB=0
+   if [ -r /proc/meminfo ]; then
+      local mem_kb
+      mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+      if [ -n "$mem_kb" ] && [ "$mem_kb" -gt 0 ] 2>/dev/null; then
+         SYSTEM_MEM_GB=$((mem_kb / 1024 / 1024))
+      fi
    fi
 }
 
@@ -388,6 +403,7 @@ run_discovery() {
    detect_sudo
    detect_cuda
    detect_audio
+   detect_system_memory
    detect_existing_install
 
    echo ""
@@ -395,6 +411,7 @@ run_discovery() {
    printf "  %-20s %s\n" "Architecture:" "$ARCH"
    printf "  %-20s %s\n" "Platform:" "$PLATFORM_DISPLAY"
    printf "  %-20s %s\n" "OS:" "$OS_NAME $OS_VERSION"
+   printf "  %-20s %s\n" "System RAM:" "${SYSTEM_MEM_GB}GB"
    printf "  %-20s %s\n" "CUDA:" "$([ "$HAS_CUDA" = true ] && echo "Yes ($CUDA_VERSION)" || echo "No")"
    printf "  %-20s %s\n" "Audio capture:" "$([ "$HAS_AUDIO_CAPTURE" = true ] && echo "Yes" || echo "No (headless)")"
    printf "  %-20s %s\n" "Audio playback:" "$([ "$HAS_AUDIO_PLAYBACK" = true ] && echo "Yes" || echo "No")"
@@ -549,6 +566,20 @@ BUILD_DIR="${BUILD_DIR:-}"
 HEADLESS="${HEADLESS:-false}"
 HAS_CUDA="${HAS_CUDA:-false}"
 ONNX_HAS_CUDA="${ONNX_HAS_CUDA:-false}"
+# Satellite-specific state (populated only when INSTALL_TARGET=satellite)
+SAT_SERVER_HOST="${SAT_SERVER_HOST:-}"
+SAT_SERVER_PORT="${SAT_SERVER_PORT:-3000}"
+SAT_SSL="${SAT_SSL:-true}"
+SAT_SSL_VERIFY="${SAT_SSL_VERIFY:-true}"
+SAT_NAME="${SAT_NAME:-}"
+SAT_LOCATION="${SAT_LOCATION:-}"
+SAT_ASR_ENGINE="${SAT_ASR_ENGINE:-vosk}"
+SAT_VOSK_MODEL="${SAT_VOSK_MODEL:-small}"
+SAT_WHISPER_MODEL="${SAT_WHISPER_MODEL:-tiny-q5_1}"
+SAT_ENABLE_SDL_UI="${SAT_ENABLE_SDL_UI:-false}"
+SAT_ENABLE_OPUS="${SAT_ENABLE_OPUS:-true}"
+SAT_CAPTURE_DEVICE="${SAT_CAPTURE_DEVICE:-}"
+SAT_PLAYBACK_DEVICE="${SAT_PLAYBACK_DEVICE:-}"
 EOF
    chmod 600 "$STATE_FILE"
 }

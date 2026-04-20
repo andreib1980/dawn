@@ -244,6 +244,57 @@ install_piper_phonemize() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# libvosk — pre-built release (used by satellite for streaming ASR)
+#
+# The daemon does not use libvosk (Whisper only); this lives in libs.sh for
+# reuse by satellite.sh. Version tracked here; check
+# https://github.com/alphacep/vosk-api/releases for updates.
+# ─────────────────────────────────────────────────────────────────────────────
+
+install_libvosk() {
+   if has_lib "libvosk.so" && has_header "/usr/local/include/vosk_api.h"; then
+      log "libvosk: already installed"
+      return 0
+   fi
+
+   local vosk_version vosk_dir vosk_tarball
+   vosk_version="0.3.45"
+   case "$ARCH" in
+      aarch64)
+         vosk_dir="vosk-linux-aarch64-${vosk_version}"
+         vosk_tarball="${vosk_dir}.zip"
+         ;;
+      x86_64)
+         vosk_dir="vosk-linux-x86_64-${vosk_version}"
+         vosk_tarball="${vosk_dir}.zip"
+         ;;
+      *)
+         error "libvosk: no pre-built release for architecture '$ARCH'. Vosk requires aarch64 or x86_64. Build from source at https://alphacephei.com/vosk/install"
+         ;;
+   esac
+
+   local url="https://github.com/alphacep/vosk-api/releases/download/v${vosk_version}/${vosk_tarball}"
+   local tmpdir
+   tmpdir=$(mktemp -d)
+   register_cleanup "$tmpdir"
+
+   log "Downloading libvosk v${vosk_version} (pre-built, $ARCH)..."
+   wget -q --show-progress -O "$tmpdir/$vosk_tarball" "$url" ||
+      error "Failed to download libvosk from $url"
+   unzip -q "$tmpdir/$vosk_tarball" -d "$tmpdir" ||
+      error "Failed to extract libvosk archive"
+
+   sudo_begin_phase "libvosk"
+   run_sudo cp "$tmpdir/$vosk_dir/libvosk.so" /usr/local/lib/ ||
+      error "Failed to install libvosk.so"
+   run_sudo cp "$tmpdir/$vosk_dir/vosk_api.h" /usr/local/include/ ||
+      error "Failed to install vosk_api.h"
+   run_sudo ldconfig
+
+   log "libvosk v${vosk_version}: installed (pre-built)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Library path setup (ensures /usr/local/lib is in ldconfig)
 # ─────────────────────────────────────────────────────────────────────────────
 
