@@ -19,33 +19,35 @@
 sed_safe_set() {
    local file="$1" section="$2" key="$3" value="$4"
 
-   # Determine if value needs quoting (booleans and numbers don't)
+   # Determine if value needs quoting. TOML bools and numbers stay bare;
+   # everything else is double-quoted as a TOML string.
    local quoted_value
-   case "$value" in
-      true | false | [0-9] | [0-9][0-9] | [0-9][0-9][0-9] | [0-9].[0-9]*)
-         quoted_value="$value"
-         ;;
-      *)
-         quoted_value="\"$value\""
-         ;;
-   esac
+   if [[ "$value" =~ ^(true|false|-?[0-9]+(\.[0-9]+)?)$ ]]; then
+      quoted_value="$value"
+   else
+      quoted_value="\"$value\""
+   fi
 
    # Escape dots in section name for regex (e.g., "llm.cloud" → "llm\.cloud")
    local section_re="${section//./\\.}"
 
-   # Try to uncomment and set: find a commented-out line with this key under this section
-   # The sed range /^\[section\]/,/^\[/ scopes to the section
+   # The sed range /^\[section\]/,/^\[/ scopes every edit to the section
+   # (stops at the next section header), so keys that also appear in
+   # other sections (e.g. `model_path` in [vad], [asr], [tts]) aren't
+   # clobbered cross-section.
    if grep -qP "^\[${section_re}\]" "$file" 2>/dev/null; then
-      # First try: uncomment a commented line like "# key = ..."
-      sed -i "/^\[${section_re}\]/,/^\[/{s|^# *${key} *=.*|${key} = ${quoted_value}|}" "$file"
-
-      # If the key is still not set (wasn't commented out), try replacing an existing uncommented line
-      if ! sed -n "/^\[${section_re}\]/,/^\[/p" "$file" | grep -qP "^${key} *=" 2>/dev/null; then
-         # Append after the section header
+      # Case 1: the key already exists uncommented — replace its value.
+      if sed -n "/^\[${section_re}\]/,/^\[/p" "$file" | grep -qP "^${key} *=" 2>/dev/null; then
+         sed -i "/^\[${section_re}\]/,/^\[/{s|^${key} *=.*|${key} = ${quoted_value}|}" "$file"
+      # Case 2: the key exists only as a commented-out line — uncomment and set.
+      elif sed -n "/^\[${section_re}\]/,/^\[/p" "$file" | grep -qP "^# *${key} *=" 2>/dev/null; then
+         sed -i "/^\[${section_re}\]/,/^\[/{s|^# *${key} *=.*|${key} = ${quoted_value}|}" "$file"
+      # Case 3: the key isn't present at all under this section — append.
+      else
          sed -i "/^\[${section_re}\]/a ${key} = ${quoted_value}" "$file"
       fi
    else
-      # Section doesn't exist — append it
+      # Section doesn't exist — append it with the key
       {
          echo ""
          echo "[$section]"
