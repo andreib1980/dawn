@@ -101,15 +101,26 @@ uninstall() {
         fi
     fi
 
-    # 8. Remove ld.so.conf.d entry (only if server is not installed)
-    if [ -f "/etc/ld.so.conf.d/dawn.conf" ]; then
-        if [ ! -f "/etc/systemd/system/dawn-server.service" ]; then
+    # 8. Remove whisper/ggml libs and ld.so.conf.d entry — only if the
+    #    server is not installed (it may share these libraries).
+    if [ ! -f "/etc/systemd/system/dawn-server.service" ]; then
+        local removed=0
+        for lib in /usr/local/lib/libwhisper.so* /usr/local/lib/libggml*.so*; do
+            [ -e "$lib" ] || continue
+            rm -f "$lib"
+            removed=$((removed + 1))
+        done
+        if [ "$removed" -gt 0 ]; then
+            log "Removed $removed whisper/ggml library file(s) from /usr/local/lib"
+        fi
+
+        if [ -f "/etc/ld.so.conf.d/dawn.conf" ]; then
             log "Removing /etc/ld.so.conf.d/dawn.conf"
             rm -f "/etc/ld.so.conf.d/dawn.conf"
-            ldconfig
-        else
-            log "Keeping /etc/ld.so.conf.d/dawn.conf (dawn-server is still installed)"
         fi
+        ldconfig
+    else
+        log "Keeping /etc/ld.so.conf.d/dawn.conf and whisper/ggml libs (dawn-server is still installed)"
     fi
 
     log ""
@@ -324,6 +335,30 @@ log "Installing binary to /usr/local/bin/dawn_satellite"
 cp "$BINARY_PATH" /usr/local/bin/dawn_satellite
 chmod 755 /usr/local/bin/dawn_satellite
 
+# Install whisper.cpp / ggml shared libraries.
+#
+# These are built inside the satellite build tree (dawn_satellite/build/
+# contains whisper.cpp/src/libwhisper.so* and ggml/src/libggml*.so*) and
+# the binary links against them dynamically. Without this step the service
+# fails on startup with:
+#   "libwhisper.so.1: cannot open shared object file"
+# even though the binary itself is installed.
+BUILD_DIR="$(dirname "$BINARY_PATH")"
+log "Installing whisper/ggml shared libraries from $BUILD_DIR"
+installed_libs=0
+while IFS= read -r -d '' lib; do
+    cp -a "$lib" /usr/local/lib/
+    installed_libs=$((installed_libs + 1))
+done < <(find "$BUILD_DIR" \
+    \( -name 'libwhisper.so*' -o -name 'libggml*.so*' \) \
+    -print0 2>/dev/null)
+if [ "$installed_libs" -eq 0 ]; then
+    warn "No whisper/ggml shared libraries found under $BUILD_DIR"
+    warn "If this build uses Whisper ASR, the service will fail to start."
+else
+    log "Installed $installed_libs whisper/ggml library file(s)"
+fi
+
 # Install models
 if [ -n "$MODELS_DIR" ]; then
     if [ "$SYMLINK_MODELS" = true ]; then
@@ -376,9 +411,11 @@ chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/satellite.toml"
 log "Configuring library path"
 if [ ! -f /etc/ld.so.conf.d/dawn.conf ]; then
     echo "/usr/local/lib" > /etc/ld.so.conf.d/dawn.conf
-    ldconfig
     log "Added /usr/local/lib to library path"
 fi
+# Always rebuild the linker cache — we may have just installed new
+# libwhisper.so* / libggml*.so* files above.
+ldconfig
 
 # Install systemd service
 log "Installing systemd service"
