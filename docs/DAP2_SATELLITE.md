@@ -603,14 +603,18 @@ Run the project-root helper to download ASR models. The script places models und
 ./setup_models.sh --help
 ```
 
-**Model recommendations by available RAM** (the installer picks these automatically based on `/proc/meminfo`):
+**Model recommendations by hardware** (the installer picks these automatically from `/proc/meminfo` and the Pi model):
 
-| RAM | Recommended | Notes |
+| Hardware | Recommended | Why |
 |---|---|---|
-| 1GB or less | Not recommended | Insufficient for simultaneous VAD + ASR + TTS |
-| 2GB | `vosk-small` (Vosk streaming) | Whisper tiny peaks ~270MB — tight but possible |
-| 4GB | `vosk-small` or `whisper tiny-q5_1` | Vosk gives lower latency; Whisper is slightly more accurate |
-| 8GB+ | `vosk` (large) or `whisper base` | Headroom for the large Vosk model or Whisper base |
+| Pi Zero / Zero 2 W | Not supported | 512MB RAM is too tight for simultaneous VAD + ASR + TTS |
+| Pi 3B (1GB) | Not recommended | CPU is too slow for a responsive voice pipeline |
+| Pi 4 (2GB) | Vosk small | `vosk-small` fits the memory budget; Whisper tiny pushes RAM too close to the limit |
+| Pi 4 (4–8GB) | Vosk small (default), Whisper tiny-q5_1 (optional) | Pi 4 CPU limits whisper.cpp tiny-q5_1 to RTF ~0.9 (≈4s finalize). Vosk streaming is noticeably snappier |
+| Pi 5 (4GB) | Whisper tiny-q5_1 | Pi 5 CPU hits RTF ~0.3 (≈1s finalize for a 3s utterance); quality beats Vosk small |
+| Pi 5 (8GB) | Whisper tiny-q5_1 | Same logic as 4GB; `whisper base` is not recommended — it triggers thermal throttling on sustained workloads ([ACM 2025](https://dl.acm.org/doi/10.1145/3769102.3774244)) even with active cooling |
+
+Benchmark sources: [ACM 2025 Whisper-on-Pi evaluation](https://dl.acm.org/doi/10.1145/3769102.3774244), [whisper.cpp Pi 4 issue #89](https://github.com/ggml-org/whisper.cpp/issues/89). RTF = real-time factor; lower is faster (&lt; 1.0 means faster than realtime).
 
 Silero VAD and Piper voice models ship with the repository under `models/` — no download needed:
 

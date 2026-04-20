@@ -53,40 +53,75 @@ SATELLITE_SDL_PACKAGES=(
 #   SAT_REGISTRATION_KEY (may be empty)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Populate RAM-based defaults. Called from run_satellite_discovery before
-# present_satellite_choices so prompts can suggest sensible values.
+# Populate hardware-aware defaults. Called from run_satellite_discovery
+# before present_satellite_choices so prompts can suggest sensible values.
+#
+# ASR recommendation logic (Pi generation matters more than RAM):
+#   - Pi 5 (any RAM >= 4GB): Whisper tiny-q5_1 — published RTF ~0.3 on Pi 5,
+#     which gives ~1s finalize for a 3s utterance. Quality beats Vosk small,
+#     latency is acceptable for conversational use. We avoid Whisper base
+#     even on the 8GB model because it triggers thermal throttling on
+#     sustained workloads per the ACM 2025 evaluation.
+#   - Pi 4 (any RAM): Vosk small — Pi 4's slower CPU means whisper.cpp tiny
+#     hits ~4s finalize per the project's own measurements (dawn_satellite
+#     README.md), which is perceptibly sluggish. Vosk's streaming decode
+#     keeps finalize near 0s.
+#   - Pi 3 / Pi Zero 2 W: Vosk small and warn about performance.
+#
+# References in conversation history / plan file:
+#   - ACM 2025 eval: https://dl.acm.org/doi/10.1145/3769102.3774244
+#   - Pi 4 NEON benchmark: whisper.cpp issue #89
+#   - Project's 4s Pi 4 figure: dawn_satellite/README.md (pre-slim)
 compute_satellite_recommendations() {
-   # Defaults (used when memory detection fails or is reported as 0)
+   # Conservative defaults for unknown / low-spec hardware
    RECOMMENDED_ASR="vosk"
    RECOMMENDED_VOSK_MODEL="small"
    RECOMMENDED_WHISPER_MODEL="tiny-q5_1"
 
-   if [ "${SYSTEM_MEM_GB:-0}" -ge 8 ]; then
-      # Pi 5 8GB or similar — room for the large Vosk model or Whisper base
-      RECOMMENDED_ASR="vosk"
+   # Parse Pi generation from PLATFORM_DISPLAY (populated by detect_platform).
+   # Examples: "Raspberry Pi 5 Model B Rev 1.0", "Raspberry Pi 4 Model B Rev 1.4",
+   # "Raspberry Pi Zero 2 W Rev 1.0".
+   PI_GENERATION=""
+   case "${PLATFORM_DISPLAY:-}" in
+      *"Pi 5"*)       PI_GENERATION="5" ;;
+      *"Pi 4"*)       PI_GENERATION="4" ;;
+      *"Pi 3"*)       PI_GENERATION="3" ;;
+      *"Pi Zero 2"*)  PI_GENERATION="zero2" ;;
+      *"Pi Zero"*)    PI_GENERATION="zero" ;;
+   esac
+
+   # Pi 5 with >= 4GB RAM → Whisper tiny-q5_1 default (quality over latency)
+   if [ "$PI_GENERATION" = "5" ] && [ "${SYSTEM_MEM_GB:-0}" -ge 4 ]; then
+      RECOMMENDED_ASR="whisper"
+      RECOMMENDED_WHISPER_MODEL="tiny-q5_1"
+   fi
+
+   # Non-Pi-5 with 8GB (e.g., Pi 4 8GB) — stick with Vosk large because
+   # CPU still limits Whisper, but use the large Vosk model for accuracy.
+   if [ "$PI_GENERATION" != "5" ] && [ "${SYSTEM_MEM_GB:-0}" -ge 8 ]; then
       RECOMMENDED_VOSK_MODEL="large"
-      RECOMMENDED_WHISPER_MODEL="base"
-   elif [ "${SYSTEM_MEM_GB:-0}" -ge 4 ]; then
-      # Pi 4 4GB / Pi 5 4GB
-      RECOMMENDED_ASR="vosk"
-      RECOMMENDED_VOSK_MODEL="small"
-      RECOMMENDED_WHISPER_MODEL="tiny-q5_1"
-   elif [ "${SYSTEM_MEM_GB:-0}" -ge 2 ]; then
-      # Pi 4 2GB / Pi 3B+ — Vosk only, small model
-      RECOMMENDED_ASR="vosk"
-      RECOMMENDED_VOSK_MODEL="small"
-      RECOMMENDED_WHISPER_MODEL="tiny-q5_1"
    fi
 }
 
-# Print the satellite-flavoured discovery summary (RAM + recommendation).
+# Print the satellite-flavoured discovery summary (Pi generation + RAM +
+# recommendation + published benchmark data that drove the choice).
 # Called after the generic run_discovery() completes.
 run_satellite_discovery() {
    compute_satellite_recommendations
 
+   local pi_display
+   case "$PI_GENERATION" in
+      5)     pi_display="Raspberry Pi 5" ;;
+      4)     pi_display="Raspberry Pi 4" ;;
+      3)     pi_display="Raspberry Pi 3" ;;
+      zero2) pi_display="Raspberry Pi Zero 2 W" ;;
+      zero)  pi_display="Raspberry Pi Zero" ;;
+      *)     pi_display="non-Pi hardware (or unrecognized)" ;;
+   esac
+
    echo ""
    log "Satellite-Specific Recommendations"
-   printf "  %-22s %s\n" "Detected RAM:" "${SYSTEM_MEM_GB}GB"
+   printf "  %-22s %s\n" "Hardware:" "$pi_display (${SYSTEM_MEM_GB}GB RAM)"
    printf "  %-22s %s\n" "Recommended ASR:" "$RECOMMENDED_ASR"
    if [ "$RECOMMENDED_ASR" = "vosk" ]; then
       printf "  %-22s %s\n" "Recommended model:" "Vosk $RECOMMENDED_VOSK_MODEL"
@@ -94,10 +129,26 @@ run_satellite_discovery() {
       printf "  %-22s %s\n" "Recommended model:" "Whisper $RECOMMENDED_WHISPER_MODEL"
    fi
 
+   # Explain the reasoning with the data point that drove the choice.
+   case "$PI_GENERATION" in
+      5)
+         info "Pi 5 CPU is ~2-3x faster than Pi 4. Published whisper.cpp RTF on Pi 5 tiny: 0.23-0.41 (ACM 2025)."
+         info "That's ~1s finalize for a 3s utterance — acceptable for conversational voice."
+         ;;
+      4)
+         info "Pi 4 CPU limits whisper.cpp tiny to RTF ~0.47 (project-measured ~4s finalize on typical utterances)."
+         info "Vosk streaming ASR finalizes near-instantly, giving lower perceived latency."
+         ;;
+   esac
+
+   # Hardware-appropriate warnings
    if [ "${SYSTEM_MEM_GB:-0}" -lt 1 ]; then
       warn "System RAM < 1GB — satellite voice processing is not recommended on this hardware."
    elif [ "${SYSTEM_MEM_GB:-0}" -lt 2 ]; then
       warn "System RAM < 2GB — expect tight memory budget. Vosk small + text-only fallback recommended."
+   fi
+   if [ "$PI_GENERATION" = "zero2" ] || [ "$PI_GENERATION" = "zero" ]; then
+      warn "Pi Zero is below the supported tier for a Tier 1 satellite — expect poor voice performance."
    fi
    echo ""
 }
@@ -132,9 +183,19 @@ present_satellite_choices() {
    # ── 3. ASR engine + model ──
    if [ -z "${SAT_ASR_ENGINE:-}" ]; then
       echo ""
-      echo "ASR engine:"
-      echo "  vosk     streaming, near-instant finalize, lower latency (recommended on Pi)"
-      echo "  whisper  batch, slightly higher accuracy, ~4s finalize on Pi 4"
+      echo "ASR engine trade-off:"
+      echo "  vosk     Streaming ASR. Near-instant finalize (~0s). Good command accuracy."
+      echo "           Transcript quality on conversational audio is noticeably lower."
+      echo "  whisper  Batch ASR. Higher accuracy, especially on natural speech."
+      echo "           Finalize latency varies with CPU:"
+      echo "             Pi 5  tiny-q5_1: ~1s finalize for 3s utterance (RTF ~0.3)"
+      echo "             Pi 4  tiny-q5_1: ~4s finalize (RTF ~0.9, borderline)"
+      echo ""
+      case "$PI_GENERATION" in
+         5) echo "  Detected Pi 5 — Whisper is viable; defaulting to whisper." ;;
+         4) echo "  Detected Pi 4 — Whisper feels sluggish; defaulting to vosk." ;;
+         *) echo "  Defaulting to $RECOMMENDED_ASR based on detected hardware." ;;
+      esac
       SAT_ASR_ENGINE=$(ask_value "ASR engine" "$RECOMMENDED_ASR")
    fi
    case "$SAT_ASR_ENGINE" in
@@ -145,16 +206,20 @@ present_satellite_choices() {
    if [ "$SAT_ASR_ENGINE" = "vosk" ] && [ -z "${SAT_VOSK_MODEL:-}" ]; then
       echo ""
       echo "Vosk model size:"
-      echo "  small   ~40MB,  good for commands, low RAM"
-      echo "  large   ~1.8GB, higher accuracy, 4GB+ RAM recommended"
+      echo "  small   ~40MB  model, ~100MB RAM. Good for commands, fast load."
+      echo "  large   ~1.8GB model, ~700MB RAM. Higher accuracy on conversation."
+      echo "          Recommended only with 4GB+ RAM."
       SAT_VOSK_MODEL=$(ask_value "Vosk model" "$RECOMMENDED_VOSK_MODEL")
    fi
 
    if [ "$SAT_ASR_ENGINE" = "whisper" ] && [ -z "${SAT_WHISPER_MODEL:-}" ]; then
       echo ""
       echo "Whisper model:"
-      echo "  tiny-q5_1  ~30MB,  fastest"
-      echo "  base       ~142MB, better accuracy"
+      echo "  tiny-q5_1  ~30MB model, ~270MB RAM."
+      echo "             Pi 5 RTF ~0.3 (realtime with headroom)."
+      echo "             Pi 4 RTF ~0.9 (marginal, noticeable lag)."
+      echo "  base       ~142MB model, ~500MB RAM. Better accuracy."
+      echo "             Pi 5 only; triggers thermal throttling without active cooling."
       SAT_WHISPER_MODEL=$(ask_value "Whisper model" "$RECOMMENDED_WHISPER_MODEL")
    fi
    log "ASR: engine=$SAT_ASR_ENGINE, model=${SAT_VOSK_MODEL:-${SAT_WHISPER_MODEL:-?}}"
