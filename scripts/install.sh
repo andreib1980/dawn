@@ -662,6 +662,11 @@ run_deploy() {
          if [ -f "$configured_toml" ]; then
             deploy_args+=(--config "$configured_toml")
          fi
+         # Pass through the daemon's ca.crt when SSL + verify are on.
+         # Service installer copies this to /etc/dawn/ca.crt.
+         if [ -n "${SAT_CA_CERT_SRC:-}" ] && [ -f "$SAT_CA_CERT_SRC" ]; then
+            deploy_args+=(--ca-cert "$SAT_CA_CERT_SRC")
+         fi
 
          log "Running: sudo $script ${deploy_args[*]}"
 
@@ -909,7 +914,7 @@ main() {
             LLM_PROVIDER="" PRIMARY_PROVIDER="" WHISPER_MODEL="" BUILD_PRESET="" FEATURES=""
             SAT_SERVER_HOST="" SAT_NAME="" SAT_LOCATION="" SAT_ASR_ENGINE=""
             SAT_VOSK_MODEL="" SAT_WHISPER_MODEL="" SAT_ENABLE_SDL_UI=""
-            SAT_CAPTURE_DEVICE="" SAT_PLAYBACK_DEVICE=""
+            SAT_CAPTURE_DEVICE="" SAT_PLAYBACK_DEVICE="" SAT_CA_CERT_SRC=""
             SETTINGS_LOADED=false
             rm -f "$STATE_FILE"
          fi

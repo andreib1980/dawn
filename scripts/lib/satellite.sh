@@ -257,7 +257,39 @@ present_satellite_choices() {
    : "${SAT_PLAYBACK_DEVICE:=$(ask_value "Playback device" "plughw:1,0")}"
    log "Audio: capture=$SAT_CAPTURE_DEVICE, playback=$SAT_PLAYBACK_DEVICE"
 
-   # ── 6. Registration key ──
+   # ── 6. CA certificate (for SSL trust) ──
+   # Only ask when SSL verification is on. The daemon uses a private CA
+   # via generate_ssl_cert.sh, so each satellite needs ca.crt locally.
+   # We assume the user has already copied the cert onto this Pi (e.g.
+   # via `scp daemon:/path/to/dawn/ssl/ca.crt /tmp/ca.crt`).
+   if [ "${SAT_SSL:-true}" = true ] && [ "${SAT_SSL_VERIFY:-true}" = true ] \
+      && [ -z "${SAT_CA_CERT_SRC:-}" ] && [ "${INTERACTIVE:-true}" = true ]; then
+      echo ""
+      echo "Daemon CA certificate (for SSL trust)"
+      echo "  The daemon uses a private CA. Each satellite needs ca.crt."
+      echo "  On the daemon host, run ./generate_ssl_cert.sh if you haven't,"
+      echo "  then copy ssl/ca.crt to this Pi, for example:"
+      echo "    scp user@daemon:/path/to/dawn/ssl/ca.crt /tmp/ca.crt"
+      echo ""
+      echo "  Leave blank to skip — you'll need to set ca_cert_path in"
+      echo "  satellite.toml manually later."
+      while :; do
+         SAT_CA_CERT_SRC=$(ask_value "Path to ca.crt on this Pi" "")
+         if [ -z "$SAT_CA_CERT_SRC" ]; then
+            warn "Skipping CA cert install — TLS verification will fail until ca_cert_path is set"
+            break
+         fi
+         # Expand ~/ manually (ask_value returns the literal string)
+         SAT_CA_CERT_SRC="${SAT_CA_CERT_SRC/#\~/$HOME}"
+         if [ -f "$SAT_CA_CERT_SRC" ]; then
+            log "CA cert: $SAT_CA_CERT_SRC"
+            break
+         fi
+         warn "Not found: $SAT_CA_CERT_SRC — try again or leave blank to skip"
+      done
+   fi
+
+   # ── 7. Registration key ──
    if [ -z "${SAT_REGISTRATION_KEY:-}" ] && [ "${INTERACTIVE:-true}" = true ]; then
       echo ""
       echo "If the daemon requires a registration key (./generate_ssl_cert.sh --gen-key"
@@ -477,6 +509,11 @@ run_configure_satellite() {
    sed_safe_set "$cfg_dst" "server" "port" "${SAT_SERVER_PORT:-3000}"
    sed_safe_set "$cfg_dst" "server" "ssl" "${SAT_SSL:-true}"
    sed_safe_set "$cfg_dst" "server" "ssl_verify" "${SAT_SSL_VERIFY:-true}"
+   # Point at the path where the service installer will land ca.crt.
+   # The service installer copies SAT_CA_CERT_SRC → /etc/dawn/ca.crt.
+   if [ -n "${SAT_CA_CERT_SRC:-}" ]; then
+      sed_safe_set "$cfg_dst" "server" "ca_cert_path" "/etc/dawn/ca.crt"
+   fi
    if [ -n "${SAT_REGISTRATION_KEY:-}" ]; then
       sed_safe_set "$cfg_dst" "server" "registration_key" "$SAT_REGISTRATION_KEY"
    fi

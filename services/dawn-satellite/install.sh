@@ -11,6 +11,7 @@ BINARY_PATH=""
 MODELS_DIR=""
 FONTS_DIR=""
 CONFIG_SRC=""
+CA_CERT_SRC=""
 SYMLINK_MODELS=false
 NO_DISPLAY=false
 UNINSTALL=false
@@ -150,6 +151,10 @@ parse_args() {
                 CONFIG_SRC="$2"
                 shift 2
                 ;;
+            --ca-cert)
+                CA_CERT_SRC="$2"
+                shift 2
+                ;;
             --symlink-models)
                 SYMLINK_MODELS=true
                 shift
@@ -174,6 +179,8 @@ parse_args() {
                 echo "                       (default: dawn_satellite/assets/fonts/)"
                 echo "  --config PATH        Path to a pre-configured satellite.toml to install"
                 echo "                       (default: the template at $SCRIPT_DIR/satellite.toml)"
+                echo "  --ca-cert PATH       Daemon's ca.crt to install at /etc/dawn/ca.crt"
+                echo "                       (required when the satellite config has ssl_verify=true)"
                 echo "  --symlink-models     Symlink models instead of copying (saves disk)"
                 echo "  --no-display         Skip video/render/input groups (headless satellite)"
                 echo "  -u, --uninstall      Remove installed dawn-satellite components"
@@ -499,6 +506,19 @@ fi
 if [ -n "$FONTS_DIR" ]; then
     log "Copying fonts from $FONTS_DIR"
     cp -r "$FONTS_DIR"/. "$DATA_DIR/assets/fonts/"
+fi
+
+# Install the daemon's CA certificate at /etc/dawn/ca.crt if provided.
+# The satellite config's ca_cert_path is expected to point at this path.
+if [ -n "$CA_CERT_SRC" ]; then
+    if [ ! -f "$CA_CERT_SRC" ]; then
+        error "CA cert source not found: $CA_CERT_SRC"
+    fi
+    log "Installing daemon CA certificate to /etc/dawn/ca.crt"
+    mkdir -p /etc/dawn
+    cp "$CA_CERT_SRC" /etc/dawn/ca.crt
+    chmod 644 /etc/dawn/ca.crt
+    chown root:root /etc/dawn/ca.crt
 fi
 
 # Install configuration (never overwrite existing — preserve user edits).
