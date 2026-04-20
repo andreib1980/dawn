@@ -33,6 +33,7 @@ WHISPER_MODEL="base"
 INCLUDE_VOSK=false
 VOSK_VARIANT=""
 INCLUDE_EMBEDDINGS=true
+SETUP_BUILD_SYMLINKS=true
 
 # Project root (where this script lives)
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +79,9 @@ show_help() {
     echo "                       Accepts: tiny, base, small, medium"
     echo "                       Quantized: tiny-q5_1, base-q5_1, etc."
     echo "  --no-embeddings      Skip embedding model download"
+    echo "  --no-build-symlinks  Skip creating models symlinks in build*/ dirs"
+    echo "                       (used by satellite installs — the satellite build"
+    echo "                        dir is dawn_satellite/build/, not \$PROJECT_ROOT/build*)"
     echo "  --help               Show this help message"
     echo ""
     echo "Examples:"
@@ -119,6 +123,10 @@ parse_args() {
                 ;;
             --no-embeddings)
                 INCLUDE_EMBEDDINGS=false
+                shift
+                ;;
+            --no-build-symlinks)
+                SETUP_BUILD_SYMLINKS=false
                 shift
                 ;;
             --whisper-model)
@@ -436,7 +444,9 @@ main() {
     setup_vosk
     setup_embeddings
     verify_committed_models
-    setup_build_symlink
+    if [ "$SETUP_BUILD_SYMLINKS" = true ]; then
+        setup_build_symlink
+    fi
 
     print_summary
 }

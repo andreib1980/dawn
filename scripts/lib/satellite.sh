@@ -431,7 +431,10 @@ run_models_satellite() {
       error "setup_models.sh not found at $PROJECT_ROOT"
    fi
 
-   local -a args=()
+   # --no-build-symlinks: the satellite binary builds in
+   # dawn_satellite/build/, not the $PROJECT_ROOT/build* pattern the script
+   # scans for, so the symlink step is daemon-only noise in this flow.
+   local -a args=(--no-build-symlinks)
    if [ "${SAT_ASR_ENGINE:-vosk}" = "vosk" ]; then
       if [ "${SAT_VOSK_MODEL:-small}" = "small" ]; then
          args+=(--vosk-small)
