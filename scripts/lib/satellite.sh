@@ -380,7 +380,10 @@ run_build_satellite() {
    mkdir -p "$BUILD_DIR"
    cd "$BUILD_DIR" || error "Cannot enter build dir $BUILD_DIR"
 
-   # Compose CMake flags from user choices
+   # Compose CMake flags from user choices. Always pass both ASR engine
+   # flags explicitly so switching engines (state edit + resume-from build)
+   # updates CMakeCache.txt cleanly — relying on defaults means a cached
+   # -DENABLE_WHISPER_ASR=ON from a prior run would silently persist.
    local -a cmake_flags=(
       -DENABLE_DAP2=ON
       -DENABLE_NEOPIXEL=OFF
@@ -388,9 +391,13 @@ run_build_satellite() {
    )
    if [ "${SAT_ASR_ENGINE:-vosk}" = "whisper" ]; then
       cmake_flags+=(-DENABLE_WHISPER_ASR=ON -DENABLE_VOSK_ASR=OFF)
+   else
+      cmake_flags+=(-DENABLE_WHISPER_ASR=OFF -DENABLE_VOSK_ASR=ON)
    fi
    if [ "${SAT_ENABLE_SDL_UI:-false}" = true ]; then
       cmake_flags+=(-DENABLE_SDL_UI=ON)
+   else
+      cmake_flags+=(-DENABLE_SDL_UI=OFF)
    fi
 
    log "Configuring CMake: ${cmake_flags[*]}"
