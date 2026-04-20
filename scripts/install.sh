@@ -915,6 +915,7 @@ main() {
             SAT_SERVER_HOST="" SAT_NAME="" SAT_LOCATION="" SAT_ASR_ENGINE=""
             SAT_VOSK_MODEL="" SAT_WHISPER_MODEL="" SAT_ENABLE_SDL_UI=""
             SAT_CAPTURE_DEVICE="" SAT_PLAYBACK_DEVICE="" SAT_CA_CERT_SRC=""
+            SAT_REGISTRATION_KEY=""
             SETTINGS_LOADED=false
             rm -f "$STATE_FILE"
          fi

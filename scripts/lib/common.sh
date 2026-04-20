@@ -592,6 +592,11 @@ SAT_ENABLE_OPUS="${SAT_ENABLE_OPUS:-true}"
 SAT_CAPTURE_DEVICE="${SAT_CAPTURE_DEVICE:-}"
 SAT_PLAYBACK_DEVICE="${SAT_PLAYBACK_DEVICE:-}"
 SAT_CA_CERT_SRC="${SAT_CA_CERT_SRC:-}"
+# Registration key is a shared secret but ends up in satellite.toml on
+# disk regardless, so there's no real benefit to omitting it here —
+# and not persisting it means --resume-from runs silently drop it,
+# which breaks registration the next time configure rewrites the TOML.
+SAT_REGISTRATION_KEY="${SAT_REGISTRATION_KEY:-}"
 EOF
    chmod 600 "$STATE_FILE"
 }
