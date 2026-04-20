@@ -631,9 +631,29 @@ Run the project-root helper to download ASR models. The script places models und
 | Pi 4 (2GB) | Vosk small | `vosk-small` fits the memory budget; Whisper tiny pushes RAM too close to the limit |
 | Pi 4 (4–8GB) | Vosk small (default), Whisper tiny-q5_1 (optional) | Pi 4 CPU limits whisper.cpp tiny-q5_1 to RTF ~0.9 (≈4s finalize). Vosk streaming is noticeably snappier |
 | Pi 5 (4GB) | Whisper tiny-q5_1 | Pi 5 CPU hits RTF ~0.3 (≈1s finalize for a 3s utterance); quality beats Vosk small |
-| Pi 5 (8GB) | Whisper tiny-q5_1 | Same logic as 4GB; `whisper base` is not recommended — it triggers thermal throttling on sustained workloads ([ACM 2025](https://dl.acm.org/doi/10.1145/3769102.3774244)) even with active cooling |
+| Pi 5 (8GB) | Whisper tiny-q5_1 (default) or base | `tiny-q5_1` is the installer default; `base` is viable on 8GB — measured RTF 0.65 (JFK, beam=5) / 0.20 (greedy, 15s real speech). Sustained continuous transcription can thermal-throttle per [ACM 2025](https://dl.acm.org/doi/10.1145/3769102.3774244); intermittent voice-command workloads are fine with active cooling |
 
 Benchmark sources: [ACM 2025 Whisper-on-Pi evaluation](https://dl.acm.org/doi/10.1145/3769102.3774244), [whisper.cpp Pi 4 issue #89](https://github.com/ggml-org/whisper.cpp/issues/89). RTF = real-time factor; lower is faster (&lt; 1.0 means faster than realtime).
+
+**Measured performance (Raspberry Pi 5, 8GB, 4 threads, active cooling):**
+
+| Config | Sample | Wall time | RTF | Notes |
+|---|---|---|---|---|
+| Whisper base, beam=5 best_of=5 | JFK 11s (whisper.cpp reference) | 7196 ms | **0.65** | `whisper-cli` defaults — directly comparable to published numbers |
+| Whisper base, greedy | 8-15s real speech | 2.5-3.0 s | **0.19-0.28** | Satellite runtime config (greedy decode) |
+| Whisper base, greedy | 2-3s short utterances | 2.0-2.1 s | **0.70-0.85** | Fixed encoder cost dominates on short audio |
+
+Encoder is ~85% of wall time on CPU. Beam search (the `whisper-cli` default) roughly halves effective RTF by fanning out decode paths; the satellite uses greedy decode for latency, so real-world numbers are faster than the JFK figure.
+
+Sustained continuous transcription (not typical for voice-command workloads) can thermal-throttle `whisper base` on Pi 5 per the ACM 2025 paper — the numbers above reflect intermittent utterance workloads with active cooling.
+
+Reproduce with:
+```bash
+cd ~/dawn/whisper.cpp && cmake -B build -DWHISPER_BUILD_EXAMPLES=ON -DGGML_NATIVE=ON
+cmake --build build -j4 --target whisper-cli
+./build/bin/whisper-cli -m /var/lib/dawn-satellite/models/whisper.cpp/ggml-base.en.bin \
+  -f samples/jfk.wav -t 4
+```
 
 Silero VAD and Piper voice models ship with the repository under `models/` — no download needed:
 

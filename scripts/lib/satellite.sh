@@ -71,7 +71,10 @@ SATELLITE_SDL_PACKAGES=(
 # References in conversation history / plan file:
 #   - ACM 2025 eval: https://dl.acm.org/doi/10.1145/3769102.3774244
 #   - Pi 4 NEON benchmark: whisper.cpp issue #89
-#   - Project's 4s Pi 4 figure: dawn_satellite/README.md (pre-slim)
+#   - Project-measured Pi 5 8GB figures: docs/DAP2_SATELLITE.md §Step 3.5
+#     "Measured performance" — Whisper base RTF 0.65 (JFK beam=5) /
+#     0.20 (greedy, 15s real speech). Tiny is still the installer default
+#     for headroom; base is viable on 8GB for intermittent workloads.
 compute_satellite_recommendations() {
    # Conservative defaults for unknown / low-spec hardware
    RECOMMENDED_ASR="vosk"
@@ -133,7 +136,9 @@ run_satellite_discovery() {
    case "$PI_GENERATION" in
       5)
          info "Pi 5 CPU is ~2-3x faster than Pi 4. Published whisper.cpp RTF on Pi 5 tiny: 0.23-0.41 (ACM 2025)."
+         info "Project-measured on Pi 5 8GB: Whisper base RTF 0.20 (greedy, 15s real speech) / 0.65 (JFK beam=5)."
          info "That's ~1s finalize for a 3s utterance — acceptable for conversational voice."
+         info "See docs/DAP2_SATELLITE.md §Step 3.5 'Measured performance' for full numbers."
          ;;
       4)
          info "Pi 4 CPU limits whisper.cpp tiny to RTF ~0.47 (project-measured ~4s finalize on typical utterances)."
