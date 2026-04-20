@@ -225,15 +225,10 @@ present_satellite_choices() {
    log "ASR: engine=$SAT_ASR_ENGINE, model=${SAT_VOSK_MODEL:-${SAT_WHISPER_MODEL:-?}}"
 
    # ── 4. Optional features ──
-   if [ -z "${SAT_ENABLE_OPUS:-}" ]; then
-      echo ""
-      echo "  Music streaming plays audio from the daemon over a dedicated Opus WebSocket."
-      if ask_yes_no "  Enable music streaming?" "default_yes"; then
-         SAT_ENABLE_OPUS=true
-      else
-         SAT_ENABLE_OPUS=false
-      fi
-   fi
+   # Music streaming is always enabled — libopus-dev is small and the
+   # feature is core to satellite utility. Advanced users who really want to
+   # drop it can set SAT_ENABLE_OPUS=false in install.conf.
+   : "${SAT_ENABLE_OPUS:=true}"
 
    if [ -z "${SAT_ENABLE_SDL_UI:-}" ]; then
       echo ""
@@ -245,7 +240,7 @@ present_satellite_choices() {
          SAT_ENABLE_SDL_UI=false
       fi
    fi
-   log "Features: music=$SAT_ENABLE_OPUS, sdl_ui=$SAT_ENABLE_SDL_UI"
+   log "Features: sdl_ui=$SAT_ENABLE_SDL_UI (music streaming: always on)"
 
    # ── 5. Audio devices ──
    if [ -z "${SAT_CAPTURE_DEVICE:-}" ] || [ -z "${SAT_PLAYBACK_DEVICE:-}" ]; then

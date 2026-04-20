@@ -53,8 +53,9 @@ FEATURES="ssl,mqtt"
 # SAT_WHISPER_MODEL="tiny-q5_1"
 
 # Optional features
-# SAT_ENABLE_SDL_UI="false"   # Set to "true" for touchscreen UI
-# SAT_ENABLE_OPUS="true"      # Music streaming (requires libopus-dev)
+# SAT_ENABLE_SDL_UI="false"   # Set to "true" for touchscreen UI (needs attached display)
+# SAT_ENABLE_OPUS="true"      # Music streaming — on by default. Set to "false" only if
+                              # you're sure you don't want it; the dep (libopus-dev) is tiny.
 
 # ALSA devices — run `arecord -l` / `aplay -l` on the Pi to find these
 # SAT_CAPTURE_DEVICE="plughw:1,0"
