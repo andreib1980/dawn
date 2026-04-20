@@ -112,7 +112,16 @@ ask_value() {
 }
 
 # Read a secret value (no echo). Returns the value.
-# Usage: key=$(ask_secret "Claude API key")
+#
+# Use this ONLY for short password-like values where the user types from
+# memory — hiding input is a real screen-recording / shoulder-surfing
+# defense in that case. For long keys (API keys, registration tokens, hex
+# keys that the user pastes) prefer ask_value() so they can visually
+# verify the paste didn't get mangled. The key ends up on disk in
+# cleartext seconds later anyway, so hiding it in the terminal buys
+# little over losing paste-verification.
+#
+# Usage: pin=$(ask_secret "Set an admin PIN")
 ask_secret() {
    if [ "${INTERACTIVE:-true}" = false ]; then
       echo ""
@@ -453,14 +462,16 @@ present_choices() {
 
    # 2. API keys (interactive only, read silently)
    if [ "${INTERACTIVE:-true}" = true ]; then
+      # Use ask_value (echoed) for long keys so users can verify the paste
+      # landed correctly; see the ask_secret docstring for the full rationale.
       if echo "$LLM_PROVIDER" | grep -q "openai" && [ -z "${OPENAI_KEY:-}" ]; then
-         OPENAI_KEY=$(ask_secret "OpenAI API key (or Enter to skip)")
+         OPENAI_KEY=$(ask_value "OpenAI API key (Enter to skip)" "")
       fi
       if echo "$LLM_PROVIDER" | grep -q "claude" && [ -z "${CLAUDE_KEY:-}" ]; then
-         CLAUDE_KEY=$(ask_secret "Claude API key (or Enter to skip)")
+         CLAUDE_KEY=$(ask_value "Claude API key (Enter to skip)" "")
       fi
       if echo "$LLM_PROVIDER" | grep -q "gemini" && [ -z "${GEMINI_KEY:-}" ]; then
-         GEMINI_KEY=$(ask_secret "Gemini API key (or Enter to skip)")
+         GEMINI_KEY=$(ask_value "Gemini API key (Enter to skip)" "")
       fi
    fi
 

@@ -262,7 +262,10 @@ present_satellite_choices() {
       echo ""
       echo "If the daemon requires a registration key (./generate_ssl_cert.sh --gen-key"
       echo "was run on the daemon host), paste it here. Leave blank to skip."
-      SAT_REGISTRATION_KEY=$(ask_secret "Registration key (or Enter to skip)")
+      # ask_value (echoed) — long hex keys benefit from paste verification
+      # more than they benefit from being hidden in the terminal; the value
+      # lands in satellite.toml in cleartext shortly after regardless.
+      SAT_REGISTRATION_KEY=$(ask_value "Registration key (Enter to skip)" "")
    fi
 
    echo ""
