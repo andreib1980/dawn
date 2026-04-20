@@ -39,6 +39,8 @@
 #include <mosquitto.h>
 #include <stdbool.h>
 
+#include "tools/tool_registry.h" /* for tool_metadata_t */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -89,6 +91,39 @@ int command_execute(const char *device,
                     const char *value,
                     struct mosquitto *mosq,
                     cmd_exec_result_t *result);
+
+/**
+ * @brief Publish an MQTT command using caller-provided tool metadata
+ *
+ * Unlike command_execute(), this skips the device-name registry lookup. Use
+ * it when the caller has already resolved the outer tool (e.g., 'hud_control',
+ * 'recording') and wants to pass a "device" value that is NOT itself a
+ * registered tool — typically an element name or mode string that MIRAGE or
+ * another subscriber will route on.
+ *
+ * Without this path, tools that use TOOL_MAPS_TO_DEVICE on a param whose
+ * values aren't individually registered (e.g., hud_control.element =
+ * "altitude", recording.mode = "record") fail with "Unknown device" even
+ * though the wire contract expects the element/mode name in the `device`
+ * field of the MQTT payload.
+ *
+ * @param tool   Already-resolved outer tool metadata (non-NULL). Provides
+ *               the MQTT topic and default-action logic.
+ * @param device String to place in the JSON `device` field (non-NULL).
+ *               This is an opaque pass-through value, not a registry key.
+ * @param action Action to place in the JSON `action` field (may be empty;
+ *               default is derived from tool->device_type).
+ * @param value  Optional value for the JSON `value` field (may be NULL/empty).
+ * @param mosq   MQTT client (required).
+ * @param result Output result (caller must call cmd_exec_result_free).
+ * @return 0 on success, non-zero on error.
+ */
+int command_execute_mqtt_direct(const tool_metadata_t *tool,
+                                const char *device,
+                                const char *action,
+                                const char *value,
+                                struct mosquitto *mosq,
+                                cmd_exec_result_t *result);
 
 /**
  * @brief Execute from parsed JSON command

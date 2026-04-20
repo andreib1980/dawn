@@ -4307,6 +4307,9 @@ int webui_server_init(int port, const char *www_path) {
 
    /* Initialize security headers string (uses g_config.webui.https) */
    webui_security_headers_init();
+   /* Note: session_manager_set_user_prompt_builder() is called earlier in
+    * dawn.c, before mosquitto_loop_start, to close the init-order race
+    * where MQTT-triggered refreshes could observe a NULL builder. */
 
    /* Configure HTTPS if enabled */
    bool use_https = g_config.webui.https;

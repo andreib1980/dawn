@@ -222,6 +222,13 @@ typedef struct session {
 } session_t;
 
 // =============================================================================
+// Prompt Builder Callback Types (defined before #ifdef so stubs can use them)
+// =============================================================================
+
+typedef char *(*session_user_prompt_builder_t)(int user_id);
+typedef const char *(*session_local_prompt_builder_t)(void);
+
+// =============================================================================
 // Lifecycle Functions
 // =============================================================================
 
@@ -585,6 +592,48 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
  * @locks session->history_mutex
  */
 char *session_get_system_prompt(session_t *session);
+
+/**
+ * @brief Register the per-user prompt builder used by the refresh helper
+ *
+ * Called once during subsystem init (e.g., by webui_server_init) to wire the
+ * session manager to the WebUI's per-user prompt builder without creating a
+ * direct dependency from core into webui. May be called with NULL to clear.
+ *
+ * @param fn Builder function pointer (may be NULL)
+ */
+void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn);
+
+/**
+ * @brief Register the local (mic) prompt builder used by the refresh helper
+ *
+ * Called once during dawn.c init. If unset, refresh falls back to
+ * get_local_command_prompt() for local sessions.
+ *
+ * @param fn Builder function pointer (may be NULL)
+ */
+void session_manager_set_local_prompt_builder(session_local_prompt_builder_t fn);
+
+/**
+ * @brief Rebuild the system prompt on every active session, preserving history
+ *
+ * Walks all active sessions and replaces each session's system-role message
+ * with a freshly-built prompt. Conversation history (user/assistant/tool
+ * messages) is preserved — only the system message content changes.
+ *
+ * Prompt selection per session type:
+ *   - SESSION_TYPE_LOCAL:  get_local_command_prompt()
+ *   - Other, with user_id: registered user_prompt_builder (if any)
+ *   - Other, no user_id:   get_remote_command_prompt()
+ *
+ * Call this after invalidate_system_instructions() when capabilities change
+ * mid-conversation (e.g., HUD goes online/offline, tool config saved) so the
+ * LLM sees the new availability on its next turn.
+ *
+ * @locks session_manager_rwlock (read) for snapshot, then per-session
+ *        history_mutex via session_update_system_prompt
+ */
+void session_manager_refresh_all_prompts(void);
 #endif /* ENABLE_MULTI_CLIENT */
 
 // =============================================================================
@@ -1008,6 +1057,17 @@ static inline void session_release(session_t *session) {
 
 static inline void session_retain(session_t *session) {
    (void)session;
+}
+
+static inline void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn) {
+   (void)fn;
+}
+
+static inline void session_manager_set_local_prompt_builder(session_local_prompt_builder_t fn) {
+   (void)fn;
+}
+
+static inline void session_manager_refresh_all_prompts(void) {
 }
 
 #endif /* !ENABLE_MULTI_CLIENT */

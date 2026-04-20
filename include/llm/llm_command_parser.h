@@ -45,9 +45,22 @@ int parse_llm_response_for_commands(const char *llm_response, struct mosquitto *
  * - Search: Requires SearXNG endpoint configured
  * - Weather/Calculator/URL: Always available
  *
+ * The disabled-tool hint appended to the instructions is session-aware so
+ * local and remote prompts correctly describe their available capabilities.
+ *
+ * @param is_remote true for a remote-session prompt, false for local
  * @return Pointer to static buffer containing assembled instructions
  */
-const char *get_system_instructions(void);
+const char *get_system_instructions(bool is_remote);
+
+/**
+ * @brief Get the current system-instructions version counter
+ *
+ * Monotonically increases each time invalidate_system_instructions() is called.
+ * Consumers that build derived prompts (e.g., direct-mode prompt) can compare
+ * against this to decide whether to rebuild.
+ */
+int get_system_instructions_version(void);
 
 /**
  * @brief Checks if vision is enabled for the current LLM type

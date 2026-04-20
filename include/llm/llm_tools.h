@@ -620,16 +620,20 @@ bool llm_check_thinking_trigger(const char *text);
 int llm_tools_get_enabled_count(void);
 
 /**
- * @brief Build a hint string listing disabled tools for the LLM system prompt
+ * @brief Build a per-session hint listing tools that are unavailable for the LLM
  *
- * Lists tools that are registered but disabled for all session types, so the LLM
- * can inform users that capabilities exist but are not currently enabled.
+ * Produces hint text that distinguishes two reasons a tool is unavailable:
+ *   1. Capability not available (hardware offline, missing credentials, etc.)
+ *   2. Available but disabled for this specific session type (local or remote)
  *
+ * Tools that are fully usable in the given session are omitted from the hint.
+ *
+ * @param is_remote true for a remote-session prompt, false for a local-session prompt
  * @param buffer Output buffer
  * @param buffer_size Size of output buffer
- * @return Number of bytes written (0 if no disabled tools)
+ * @return Number of bytes written (0 if no unavailable tools for this session)
  */
-int llm_tools_build_disabled_hint(char *buffer, size_t buffer_size);
+int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_size);
 
 /**
  * @brief Free an llm_tool_response_t structure

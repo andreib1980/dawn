@@ -345,7 +345,8 @@ struct json_object *conversation_history = NULL;
 // Combines custom persona (or default AI_PERSONA) with dynamic system instructions.
 #define DIRECT_PROMPT_BUFFER_SIZE 16384
 static char direct_mode_prompt[DIRECT_PROMPT_BUFFER_SIZE];
-static int direct_mode_prompt_initialized = 0;
+static int direct_mode_prompt_version = -1;
+static pthread_mutex_t direct_mode_prompt_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * @brief Gets the system prompt for direct-only command processing mode
@@ -356,17 +357,44 @@ static int direct_mode_prompt_initialized = 0;
  *
  * This ensures consistent LLM behavior (response length, formatting rules)
  * even when using a custom persona. Only includes instructions for
- * features that are actually enabled (search, vision, etc.).
+ * features that are actually enabled (search, vision, etc.). The cached
+ * prompt is rebuilt whenever system instructions are invalidated (e.g.,
+ * when HUD availability changes), tracked via the version counter.
+ *
+ * Now callable from refresh threads (MQTT callbacks via
+ * session_manager_refresh_all_prompts), so the buffer is mutex-protected.
  */
 static const char *get_direct_mode_prompt(void) {
-   if (!direct_mode_prompt_initialized) {
+   int current_version = get_system_instructions_version();
+
+   pthread_mutex_lock(&direct_mode_prompt_mutex);
+   if (direct_mode_prompt_version != current_version) {
       const char *persona = (g_config.persona.description[0] != '\0') ? g_config.persona.description
                                                                       : AI_PERSONA;
+      /* Local microphone pipeline - always a local-session prompt */
       snprintf(direct_mode_prompt, DIRECT_PROMPT_BUFFER_SIZE, "%s\n\n%s", persona,
-               get_system_instructions());
-      direct_mode_prompt_initialized = 1;
+               get_system_instructions(false));
+      direct_mode_prompt_version = current_version;
    }
+   pthread_mutex_unlock(&direct_mode_prompt_mutex);
    return direct_mode_prompt;
+}
+
+/**
+ * @brief Local-session prompt builder registered with the session manager.
+ *
+ * Selects between get_direct_mode_prompt() and get_local_command_prompt()
+ * based on command_processing_mode so that session_manager_refresh_all_prompts()
+ * reinstalls a prompt consistent with the configured processing mode. This
+ * avoids overwriting a direct-only session's minimal prompt with the LLM
+ * command prompt on HUD state changes.
+ */
+static const char *dawn_local_prompt_builder(void) {
+   if (command_processing_mode == CMD_MODE_LLM_ONLY ||
+       command_processing_mode == CMD_MODE_DIRECT_FIRST) {
+      return get_local_command_prompt();
+   }
+   return get_direct_mode_prompt();
 }
 
 // Barge-in control: when true, speech detection is disabled during TTS playback
@@ -1892,14 +1920,27 @@ int main(int argc, char *argv[]) {
    llm_context_init();
 
    // Force early initialization of system instructions before any threads start.
-   // This ensures thread-safe access since the buffer is built once and cached.
-   (void)get_system_instructions();
+   // This ensures thread-safe access since the buffers are built once and cached.
+   // Warm both local and remote variants so either session type can read without
+   // triggering a lazy rebuild on a worker thread.
+   (void)get_system_instructions(false);
+   (void)get_system_instructions(true);
 
    // Initialize session manager (creates local session)
    if (session_manager_init() != 0) {
       OLOG_ERROR("Failed to initialize session manager");
       return 1;
    }
+
+   // Register prompt builders BEFORE mosquitto_loop_start so MQTT-triggered
+   // refreshes (HUD status / discovery) never observe NULL callbacks. Keeping
+   // build_user_prompt's declaration local here avoids pulling the WebUI
+   // internal header into dawn.c.
+   session_manager_set_local_prompt_builder(dawn_local_prompt_builder);
+#ifdef ENABLE_WEBUI
+   extern char *build_user_prompt(int user_id);
+   session_manager_set_user_prompt_builder(build_user_prompt);
+#endif
 
    // Initialize command router for worker thread request/response
    if (command_router_init() != 0) {

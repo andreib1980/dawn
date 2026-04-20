@@ -144,10 +144,32 @@ static int remote_prompt_initialized = 0;
 static char localization_context[LOCALIZATION_BUFFER_SIZE];
 static int localization_initialized = 0;
 
-// Static buffer for dynamic system instructions
+// Static buffers for dynamic system instructions.
+// Local and remote prompts use separate buffers because the disabled-tool hint
+// differs per session (a tool can be locally available but remotely disabled,
+// or vice versa). Both must remain simultaneously valid — initialize_*_command_prompt
+// read from their respective buffer and expect the other's to still be live.
 #define SYSTEM_INSTRUCTIONS_BUFFER_SIZE 8192
-static char system_instructions_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
-static int system_instructions_initialized = 0;
+static char system_instructions_local_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
+static char system_instructions_remote_buffer[SYSTEM_INSTRUCTIONS_BUFFER_SIZE];
+static int system_instructions_local_initialized = 0;
+static int system_instructions_remote_initialized = 0;
+
+// Monotonic version counter, bumped by invalidate_system_instructions().
+// Lets consumers that cache derived prompts (e.g., direct-mode prompt in
+// dawn.c) detect staleness and rebuild.
+static int system_instructions_version = 0;
+
+/*
+ * Serializes all access to the cached system_instructions state above, plus
+ * the derived command_prompt / remote_command_prompt buffers and their
+ * _initialized flags. Before this existed, invalidation was called only at
+ * well-defined init boundaries and the buffers were treated as build-once;
+ * now invalidation fires from MQTT callback threads (HUD status / discovery)
+ * while LLM worker threads may be mid-read, so the previous lock-free
+ * pattern no longer holds.
+ */
+static pthread_mutex_t system_instructions_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * @brief Checks if vision is enabled for the current LLM type
@@ -206,10 +228,21 @@ int is_vision_enabled_for_current_llm(void) {
  * get_system_instructions() rebuilds the prompt with updated capabilities.
  */
 void invalidate_system_instructions(void) {
-   system_instructions_initialized = 0;
+   pthread_mutex_lock(&system_instructions_mutex);
+   system_instructions_local_initialized = 0;
+   system_instructions_remote_initialized = 0;
    prompt_initialized = 0;
    remote_prompt_initialized = 0;
+   system_instructions_version++;
+   pthread_mutex_unlock(&system_instructions_mutex);
    OLOG_INFO("System instructions cache invalidated - will rebuild on next LLM call");
+}
+
+int get_system_instructions_version(void) {
+   pthread_mutex_lock(&system_instructions_mutex);
+   int v = system_instructions_version;
+   pthread_mutex_unlock(&system_instructions_mutex);
+   return v;
 }
 
 /* =============================================================================
@@ -417,11 +450,15 @@ static void build_combined_entry(const tool_metadata_t *tool, void *user_data) {
  * for both cached (global) and non-cached (session-specific) builds.
  *
  * @param mode The tool mode: "native", "command_tags", or "disabled"
+ * @param is_remote true for a remote-session prompt, false for local
  * @param buffer Output buffer to write instructions to
  * @param buffer_size Size of the output buffer
  * @return Number of bytes written (excluding null terminator)
  */
-static int build_system_instructions_to_buffer(const char *mode, char *buffer, size_t buffer_size) {
+static int build_system_instructions_to_buffer(const char *mode,
+                                               bool is_remote,
+                                               char *buffer,
+                                               size_t buffer_size) {
    int len = 0;
    int remaining = (int)buffer_size;
 
@@ -433,8 +470,8 @@ static int build_system_instructions_to_buffer(const char *mode, char *buffer, s
       if (tool_registry_is_enabled("execute_plan") && llm_tools_get_enabled_count() >= 3) {
          len += snprintf(buffer + len, remaining - len, "%s", PLAN_EXECUTOR_PROMPT);
       }
-      /* Append hint about disabled tools so LLM can inform users */
-      len += llm_tools_build_disabled_hint(buffer + len, remaining - len);
+      /* Append per-session hint about unavailable/disabled tools */
+      len += llm_tools_build_disabled_hint(is_remote, buffer + len, remaining - len);
       return len;
    }
 
@@ -504,9 +541,16 @@ static int build_system_instructions_to_buffer(const char *mode, char *buffer, s
    return len;
 }
 
-const char *get_system_instructions(void) {
-   if (system_instructions_initialized) {
-      return system_instructions_buffer;
+const char *get_system_instructions(bool is_remote) {
+   char *buffer = is_remote ? system_instructions_remote_buffer : system_instructions_local_buffer;
+   int *initialized = is_remote ? &system_instructions_remote_initialized
+                                : &system_instructions_local_initialized;
+
+   pthread_mutex_lock(&system_instructions_mutex);
+
+   if (*initialized) {
+      pthread_mutex_unlock(&system_instructions_mutex);
+      return buffer;
    }
 
    /* Determine mode from global config */
@@ -515,18 +559,21 @@ const char *get_system_instructions(void) {
       mode = "native";
    }
 
-   int len = build_system_instructions_to_buffer(mode, system_instructions_buffer,
+   int len = build_system_instructions_to_buffer(mode, is_remote, buffer,
                                                  SYSTEM_INSTRUCTIONS_BUFFER_SIZE);
 
-   system_instructions_initialized = 1;
+   *initialized = 1;
 
+   pthread_mutex_unlock(&system_instructions_mutex);
+
+   const char *scope = is_remote ? "remote" : "local";
    if (strcmp(mode, "native") == 0) {
-      OLOG_INFO("Built system instructions for native tool calling (%d bytes)", len);
+      OLOG_INFO("Built %s system instructions for native tool calling (%d bytes)", scope, len);
    } else {
-      OLOG_INFO("Built dynamic system instructions (%d bytes)", len);
+      OLOG_INFO("Built %s dynamic system instructions (%d bytes)", scope, len);
    }
 
-   return system_instructions_buffer;
+   return buffer;
 }
 
 /**
@@ -651,26 +698,23 @@ static const char *get_persona_description(void) {
  * falls back to a minimal prompt without JSON-defined commands.
  */
 static void initialize_command_prompt(void) {
+   /* Gather inputs without holding the mutex — these call helpers that each
+    * take the mutex briefly (get_system_instructions) or none at all. */
+   const char *persona = get_persona_description();
+   const char *sys_instr = get_system_instructions(false);
+   const char *loc_ctx = get_localization_context();
+   const char *tools_mode = g_config.llm.tools.mode;
+
+   pthread_mutex_lock(&system_instructions_mutex);
    if (prompt_initialized) {
+      pthread_mutex_unlock(&system_instructions_mutex);
       return;
    }
 
-   // Check tool calling mode:
-   // - "native": Use native function/tool calling (minimal prompt)
-   // - "command_tags": Use <command> tag instructions (legacy)
-   // - "disabled": No tool/command handling at all
-   const char *tools_mode = g_config.llm.tools.mode;
-
-   // All modes now use the same minimal prompt structure
-   // Tool definitions are provided via native tool calling API
-   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE,
-                             "%s\n\n"  // Persona (from config or AI_PERSONA)
-                             "%s\n\n"  // System instructions
-                             "%s",     // Localization context
-                             get_persona_description(), get_system_instructions(),
-                             get_localization_context());
-
+   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
+                             sys_instr, loc_ctx);
    prompt_initialized = 1;
+   pthread_mutex_unlock(&system_instructions_mutex);
 
    if (strcmp(tools_mode, "native") == 0) {
       OLOG_INFO("AI prompt initialized (native tools mode). Length: %d", prompt_len);
@@ -700,22 +744,21 @@ const char *get_local_command_prompt(void) {
  * Native tool calling filters remote-available tools automatically.
  */
 static void initialize_remote_command_prompt(void) {
+   const char *persona = get_persona_description();
+   const char *sys_instr = get_system_instructions(true);
+   const char *loc_ctx = get_localization_context();
+   const char *tools_mode = g_config.llm.tools.mode;
+
+   pthread_mutex_lock(&system_instructions_mutex);
    if (remote_prompt_initialized) {
+      pthread_mutex_unlock(&system_instructions_mutex);
       return;
    }
 
-   const char *tools_mode = g_config.llm.tools.mode;
-
-   // All modes now use the same minimal prompt structure
-   // Tool definitions are provided via native tool calling API
-   int prompt_len = snprintf(remote_command_prompt, PROMPT_BUFFER_SIZE,
-                             "%s\n\n"  // Persona (from config or AI_PERSONA)
-                             "%s\n\n"  // System instructions
-                             "%s",     // Localization context
-                             get_persona_description(), get_system_instructions(),
-                             get_localization_context());
-
+   int prompt_len = snprintf(remote_command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
+                             sys_instr, loc_ctx);
    remote_prompt_initialized = 1;
+   pthread_mutex_unlock(&system_instructions_mutex);
 
    if (strcmp(tools_mode, "native") == 0) {
       OLOG_INFO("Remote AI prompt initialized (native tools mode). Length: %d", prompt_len);
@@ -759,8 +802,9 @@ char *build_remote_prompt_for_mode(const char *tool_mode) {
    /* Add persona */
    len += snprintf(prompt + len, remaining - len, "%s\n\n", get_persona_description());
 
-   /* Generate system instructions using the shared builder (respects mode parameter) */
-   len += build_system_instructions_to_buffer(tool_mode, prompt + len, remaining - len);
+   /* Generate system instructions using the shared builder (respects mode parameter).
+    * This helper is called only for remote sessions (WebUI / satellites). */
+   len += build_system_instructions_to_buffer(tool_mode, true, prompt + len, remaining - len);
    len += snprintf(prompt + len, remaining - len, "\n");
 
    /* Add localization context */

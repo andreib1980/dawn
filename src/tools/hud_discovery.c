@@ -32,6 +32,8 @@
 #include <time.h>
 
 #include "core/ocp_helpers.h"
+#include "core/session_manager.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
@@ -123,42 +125,58 @@ static int parse_string_array(struct json_object *array,
 /**
  * @brief Update hud_control tool with discovered elements
  */
-static void update_hud_control_elements(void) {
+/* Returns true on success; caller is responsible for running the post-update
+ * cache-invalidate + session-refresh sequence AFTER releasing s_discovery_mutex
+ * so DB I/O and per-session history_mutex aren't held under the discovery mutex. */
+static bool update_hud_control_elements(void) {
    if (s_element_count <= 0) {
-      return;
+      return false;
    }
 
    int rc = tool_registry_update_param_enum("hud_control", "element", s_element_ptrs,
                                             s_element_count);
    if (rc == 0) {
       OLOG_INFO("HUD discovery: Updated hud_control with %d elements", s_element_count);
-      /* Refresh tool availability (enables armor tools now that HUD is valid) */
+      /* Refresh tool availability (enables armor tools now that HUD is valid).
+       * This is a registry flag flip — cheap, holds only s_tools_mutex briefly. */
       llm_tools_refresh();
-      /* Invalidate schema cache so it regenerates with new enum values */
-      llm_tools_invalidate_cache();
-   } else {
-      OLOG_WARNING("HUD discovery: Failed to update hud_control elements (rc=%d)", rc);
+      return true;
    }
+   OLOG_WARNING("HUD discovery: Failed to update hud_control elements (rc=%d)", rc);
+   return false;
 }
 
 /**
  * @brief Update hud_mode tool with discovered modes
  */
-static void update_hud_mode_modes(void) {
+/* Returns true on success; see update_hud_control_elements() for why the
+ * post-update invalidate+refresh is deferred to the caller. */
+static bool update_hud_mode_modes(void) {
    if (s_mode_count <= 0) {
-      return;
+      return false;
    }
 
    int rc = tool_registry_update_param_enum("hud_mode", "mode", s_mode_ptrs, s_mode_count);
    if (rc == 0) {
       OLOG_INFO("HUD discovery: Updated hud_mode with %d modes", s_mode_count);
-      /* Refresh tool availability (enables armor tools now that HUD is valid) */
       llm_tools_refresh();
-      /* Invalidate schema cache so it regenerates with new enum values */
-      llm_tools_invalidate_cache();
-   } else {
-      OLOG_WARNING("HUD discovery: Failed to update hud_mode modes (rc=%d)", rc);
+      return true;
    }
+   OLOG_WARNING("HUD discovery: Failed to update hud_mode modes (rc=%d)", rc);
+   return false;
+}
+
+/* Cache-invalidate + session-refresh sequence run AFTER s_discovery_mutex is
+ * released. Kept in one helper so elements / modes paths don't diverge. */
+static void hud_capability_changed_unlocked(void) {
+   /* Schema cache is regenerated with the new enum values on next tool call */
+   llm_tools_invalidate_cache();
+   /* Rebuild system-prompt hint so it reflects the new availability */
+   invalidate_system_instructions();
+   /* Propagate the refreshed prompt to every active session.
+    * Takes session_manager_rwlock (read) then per-session locks + DB I/O;
+    * must run OUTSIDE s_discovery_mutex. */
+   session_manager_refresh_all_prompts();
 }
 
 /**
@@ -174,6 +192,7 @@ static void process_elements_discovery(struct json_object *root) {
 
    pthread_mutex_lock(&s_discovery_mutex);
 
+   bool capability_changed = false;
    int count = parse_string_array(elements_array, s_elements, s_element_ptrs,
                                   HUD_DISCOVERY_MAX_ITEMS);
    if (count > 0) {
@@ -181,10 +200,17 @@ static void process_elements_discovery(struct json_object *root) {
       s_elements_timestamp = time(NULL);
       s_elements_received = true;
 
-      update_hud_control_elements();
+      capability_changed = update_hud_control_elements();
    }
 
    pthread_mutex_unlock(&s_discovery_mutex);
+
+   /* Post-update refresh runs OUTSIDE s_discovery_mutex — it acquires
+    * session_manager_rwlock + per-session history_mutex and may do DB I/O
+    * via the registered user-prompt builder. */
+   if (capability_changed) {
+      hud_capability_changed_unlocked();
+   }
 }
 
 /**
@@ -201,16 +227,21 @@ static void process_modes_discovery(struct json_object *root) {
 
    pthread_mutex_lock(&s_discovery_mutex);
 
+   bool capability_changed = false;
    int count = parse_string_array(modes_array, s_modes, s_mode_ptrs, HUD_DISCOVERY_MAX_ITEMS);
    if (count > 0) {
       s_mode_count = count;
       s_modes_timestamp = time(NULL);
       s_modes_received = true;
 
-      update_hud_mode_modes();
+      capability_changed = update_hud_mode_modes();
    }
 
    pthread_mutex_unlock(&s_discovery_mutex);
+
+   if (capability_changed) {
+      hud_capability_changed_unlocked();
+   }
 }
 
 /* =============================================================================

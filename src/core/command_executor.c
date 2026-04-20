@@ -192,43 +192,7 @@ int command_execute(const char *device,
 
    /* Check for mqtt_only tools - publish to MQTT instead of calling callback */
    if (tool->mqtt_only && tool->topic) {
-      if (!mosq) {
-         result->success = false;
-         result->result = strdup("MQTT client not available for hardware command");
-         return 1;
-      }
-
-      /* Determine default action based on device_type when action is empty */
-      const char *effective_action = (action && action[0] != '\0') ? action
-                                                                   : get_default_action(tool);
-
-      struct json_object *cmd_json = json_object_new_object();
-      json_object_object_add(cmd_json, "device", json_object_new_string(device));
-      json_object_object_add(cmd_json, "action", json_object_new_string(effective_action));
-      if (value && value[0] != '\0') {
-         json_object_object_add(cmd_json, "value", json_object_new_string(value));
-      }
-      json_object_object_add(cmd_json, "msg_type", json_object_new_string("request"));
-      json_object_object_add(cmd_json, "timestamp", json_object_new_int64(ocp_get_timestamp_ms()));
-
-      const char *cmd_str = json_object_to_json_string(cmd_json);
-      int rc = mosquitto_publish(mosq, NULL, tool->topic, strlen(cmd_str), cmd_str, 0, false);
-      json_object_put(cmd_json);
-
-      if (rc != MOSQ_ERR_SUCCESS) {
-         result->success = false;
-         char errbuf[256];
-         snprintf(errbuf, sizeof(errbuf), "MQTT publish failed: %s", mosquitto_strerror(rc));
-         result->result = strdup(errbuf);
-         return 1;
-      }
-
-      result->success = true;
-      result->result = NULL; /* Fire-and-forget has no response */
-      result->should_respond = false;
-
-      OLOG_INFO("command_execute: MQTT published to '%s' for tool '%s'", tool->topic, device);
-      return 0;
+      return command_execute_mqtt_direct(tool, device, action, value, mosq, result);
    }
 
    /* Standard callback execution */
@@ -255,6 +219,72 @@ int command_execute(const char *device,
    result->success = false;
    result->result = strdup("Tool has no execution path configured");
    return 1;
+}
+
+/* =============================================================================
+ * MQTT Direct Publish (skips registry lookup on the device field)
+ * ============================================================================= */
+
+int command_execute_mqtt_direct(const tool_metadata_t *tool,
+                                const char *device,
+                                const char *action,
+                                const char *value,
+                                struct mosquitto *mosq,
+                                cmd_exec_result_t *result) {
+   if (!result) {
+      return 1;
+   }
+   memset(result, 0, sizeof(*result));
+
+   if (!tool || !tool->topic || !tool->topic[0]) {
+      result->success = false;
+      result->result = strdup("command_execute_mqtt_direct: tool or topic missing");
+      return 1;
+   }
+   if (!device || !device[0]) {
+      result->success = false;
+      result->result = strdup("command_execute_mqtt_direct: device field required");
+      return 1;
+   }
+   if (!mosq) {
+      result->success = false;
+      result->result = strdup("MQTT client not available for hardware command");
+      return 1;
+   }
+
+   result->skip_followup = tool->skip_followup;
+
+   /* Default action based on device_type when none supplied */
+   const char *effective_action = (action && action[0] != '\0') ? action : get_default_action(tool);
+
+   struct json_object *cmd_json = json_object_new_object();
+   json_object_object_add(cmd_json, "device", json_object_new_string(device));
+   json_object_object_add(cmd_json, "action", json_object_new_string(effective_action));
+   if (value && value[0] != '\0') {
+      json_object_object_add(cmd_json, "value", json_object_new_string(value));
+   }
+   json_object_object_add(cmd_json, "msg_type", json_object_new_string("request"));
+   json_object_object_add(cmd_json, "timestamp", json_object_new_int64(ocp_get_timestamp_ms()));
+
+   const char *cmd_str = json_object_to_json_string(cmd_json);
+   int rc = mosquitto_publish(mosq, NULL, tool->topic, strlen(cmd_str), cmd_str, 0, false);
+   json_object_put(cmd_json);
+
+   if (rc != MOSQ_ERR_SUCCESS) {
+      result->success = false;
+      char errbuf[256];
+      snprintf(errbuf, sizeof(errbuf), "MQTT publish failed: %s", mosquitto_strerror(rc));
+      result->result = strdup(errbuf);
+      return 1;
+   }
+
+   result->success = true;
+   result->result = NULL; /* Fire-and-forget has no response */
+   result->should_respond = false;
+
+   OLOG_INFO("command_execute: MQTT published to '%s' for tool '%s' (device field='%s')",
+             tool->topic, tool->name, device);
+   return 0;
 }
 
 /* =============================================================================

@@ -1357,7 +1357,12 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       return result->success ? 0 : 1;
    }
 
-   /* MQTT-only tools must go through command_execute for proper MQTT publishing */
+   /* MQTT-only tools publish directly using the already-resolved outer tool's
+    * metadata. We deliberately skip command_execute()'s device-name registry
+    * lookup here because effective_device can be a pass-through value (e.g.,
+    * "altitude" for hud_control, "record" for recording) that is not itself
+    * a registered tool — MIRAGE's topic-hud handler parses the device field
+    * directly to route to display elements or recording modes. */
    if (meta->mqtt_only) {
       struct mosquitto *mosq = worker_pool_get_mosq();
       cmd_exec_result_t exec_result;
@@ -1367,7 +1372,8 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
          safe_strncpy(action_name, "set", sizeof(action_name));
       }
 
-      int rc = command_execute(effective_device, action_name, value_buf, mosq, &exec_result);
+      int rc = command_execute_mqtt_direct(meta, effective_device, action_name, value_buf, mosq,
+                                           &exec_result);
 
       if (rc == 0 && exec_result.success) {
          if (exec_result.result) {
@@ -1465,6 +1471,45 @@ int llm_tools_execute(const tool_call_t *call, tool_result_t *result) {
       snprintf(result->result, LLM_TOOLS_RESULT_LEN, "Error: Unknown tool '%s'", call->name);
       result->success = false;
       return 1;
+   }
+
+   /* Session-level availability guard. The schema sent to the LLM already
+    * excludes unavailable tools, but LLMs sometimes hallucinate a call from
+    * conversation history — e.g., when a previous turn successfully used a
+    * tool that has since been disabled (HUD going offline, admin toggling
+    * it off, etc.). Without this check we'd blindly execute the hallucinated
+    * call because tool_registry_find() only looks up by name. Fail soft with
+    * a descriptive error so the LLM can tell the user instead of silently
+    * MQTT-publishing into a dead endpoint.
+    *
+    * When session context is absent (e.g., internal / system-driven tool
+    * calls) we allow execution — those paths aren't gated by session flags. */
+   session_t *ctx = session_get_command_context();
+   if (ctx) {
+      bool is_remote = (ctx->type != SESSION_TYPE_LOCAL);
+      bool enabled = true;
+      pthread_mutex_lock(&s_tools_mutex);
+      for (int i = 0; i < s_tool_count; i++) {
+         if (strcmp(s_tools[i].name, call->name) == 0) {
+            enabled = is_tool_enabled_for_session(&s_tools[i], is_remote);
+            break;
+         }
+      }
+      pthread_mutex_unlock(&s_tools_mutex);
+
+      if (!enabled) {
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN,
+                  "Tool '%s' is not currently available (capability offline, misconfigured, or "
+                  "disabled for this %s session). Let the user know the feature can't be used "
+                  "right now.",
+                  call->name, is_remote ? "remote" : "local");
+         result->success = false;
+         result->should_respond = true;
+         OLOG_WARNING("Refused tool '%s' — not enabled for %s session", call->name,
+                      is_remote ? "remote" : "local");
+         notify_tool_execution(call->name, call->arguments, result->result, false);
+         return 1;
+      }
    }
 
    return llm_tools_execute_from_treg(call, treg_meta, result);
@@ -2030,39 +2075,121 @@ int llm_tools_get_enabled_count(void) {
    return s_enabled_count;
 }
 
-int llm_tools_build_disabled_hint(char *buffer, size_t buffer_size) {
+/* Append "name" (with ", " separator after the first entry) to a bucket,
+ * clamping on truncation so repeated calls can't underflow remaining space.
+ * Returns true if the name was fully written, false on truncation or error. */
+static bool hint_bucket_append(char *bucket, size_t bucket_size, int *offset, const char *name) {
+   if (!bucket || !offset || !name || bucket_size == 0) {
+      return false;
+   }
+   int off = *offset;
+   if (off < 0 || (size_t)off >= bucket_size - 1) {
+      return false; /* Bucket full */
+   }
+
+   if (off > 0) {
+      int w = snprintf(bucket + off, bucket_size - off, ", ");
+      if (w < 0 || (size_t)w >= bucket_size - off) {
+         *offset = (int)bucket_size - 1; /* Clamp */
+         return false;
+      }
+      off += w;
+   }
+
+   int w = snprintf(bucket + off, bucket_size - off, "%s", name);
+   if (w < 0) {
+      return false;
+   }
+   if ((size_t)w >= bucket_size - off) {
+      /* Truncated — clamp so further appends see no remaining space */
+      *offset = (int)bucket_size - 1;
+      return false;
+   }
+   off += w;
+   *offset = off;
+   return true;
+}
+
+int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_size) {
    if (!s_initialized || !buffer || buffer_size == 0) {
       return 0;
    }
 
-   /* Collect names of tools that are registered but disabled for all session types */
-   char names[512] = "";
-   int offset = 0;
-   int count = 0;
+   /* Bucket tools into two lists for the target session:
+    *   unavailable[]      - capability not available (hardware/config not met)
+    *   session_disabled[] - capability works, but admin-disabled for this session
+    */
+   char unavailable[512] = "";
+   char session_disabled[512] = "";
+   int unavail_off = 0;
+   int disabled_off = 0;
+   int unavail_count = 0;
+   int disabled_count = 0;
 
+   /* Hold s_tools_mutex across the scan so enable-flag writers
+    * (llm_tools_set_enabled, llm_tools_refresh) don't mutate mid-read. */
+   pthread_mutex_lock(&s_tools_mutex);
    for (int i = 0; i < s_tool_count; i++) {
       const tool_definition_t *t = &s_tools[i];
-      /* Skip tools that are enabled for at least one session type */
-      if (t->enabled && (t->enabled_local || t->enabled_remote)) {
+      bool session_flag = is_remote ? t->enabled_remote : t->enabled_local;
+
+      /* Fully usable in this session - omit from hint */
+      if (t->enabled && session_flag) {
          continue;
       }
-      if (offset > 0 && offset < (int)sizeof(names) - 2) {
-         offset += snprintf(names + offset, sizeof(names) - offset, ", ");
-      }
-      offset += snprintf(names + offset, sizeof(names) - offset, "%s", t->name);
-      count++;
-   }
 
-   if (count == 0) {
+      if (!t->enabled) {
+         /* Capability not available (e.g., HUD hardware offline, API key missing) */
+         if (hint_bucket_append(unavailable, sizeof(unavailable), &unavail_off, t->name)) {
+            unavail_count++;
+         }
+      } else {
+         /* Capability works but disabled for this session type */
+         if (hint_bucket_append(session_disabled, sizeof(session_disabled), &disabled_off,
+                                t->name)) {
+            disabled_count++;
+         }
+      }
+   }
+   pthread_mutex_unlock(&s_tools_mutex);
+
+   if (unavail_count == 0 && disabled_count == 0) {
       buffer[0] = '\0';
       return 0;
    }
 
-   return snprintf(buffer, buffer_size,
-                   "\nNote: The following tools exist but are currently disabled by the "
-                   "administrator: %s. If the user asks about these capabilities, let them "
-                   "know the feature exists but is not currently enabled.\n",
-                   names);
+   int len = 0;
+   const char *session_label = is_remote ? "remote" : "local";
+
+   if (unavail_count > 0) {
+      int w = snprintf(buffer + len, buffer_size - len,
+                       "\nNote: The following tools are installed but not currently "
+                       "available (hardware offline or not configured): %s. If the user "
+                       "asks about these capabilities, let them know the feature exists "
+                       "but is not reachable right now.\n",
+                       unavailable);
+      if (w > 0 && (size_t)w < buffer_size - len) {
+         len += w;
+      } else if (w > 0) {
+         len = (int)buffer_size - 1; /* Clamp on truncation */
+      }
+   }
+
+   if (disabled_count > 0 && (size_t)len < buffer_size - 1) {
+      int w = snprintf(buffer + len, buffer_size - len,
+                       "\nNote: The following tools are disabled by the administrator "
+                       "for this %s session: %s. If the user asks about these "
+                       "capabilities, let them know the feature exists but is not "
+                       "enabled in this context.\n",
+                       session_label, session_disabled);
+      if (w > 0 && (size_t)w < buffer_size - len) {
+         len += w;
+      } else if (w > 0) {
+         len = (int)buffer_size - 1;
+      }
+   }
+
+   return len;
 }
 
 void llm_tool_response_free(llm_tool_response_t *response) {

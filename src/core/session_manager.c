@@ -25,6 +25,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -1567,6 +1568,117 @@ char *session_get_system_prompt(session_t *session) {
    pthread_mutex_unlock(&session->history_mutex);
 
    return result;
+}
+
+// =============================================================================
+// System Prompt Refresh (broadcast on capability change)
+// =============================================================================
+
+/*
+ * Prompt-builder callbacks registered by higher layers. Kept as callbacks so
+ * session_manager (Layer 1) doesn't pull in webui/ (Layer 4) or reach up into
+ * dawn.c for command_processing_mode. Atomic pointers ensure a cross-thread
+ * publication from init thread (main) is visible to callers on MQTT /
+ * worker threads without stale-NULL reads on weakly ordered architectures.
+ */
+static _Atomic(session_user_prompt_builder_t) s_user_prompt_builder = NULL;
+static _Atomic(session_local_prompt_builder_t) s_local_prompt_builder = NULL;
+
+void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn) {
+   atomic_store_explicit(&s_user_prompt_builder, fn, memory_order_release);
+}
+
+void session_manager_set_local_prompt_builder(session_local_prompt_builder_t fn) {
+   atomic_store_explicit(&s_local_prompt_builder, fn, memory_order_release);
+}
+
+void session_manager_refresh_all_prompts(void) {
+   if (!initialized) {
+      return;
+   }
+
+   /* Snapshot only session IDs under the read lock. We intentionally do NOT
+    * snapshot user_id here — on a satellite rebind the session object can be
+    * reassigned to a different user between snapshot and apply, and using a
+    * stale user_id would cause user A's persona + memory context to be
+    * written into user B's session. Instead, user_id is re-read under
+    * metrics_mutex during apply (after session_get() retains the session). */
+   uint32_t snapshot_ids[MAX_SESSIONS];
+   int count = 0;
+
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      session_t *s = sessions[i];
+      if (!s) {
+         continue;
+      }
+      snapshot_ids[count++] = s->session_id;
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+
+   session_user_prompt_builder_t user_builder = atomic_load_explicit(&s_user_prompt_builder,
+                                                                     memory_order_acquire);
+   session_local_prompt_builder_t local_builder = atomic_load_explicit(&s_local_prompt_builder,
+                                                                       memory_order_acquire);
+
+   int refreshed = 0;
+   for (int i = 0; i < count; i++) {
+      session_t *s = session_get(snapshot_ids[i]); /* Retains */
+      if (!s) {
+         continue;
+      }
+
+      /* Re-read user_id and type under the session's own locks so rebinds
+       * that have occurred since the snapshot are picked up. */
+      session_type_t type = s->type;
+      pthread_mutex_lock(&s->metrics_mutex);
+      int user_id = s->metrics.user_id;
+      pthread_mutex_unlock(&s->metrics_mutex);
+
+      const char *static_prompt = NULL;
+      char *owned_prompt = NULL;
+
+      if (type == SESSION_TYPE_LOCAL) {
+         /* Local mic session — delegate to dawn.c so the prompt matches the
+          * active command_processing_mode (direct-only vs LLM). */
+         static_prompt = local_builder ? local_builder() : get_local_command_prompt();
+      } else if (user_id > 0 && user_builder) {
+         /* Authenticated WebUI / satellite — rebuild with per-user persona */
+         owned_prompt = user_builder(user_id);
+      } else {
+         /* Unauthenticated remote or WebUI not registered — base remote prompt */
+         static_prompt = get_remote_command_prompt();
+      }
+
+      const char *use_prompt = owned_prompt ? owned_prompt : static_prompt;
+      if (use_prompt) {
+         session_update_system_prompt(s, use_prompt);
+
+         /* DAP2 satellites originally have room + HA area appended after
+          * registration via session_append_satellite_context(). Refresh
+          * replaces the whole prompt, so we must re-apply that suffix or
+          * Home Assistant commands lose their area scoping. The append
+          * helper is a no-op if the suffix is already present. */
+         if (type == SESSION_TYPE_DAP2 && s->identity.uuid[0] != '\0') {
+            satellite_mapping_t mapping;
+            if (satellite_db_get(s->identity.uuid, &mapping) == 0) {
+               session_append_satellite_context(s, s->identity.location, mapping.ha_area);
+            } else {
+               /* No mapping row — still re-append room from identity if set */
+               session_append_satellite_context(s, s->identity.location, NULL);
+            }
+         }
+
+         refreshed++;
+      }
+
+      free(owned_prompt);
+      session_release(s);
+   }
+
+   if (refreshed > 0) {
+      OLOG_INFO("Refreshed system prompt on %d active session(s)", refreshed);
+   }
 }
 
 // =============================================================================

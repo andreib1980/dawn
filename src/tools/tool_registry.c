@@ -34,6 +34,8 @@
 
 #include "config/dawn_config.h"
 #include "core/device_types.h"
+#include "core/session_manager.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/toml.h"
@@ -1307,10 +1309,13 @@ void tool_registry_invalidate_cache(void) {
    s_cache_valid = false;
    pthread_mutex_unlock(&s_registry_mutex);
 
-   /* Also invalidate LLM tools cache for coherence */
+   /* Also invalidate LLM tools cache and system-prompt hint for coherence */
    llm_tools_invalidate_cache();
+   invalidate_system_instructions();
+   /* Propagate the refreshed prompt to every active session */
+   session_manager_refresh_all_prompts();
 
-   OLOG_INFO("tool_registry: Schema cache invalidated (including LLM tools)");
+   OLOG_INFO("tool_registry: Schema cache invalidated (including LLM tools and prompt)");
 }
 
 bool tool_registry_is_cache_valid(void) {
