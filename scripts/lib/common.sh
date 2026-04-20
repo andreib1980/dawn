@@ -558,7 +558,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dawn"
 STATE_FILE="$STATE_DIR/install-state.env"
 
 # Phase ordering for resume logic
-PHASE_ORDER=(discovery deps libs build models configure apikeys ssl admin services verify)
+PHASE_ORDER=(discovery deps libs build models configure apikeys ssl admin services verify deploy)
 
 save_state() {
    local phase="$1"

@@ -107,7 +107,8 @@ Options:
   -h, --help             Show this help
 
 Phases (for --resume-from):
-  discovery, deps, libs, build, models, configure, apikeys, ssl, admin, services, verify
+  discovery, deps, libs, build, models, configure, apikeys, ssl, admin,
+  services, verify, deploy
   (satellite skips apikeys, ssl, admin, services)
 
 Examples:
@@ -1080,22 +1081,17 @@ main() {
       save_state "verify"
    fi
 
-   # Offer to deploy as service
-   if [ "$INTERACTIVE" = true ]; then
+   # Phase 11: Deploy (systemd service install)
+   #   - Satellite: always run (satellite is useless without deploy)
+   #   - Server interactive: ask
+   #   - Server unattended: skip (preserve prior behavior — dev-install via binary)
+   if should_run_phase "deploy"; then
       echo ""
       echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
       echo ""
       if [ "$INSTALL_TARGET" = "satellite" ]; then
-         # Satellites are only useful when deployed. Default to yes.
-         if ask_yes_no "Deploy as dawn-satellite systemd service?" "default_yes"; then
-            run_deploy "satellite"
-         else
-            echo ""
-            log "To deploy as a service later:"
-            echo "  ./scripts/install.sh --deploy satellite"
-            echo "  # or: sudo ./services/dawn-satellite/install.sh"
-         fi
-      else
+         run_deploy "satellite"
+      elif [ "$INTERACTIVE" = true ]; then
          if ask_yes_no "Deploy DAWN as a systemd service?"; then
             run_deploy "server"
             # Reprint admin credentials so user doesn't have to scroll up
@@ -1113,7 +1109,10 @@ main() {
             echo "  ./scripts/install.sh --deploy server"
             echo "  # or: sudo ./services/dawn-server/install.sh"
          fi
+      else
+         info "Skipping deploy in unattended mode — run: ./scripts/install.sh --deploy server"
       fi
+      save_state "deploy"
    fi
 
    echo ""
