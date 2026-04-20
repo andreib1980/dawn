@@ -565,10 +565,19 @@ if [ -n "$CA_CERT_SRC" ]; then
     if [ -z "$ca_src_real" ]; then
         error "CA cert source path could not be canonicalized: $CA_CERT_SRC"
     fi
+    # Short-circuit: source already IS the installed destination. Happens on
+    # re-installs where the state file still points at /etc/dawn/ca.crt from
+    # the original run. No copy needed, and no privilege-laundering risk
+    # since the root-owned file is already in its intended location.
+    ca_dst_real=$(realpath -e --no-symlinks /etc/dawn/ca.crt 2>/dev/null || true)
+    if [ -n "$ca_dst_real" ] && [ "$ca_src_real" = "$ca_dst_real" ]; then
+        log "CA cert already installed at /etc/dawn/ca.crt — skipping copy"
+        CA_CERT_SRC=""  # skip the copy block below
+    fi
     # Ownership check: block root-owned files (privilege laundering).
     # SUDO_UID is set by sudo; if unset, we're invoked directly as root,
     # in which case skip the check.
-    if [ -n "${SUDO_UID:-}" ]; then
+    if [ -n "$CA_CERT_SRC" ] && [ -n "${SUDO_UID:-}" ]; then
         src_uid=$(stat -c '%u' "$ca_src_real")
         if [ "$src_uid" != "$SUDO_UID" ] && [ "$src_uid" != 0 ]; then
             error "CA cert source is owned by uid=$src_uid (expected $SUDO_UID) — refusing"
@@ -579,16 +588,18 @@ if [ -n "$CA_CERT_SRC" ]; then
             error "CA cert source is owned by root; refuse to stage it when invoked via sudo from uid=$SUDO_UID"
         fi
     fi
-    # Content sanity — refuse anything that doesn't look like a PEM cert.
-    if ! head -n 1 "$ca_src_real" | grep -q '^-----BEGIN CERTIFICATE-----'; then
-        error "CA cert source doesn't look like a PEM certificate: $ca_src_real"
+    if [ -n "$CA_CERT_SRC" ]; then
+        # Content sanity — refuse anything that doesn't look like a PEM cert.
+        if ! head -n 1 "$ca_src_real" | grep -q '^-----BEGIN CERTIFICATE-----'; then
+            error "CA cert source doesn't look like a PEM certificate: $ca_src_real"
+        fi
+        log "Installing daemon CA certificate to /etc/dawn/ca.crt"
+        mkdir -p /etc/dawn
+        # cp --no-dereference is belt-and-braces after the symlink check above.
+        cp --no-dereference "$ca_src_real" /etc/dawn/ca.crt
+        chmod 644 /etc/dawn/ca.crt
+        chown root:root /etc/dawn/ca.crt
     fi
-    log "Installing daemon CA certificate to /etc/dawn/ca.crt"
-    mkdir -p /etc/dawn
-    # cp --no-dereference is belt-and-braces after the symlink check above.
-    cp --no-dereference "$ca_src_real" /etc/dawn/ca.crt
-    chmod 644 /etc/dawn/ca.crt
-    chown root:root /etc/dawn/ca.crt
 fi
 
 # Install configuration. Default rule: preserve an existing satellite.toml
