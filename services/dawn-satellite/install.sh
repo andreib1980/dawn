@@ -10,6 +10,7 @@ set -e
 BINARY_PATH=""
 MODELS_DIR=""
 FONTS_DIR=""
+CONFIG_SRC=""
 SYMLINK_MODELS=false
 NO_DISPLAY=false
 UNINSTALL=false
@@ -145,6 +146,10 @@ parse_args() {
                 FONTS_DIR="$2"
                 shift 2
                 ;;
+            --config)
+                CONFIG_SRC="$2"
+                shift 2
+                ;;
             --symlink-models)
                 SYMLINK_MODELS=true
                 shift
@@ -167,6 +172,8 @@ parse_args() {
                 echo "                       (default: dawn_satellite/models/)"
                 echo "  --fonts-dir PATH     Path to fonts directory"
                 echo "                       (default: dawn_satellite/assets/fonts/)"
+                echo "  --config PATH        Path to a pre-configured satellite.toml to install"
+                echo "                       (default: the template at $SCRIPT_DIR/satellite.toml)"
                 echo "  --symlink-models     Symlink models instead of copying (saves disk)"
                 echo "  --no-display         Skip video/render/input groups (headless satellite)"
                 echo "  -u, --uninstall      Remove installed dawn-satellite components"
@@ -380,14 +387,24 @@ if [ -n "$FONTS_DIR" ]; then
     cp -r "$FONTS_DIR"/. "$DATA_DIR/assets/fonts/"
 fi
 
-# Install configuration (never overwrite existing)
+# Resolve config source: prefer --config, fall back to the shipped template.
+if [ -n "$CONFIG_SRC" ]; then
+    if [ ! -f "$CONFIG_SRC" ]; then
+        error "Config source not found: $CONFIG_SRC"
+    fi
+    log "Using custom config: $CONFIG_SRC"
+else
+    CONFIG_SRC="$SCRIPT_DIR/satellite.toml"
+fi
+
+# Install configuration (never overwrite existing — preserve user edits)
 if [ -f "$CONFIG_DIR/satellite.toml" ]; then
     warn "Config file already exists: $CONFIG_DIR/satellite.toml (not overwriting)"
-    warn "New template saved to: $CONFIG_DIR/satellite.toml.new"
-    cp "$SCRIPT_DIR/satellite.toml" "$CONFIG_DIR/satellite.toml.new"
+    warn "New version saved to: $CONFIG_DIR/satellite.toml.new"
+    cp "$CONFIG_SRC" "$CONFIG_DIR/satellite.toml.new"
 else
-    log "Installing satellite.toml"
-    cp "$SCRIPT_DIR/satellite.toml" "$CONFIG_DIR/satellite.toml"
+    log "Installing satellite.toml from $CONFIG_SRC"
+    cp "$CONFIG_SRC" "$CONFIG_DIR/satellite.toml"
 fi
 # Config must be writable by dawn user (satellite saves UI prefs back)
 chmod 664 "$CONFIG_DIR/satellite.toml"

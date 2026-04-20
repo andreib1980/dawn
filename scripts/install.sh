@@ -653,6 +653,14 @@ run_deploy() {
          if [ -d "$PROJECT_ROOT/models" ]; then
             deploy_args+=(--models-dir "$PROJECT_ROOT/models")
          fi
+         # If run_configure_satellite has written a configured satellite.toml
+         # in the build tree, pass it to the service installer. Otherwise the
+         # installer falls back to the default template (which has
+         # host=localhost and engine=vosk — almost never what the user wants).
+         local configured_toml="$PROJECT_ROOT/dawn_satellite/build/satellite.toml"
+         if [ -f "$configured_toml" ]; then
+            deploy_args+=(--config "$configured_toml")
+         fi
 
          log "Running: sudo $script ${deploy_args[*]}"
 

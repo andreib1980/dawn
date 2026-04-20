@@ -492,15 +492,19 @@ run_configure_satellite() {
    sed_safe_set "$cfg_dst" "audio" "playback_device" "${SAT_PLAYBACK_DEVICE:-plughw:1,0}"
 
    sed_safe_set "$cfg_dst" "asr" "engine" "${SAT_ASR_ENGINE:-vosk}"
+   # Use RELATIVE model paths so they work after the service installer
+   # copies $PROJECT_ROOT/models/ → /var/lib/dawn-satellite/models/ and
+   # systemd runs the binary with WorkingDirectory=/var/lib/dawn-satellite/.
+   # The default template's VAD and TTS paths follow the same convention.
    local model_path
    if [ "${SAT_ASR_ENGINE:-vosk}" = "vosk" ]; then
       if [ "${SAT_VOSK_MODEL:-small}" = "small" ]; then
-         model_path="$PROJECT_ROOT/models/vosk-model-small-en-us-0.15"
+         model_path="models/vosk-model-small-en-us-0.15"
       else
-         model_path="$PROJECT_ROOT/models/vosk-model-en-us-0.22"
+         model_path="models/vosk-model-en-us-0.22"
       fi
    else
-      model_path="$PROJECT_ROOT/models/whisper.cpp/ggml-${SAT_WHISPER_MODEL:-tiny-q5_1}.en.bin"
+      model_path="models/whisper.cpp/ggml-${SAT_WHISPER_MODEL:-tiny-q5_1}.en.bin"
    fi
    sed_safe_set "$cfg_dst" "asr" "model_path" "$model_path"
 
