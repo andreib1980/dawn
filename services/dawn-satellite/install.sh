@@ -325,13 +325,27 @@ install_selected_models() {
             continue
         fi
 
+        # Refuse symlinks: we run as root and chmod -R 755 below — a symlink
+        # (at any level of $src) could dereference a sensitive file and
+        # expose it via $DATA_DIR.
+        if [ -L "$src" ]; then
+            warn "Refusing symlink model path: $path"
+            continue
+        fi
+        if [ -d "$src" ] && [ -n "$(find "$src" -type l -print -quit 2>/dev/null)" ]; then
+            warn "Refusing model directory containing symlinks: $path"
+            continue
+        fi
+
         mkdir -p "$(dirname "$dst")"
         if [ -d "$src" ]; then
-            # Vosk model is a directory bundle — copy recursively
+            # Vosk model is a directory bundle — copy recursively.
+            # --no-dereference preserves any symlinks that slipped past
+            # the pre-check above (defense in depth).
             rm -rf "$dst"
-            cp -rL "$src" "$dst"
+            cp -r --no-dereference "$src" "$dst"
         else
-            cp -Lf "$src" "$dst"
+            cp -f --no-dereference "$src" "$dst"
         fi
         log "  + ${rel}"
         installed=$((installed + 1))

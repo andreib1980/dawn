@@ -442,8 +442,23 @@ run_build_satellite() {
       error "Build aborted. See docs/DAP2_SATELLITE.md → Troubleshooting → 'Build fails with DISABLED warnings'"
    fi
 
-   log "Building satellite (parallelism: $(nproc))..."
-   if ! make -j"$(nproc)"; then
+   # Memory-aware parallelism: gcc+whisper.cpp can peak >1GB/job, so cap
+   # -j on low-RAM hosts (Pi Zero 2 W, Pi 3) to avoid OOM. Override with
+   # DAWN_MAKE_JOBS=N for advanced users.
+   local jobs="${DAWN_MAKE_JOBS:-}"
+   if [ -z "$jobs" ]; then
+      jobs="$(nproc)"
+      local mem_gb="${SYSTEM_MEM_GB:-0}"
+      if [ "$mem_gb" -gt 0 ] 2>/dev/null; then
+         if [ "$mem_gb" -lt 2 ]; then
+            jobs=1
+         elif [ "$mem_gb" -lt 4 ] && [ "$jobs" -gt 2 ]; then
+            jobs=2
+         fi
+      fi
+   fi
+   log "Building satellite (parallelism: $jobs, RAM: ${SYSTEM_MEM_GB:-?}GB)..."
+   if ! make -j"$jobs"; then
       error "Satellite build failed"
    fi
 
@@ -552,7 +567,13 @@ run_configure_satellite() {
          model_path="models/vosk-model-en-us-0.22"
       fi
    else
-      model_path="models/whisper.cpp/ggml-${SAT_WHISPER_MODEL:-tiny-q5_1}.en.bin"
+      # Must match setup_models.sh:222 → ggml-{base}.en{-quant}.bin
+      # e.g. tiny-q5_1 → ggml-tiny.en-q5_1.bin (NOT ggml-tiny-q5_1.en.bin)
+      local wm="${SAT_WHISPER_MODEL:-tiny-q5_1}"
+      local wbase="${wm%%-q*}"
+      local wquant=""
+      [ "$wbase" != "$wm" ] && wquant="-${wm#*-}"
+      model_path="models/whisper.cpp/ggml-${wbase}.en${wquant}.bin"
    fi
    sed_safe_set "$cfg_dst" "asr" "model_path" "$model_path"
 
