@@ -16,6 +16,26 @@
 #
 # Usage: sed_safe_set <file> <section> <key> <value>
 # Example: sed_safe_set dawn.toml "llm" "type" "cloud"
+# Escape characters that have meaning in sed's replacement string so a
+# user-supplied value can't break out of the substitution. Specifically:
+#   - backslash (must be first — it escapes everything else)
+#   - & (sed reference to the matched text)
+#   - | (our s-command delimiter)
+#   - newline (would terminate the sed command; GNU sed's `e` flag on a
+#     later line could then execute shell — refuse outright)
+# Returns escaped string on stdout, or exits 1 if a newline is present.
+_sed_escape_replacement() {
+   local s="$1"
+   if [[ "$s" == *$'\n'* ]]; then
+      echo "_sed_escape_replacement: value contains newline — refusing" >&2
+      return 1
+   fi
+   s="${s//\\/\\\\}"
+   s="${s//&/\\&}"
+   s="${s//|/\\|}"
+   printf '%s' "$s"
+}
+
 sed_safe_set() {
    local file="$1" section="$2" key="$3" value="$4"
 
@@ -28,6 +48,17 @@ sed_safe_set() {
       quoted_value="\"$value\""
    fi
 
+   # Escape sed metacharacters in the replacement before building the
+   # sed command. Without this, a value containing |, &, or \ could
+   # break out of the s/// form — and a newline could inject a separate
+   # sed command entirely (including w/e which GNU sed can use to write
+   # files or run shell). Key and section are regex-safe here because
+   # they're controlled by code, not user input, and `section` has dots
+   # escaped a few lines down.
+   local sed_replacement
+   sed_replacement=$(_sed_escape_replacement "$quoted_value") ||
+      { echo "sed_safe_set: refusing unsafe value for $section.$key" >&2; return 1; }
+
    # Escape dots in section name for regex (e.g., "llm.cloud" → "llm\.cloud")
    local section_re="${section//./\\.}"
 
@@ -38,16 +69,19 @@ sed_safe_set() {
    if grep -qP "^\[${section_re}\]" "$file" 2>/dev/null; then
       # Case 1: the key already exists uncommented — replace its value.
       if sed -n "/^\[${section_re}\]/,/^\[/p" "$file" | grep -qP "^${key} *=" 2>/dev/null; then
-         sed -i "/^\[${section_re}\]/,/^\[/{s|^${key} *=.*|${key} = ${quoted_value}|}" "$file"
+         sed -i "/^\[${section_re}\]/,/^\[/{s|^${key} *=.*|${key} = ${sed_replacement}|}" "$file"
       # Case 2: the key exists only as a commented-out line — uncomment and set.
       elif sed -n "/^\[${section_re}\]/,/^\[/p" "$file" | grep -qP "^# *${key} *=" 2>/dev/null; then
-         sed -i "/^\[${section_re}\]/,/^\[/{s|^# *${key} *=.*|${key} = ${quoted_value}|}" "$file"
+         sed -i "/^\[${section_re}\]/,/^\[/{s|^# *${key} *=.*|${key} = ${sed_replacement}|}" "$file"
       # Case 3: the key isn't present at all under this section — append.
+      # `a` takes a literal string, not a regex, but still interprets
+      # backslash escapes. Use the already-escaped form.
       else
-         sed -i "/^\[${section_re}\]/a ${key} = ${quoted_value}" "$file"
+         sed -i "/^\[${section_re}\]/a ${key} = ${sed_replacement}" "$file"
       fi
    else
-      # Section doesn't exist — append it with the key
+      # Section doesn't exist — append it with the key. Plain file write,
+      # no sed interpretation needed so use the raw quoted_value.
       {
          echo ""
          echo "[$section]"
@@ -118,24 +152,33 @@ write_user_config() {
 # Write API keys to secrets.toml
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Top-level secrets.toml key setter. Value is escaped against sed
+# replacement metacharacters (same rationale as sed_safe_set).
+_write_top_level_key() {
+   local file="$1" key="$2" value="$3"
+   local escaped
+   escaped=$(_sed_escape_replacement "$value") ||
+      { warn "secrets.toml: refusing unsafe value for $key"; return 1; }
+   # Uncomment-or-replace the assignment, matching either form
+   sed -i "s|^# *${key} *=.*|${key} = \"${escaped}\"|" "$file"
+   sed -i "s|^${key} *=.*|${key} = \"${escaped}\"|" "$file"
+}
+
 write_api_keys() {
    local secrets="$PROJECT_ROOT/secrets.toml"
    local keys_set=0
 
    if [ -n "${OPENAI_KEY:-}" ]; then
-      sed -i "s|^# *openai_api_key.*|openai_api_key = \"$OPENAI_KEY\"|" "$secrets"
-      log "secrets.toml: OpenAI API key set"
-      ((++keys_set))
+      _write_top_level_key "$secrets" openai_api_key "$OPENAI_KEY" &&
+         { log "secrets.toml: OpenAI API key set"; ((++keys_set)); }
    fi
    if [ -n "${CLAUDE_KEY:-}" ]; then
-      sed -i "s|^# *claude_api_key.*|claude_api_key = \"$CLAUDE_KEY\"|" "$secrets"
-      log "secrets.toml: Claude API key set"
-      ((++keys_set))
+      _write_top_level_key "$secrets" claude_api_key "$CLAUDE_KEY" &&
+         { log "secrets.toml: Claude API key set"; ((++keys_set)); }
    fi
    if [ -n "${GEMINI_KEY:-}" ]; then
-      sed -i "s|^# *gemini_api_key.*|gemini_api_key = \"$GEMINI_KEY\"|" "$secrets"
-      log "secrets.toml: Gemini API key set"
-      ((++keys_set))
+      _write_top_level_key "$secrets" gemini_api_key "$GEMINI_KEY" &&
+         { log "secrets.toml: Gemini API key set"; ((++keys_set)); }
    fi
 
    if [ "$keys_set" -eq 0 ]; then

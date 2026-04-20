@@ -20,6 +20,25 @@ The unified installer walks you through an interactive setup:
 4. **Build & configure** — builds `dawn_satellite` with your chosen feature set and writes `satellite.toml`
 5. **Deploy** — installs the systemd service via `services/dawn-satellite/install.sh`
 
+**Before running the installer** — if your daemon uses SSL (the default) the installer will prompt for the path to the daemon's `ca.crt` on this Pi. Copy it over first:
+
+```bash
+scp user@daemon:/path/to/dawn/ssl/ca.crt /tmp/ca.crt
+```
+
+Then give `/tmp/ca.crt` at the prompt. The installer stages it at `/etc/dawn/ca.crt` and points `satellite.toml` at that path. You can skip the prompt and set `ca_cert_path` manually later if you prefer.
+
+### Useful installer flags
+
+| Flag | Purpose |
+|---|---|
+| `--target satellite` | Required for a satellite install (default is `server`). |
+| `--resume-from PHASE` | Pick up from a specific phase after a failure. Phases: `deps`, `libs`, `build`, `models`, `configure`, `verify`, `deploy`. |
+| `--fresh` | Ignore cached settings and re-run the prompts from scratch. |
+| `--verify` | Run post-install verification only. |
+| `--deploy satellite` | Run only the deploy phase (re-stage binary/config/models/service). |
+| `--uninstall` | Interactive uninstall — stops the service, removes files, prompts before deleting config. |
+
 For a manual step-by-step install (no installer script), jump to [Building for Raspberry Pi](#building-for-raspberry-pi). For the detailed build/config reference, read on.
 
 ## Overview

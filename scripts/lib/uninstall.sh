@@ -277,6 +277,45 @@ uninstall_dawn_libs() {
       descriptions+=("ONNX Runtime")
    fi
 
+   # libvosk (installed by satellite builds via install_libvosk)
+   local vosk_files=()
+   # shellcheck disable=SC2206
+   vosk_files=(/usr/local/lib/libvosk.so*)
+   local vosk_found=false
+   for f in "${vosk_files[@]}"; do
+      if [ -f "$f" ]; then
+         found+=("$f")
+         vosk_found=true
+      fi
+   done
+   if [ "$vosk_found" = true ]; then
+      [ -f /usr/local/include/vosk_api.h ] && found+=("/usr/local/include/vosk_api.h")
+      descriptions+=("libvosk")
+   fi
+
+   # whisper.cpp / ggml shared libs (installed by dawn-satellite service installer)
+   local whisper_files=()
+   # shellcheck disable=SC2206
+   whisper_files=(/usr/local/lib/libwhisper.so* /usr/local/lib/libggml*.so*)
+   local whisper_found=false
+   for f in "${whisper_files[@]}"; do
+      if [ -f "$f" ]; then
+         found+=("$f")
+         whisper_found=true
+      fi
+   done
+   if [ "$whisper_found" = true ]; then
+      descriptions+=("whisper.cpp/ggml libs")
+   fi
+
+   # Daemon CA cert staged by services/dawn-satellite/install.sh.
+   # Only remove when the daemon service itself is NOT installed — the two
+   # may share the same private CA on a co-hosted deployment.
+   if [ -f /etc/dawn/ca.crt ] && [ ! -f /etc/systemd/system/dawn-server.service ]; then
+      found+=("/etc/dawn/ca.crt")
+      descriptions+=("/etc/dawn/ca.crt")
+   fi
+
    if [ ${#found[@]} -eq 0 ]; then
       log "DAWN libraries: none found"
       return 0

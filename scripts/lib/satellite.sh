@@ -410,7 +410,7 @@ run_build_satellite() {
 
    # Hard-fail if user-requested features landed as OFF. This catches the
    # exact failure mode that motivated the installer: silent CMake warnings
-   # leading to a build without VAD/ASR/TTS.
+   # leading to a build without VAD/ASR/TTS/SDL.
    local -a required_on=(
       "VAD (Silero): ON"
       "TTS (Piper): ON"
@@ -422,6 +422,9 @@ run_build_satellite() {
    fi
    if [ "${SAT_ENABLE_OPUS:-true}" = true ]; then
       required_on+=("Music (Opus): ON")
+   fi
+   if [ "${SAT_ENABLE_SDL_UI:-false}" = true ]; then
+      required_on+=("SDL2 UI: ON")
    fi
 
    local missing=()
@@ -473,7 +476,8 @@ run_models_satellite() {
    # --no-build-symlinks: the satellite binary builds in
    # dawn_satellite/build/, not the $PROJECT_ROOT/build* pattern the script
    # scans for, so the symlink step is daemon-only noise in this flow.
-   local -a args=(--no-build-symlinks)
+   # --no-embeddings: the satellite doesn't use the RAG embedding model.
+   local -a args=(--no-build-symlinks --no-embeddings)
    if [ "${SAT_ASR_ENGINE:-vosk}" = "vosk" ]; then
       if [ "${SAT_VOSK_MODEL:-small}" = "small" ]; then
          args+=(--vosk-small)

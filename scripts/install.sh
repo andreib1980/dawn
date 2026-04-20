@@ -909,13 +909,13 @@ main() {
       if [ "$INTERACTIVE" = true ] && [ "${LAST_COMPLETED_PHASE:-}" = "verify" ]; then
          if ! ask_yes_no "Use these cached settings?"; then
             info "Re-entering installation options..."
-            # Clear loaded settings so the target prompt + present_choices re-run
+            # Clear loaded settings so the target prompt + present_choices
+            # re-run. Using `unset ${!SAT_*}` means we don't have to keep
+            # this list in sync with save_state's SAT_* block manually.
             INSTALL_TARGET=""
             LLM_PROVIDER="" PRIMARY_PROVIDER="" WHISPER_MODEL="" BUILD_PRESET="" FEATURES=""
-            SAT_SERVER_HOST="" SAT_NAME="" SAT_LOCATION="" SAT_ASR_ENGINE=""
-            SAT_VOSK_MODEL="" SAT_WHISPER_MODEL="" SAT_ENABLE_SDL_UI=""
-            SAT_CAPTURE_DEVICE="" SAT_PLAYBACK_DEVICE="" SAT_CA_CERT_SRC=""
-            SAT_REGISTRATION_KEY=""
+            # shellcheck disable=SC2086
+            unset ${!SAT_*}
             SETTINGS_LOADED=false
             rm -f "$STATE_FILE"
          fi

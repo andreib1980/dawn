@@ -310,6 +310,12 @@ install_selected_models() {
             continue
         fi
         local rel="${path#models/}"
+        # Reject any ../ component — a hostile satellite.toml with
+        # model_path = "models/../../etc/shadow" would otherwise be
+        # cp'd as root from /etc/shadow to /var/lib/dawn-satellite/etc/shadow.
+        case "/$rel/" in
+            */../*|*/..) warn "Skipping model path with parent traversal: $path"; continue ;;
+        esac
         local src="$MODELS_DIR/$rel"
         local dst="$DATA_DIR/models/$rel"
 
@@ -427,10 +433,12 @@ mkdir -p "$LOG_DIR"
 # Resolve config source early — model install below reads it to pick
 # the correct subset of models to copy. --config wins if given;
 # otherwise fall back to the shipped template.
+CONFIG_EXPLICIT=false
 if [ -n "$CONFIG_SRC" ]; then
     if [ ! -f "$CONFIG_SRC" ]; then
         error "Config source not found: $CONFIG_SRC"
     fi
+    CONFIG_EXPLICIT=true
     log "Using custom config: $CONFIG_SRC"
 else
     CONFIG_SRC="$SCRIPT_DIR/satellite.toml"
@@ -458,7 +466,12 @@ chmod 755 /usr/local/bin/dawn_satellite
 # fails on startup with:
 #   "libwhisper.so.1: cannot open shared object file"
 # even though the binary itself is installed.
+#
+# Only required when the build actually uses Whisper. For vosk-only builds
+# these libs aren't produced and their absence is expected — quiet the
+# "no libs found" warning in that case to avoid false alarms.
 BUILD_DIR="$(dirname "$BINARY_PATH")"
+configured_engine=$(parse_toml_str asr engine "$CONFIG_SRC" 2>/dev/null || echo "")
 log "Installing whisper/ggml shared libraries from $BUILD_DIR"
 installed_libs=0
 while IFS= read -r -d '' lib; do
@@ -468,8 +481,12 @@ done < <(find "$BUILD_DIR" \
     \( -name 'libwhisper.so*' -o -name 'libggml*.so*' \) \
     -print0 2>/dev/null)
 if [ "$installed_libs" -eq 0 ]; then
-    warn "No whisper/ggml shared libraries found under $BUILD_DIR"
-    warn "If this build uses Whisper ASR, the service will fail to start."
+    if [ "$configured_engine" = "whisper" ]; then
+        warn "No whisper/ggml shared libraries found under $BUILD_DIR"
+        warn "This build claims Whisper ASR but the libs are missing — the service will fail to start."
+    else
+        log "No whisper/ggml libs to install (expected for vosk-only builds)"
+    fi
 else
     log "Installed $installed_libs whisper/ggml library file(s)"
 fi
@@ -510,24 +527,72 @@ fi
 
 # Install the daemon's CA certificate at /etc/dawn/ca.crt if provided.
 # The satellite config's ca_cert_path is expected to point at this path.
+#
+# Security: this script runs as root. Without the checks below, a non-root
+# caller (who owns their install-state.env or writes install.conf) could
+# set SAT_CA_CERT_SRC=/root/.ssh/id_rsa (or a symlink into /etc/shadow)
+# and have the root `cp` stage that file at /etc/dawn/ca.crt with mode
+# 644 (world-readable) — a root-level arbitrary file disclosure.
+# Mitigations:
+#  1. Reject symlinks outright (-L check before -f).
+#  2. Canonicalize via realpath to catch ../ traversal surprises.
+#  3. Require the source to be owned by the invoking non-root user (the
+#     user who ran sudo to get here). Prevents a compromised local
+#     account from laundering root-owned files through this path.
+#  4. Sanity-check that it looks like a PEM CA cert.
 if [ -n "$CA_CERT_SRC" ]; then
+    if [ -L "$CA_CERT_SRC" ]; then
+        error "CA cert source is a symlink (refused): $CA_CERT_SRC"
+    fi
     if [ ! -f "$CA_CERT_SRC" ]; then
-        error "CA cert source not found: $CA_CERT_SRC"
+        error "CA cert source not found or not a regular file: $CA_CERT_SRC"
+    fi
+    ca_src_real=$(realpath -e --no-symlinks "$CA_CERT_SRC" 2>/dev/null) || ca_src_real=""
+    if [ -z "$ca_src_real" ]; then
+        error "CA cert source path could not be canonicalized: $CA_CERT_SRC"
+    fi
+    # Ownership check: block root-owned files (privilege laundering).
+    # SUDO_UID is set by sudo; if unset, we're invoked directly as root,
+    # in which case skip the check.
+    if [ -n "${SUDO_UID:-}" ]; then
+        src_uid=$(stat -c '%u' "$ca_src_real")
+        if [ "$src_uid" != "$SUDO_UID" ] && [ "$src_uid" != 0 ]; then
+            error "CA cert source is owned by uid=$src_uid (expected $SUDO_UID) — refusing"
+        fi
+        # Extra: if source is root-owned but SUDO_UID is set, that's
+        # exactly the privilege-laundering case we want to block.
+        if [ "$src_uid" = 0 ] && [ "$SUDO_UID" != 0 ]; then
+            error "CA cert source is owned by root; refuse to stage it when invoked via sudo from uid=$SUDO_UID"
+        fi
+    fi
+    # Content sanity — refuse anything that doesn't look like a PEM cert.
+    if ! head -n 1 "$ca_src_real" | grep -q '^-----BEGIN CERTIFICATE-----'; then
+        error "CA cert source doesn't look like a PEM certificate: $ca_src_real"
     fi
     log "Installing daemon CA certificate to /etc/dawn/ca.crt"
     mkdir -p /etc/dawn
-    cp "$CA_CERT_SRC" /etc/dawn/ca.crt
+    # cp --no-dereference is belt-and-braces after the symlink check above.
+    cp --no-dereference "$ca_src_real" /etc/dawn/ca.crt
     chmod 644 /etc/dawn/ca.crt
     chown root:root /etc/dawn/ca.crt
 fi
 
-# Install configuration (never overwrite existing — preserve user edits).
-# $CONFIG_SRC was resolved above, before the model install.
-if [ -f "$CONFIG_DIR/satellite.toml" ]; then
+# Install configuration. Default rule: preserve an existing satellite.toml
+# (manual edits shouldn't be clobbered by a bare re-run of this script).
+# Exception: when --config was explicitly passed, the caller is the top-level
+# installer feeding us a freshly-generated TOML — overwrite and back up the
+# old one. Otherwise a fresh `--target satellite` flow would write config
+# choices to .toml.new where nothing picks them up.
+if [ -f "$CONFIG_DIR/satellite.toml" ] && [ "$CONFIG_EXPLICIT" = false ]; then
     warn "Config file already exists: $CONFIG_DIR/satellite.toml (not overwriting)"
     warn "New version saved to: $CONFIG_DIR/satellite.toml.new"
     cp "$CONFIG_SRC" "$CONFIG_DIR/satellite.toml.new"
 else
+    if [ -f "$CONFIG_DIR/satellite.toml" ]; then
+        backup="$CONFIG_DIR/satellite.toml.bak.$(date +%s)"
+        cp "$CONFIG_DIR/satellite.toml" "$backup"
+        log "Backed up existing config to $backup"
+    fi
     log "Installing satellite.toml from $CONFIG_SRC"
     cp "$CONFIG_SRC" "$CONFIG_DIR/satellite.toml"
 fi
