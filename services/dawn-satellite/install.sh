@@ -337,6 +337,15 @@ mkdir -p "$DATA_DIR/assets/fonts"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$LOG_DIR"
 
+# Stop the running service before touching binaries / libraries. Linux
+# refuses `cp` over a running executable (Text file busy), and stopping
+# here also means we don't have to worry about the service reloading a
+# half-installed library set between steps.
+if systemctl is-active --quiet "$SERVICE_NAME.service" 2>/dev/null; then
+    log "Stopping running $SERVICE_NAME service before replacing files"
+    systemctl stop "$SERVICE_NAME.service"
+fi
+
 # Install binary
 log "Installing binary to /usr/local/bin/dawn_satellite"
 cp "$BINARY_PATH" /usr/local/bin/dawn_satellite
