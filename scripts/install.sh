@@ -62,7 +62,9 @@ INSTALL_ADMIN_PASS=""
 SETTINGS_LOADED=false
 
 # User preferences (set via CLI, config file, or interactive prompts)
-INSTALL_TARGET="${INSTALL_TARGET:-server}"
+# Leave INSTALL_TARGET empty by default so main() can prompt in interactive
+# mode. --target, install.conf, and load_state all populate it explicitly.
+INSTALL_TARGET="${INSTALL_TARGET:-}"
 LLM_PROVIDER="${LLM_PROVIDER:-}"
 PRIMARY_PROVIDER="${PRIMARY_PROVIDER:-}"
 OPENAI_KEY="${OPENAI_KEY:-}"
@@ -885,6 +887,7 @@ main() {
       SETTINGS_LOADED=false
    elif load_state; then
       echo -e "${BLUE}[INFO]${NC} Loaded settings from previous install (last phase: ${LAST_COMPLETED_PHASE:-none})"
+      echo -e "       Target: ${INSTALL_TARGET:-unset}"
       echo -e "       Provider: ${LLM_PROVIDER:-unset}, Whisper: ${WHISPER_MODEL:-unset}, Preset: ${BUILD_PRESET:-unset}"
       echo -e "       Features: ${FEATURES:-none}"
       echo ""
@@ -892,8 +895,12 @@ main() {
       if [ "$INTERACTIVE" = true ] && [ "${LAST_COMPLETED_PHASE:-}" = "verify" ]; then
          if ! ask_yes_no "Use these cached settings?"; then
             info "Re-entering installation options..."
-            # Clear loaded settings so present_choices will re-prompt
+            # Clear loaded settings so the target prompt + present_choices re-run
+            INSTALL_TARGET=""
             LLM_PROVIDER="" PRIMARY_PROVIDER="" WHISPER_MODEL="" BUILD_PRESET="" FEATURES=""
+            SAT_SERVER_HOST="" SAT_NAME="" SAT_LOCATION="" SAT_ASR_ENGINE=""
+            SAT_VOSK_MODEL="" SAT_WHISPER_MODEL="" SAT_ENABLE_SDL_UI=""
+            SAT_CAPTURE_DEVICE="" SAT_PLAYBACK_DEVICE=""
             SETTINGS_LOADED=false
             rm -f "$STATE_FILE"
          fi
@@ -906,6 +913,31 @@ main() {
    # Load state for resume logic
    if [ -n "$RESUME_FROM" ] && [ "$SETTINGS_LOADED" = false ]; then
       warn "No state file found — running from $RESUME_FROM anyway"
+   fi
+
+   # Resolve install target. Source of truth order:
+   #   1. --target CLI flag (set by parse_args)
+   #   2. INSTALL_TARGET from config file (loaded via --config)
+   #   3. INSTALL_TARGET from cached state (load_state)
+   #   4. Interactive prompt (if none of the above set it and --unattended is off)
+   #   5. Fall back to "server" in unattended mode
+   if [ -z "${INSTALL_TARGET:-}" ]; then
+      if [ "$INTERACTIVE" = true ]; then
+         echo ""
+         echo "Install target:"
+         echo "  server     Full DAWN daemon — LLM, WebUI, tools, MQTT. The main device."
+         echo "  satellite  Tier 1 voice satellite for Raspberry Pi. Connects to a running server."
+         echo ""
+         INSTALL_TARGET=$(ask_value "Target" "server")
+         case "$INSTALL_TARGET" in
+            server | satellite) ;;
+            *) error "Invalid target: $INSTALL_TARGET (must be 'server' or 'satellite')" ;;
+         esac
+         echo ""
+      else
+         INSTALL_TARGET="server"
+         info "No --target specified — defaulting to 'server'"
+      fi
    fi
 
    # Phase 0: Discovery
