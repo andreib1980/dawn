@@ -94,6 +94,24 @@
    border: 1px solid rgba(156, 39, 176, 0.3);
 }
 
+/* LOCAL badge shares the project's canonical amber warning palette so the
+ * token is visually consistent with other amber indicators (e.g. alarm rings). */
+.satellite-tier.tier-local {
+   background: var(--warning-subtle);
+   color: var(--warning);
+   border: 1px solid var(--warning-border);
+}
+
+.satellite-footer-local {
+   padding: 8px 0 0;
+}
+
+.satellite-local-note {
+   font-size: 0.8rem;
+   color: var(--text-secondary, #aaa);
+   font-style: italic;
+}
+
 .satellite-location {
    color: var(--text-secondary);
    font-size: 0.85rem;

@@ -235,6 +235,14 @@ void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload)
       return;
    }
 
+   /* The local pseudo-satellite represents the daemon's own speaker — deleting
+    * it doesn't make sense. Admin can still disable or reassign it. */
+   if (satellite_is_local_pseudo(uuid)) {
+      send_error_impl(conn->wsi, "FORBIDDEN",
+                      "Local device cannot be deleted; reassign to another user instead");
+      return;
+   }
+
    /* Force-disconnect if online before removing mapping */
    webui_force_disconnect_satellite(uuid);
 

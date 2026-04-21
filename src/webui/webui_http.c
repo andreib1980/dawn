@@ -761,6 +761,9 @@ static int handle_auth_logout(struct lws *wsi) {
          lws_get_peer_simple(wsi, client_ip, sizeof(client_ip));
          auth_db_log_event("logout", session.username, client_ip, "WebUI logout");
          auth_db_delete_session(token);
+         /* Release session_manager slots immediately instead of waiting for the
+          * 30-minute idle timeout — logout is an explicit signal the user is done. */
+         webui_destroy_sessions_by_auth_token(token);
          OLOG_INFO("WebUI: User logged out: %s", session.username);
       }
    }

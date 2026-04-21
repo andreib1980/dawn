@@ -117,6 +117,10 @@ typedef struct {
    char username[AUTH_USERNAME_MAX];
    /* Note: is_admin NOT cached - re-validated from DB on each admin operation */
 
+   /* Missed notification delivery: set once queued replay has been pushed to the
+    * client so the delivery only happens on the first ready message per connection. */
+   bool missed_notif_delivered;
+
    /* Client IP address (captured at connection establishment for reliable logging) */
    char client_ip[64];
 
@@ -586,6 +590,18 @@ void send_error_impl(struct lws *wsi, const char *code, const char *message);
  * @return Number of connections notified
  */
 int webui_force_logout_by_auth_token(const char *auth_token_prefix);
+
+/**
+ * @brief Destroy session_manager sessions for connections with matching auth token.
+ *
+ * Used by the logout handler to release session slots immediately instead of
+ * waiting for the 30-minute idle timeout. Detaches matching connections from
+ * their sessions and destroys the sessions.
+ *
+ * @param auth_token_prefix First AUTH_TOKEN_PREFIX_LEN chars of auth token
+ * @return Number of sessions destroyed
+ */
+int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix);
 
 /* =============================================================================
  * Prompt Construction Helpers

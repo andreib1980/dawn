@@ -11,6 +11,12 @@
    gap: 8px;
    max-width: 480px;
    width: calc(100% - 24px);
+   /* Cap the stack height so a batch of replayed missed notifications (up to
+    * MISSED_NOTIF_DELIVERY_BATCH) doesn't overrun the viewport on mobile.
+    * Scroll inside the container; contain overscroll from the page. */
+   max-height: calc(100vh - 24px);
+   overflow-y: auto;
+   overscroll-behavior: contain;
    pointer-events: none;
 }
 
@@ -173,11 +179,29 @@
    }
 }
 
-/* Ringing pulse for active alarms */
+/* Ringing pulse for active alarms. The browser now plays an audible loop for
+ * ringing alarms, so the visual cue needs parity — a deaf/HOH user should be
+ * able to tell a ringing alarm apart from a regular banner at a glance. */
 .sched-alarm.sched-ringing {
    animation:
       sched-slide-in 0.3s ease-out,
       sched-pulse 2s ease-in-out infinite;
+   border-width: 2px;
+   border-color: var(--warning, #f0b429);
+}
+
+/* Blinking dot on the badge re-announces "this is live right now" without
+ * relying on audio. */
+.sched-alarm.sched-ringing .sched-type-badge::before {
+   content: '● ';
+   color: var(--warning, #f0b429);
+   animation: sched-ring-dot 1s steps(2, start) infinite;
+}
+
+@keyframes sched-ring-dot {
+   50% {
+      opacity: 0;
+   }
 }
 
 @keyframes sched-pulse {
@@ -190,6 +214,51 @@
          0 4px 20px rgba(0, 0, 0, 0.4),
          0 0 12px rgba(240, 180, 41, 0.3);
    }
+}
+
+/* Respect user motion preferences — stop looping animations but keep the
+ * stronger border + dot styling so the visual signal remains. */
+@media (prefers-reduced-motion: reduce) {
+   .sched-alarm.sched-ringing {
+      animation: none;
+   }
+   .sched-alarm.sched-ringing .sched-type-badge::before {
+      animation: none;
+   }
+   .sched-banner {
+      animation: none;
+   }
+}
+
+/* Missed notifications: muted styling so replays don't look like live alerts.
+ * Left border kept solid to preserve the type-color accent — dashing the 3px
+ * accent stripe makes it render as color dots (looks like a bug).
+ * No opacity on the banner itself — it'd let page content show through. */
+.sched-banner.sched-missed {
+   border-top-style: dashed;
+   border-right-style: dashed;
+   border-bottom-style: dashed;
+}
+
+.sched-banner.sched-missed .sched-message {
+   color: var(--text-secondary, #aaa);
+}
+
+.sched-banner.sched-missed .sched-type-badge {
+   background: rgba(255, 255, 255, 0.1);
+   color: var(--text-secondary, #aaa);
+}
+
+/* Missed banners are historical, not destructive — neutral close button so the
+ * default red "dismiss-a-ringing-alarm" styling doesn't fight the muted theme. */
+.sched-banner.sched-missed .sched-btn-dismiss {
+   background: rgba(255, 255, 255, 0.08);
+   color: var(--text-secondary, #aaa);
+   border-color: rgba(255, 255, 255, 0.12);
+}
+
+.sched-banner.sched-missed .sched-btn-dismiss:hover {
+   background: rgba(255, 255, 255, 0.15);
 }
 
 /* Mobile responsive */

@@ -52,6 +52,7 @@
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/command_router.h"
+#include "core/missed_notifications_db.h"
 #include "core/ocp_helpers.h"
 #include "core/rate_limiter.h"
 #include "core/scheduler.h"
@@ -151,6 +152,9 @@ pthread_mutex_t s_token_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_ACTIVE_CONNECTIONS 64
 static ws_connection_t *s_active_connections[MAX_ACTIVE_CONNECTIONS];
 static pthread_mutex_t s_conn_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Forward decl for early call sites (reconnect handler) — defined later in file. */
+static void deliver_missed_notifications(ws_connection_t *conn);
 
 static void register_connection(ws_connection_t *conn) {
    pthread_mutex_lock(&s_conn_registry_mutex);
@@ -2867,6 +2871,17 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
 
                   /* Queue init messages (one lws_write per callback) */
                   queue_init_messages(conn, token);
+
+                  /* Re-deliver missed notifications to the reconnected session.
+                   * On page refresh, LWS_CALLBACK_RECEIVE's early hook queued
+                   * them to the abandoned session (now destroyed), so the
+                   * client never saw them. Fire delivery against the real
+                   * session and mark the connection as delivered. */
+                  conn->missed_notif_delivered = false;
+                  if (conn->authenticated && conn->auth_user_id > 0) {
+                     deliver_missed_notifications(conn);
+                     conn->missed_notif_delivered = true;
+                  }
                } else {
                   /* Token not found or session expired - create new session */
                   OLOG_INFO("WebUI: Token %.4s... not found, creating new session", token);
@@ -3294,6 +3309,31 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
 
       if (!action || !action[0]) {
          send_error_impl(conn->wsi, "INVALID_PARAM", "Missing action");
+      } else if (strcmp(action, "dismiss_missed") == 0) {
+         /* Delete a queued missed notification. Uses missed_notif_id rather than
+          * event_id, so this branch runs before the event_id validation.
+          * The DB delete enforces user ownership via AND user_id = ?. */
+         json_object *mid_obj = NULL;
+         json_object_object_get_ex(payload, "missed_notif_id", &mid_obj);
+         int64_t mid = mid_obj ? json_object_get_int64(mid_obj) : 0;
+         if (mid <= 0) {
+            send_error_impl(conn->wsi, "INVALID_PARAM", "Missing missed_notif_id");
+         } else if (conn->auth_user_id <= 0) {
+            send_error_impl(conn->wsi, "FORBIDDEN", "Not authenticated");
+         } else {
+            missed_notif_delete_by_user(mid, conn->auth_user_id);
+            /* If the underlying event is still ringing (e.g. alarm looping on
+             * the local speaker while user was offline), dismiss it too.
+             * event_id comes from the client but ownership is verified before
+             * dismissing so it's not an injection vector. */
+            if (event_id > 0) {
+               sched_event_t ev;
+               if (scheduler_db_get(event_id, &ev) == 0 && ev.user_id == conn->auth_user_id &&
+                   ev.status == SCHED_STATUS_RINGING) {
+                  scheduler_dismiss(event_id);
+               }
+            }
+         }
       } else if (event_id <= 0) {
          send_error_impl(conn->wsi, "INVALID_PARAM", "Missing or invalid event_id");
       } else {
@@ -3719,6 +3759,13 @@ static int callback_websocket(struct lws *wsi,
          }
 
          session_touch(conn->session);
+
+         /* Deliver any queued missed notifications once the session is ready and
+          * the user is authenticated. One-shot per connection. */
+         if (!conn->missed_notif_delivered && conn->authenticated && conn->auth_user_id > 0) {
+            deliver_missed_notifications(conn);
+            conn->missed_notif_delivered = true;
+         }
 
          int is_final = lws_is_final_fragment(wsi);
          int is_binary = lws_frame_is_binary(wsi);
@@ -5845,9 +5892,106 @@ int webui_force_logout_by_auth_token(const char *auth_token_prefix) {
    return count;
 }
 
+int webui_destroy_sessions_by_auth_token(const char *auth_token_prefix) {
+   if (!auth_token_prefix || strlen(auth_token_prefix) < AUTH_TOKEN_PREFIX_LEN)
+      return 0;
+
+   /* Collect matching session IDs under the conn mutex, then destroy after
+    * releasing (session_destroy blocks on ref_count and itself calls
+    * webui_detach_session → s_conn_registry_mutex; recursive would deadlock). */
+   uint32_t ids[MAX_ACTIVE_CONNECTIONS];
+   int n = 0;
+
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session)
+         continue;
+      if (strncmp(conn->auth_session_token, auth_token_prefix, AUTH_TOKEN_PREFIX_LEN) != 0)
+         continue;
+      /* Skip satellites — their session lifecycle is managed by the satellite
+       * protocol, not the auth cookie. */
+      if (conn->is_satellite)
+         continue;
+      uint32_t sid = conn->session->session_id;
+      bool dup = false;
+      for (int j = 0; j < n; j++) {
+         if (ids[j] == sid) {
+            dup = true;
+            break;
+         }
+      }
+      if (!dup && n < MAX_ACTIVE_CONNECTIONS)
+         ids[n++] = sid;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   for (int i = 0; i < n; i++) {
+      session_destroy(ids[i]);
+   }
+
+   if (n > 0)
+      OLOG_INFO("WebUI: Destroyed %d session slot(s) for auth token %.4s...", n, auth_token_prefix);
+
+   return n;
+}
+
 /* =============================================================================
  * Scheduler Notification Broadcast
  * ============================================================================= */
+
+/**
+ * @brief Deliver queued missed notifications to a newly-authenticated connection.
+ *
+ * Called after cookie-based authentication completes at WebSocket open. Reads
+ * up to 32 queued notifications for the user and emits them as regular
+ * scheduler_notification messages with a "missed" flag. Entries remain in the
+ * DB until the user explicitly dismisses them (dismiss_missed action), so
+ * reloading the page or opening another tab shows the same set.
+ */
+static void deliver_missed_notifications(ws_connection_t *conn) {
+   if (!conn || !conn->session || !conn->authenticated || conn->auth_user_id <= 0)
+      return;
+
+   missed_notif_t missed[MISSED_NOTIF_DELIVERY_BATCH];
+   int count = missed_notif_get_for_user(conn->auth_user_id, missed, MISSED_NOTIF_DELIVERY_BATCH);
+   if (count <= 0)
+      return;
+
+   for (int i = 0; i < count; i++) {
+      json_object *root = json_object_new_object();
+      json_object_object_add(root, "type", json_object_new_string("scheduler_notification"));
+
+      json_object *payload = json_object_new_object();
+      json_object_object_add(payload, "event_id", json_object_new_int64(missed[i].event_id));
+      json_object_object_add(payload, "event_type", json_object_new_string(missed[i].event_type));
+      json_object_object_add(payload, "status", json_object_new_string(missed[i].status));
+      json_object_object_add(payload, "name", json_object_new_string(missed[i].name));
+      json_object_object_add(payload, "message", json_object_new_string(missed[i].message));
+      json_object_object_add(payload, "fire_at", json_object_new_int64((int64_t)missed[i].fire_at));
+      json_object_object_add(payload, "missed", json_object_new_boolean(true));
+      json_object_object_add(payload, "missed_notif_id", json_object_new_int64(missed[i].id));
+      if (missed[i].conversation_id > 0) {
+         json_object_object_add(payload, "conversation_id",
+                                json_object_new_int64(missed[i].conversation_id));
+      }
+
+      json_object_object_add(root, "payload", payload);
+      const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+      char *json_copy = json_str ? strdup(json_str) : NULL;
+      json_object_put(root);
+
+      if (!json_copy)
+         continue;
+
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_SCHEDULER_NOTIFICATION,
+                             .scheduler_json = { .json = json_copy } };
+      queue_response(&resp);
+   }
+
+   OLOG_INFO("WebUI: Delivered %d missed notification(s) to user %d", count, conn->auth_user_id);
+}
 
 /**
  * @brief Broadcast scheduler notification to all authenticated WebUI connections
@@ -5912,13 +6056,30 @@ void scheduler_broadcast_notification(const sched_event_t *event, const char *te
       queue_response(&resp);
       sent++;
    }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
 
-   json_object_put(root);
+   /* Queue as missed notification when no clients were available. Decision is
+    * made and the DB insert runs while the conn mutex is still held so a
+    * concurrent reconnect cannot slip between "nobody online" and the insert.
+    * Only user-specific ringing events are queued; system events (user_id == 0)
+    * and transient rebroadcasts (dismiss/timeout) are dropped. */
+   bool queued_missed = false;
+   if (sent == 0 && target_user > 0 && event->status == SCHED_STATUS_RINGING) {
+      missed_notif_insert(target_user, event->id, sched_event_type_to_str(event->event_type),
+                          sched_status_to_str(event->status), event->name, text, event->fire_at, 0);
+      queued_missed = true;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
 
    if (sent > 0) {
       OLOG_INFO("Scheduler: Broadcast notification to %d client(s): %s", sent, text);
+   } else if (queued_missed) {
+      OLOG_INFO("Scheduler: No clients for user %d, queued missed: %s", target_user, text);
+   } else {
+      OLOG_INFO("Scheduler: no recipients for '%s' (target_user=%d, status=%s) — dropped", text,
+                target_user, sched_status_to_str(event->status));
    }
+
+   json_object_put(root);
 }
 
 void scheduler_broadcast_briefing_notification(const sched_event_t *event,
@@ -5979,13 +6140,26 @@ void scheduler_broadcast_briefing_notification(const sched_event_t *event,
       queue_response(&resp);
       sent++;
    }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
 
-   json_object_put(root);
+   bool queued_missed = false;
+   if (sent == 0 && target_user > 0 && event->status == SCHED_STATUS_RINGING) {
+      missed_notif_insert(target_user, event->id, sched_event_type_to_str(event->event_type),
+                          sched_status_to_str(event->status), event->name, preview, event->fire_at,
+                          conversation_id);
+      queued_missed = true;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
 
    if (sent > 0) {
       OLOG_INFO("Scheduler: Broadcast briefing notification to %d client(s)", sent);
+   } else if (queued_missed) {
+      OLOG_INFO("Scheduler: No clients for user %d, queued missed briefing", target_user);
+   } else {
+      OLOG_INFO("Scheduler: no recipients for briefing (target_user=%d, status=%s) — dropped",
+                target_user, sched_status_to_str(event->status));
    }
+
+   json_object_put(root);
 }
 
 /* Forward declarations for scheduler TTS routing */
@@ -6386,6 +6560,11 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
 
    session_set_metrics_user(conn->session, conn->auth_user_id);
    conn->session->client_data = conn;
+
+   /* Re-enable missed-notification replay on the new session. Any notifications
+    * that arrived during the conversation-session-expired window would have
+    * been queued as missed (no attached session), so re-delivery is needed. */
+   conn->missed_notif_delivered = false;
 
    /* Generate and register a new session token */
    if (generate_session_token(conn->session_token) != 0) {

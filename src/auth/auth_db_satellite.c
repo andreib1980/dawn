@@ -281,3 +281,60 @@ int satellite_db_list(int (*callback)(const satellite_mapping_t *, void *), void
 
    return result;
 }
+
+int satellite_db_ensure_local_pseudo(void) {
+   /* Only create the row if it's missing — upsert preserves user_id / enabled /
+    * ha_area on conflict, but calling upsert unconditionally would also bump
+    * last_seen on every restart which adds noise. So check first. */
+   satellite_mapping_t existing;
+   int rc = satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &existing);
+   if (rc == AUTH_DB_SUCCESS) {
+      return AUTH_DB_SUCCESS;
+   }
+
+   satellite_mapping_t m;
+   memset(&m, 0, sizeof(m));
+   strncpy(m.uuid, LOCAL_PSEUDO_SATELLITE_UUID, sizeof(m.uuid) - 1);
+   strncpy(m.name, "Local Device", sizeof(m.name) - 1);
+   m.location[0] = '\0';
+   m.ha_area[0] = '\0';
+   m.user_id = 0; /* unassigned → backward-compat default (plays for all) */
+   m.tier = LOCAL_PSEUDO_SATELLITE_TIER;
+   m.enabled = true;
+   m.last_seen = time(NULL);
+   m.created_at = time(NULL);
+
+   rc = satellite_db_upsert(&m);
+   if (rc == AUTH_DB_SUCCESS) {
+      OLOG_INFO("satellite: provisioned local pseudo-satellite (unassigned)");
+   }
+   return rc;
+}
+
+bool satellite_local_speaker_plays_for_user(int event_user_id) {
+   satellite_mapping_t m;
+   int rc = satellite_db_get(LOCAL_PSEUDO_SATELLITE_UUID, &m);
+   if (rc != AUTH_DB_SUCCESS) {
+      /* Mapping missing or DB error — fail open rather than go silent on
+       * notifications the user might need to hear. */
+      return true;
+   }
+
+   /* Admin disable wins over everything, including system events. Otherwise
+    * a user who explicitly silenced the daemon speaker would still get woken
+    * up by system alerts. */
+   if (!m.enabled) {
+      return false;
+   }
+
+   /* System events (no user_id) play on any enabled speaker. */
+   if (event_user_id <= 0) {
+      return true;
+   }
+
+   if (m.user_id <= 0) {
+      /* Unassigned → backward-compatible behavior: play for everyone. */
+      return true;
+   }
+   return m.user_id == event_user_id;
+}

@@ -38,6 +38,7 @@
 #include "audio/chime.h"
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/missed_notifications_db.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
@@ -191,6 +192,11 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
 #ifdef ENABLE_MULTI_CLIENT
    bool delivered = false;
 
+   /* Cache the local-speaker decision once per fire — avoids 2+ DB lookups for
+    * the same event and prevents mid-route inconsistency if an admin toggles
+    * the mapping during the call. */
+   bool local_plays = satellite_local_speaker_plays_for_user(event->user_id);
+
    switch (event->source_client_type) {
       case SCHED_SOURCE_DAP2: {
          /* Try originating satellite first */
@@ -225,11 +231,15 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
 
       case SCHED_SOURCE_LOCAL:
       default: {
-         /* Daemon local speaker (existing behavior) */
-         char *tts_text = strdup(text);
-         if (tts_text) {
-            text_to_speech(tts_text);
-            delivered = true;
+         /* Daemon local speaker, gated by the cached local pseudo-satellite
+          * decision. Admin can assign local audio to a specific user, in which
+          * case only that user's events play here. Unassigned → play for all. */
+         if (local_plays) {
+            char *tts_text = strdup(text);
+            if (tts_text) {
+               text_to_speech(tts_text);
+               delivered = true;
+            }
          }
          break;
       }
@@ -247,8 +257,10 @@ static bool route_tts_announcement(const sched_event_t *event, const char *text)
        * for announce_all, broadcast to other users' sessions (skip originating user) */
       scheduler_route_tts_to_user(0, text, event->source_uuid, event->user_id);
 #endif
-      /* Also play on daemon speaker if not already done */
-      if (event->source_client_type != SCHED_SOURCE_LOCAL) {
+      /* Also play on daemon speaker if not already done — still respecting the
+       * local pseudo-satellite assignment so announce_all doesn't override the
+       * admin's device ownership. Reuses the cached decision. */
+      if (event->source_client_type != SCHED_SOURCE_LOCAL && local_plays) {
          char *tts_text = strdup(text);
          if (tts_text)
             text_to_speech(tts_text);
@@ -758,6 +770,13 @@ static void *alarm_sound_thread(void *arg) {
 }
 
 static void start_alarm_sound(const sched_event_t *event) {
+   /* Respect the local pseudo-satellite assignment — if this daemon's speaker
+    * isn't owned by this event's user (or is disabled), don't fire the chime.
+    * The user's WebUI/satellite handles the alert. */
+   if (!satellite_local_speaker_plays_for_user(event->user_id)) {
+      return;
+   }
+
    /* Only one alarm sound at a time */
    if (alarm_sound_playing) {
       alarm_sound_stop = true;
@@ -1092,6 +1111,12 @@ static void *scheduler_thread_func(void *arg) {
    if (deleted > 0)
       OLOG_INFO("scheduler: cleaned up %d old events", deleted);
 
+   /* Expire stale missed notifications (older than MISSED_NOTIF_EXPIRE_SEC) */
+   int missed_expired = missed_notif_expire(MISSED_NOTIF_EXPIRE_SEC);
+   if (missed_expired > 0)
+      OLOG_INFO("scheduler: expired %d stale missed notifications", missed_expired);
+   time_t last_missed_expire = time(NULL);
+
    /* Recover missed events */
    if (g_config.scheduler.missed_event_recovery)
       recover_missed_events();
@@ -1129,6 +1154,15 @@ static void *scheduler_thread_func(void *arg) {
 
       /* Fire any due events */
       fire_due_events();
+
+      /* Periodic housekeeping: expire stale missed notifications once per hour. */
+      time_t now = time(NULL);
+      if (now - last_missed_expire >= 3600) {
+         int expired = missed_notif_expire(MISSED_NOTIF_EXPIRE_SEC);
+         if (expired > 0)
+            OLOG_INFO("scheduler: expired %d stale missed notifications", expired);
+         last_missed_expire = now;
+      }
    }
 
    OLOG_INFO("scheduler: thread exiting");
@@ -1228,26 +1262,38 @@ int scheduler_get_ringing(sched_event_t *event) {
 int scheduler_dismiss(int64_t event_id) {
    pthread_mutex_lock(&ringing_mutex);
 
-   if (!alarm_ringing) {
-      pthread_mutex_unlock(&ringing_mutex);
-      return -1;
+   /* Only clear the global ringing state if the target ID matches the
+    * currently-ringing event. With the missed-notification queue, stale
+    * SCHED_STATUS_RINGING rows accumulate for offline users and routinely
+    * get dismissed via dismiss_missed — we must NOT silence a different
+    * user's actively-ringing alarm in the process. */
+   bool matches_current = false;
+   int64_t id = event_id;
+   if (alarm_ringing) {
+      int64_t current_id = ringing_event.id;
+      if (id <= 0)
+         id = current_id; /* Null event_id means "whatever is ringing" */
+      matches_current = (id == current_id);
+      if (matches_current) {
+         alarm_ringing = false;
+         memset(&ringing_event, 0, sizeof(ringing_event));
+      }
    }
-
-   int64_t id = (event_id > 0) ? event_id : ringing_event.id;
-
-   /* Clear ringing state while still holding the lock to prevent
-    * alarm_sound_thread from also dismissing */
-   alarm_ringing = false;
-   memset(&ringing_event, 0, sizeof(ringing_event));
    pthread_mutex_unlock(&ringing_mutex);
 
-   /* Stop alarm sound */
-   scheduler_stop_alarm_sound();
+   if (id <= 0)
+      return -1; /* Nothing ringing and no explicit target. */
 
-   /* Optimistic update: only dismiss if still ringing in DB */
+   /* Only stop the alarm sound when the target matches the current one. */
+   if (matches_current)
+      scheduler_stop_alarm_sound();
+
+   /* Dismiss in DB regardless — this covers stale RINGING rows from missed
+    * notifications that are no longer the active alarm. */
    int result = scheduler_db_dismiss(id);
    if (result == 0) {
-      OLOG_INFO("scheduler: dismissed event %lld", (long long)id);
+      OLOG_INFO("scheduler: dismissed event %lld%s", (long long)id,
+                matches_current ? "" : " (DB-only, not the active alarm)");
 
       /* Schedule next occurrence for recurring events */
       sched_event_t dismissed;
@@ -1272,6 +1318,13 @@ int scheduler_snooze(int64_t event_id, int snooze_minutes) {
    }
 
    int64_t id = (event_id > 0) ? event_id : ringing_event.id;
+   /* Refuse to snooze a non-active alarm — snooze only makes sense for the
+    * currently-ringing event, and touching the global state would silence
+    * another user's alarm. */
+   if (id != ringing_event.id) {
+      pthread_mutex_unlock(&ringing_mutex);
+      return -1;
+   }
    int max_snooze = g_config.scheduler.max_snooze_count;
    int current_snooze = ringing_event.snooze_count;
 

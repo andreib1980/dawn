@@ -601,6 +601,7 @@ list(APPEND DAWN_SOURCES
 list(APPEND DAWN_SOURCES
     src/core/scheduler_db.c
     src/core/scheduler.c
+    src/core/missed_notifications_db.c
 )
 
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)

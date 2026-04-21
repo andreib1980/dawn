@@ -70,7 +70,7 @@ static void finalize_statements(void);
  * Schema SQL
  * ============================================================================= */
 
-/* Base schema for fresh installs.  Must match AUTH_DB_SCHEMA_VERSION (v29).
+/* Base schema for fresh installs.  Must match AUTH_DB_SCHEMA_VERSION.
  *
  * IMPORTANT: When adding a new column or table via migration, also add it here
  * so that fresh installs get the complete schema.  All statements use
@@ -375,6 +375,24 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_sched_user ON scheduled_events(user_id, status);"
     "CREATE INDEX IF NOT EXISTS idx_sched_user_name ON scheduled_events(user_id, status, name);"
     "CREATE INDEX IF NOT EXISTS idx_sched_source ON scheduled_events(source_uuid);"
+
+    /* Missed scheduler notifications (v32) — queued when a ringing event has no
+     * connected clients for the target user; replayed on reconnect. */
+    "CREATE TABLE IF NOT EXISTS missed_notifications ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  event_id INTEGER NOT NULL,"
+    "  event_type TEXT NOT NULL,"
+    "  status TEXT NOT NULL,"
+    "  name TEXT NOT NULL,"
+    "  message TEXT,"
+    "  fire_at INTEGER NOT NULL,"
+    "  conversation_id INTEGER DEFAULT 0,"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_missed_notif_user "
+    "  ON missed_notifications(user_id, created_at);"
 
     /* Documents and chunks for RAG search (v22) */
     "CREATE TABLE IF NOT EXISTS documents ("
@@ -1552,6 +1570,33 @@ static int create_schema(const char *db_path) {
       } else {
          OLOG_INFO("auth_db: added photo_id column to memory_entities (v31)");
       }
+   }
+
+   /* v32 migration: missed_notifications table for offline-user notification queue */
+   if (current_version >= 1 && current_version < 32) {
+      const char *v32_sql = "CREATE TABLE IF NOT EXISTS missed_notifications ("
+                            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "  user_id INTEGER NOT NULL,"
+                            "  event_id INTEGER NOT NULL,"
+                            "  event_type TEXT NOT NULL,"
+                            "  status TEXT NOT NULL,"
+                            "  name TEXT NOT NULL,"
+                            "  message TEXT,"
+                            "  fire_at INTEGER NOT NULL,"
+                            "  conversation_id INTEGER DEFAULT 0,"
+                            "  created_at INTEGER NOT NULL,"
+                            "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+                            ");"
+                            "CREATE INDEX IF NOT EXISTS idx_missed_notif_user "
+                            "  ON missed_notifications(user_id, created_at);";
+      rc = sqlite3_exec(s_db.db, v32_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v32 migration (missed_notifications) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added missed_notifications table (v32)");
    }
 
    /* Create indexes that depend on migration-added columns.
@@ -3784,6 +3829,14 @@ int auth_db_init(const char *db_path) {
    OLOG_INFO("auth_db_init: initialized at %s", path);
 
    pthread_mutex_unlock(&s_db.mutex);
+
+   /* Ensure the local pseudo-satellite row exists. Runs outside the init
+    * mutex because it calls other auth_db_* helpers that acquire the mutex
+    * themselves. Safe: s_db.initialized is already true here. */
+   if (satellite_db_ensure_local_pseudo() != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("auth_db_init: could not ensure local pseudo-satellite row");
+   }
+
    return AUTH_DB_SUCCESS;
 }
 

@@ -14,6 +14,7 @@
    };
 
    const REFRESH_INTERVAL_MS = 30000;
+   const LOCAL_PSEUDO_UUID = '00000000-0000-0000-0000-000000000000';
 
    /* =============================================================================
     * API Requests
@@ -115,11 +116,24 @@
 
       let html = '';
       for (const sat of satellites) {
-         const tierLabel = sat.tier === 1 ? 'T1 RPi' : 'T2 ESP32';
-         const tierClass = sat.tier === 1 ? 'tier-1' : 'tier-2';
-         const statusClass = sat.online ? 'online' : 'offline';
-         const statusLabel = sat.online ? 'Online' : 'Offline';
-         const lastSeenText = sat.online ? '' : 'Last seen: ' + formatLastSeen(sat.last_seen);
+         const isLocal = sat.uuid === LOCAL_PSEUDO_UUID;
+         let tierLabel, tierClass;
+         if (isLocal) {
+            tierLabel = 'LOCAL';
+            tierClass = 'tier-local';
+         } else if (sat.tier === 1) {
+            tierLabel = 'T1 RPi';
+            tierClass = 'tier-1';
+         } else {
+            tierLabel = 'T2 ESP32';
+            tierClass = 'tier-2';
+         }
+         // Local pseudo-satellite is always "present" — treat as online.
+         const effectiveOnline = isLocal ? true : sat.online;
+         const statusClass = effectiveOnline ? 'online' : 'offline';
+         const statusLabel = effectiveOnline ? 'Online' : 'Offline';
+         const lastSeenText =
+            isLocal || effectiveOnline ? '' : 'Last seen: ' + formatLastSeen(sat.last_seen);
 
          // Build user dropdown options
          let userOptions = '<option value="0">-- Unassigned --</option>';
@@ -181,16 +195,23 @@
             buildHaAreaControl(sat) +
             '</label>' +
             '</div>' +
-            // Footer: delete button
-            '<div class="satellite-footer">' +
-            '<button class="btn satellite-delete-btn" data-uuid="' +
-            sat.uuid +
-            '" data-name="' +
-            escapeHtml(sat.name) +
-            '" data-user="' +
-            escapeHtml(getUserName(sat.user_id)) +
-            '">Delete Satellite</button>' +
-            '</div>' +
+            // Footer: delete button (hidden for the daemon's local pseudo-satellite)
+            (isLocal
+               ? '<div class="satellite-footer satellite-footer-local">' +
+                 '<span class="satellite-local-note">' +
+                 'Daemon speaker. <strong>Unassigned</strong> plays for everyone; ' +
+                 'assign to a user to restrict notifications to them. Cannot be deleted.' +
+                 '</span>' +
+                 '</div>'
+               : '<div class="satellite-footer">' +
+                 '<button class="btn satellite-delete-btn" data-uuid="' +
+                 sat.uuid +
+                 '" data-name="' +
+                 escapeHtml(sat.name) +
+                 '" data-user="' +
+                 escapeHtml(getUserName(sat.user_id)) +
+                 '">Delete Satellite</button>' +
+                 '</div>') +
             '</div>';
       }
 

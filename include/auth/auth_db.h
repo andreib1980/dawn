@@ -31,6 +31,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #ifdef ENABLE_AUTH
@@ -726,6 +727,25 @@ int auth_db_checkpoint_passive(void);
 #define SATELLITE_LOCATION_MAX 64
 
 /**
+ * @brief Reserved UUID representing the daemon's own local mic/speaker.
+ *
+ * Stored in satellite_mappings as a pseudo-satellite so the admin can assign
+ * the daemon's local audio to a specific user via the normal satellite
+ * management page. When unassigned (user_id NULL), local audio plays for
+ * everyone (backward-compatible default). Tier is set to 0 to distinguish
+ * from real Tier 1 (RPi) and Tier 2 (ESP32) devices.
+ */
+#define LOCAL_PSEUDO_SATELLITE_UUID "00000000-0000-0000-0000-000000000000"
+#define LOCAL_PSEUDO_SATELLITE_TIER 0
+
+/**
+ * @brief True if the given UUID is the reserved local pseudo-satellite.
+ */
+static inline bool satellite_is_local_pseudo(const char *uuid) {
+   return uuid && strcmp(uuid, LOCAL_PSEUDO_SATELLITE_UUID) == 0;
+}
+
+/**
  * @brief Persistent satellite-to-user mapping
  *
  * Stored in satellite_mappings table. Created on first registration,
@@ -753,6 +773,34 @@ typedef struct {
  * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE
  */
 int satellite_db_upsert(const satellite_mapping_t *mapping);
+
+/**
+ * @brief Ensure the reserved local pseudo-satellite row exists.
+ *
+ * Called during init. Safe to call repeatedly — the upsert preserves
+ * admin-managed fields (user_id, ha_area, enabled), so existing assignments
+ * are not clobbered. If the row is missing, creates it unassigned and
+ * enabled with tier=LOCAL_PSEUDO_SATELLITE_TIER.
+ *
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int satellite_db_ensure_local_pseudo(void);
+
+/**
+ * @brief Decide whether the daemon's local speaker should play for this event.
+ *
+ * Consults the local pseudo-satellite mapping:
+ *  - mapping disabled         → false (silent)
+ *  - mapping unassigned       → true  (backward-compat: play for everyone)
+ *  - assigned user matches    → true
+ *  - assigned user mismatched → false
+ *  - system events (user_id<=0) → true (always play)
+ *  - any DB error             → true (fail open: never go silent on error)
+ *
+ * @param event_user_id  Event's user_id (0 for system events)
+ * @return true if the local speaker should play
+ */
+bool satellite_local_speaker_plays_for_user(int event_user_id);
 
 /**
  * @brief Get satellite mapping by UUID
