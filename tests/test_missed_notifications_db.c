@@ -47,8 +47,8 @@ static int tests_failed = 0;
       }                                \
    } while (0)
 
-/* DDL mirrors the v32 migration in src/auth/auth_db_core.c — keep in sync. */
-static const char *DDL = "CREATE TABLE IF NOT EXISTS missed_notifications ("
+/* ddl mirrors the v32 migration in src/auth/auth_db_core.c — keep in sync. */
+static const char *ddl = "CREATE TABLE IF NOT EXISTS missed_notifications ("
                          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
                          "  user_id INTEGER NOT NULL,"
                          "  event_id INTEGER NOT NULL,"
@@ -73,9 +73,9 @@ static void setup_db(void) {
    pthread_mutex_init(&s_db.mutex, NULL);
 
    char *errmsg = NULL;
-   rc = sqlite3_exec(s_db.db, DDL, NULL, NULL, &errmsg);
+   rc = sqlite3_exec(s_db.db, ddl, NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
-      fprintf(stderr, "DDL failed: %s\n", errmsg);
+      fprintf(stderr, "ddl failed: %s\n", errmsg);
       sqlite3_free(errmsg);
       exit(1);
    }
@@ -108,7 +108,7 @@ static void test_insert_basic(void) {
    TEST_ASSERT(rc == AUTH_DB_SUCCESS, "basic insert succeeds");
 
    missed_notif_t rows[10];
-   int count = missed_notif_get_for_user(1, rows, 10);
+   int count = missed_notif_get_for_user(1, 10, rows);
    TEST_ASSERT(count == 1, "one row for user 1");
    TEST_ASSERT(rows[0].event_id == 100, "event_id round-trips");
    TEST_ASSERT(strcmp(rows[0].event_type, "timer") == 0, "event_type round-trips");
@@ -129,7 +129,7 @@ static void test_insert_briefing_with_conversation(void) {
    TEST_ASSERT(rc == AUTH_DB_SUCCESS, "briefing insert succeeds");
 
    missed_notif_t rows[10];
-   int count = missed_notif_get_for_user(1, rows, 10);
+   int count = missed_notif_get_for_user(1, 10, rows);
    TEST_ASSERT(count == 1, "briefing row stored");
    TEST_ASSERT(rows[0].conversation_id == 42, "conversation_id round-trips");
 }
@@ -206,7 +206,7 @@ static void test_get_ordering_oldest_first(void) {
    missed_notif_insert(1, 30, "timer", "ringing", "third", "", 300, 0);
 
    missed_notif_t rows[10];
-   int count = missed_notif_get_for_user(1, rows, 10);
+   int count = missed_notif_get_for_user(1, 10, rows);
    TEST_ASSERT(count == 3, "three rows returned");
    TEST_ASSERT(rows[0].event_id == 10, "oldest first");
    TEST_ASSERT(rows[1].event_id == 20, "middle next");
@@ -223,7 +223,7 @@ static void test_get_respects_limit(void) {
    }
 
    missed_notif_t rows[5];
-   int count = missed_notif_get_for_user(1, rows, 5);
+   int count = missed_notif_get_for_user(1, 5, rows);
    TEST_ASSERT(count == 5, "LIMIT caps returned rows");
 }
 
@@ -232,7 +232,7 @@ static void test_get_empty_user(void) {
    reset_table();
 
    missed_notif_t rows[10];
-   int count = missed_notif_get_for_user(99, rows, 10);
+   int count = missed_notif_get_for_user(99, 10, rows);
    TEST_ASSERT(count == 0, "user with no rows returns 0");
 }
 
@@ -240,9 +240,9 @@ static void test_get_rejects_bad_args(void) {
    printf("\n--- test_get_rejects_bad_args ---\n");
 
    missed_notif_t rows[10];
-   TEST_ASSERT(missed_notif_get_for_user(1, NULL, 10) == 0, "NULL out returns 0");
-   TEST_ASSERT(missed_notif_get_for_user(1, rows, 0) == 0, "max_count 0 returns 0");
-   TEST_ASSERT(missed_notif_get_for_user(0, rows, 10) == 0, "user_id 0 returns 0");
+   TEST_ASSERT(missed_notif_get_for_user(1, 10, NULL) == 0, "NULL out returns 0");
+   TEST_ASSERT(missed_notif_get_for_user(1, 0, rows) == 0, "max_count 0 returns 0");
+   TEST_ASSERT(missed_notif_get_for_user(0, 10, rows) == 0, "user_id 0 returns 0");
 }
 
 /* ============================================================================
@@ -256,13 +256,13 @@ static void test_delete_by_user_matches_owner(void) {
    missed_notif_insert(1, 10, "timer", "ringing", "n", "m", time(NULL), 0);
 
    missed_notif_t rows[10];
-   missed_notif_get_for_user(1, rows, 10);
+   missed_notif_get_for_user(1, 10, rows);
    int64_t id = rows[0].id;
 
    int rc = missed_notif_delete_by_user(id, 1);
    TEST_ASSERT(rc == AUTH_DB_SUCCESS, "owner delete returns SUCCESS");
 
-   int count = missed_notif_get_for_user(1, rows, 10);
+   int count = missed_notif_get_for_user(1, 10, rows);
    TEST_ASSERT(count == 0, "row is actually gone");
 }
 
@@ -273,14 +273,14 @@ static void test_delete_by_user_rejects_non_owner(void) {
    missed_notif_insert(1, 10, "timer", "ringing", "user1", "m", time(NULL), 0);
 
    missed_notif_t rows[10];
-   missed_notif_get_for_user(1, rows, 10);
+   missed_notif_get_for_user(1, 10, rows);
    int64_t id = rows[0].id;
 
    /* User 2 attempts to delete user 1's row. DB enforces AND user_id = ?. */
    int rc = missed_notif_delete_by_user(id, 2);
    TEST_ASSERT(rc == AUTH_DB_SUCCESS, "non-owner delete returns SUCCESS (no oracle)");
 
-   int count = missed_notif_get_for_user(1, rows, 10);
+   int count = missed_notif_get_for_user(1, 10, rows);
    TEST_ASSERT(count == 1, "user 1's row still present (non-owner could not delete)");
 }
 
@@ -306,8 +306,8 @@ static void test_delete_all_for_user(void) {
    TEST_ASSERT(deleted == 3, "delete_all returns row count");
 
    missed_notif_t rows[10];
-   TEST_ASSERT(missed_notif_get_for_user(1, rows, 10) == 0, "user 1 is empty");
-   TEST_ASSERT(missed_notif_get_for_user(2, rows, 10) == 1, "user 2 untouched");
+   TEST_ASSERT(missed_notif_get_for_user(1, 10, rows) == 0, "user 1 is empty");
+   TEST_ASSERT(missed_notif_get_for_user(2, 10, rows) == 1, "user 2 untouched");
 }
 
 /* ============================================================================
@@ -341,7 +341,7 @@ static void test_expire_removes_only_stale(void) {
    TEST_ASSERT(deleted == 1, "expire removes exactly one stale row");
 
    missed_notif_t rows[10];
-   int count = missed_notif_get_for_user(1, rows, 10);
+   int count = missed_notif_get_for_user(1, 10, rows);
    TEST_ASSERT(count == 1, "fresh row remains");
    TEST_ASSERT(rows[0].event_id == 1, "fresh row is the survivor");
 }
@@ -377,9 +377,9 @@ static void test_user_isolation(void) {
    missed_notif_insert(2, 20, "timer", "ringing", "u2-a", "", now, 0);
 
    missed_notif_t rows[10];
-   TEST_ASSERT(missed_notif_get_for_user(1, rows, 10) == 2, "user 1 sees 2 rows");
-   TEST_ASSERT(missed_notif_get_for_user(2, rows, 10) == 1, "user 2 sees 1 row");
-   TEST_ASSERT(missed_notif_get_for_user(3, rows, 10) == 0, "unrelated user sees 0");
+   TEST_ASSERT(missed_notif_get_for_user(1, 10, rows) == 2, "user 1 sees 2 rows");
+   TEST_ASSERT(missed_notif_get_for_user(2, 10, rows) == 1, "user 2 sees 1 row");
+   TEST_ASSERT(missed_notif_get_for_user(3, 10, rows) == 0, "unrelated user sees 0");
 }
 
 /* ============================================================================

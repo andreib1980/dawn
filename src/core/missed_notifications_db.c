@@ -133,7 +133,7 @@ int missed_notif_insert(int user_id,
    return AUTH_DB_SUCCESS;
 }
 
-int missed_notif_get_for_user(int user_id, missed_notif_t *out, int max_count) {
+int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out) {
    if (!out || max_count <= 0 || user_id <= 0)
       return 0;
 

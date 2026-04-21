@@ -85,11 +85,11 @@ int missed_notif_insert(int user_id,
  * @brief Load missed notifications for a user (oldest first).
  *
  * @param user_id    Target user
- * @param out        Output buffer
  * @param max_count  Maximum rows to return (also used as SQL LIMIT)
+ * @param out        Output buffer (at least max_count entries)
  * @return Number of rows filled, or -1 on error
  */
-int missed_notif_get_for_user(int user_id, missed_notif_t *out, int max_count);
+int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out);
 
 /**
  * @brief Delete a single missed notification, enforcing user ownership.

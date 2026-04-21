@@ -5954,7 +5954,7 @@ static void deliver_missed_notifications(ws_connection_t *conn) {
       return;
 
    missed_notif_t missed[MISSED_NOTIF_DELIVERY_BATCH];
-   int count = missed_notif_get_for_user(conn->auth_user_id, missed, MISSED_NOTIF_DELIVERY_BATCH);
+   int count = missed_notif_get_for_user(conn->auth_user_id, MISSED_NOTIF_DELIVERY_BATCH, missed);
    if (count <= 0)
       return;
 
