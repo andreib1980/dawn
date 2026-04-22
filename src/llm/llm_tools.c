@@ -257,6 +257,7 @@ static const char *SEQUENTIAL_TOOLS[] = {
    "viewing",            /* Uses shared MQTT state for image capture */
    "shutdown",           /* Critical system operation */
    "execute_plan",       /* Plan executor modifies state via sub-tool calls */
+   "phone",              /* Shared pending confirmation state + delete rate bucket */
    NULL                  /* Sentinel */
 };
 

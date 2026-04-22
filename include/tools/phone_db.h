@@ -25,6 +25,7 @@
 #ifndef PHONE_DB_H
 #define PHONE_DB_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -54,17 +55,56 @@ typedef struct {
    int status; /* PHONE_CALL_ANSWERED, MISSED, REJECTED, FAILED */
 } phone_call_log_t;
 
-/* SMS log entry */
+/* SMS log entry. body is sized to hold multi-segment concatenated SMS
+ * reassembled by ECHO (PDU mode): up to ~1530 ASCII or ~670 UCS2 chars. */
 typedef struct {
    int64_t id;
    int user_id;
    int direction;
    char number[24];
    char contact_name[64];
-   char body[1024];
+   char body[2048];
    time_t timestamp;
    int read;
 } phone_sms_log_t;
+
+/* Return codes for delete operations. Insert/update/query keep their legacy
+ * 0/1/-1 convention; see note in phone_db.c. */
+#define PHONE_DB_SUCCESS 0
+#define PHONE_DB_FAILURE 1
+#define PHONE_DB_NOT_FOUND 2
+
+/**
+ * @brief Redact a phone number for audit logs: keep last 4 digits, mask the
+ *        rest. "+15551234567" → "...4567". Short strings (<=4 chars) and
+ *        empty/NULL inputs pass through unchanged (short codes like "911"
+ *        keep forensic value; empty becomes "(none)").
+ */
+void phone_number_redact(const char *in, char *out, size_t out_size);
+
+/**
+ * @brief Format a phone number for TTS: insert spaces between digits so Piper
+ *        reads "+15551234567" as "1 5 5 5 1 2 3 4 5 6 7" (each digit spoken
+ *        individually) instead of as a billion-dollar integer. Non-digits are
+ *        dropped. Empty/NULL produces "".
+ */
+void phone_number_format_for_tts(const char *in, char *out, size_t out_size);
+
+/**
+ * @brief Normalize a phone number for DB matching.
+ *
+ * LLMs emit phone numbers in many formats ("+1-555-123-4567", "(555) 123-4567",
+ * "1 555 123 4567"). Stored rows are E.164 without punctuation ("+15551234567").
+ * Strip whitespace/dashes/parens/dots, keep digits and an optional leading '+',
+ * prefix a bare 10-digit US number with "+1". Used on both ingestion (inbound
+ * SMS sender, outbound resolve_number) and delete (by-number) paths so rows
+ * match on any LLM-supplied format.
+ *
+ * @param in       Raw input (may be NULL/empty → out receives "").
+ * @param out      Output buffer.
+ * @param out_size sizeof(out).
+ */
+void phone_number_normalize(const char *in, char *out, size_t out_size);
 
 /**
  * @brief Insert a call log entry.
@@ -127,5 +167,74 @@ int phone_db_sms_mark_read(int64_t id);
  * @return 0 on success, 1 on error.
  */
 int phone_db_cleanup(int call_retention_days, int sms_retention_days);
+
+/**
+ * @brief Delete a single SMS log entry by ID, scoped to user_id.
+ * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
+ */
+int phone_db_sms_log_delete(int user_id, int64_t id);
+
+/**
+ * @brief Delete all SMS log entries matching a phone number, scoped to user_id.
+ *        The number is normalized (strip spaces/dashes/parens, ensure leading +)
+ *        before lookup so LLM-supplied formats match stored E.164 rows.
+ * @param out_count Rows deleted (may be NULL).
+ * @return PHONE_DB_SUCCESS (even if 0 rows), PHONE_DB_FAILURE on SQL error.
+ */
+int phone_db_sms_log_delete_by_number(int user_id, const char *number, int *out_count);
+
+/**
+ * @brief Count SMS log entries matching a phone number (for delete preview).
+ *        Normalization matches phone_db_sms_log_delete_by_number.
+ * @return Count on success, -1 on error.
+ */
+int phone_db_sms_log_count_by_number(int user_id, const char *number);
+
+/**
+ * @brief Fetch a single SMS log entry by ID, scoped to user_id.
+ *        Avoids the 21 KB stack frame of recent-query when the caller knows
+ *        the id (e.g., delete-by-id previews). Also works for entries
+ *        outside the recent window.
+ * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
+ */
+int phone_db_sms_log_get_by_id(int user_id, int64_t id, phone_sms_log_t *out);
+
+/**
+ * @brief Delete all SMS log entries older than cutoff, scoped to user_id.
+ * @param out_count Rows deleted (may be NULL).
+ * @return PHONE_DB_SUCCESS (even if 0 rows), PHONE_DB_FAILURE on SQL error.
+ */
+int phone_db_sms_log_delete_older_than(int user_id, time_t cutoff, int *out_count);
+
+/**
+ * @brief Count SMS log entries older than cutoff (for delete preview).
+ * @return Count on success, -1 on error.
+ */
+int phone_db_sms_log_count_older_than(int user_id, time_t cutoff);
+
+/**
+ * @brief Delete a single call log entry by ID, scoped to user_id.
+ * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
+ */
+int phone_db_call_log_delete(int user_id, int64_t id);
+
+/**
+ * @brief Fetch a single call log entry by ID, scoped to user_id.
+ * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
+ */
+int phone_db_call_log_get_by_id(int user_id, int64_t id, phone_call_log_t *out);
+
+/**
+ * @brief Delete call log entries older than cutoff, scoped to user_id.
+ * @param out_count Rows deleted (may be NULL).
+ * @return PHONE_DB_SUCCESS (even if 0 rows), PHONE_DB_FAILURE on SQL error.
+ */
+int phone_db_call_log_delete_older_than(int user_id, time_t cutoff, int *out_count);
+
+/**
+ * @brief Count call log entries older than cutoff (for delete preview).
+ * @return Count on success, -1 on error.
+ */
+int phone_db_call_log_count_older_than(int user_id, time_t cutoff);
 
 #endif /* PHONE_DB_H */

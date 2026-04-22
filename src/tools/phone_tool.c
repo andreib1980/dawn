@@ -50,17 +50,123 @@
 typedef struct {
    bool enabled;
    bool confirm_outbound;
+   bool warn_on_multi_segment;
+   int delete_rate_limit_per_hour; /* confirm_delete_* per hour */
 } phone_tool_config_t;
 
 static phone_tool_config_t s_config = {
    .enabled = true,
    .confirm_outbound = true,
+   .warn_on_multi_segment = true,
+   .delete_rate_limit_per_hour = 10,
 };
+
+/* Delete rate-limit sliding-window timestamps.
+ *
+ * Guards against prompt-injection-coerced confirm_delete_* chains — the nonce
+ * (shown in preview) can appear in LLM context if the attacker owns part of
+ * the turn, so a hard cap on confirm frequency is defense in depth. Scoped
+ * per-user_id, but in practice single-user deployments just see one bucket. */
+#define DELETE_BUCKET_SIZE 16
+
+typedef struct {
+   int user_id;
+   time_t timestamps[DELETE_BUCKET_SIZE];
+   unsigned int count;
+} delete_bucket_t;
+
+/* We only expect one or two active users in flight; scan linearly. */
+#define DELETE_BUCKETS 4
+static delete_bucket_t s_delete_buckets[DELETE_BUCKETS];
+
+/* Returns true if the delete is allowed, false if rate-limited. Records the
+ * timestamp on success. */
+static bool check_delete_rate_limit(int user_id) {
+   if (s_config.delete_rate_limit_per_hour <= 0)
+      return true; /* disabled */
+
+   time_t now = time(NULL);
+   time_t cutoff = now - 3600;
+
+   delete_bucket_t *bucket = NULL;
+   delete_bucket_t *free_slot = NULL;
+   for (int i = 0; i < DELETE_BUCKETS; i++) {
+      if (s_delete_buckets[i].user_id == user_id) {
+         bucket = &s_delete_buckets[i];
+         break;
+      }
+      if (!free_slot && s_delete_buckets[i].user_id == 0)
+         free_slot = &s_delete_buckets[i];
+   }
+   if (!bucket) {
+      /* Reuse free slot; or evict the bucket whose most recent activity is
+       * oldest (true LRU). Using cumulative count would evict new users first
+       * and keep near-limit attackers' state alive. */
+      if (!free_slot) {
+         free_slot = &s_delete_buckets[0];
+         time_t free_slot_last = 0;
+         for (int j = 0; j < DELETE_BUCKET_SIZE; j++)
+            if (s_delete_buckets[0].timestamps[j] > free_slot_last)
+               free_slot_last = s_delete_buckets[0].timestamps[j];
+         for (int i = 1; i < DELETE_BUCKETS; i++) {
+            time_t last = 0;
+            for (int j = 0; j < DELETE_BUCKET_SIZE; j++)
+               if (s_delete_buckets[i].timestamps[j] > last)
+                  last = s_delete_buckets[i].timestamps[j];
+            if (last < free_slot_last) {
+               free_slot = &s_delete_buckets[i];
+               free_slot_last = last;
+            }
+         }
+         memset(free_slot, 0, sizeof(*free_slot));
+      }
+      free_slot->user_id = user_id;
+      bucket = free_slot;
+   }
+
+   int active = 0;
+   unsigned int scan = (bucket->count < DELETE_BUCKET_SIZE) ? bucket->count : DELETE_BUCKET_SIZE;
+   for (unsigned int i = 0; i < scan; i++) {
+      if (bucket->timestamps[i] >= cutoff)
+         active++;
+   }
+   if (active >= s_config.delete_rate_limit_per_hour)
+      return false;
+
+   unsigned int idx = bucket->count % DELETE_BUCKET_SIZE;
+   bucket->timestamps[idx] = now;
+   bucket->count++;
+   return true;
+}
 
 /* Pending confirmation state (per-session would be ideal, but single user for now) */
 static char s_pending_call_number[24] = "";
 static char s_pending_sms_number[24] = "";
 static char s_pending_sms_body[1024] = "";
+
+/* Pending deletion state with TTL.
+ *
+ * Matches the email-tool pattern: preview arms pending state, next-turn
+ * confirm_delete_* executes. The 120s TTL bounds replay windows if the user
+ * walks away after the preview. Rate-limit caps are applied at confirm time.
+ */
+#define PHONE_TOOL_PENDING_TTL_SEC 120
+
+static char s_pending_delete_kind[16] = "";   /* "sms" or "call" */
+static int64_t s_pending_delete_id = -1;      /* used if criteria=by-id */
+static char s_pending_delete_number[24] = ""; /* used if criteria=by-number */
+static time_t s_pending_delete_cutoff = 0;    /* used if criteria=older-than */
+static int s_pending_delete_count = 0;        /* preview count shown to user */
+static time_t s_pending_delete_at = 0;        /* arm time for TTL */
+
+static void clear_pending_delete(void) {
+   s_pending_delete_kind[0] = '\0';
+   s_pending_delete_id = -1;
+   s_pending_delete_number[0] = '\0';
+   s_pending_delete_cutoff = 0;
+   s_pending_delete_count = 0;
+   s_pending_delete_at = 0;
+}
 
 /* =============================================================================
  * JSON Helpers
@@ -78,6 +184,61 @@ static int json_get_int(struct json_object *obj, const char *key, int def) {
    if (!json_object_object_get_ex(obj, key, &val))
       return def;
    return json_object_get_int(val);
+}
+
+/* =============================================================================
+ * SMS segment estimator
+ *
+ * Rough heuristic that mirrors ECHO's UCS2-only PDU encoding. Any non-ASCII
+ * byte in the body → UCS2 (67 chars/segment after UDH). Pure ASCII → 153
+ * chars/segment (reserved for when ECHO adds GSM7). Used to warn the user in
+ * the send-confirmation preview when a message will be split.
+ *
+ * Keep in sync with ECHO src/pdu.c:pdu_segment_count(). When GSM7 lands,
+ * extract to a shared header.
+ * ============================================================================= */
+
+static int estimate_sms_segments(const char *body) {
+   if (!body || !*body)
+      return 1;
+
+   bool is_ucs2 = false;
+   size_t char_count = 0;
+   for (const unsigned char *p = (const unsigned char *)body; *p;) {
+      if (*p < 0x80) {
+         p++;
+         char_count++;
+      } else {
+         is_ucs2 = true;
+         /* UTF-8 multi-byte sequence — advance by length. UCS2 segment limits
+          * are in UTF-16 code units, so a 4-byte UTF-8 (non-BMP, e.g. emoji)
+          * costs 2 code units (surrogate pair). 2- and 3-byte sequences fit
+          * in one UTF-16 code unit. */
+         if ((*p & 0xE0) == 0xC0) {
+            p += 2;
+            char_count++;
+         } else if ((*p & 0xF0) == 0xE0) {
+            p += 3;
+            char_count++;
+         } else if ((*p & 0xF8) == 0xF0) {
+            p += 4;
+            char_count += 2;
+         } else {
+            p++;
+            char_count++;
+         }
+      }
+   }
+
+   int per_seg = is_ucs2 ? 67 : 153;
+   /* A body that fits in a single segment without UDH is more generous
+    * (70 UCS2 / 160 GSM7), so only report multi-seg when the UDH-reduced
+    * budget is actually exceeded. */
+   int single_cap = is_ucs2 ? 70 : 160;
+   if ((int)char_count <= single_cap)
+      return 1;
+
+   return (int)((char_count + per_seg - 1) / per_seg);
 }
 
 /* =============================================================================
@@ -144,9 +305,17 @@ static char *handle_send_sms(struct json_object *details, int user_id) {
       snprintf(s_pending_sms_number, sizeof(s_pending_sms_number), "%s", target);
       snprintf(s_pending_sms_body, sizeof(s_pending_sms_body), "%s", body);
 
-      char buf[512];
-      snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\". Say 'confirm' to send.", target,
-               body);
+      int segs = s_config.warn_on_multi_segment ? estimate_sms_segments(body) : 1;
+      char buf[768];
+      if (segs > 1) {
+         snprintf(buf, sizeof(buf),
+                  "About to send SMS to %s: \"%s\". This will send as %d text messages. "
+                  "Say 'confirm' to send.",
+                  target, body, segs);
+      } else {
+         snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\". Say 'confirm' to send.",
+                  target, body);
+      }
       return strdup(buf);
    }
 
@@ -170,8 +339,9 @@ static char *handle_confirm_sms(int user_id) {
 }
 
 static char *handle_read_sms(int user_id) {
-   phone_sms_log_t entries[20];
-   int count = phone_db_sms_get_unread(user_id, entries, 20);
+   /* Capped at 10 resident rows to keep stack frame bounded after body[2048] bump. */
+   phone_sms_log_t entries[10];
+   int count = phone_db_sms_get_unread(user_id, entries, 10);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
@@ -185,11 +355,19 @@ static char *handle_read_sms(int user_id) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Unread text messages (%d):\n", count);
       for (int i = 0; i < count && pos < RESULT_BUF_SIZE - 512; i++) {
          const char *dir = entries[i].direction == PHONE_DIR_INCOMING ? "From" : "To";
-         const char *name = entries[i].contact_name[0] ? entries[i].contact_name
-                                                       : entries[i].number;
+         /* Show "Name (+1...)" when a contact matches, bare number otherwise —
+          * the LLM needs the number visible to route delete-by-number requests. */
+         char display[96];
+         if (entries[i].contact_name[0]) {
+            snprintf(display, sizeof(display), "%s (%s)", entries[i].contact_name,
+                     entries[i].number);
+         } else {
+            snprintf(display, sizeof(display), "%s", entries[i].number);
+         }
 
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%d. %s: %s\n   %s\n", i + 1, dir,
-                         name, entries[i].body);
+         /* Include DB id so the LLM can target delete_sms {id: N}. */
+         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%d. [id=%lld] %s: %s\n   %s\n", i + 1,
+                         (long long)entries[i].id, dir, display, entries[i].body);
 
          /* Mark as read */
          phone_db_sms_mark_read(entries[i].id);
@@ -197,6 +375,353 @@ static char *handle_read_sms(int user_id) {
    }
 
    return buf;
+}
+
+/* =============================================================================
+ * Delete Handlers — two-step confirmation with TTL + nonce.
+ *
+ * Flow:
+ *   1. LLM calls delete_sms / delete_call with {id} OR {number} OR
+ *      {older_than_days}. Exactly one criterion required.
+ *   2. Handler looks up match count (0 → immediate error, don't arm pending).
+ *   3. Preview is returned with a generated 4-digit confirmation code.
+ *      Pending state is armed with criteria + timestamp + nonce.
+ *   4. LLM calls confirm_delete_sms / confirm_delete_call with
+ *      {confirm_code: "NNNN"}. Handler checks TTL (120s) and nonce match,
+ *      executes DELETE, audit-logs, clears pending.
+ * ============================================================================= */
+
+/* Convert timestamp → compact yyyy-mm-dd string for previews. */
+static void format_short_date(time_t t, char *out, size_t out_size) {
+   struct tm tm_buf;
+   localtime_r(&t, &tm_buf);
+   strftime(out, out_size, "%Y-%m-%d", &tm_buf);
+}
+
+static char *handle_delete_sms(struct json_object *details, int user_id) {
+   if (!details)
+      return strdup("Error: delete_sms requires one of {id, number, older_than_days}.");
+
+   struct json_object *id_obj = NULL;
+   struct json_object *num_obj = NULL;
+   struct json_object *older_obj = NULL;
+   json_object_object_get_ex(details, "id", &id_obj);
+   json_object_object_get_ex(details, "number", &num_obj);
+   json_object_object_get_ex(details, "older_than_days", &older_obj);
+
+   int criteria_count = (id_obj ? 1 : 0) + (num_obj ? 1 : 0) + (older_obj ? 1 : 0);
+   if (criteria_count != 1)
+      return strdup("Error: delete_sms requires exactly one of "
+                    "{id, number, older_than_days}.");
+
+   char buf[1024];
+
+   if (id_obj) {
+      int64_t id = (int64_t)json_object_get_int64(id_obj);
+
+      /* Fetch the exact row by id — works for old rows too and saves ~21 KB stack. */
+      phone_sms_log_t match;
+      int rc = phone_db_sms_log_get_by_id(user_id, id, &match);
+      if (rc == PHONE_DB_NOT_FOUND) {
+         clear_pending_delete();
+         snprintf(buf, sizeof(buf), "Error: SMS record #%lld not found.", (long long)id);
+         return strdup(buf);
+      }
+      if (rc != PHONE_DB_SUCCESS) {
+         clear_pending_delete();
+         return strdup("Error: database error looking up SMS record.");
+      }
+
+      /* Truncate body preview */
+      char preview[128];
+      size_t blen = strlen(match.body);
+      if (blen > 100) {
+         memcpy(preview, match.body, 100);
+         preview[100] = '\0';
+         strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
+      } else {
+         memcpy(preview, match.body, blen + 1);
+      }
+      char date[32];
+      format_short_date(match.timestamp, date, sizeof(date));
+      const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
+      const char *name = match.contact_name[0] ? match.contact_name : match.number;
+
+      snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "sms");
+      s_pending_delete_id = id;
+      s_pending_delete_number[0] = '\0';
+      s_pending_delete_cutoff = 0;
+      s_pending_delete_count = 1;
+      s_pending_delete_at = time(NULL);
+
+      snprintf(buf, sizeof(buf),
+               "About to delete SMS #%lld [%s %s, %s]: \"%s\". Say 'confirm' to delete.",
+               (long long)id, dir, name, date, preview);
+      return strdup(buf);
+   }
+
+   if (num_obj) {
+      const char *number = json_object_get_string(num_obj);
+      if (!number || !*number) {
+         clear_pending_delete();
+         return strdup("Error: 'number' must be a non-empty phone number.");
+      }
+      int match_count = phone_db_sms_log_count_by_number(user_id, number);
+      if (match_count < 0) {
+         clear_pending_delete();
+         return strdup("Error: database error counting SMS by number.");
+      }
+      if (match_count == 0) {
+         clear_pending_delete();
+         snprintf(buf, sizeof(buf), "No SMS records match number %s.", number);
+         return strdup(buf);
+      }
+
+      snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "sms");
+      s_pending_delete_id = -1;
+      snprintf(s_pending_delete_number, sizeof(s_pending_delete_number), "%s", number);
+      s_pending_delete_cutoff = 0;
+      s_pending_delete_count = match_count;
+      s_pending_delete_at = time(NULL);
+
+      snprintf(buf, sizeof(buf),
+               "About to delete %d SMS message(s) matching number %s. "
+               "Say 'confirm' to delete all %d.",
+               match_count, number, match_count);
+      return strdup(buf);
+   }
+
+   /* older_than_days */
+   int days = json_object_get_int(older_obj);
+   if (days <= 0) {
+      clear_pending_delete();
+      return strdup("Error: 'older_than_days' must be a positive integer.");
+   }
+   time_t cutoff = time(NULL) - (time_t)days * 86400;
+
+   int match_count = phone_db_sms_log_count_older_than(user_id, cutoff);
+   if (match_count < 0) {
+      clear_pending_delete();
+      return strdup("Error: database error counting older SMS.");
+   }
+   if (match_count == 0) {
+      clear_pending_delete();
+      snprintf(buf, sizeof(buf), "No SMS records older than %d days.", days);
+      return strdup(buf);
+   }
+
+   snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "sms");
+   s_pending_delete_id = -1;
+   s_pending_delete_number[0] = '\0';
+   s_pending_delete_cutoff = cutoff;
+   s_pending_delete_count = match_count;
+   s_pending_delete_at = time(NULL);
+
+   char cutoff_date[32];
+   format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
+   snprintf(buf, sizeof(buf),
+            "About to delete %d SMS record(s) older than %d days (before %s). "
+            "Say 'confirm' to delete.",
+            match_count, days, cutoff_date);
+   return strdup(buf);
+}
+
+/* Shared confirm logic for sms / call. Returns non-NULL error message if any
+ * precondition fails; caller proceeds to execute DELETE on NULL return. */
+static char *validate_pending_delete(const char *expected_kind) {
+   if (!s_pending_delete_kind[0])
+      return strdup("Error: no pending deletion to confirm.");
+   if (strcmp(s_pending_delete_kind, expected_kind) != 0) {
+      clear_pending_delete();
+      return strdup("Error: pending deletion is for a different record type.");
+   }
+   if (time(NULL) - s_pending_delete_at > PHONE_TOOL_PENDING_TTL_SEC) {
+      clear_pending_delete();
+      return strdup("Error: confirmation expired. Please retry the delete request.");
+   }
+   return NULL;
+}
+
+static char *handle_confirm_delete_sms(int user_id) {
+   char *err = validate_pending_delete("sms");
+   if (err)
+      return err;
+
+   if (!check_delete_rate_limit(user_id)) {
+      OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
+                   s_config.delete_rate_limit_per_hour);
+      clear_pending_delete();
+      return strdup("Error: too many deletions in the last hour. Try again later.");
+   }
+
+   char buf[256];
+   int deleted = 0;
+   int rc;
+
+   if (s_pending_delete_id >= 0) {
+      rc = phone_db_sms_log_delete(user_id, s_pending_delete_id);
+      if (rc == PHONE_DB_SUCCESS) {
+         deleted = 1;
+         OLOG_INFO("phone_tool: user=%d deleted sms id=%lld", user_id,
+                   (long long)s_pending_delete_id);
+         snprintf(buf, sizeof(buf), "Deleted 1 SMS record.");
+      } else if (rc == PHONE_DB_NOT_FOUND) {
+         snprintf(buf, sizeof(buf), "SMS record #%lld no longer exists.",
+                  (long long)s_pending_delete_id);
+      } else {
+         snprintf(buf, sizeof(buf), "Deletion failed: database error.");
+      }
+   } else if (s_pending_delete_number[0]) {
+      rc = phone_db_sms_log_delete_by_number(user_id, s_pending_delete_number, &deleted);
+      if (rc == PHONE_DB_SUCCESS) {
+         char redacted[32];
+         phone_number_redact(s_pending_delete_number, redacted, sizeof(redacted));
+         OLOG_INFO("phone_tool: user=%d deleted %d sms for number=%s", user_id, deleted, redacted);
+         snprintf(buf, sizeof(buf), "Deleted %d SMS record(s).", deleted);
+      } else {
+         snprintf(buf, sizeof(buf), "Deletion failed: database error.");
+      }
+   } else if (s_pending_delete_cutoff > 0) {
+      rc = phone_db_sms_log_delete_older_than(user_id, s_pending_delete_cutoff, &deleted);
+      if (rc == PHONE_DB_SUCCESS) {
+         OLOG_INFO("phone_tool: user=%d deleted %d sms older than %lld", user_id, deleted,
+                   (long long)s_pending_delete_cutoff);
+         snprintf(buf, sizeof(buf), "Deleted %d SMS record(s).", deleted);
+      } else {
+         snprintf(buf, sizeof(buf), "Deletion failed: database error.");
+      }
+   } else {
+      snprintf(buf, sizeof(buf), "Error: pending state is inconsistent.");
+   }
+
+   clear_pending_delete();
+   return strdup(buf);
+}
+
+static char *handle_delete_call(struct json_object *details, int user_id) {
+   if (!details)
+      return strdup("Error: delete_call requires one of {id, older_than_days}.");
+
+   struct json_object *id_obj = NULL;
+   struct json_object *older_obj = NULL;
+   json_object_object_get_ex(details, "id", &id_obj);
+   json_object_object_get_ex(details, "older_than_days", &older_obj);
+
+   int criteria_count = (id_obj ? 1 : 0) + (older_obj ? 1 : 0);
+   if (criteria_count != 1)
+      return strdup("Error: delete_call requires exactly one of {id, older_than_days}.");
+
+   char buf[768];
+
+   if (id_obj) {
+      int64_t id = (int64_t)json_object_get_int64(id_obj);
+
+      phone_call_log_t match;
+      int rc = phone_db_call_log_get_by_id(user_id, id, &match);
+      if (rc == PHONE_DB_NOT_FOUND) {
+         clear_pending_delete();
+         snprintf(buf, sizeof(buf), "Error: call record #%lld not found.", (long long)id);
+         return strdup(buf);
+      }
+      if (rc != PHONE_DB_SUCCESS) {
+         clear_pending_delete();
+         return strdup("Error: database error looking up call record.");
+      }
+
+      char date[32];
+      format_short_date(match.timestamp, date, sizeof(date));
+      const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
+      const char *name = match.contact_name[0] ? match.contact_name : match.number;
+
+      snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "call");
+      s_pending_delete_id = id;
+      s_pending_delete_cutoff = 0;
+      s_pending_delete_count = 1;
+      s_pending_delete_at = time(NULL);
+
+      snprintf(buf, sizeof(buf),
+               "About to delete call #%lld [%s %s, %s, %ds]. Say 'confirm' to delete.",
+               (long long)id, dir, name, date, match.duration_sec);
+      return strdup(buf);
+   }
+
+   /* older_than_days */
+   int days = json_object_get_int(older_obj);
+   if (days <= 0) {
+      clear_pending_delete();
+      return strdup("Error: 'older_than_days' must be a positive integer.");
+   }
+   time_t cutoff = time(NULL) - (time_t)days * 86400;
+   int match_count = phone_db_call_log_count_older_than(user_id, cutoff);
+   if (match_count < 0) {
+      clear_pending_delete();
+      return strdup("Error: database error counting older calls.");
+   }
+   if (match_count == 0) {
+      clear_pending_delete();
+      snprintf(buf, sizeof(buf), "No call records older than %d days.", days);
+      return strdup(buf);
+   }
+
+   snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "call");
+   s_pending_delete_id = -1;
+   s_pending_delete_cutoff = cutoff;
+   s_pending_delete_count = match_count;
+   s_pending_delete_at = time(NULL);
+
+   char cutoff_date[32];
+   format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
+   snprintf(buf, sizeof(buf),
+            "About to delete %d call record(s) older than %d days (before %s). "
+            "Say 'confirm' to delete.",
+            match_count, days, cutoff_date);
+   return strdup(buf);
+}
+
+static char *handle_confirm_delete_call(int user_id) {
+   char *err = validate_pending_delete("call");
+   if (err)
+      return err;
+
+   if (!check_delete_rate_limit(user_id)) {
+      OLOG_WARNING("phone_tool: user=%d delete rate-limited (>%d/hour)", user_id,
+                   s_config.delete_rate_limit_per_hour);
+      clear_pending_delete();
+      return strdup("Error: too many deletions in the last hour. Try again later.");
+   }
+
+   char buf[256];
+   int deleted = 0;
+   int rc;
+
+   if (s_pending_delete_id >= 0) {
+      rc = phone_db_call_log_delete(user_id, s_pending_delete_id);
+      if (rc == PHONE_DB_SUCCESS) {
+         deleted = 1;
+         OLOG_INFO("phone_tool: user=%d deleted call id=%lld", user_id,
+                   (long long)s_pending_delete_id);
+         snprintf(buf, sizeof(buf), "Deleted 1 call record.");
+      } else if (rc == PHONE_DB_NOT_FOUND) {
+         snprintf(buf, sizeof(buf), "Call record #%lld no longer exists.",
+                  (long long)s_pending_delete_id);
+      } else {
+         snprintf(buf, sizeof(buf), "Deletion failed: database error.");
+      }
+   } else if (s_pending_delete_cutoff > 0) {
+      rc = phone_db_call_log_delete_older_than(user_id, s_pending_delete_cutoff, &deleted);
+      if (rc == PHONE_DB_SUCCESS) {
+         OLOG_INFO("phone_tool: user=%d deleted %d calls older than %lld", user_id, deleted,
+                   (long long)s_pending_delete_cutoff);
+         snprintf(buf, sizeof(buf), "Deleted %d call record(s).", deleted);
+      } else {
+         snprintf(buf, sizeof(buf), "Deletion failed: database error.");
+      }
+   } else {
+      snprintf(buf, sizeof(buf), "Error: pending state is inconsistent.");
+   }
+
+   clear_pending_delete();
+   return strdup(buf);
 }
 
 static char *handle_call_log(struct json_object *details, int user_id) {
@@ -223,15 +748,23 @@ static char *handle_call_log(struct json_object *details, int user_id) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent calls (%d):\n", actual);
       for (int i = 0; i < actual && pos < RESULT_BUF_SIZE - 256; i++) {
          const char *dir = entries[i].direction == PHONE_DIR_INCOMING ? "Incoming" : "Outgoing";
-         const char *name = entries[i].contact_name[0] ? entries[i].contact_name
-                                                       : entries[i].number;
+         /* Show both name and number so the LLM can match either. */
+         char display[96];
+         if (entries[i].contact_name[0]) {
+            snprintf(display, sizeof(display), "%s (%s)", entries[i].contact_name,
+                     entries[i].number);
+         } else {
+            snprintf(display, sizeof(display), "%s", entries[i].number);
+         }
          const char *status_str[] = { "answered", "missed", "rejected", "failed" };
          const char *status = (entries[i].status >= 0 && entries[i].status <= 3)
                                   ? status_str[entries[i].status]
                                   : "unknown";
 
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%d. %s %s — %s (%ds)\n", i + 1, dir,
-                         name, status, entries[i].duration_sec);
+         /* Include DB id so the LLM can target delete_call {id: N}. */
+         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%d. [id=%lld] %s %s — %s (%ds)\n",
+                         i + 1, (long long)entries[i].id, dir, display, status,
+                         entries[i].duration_sec);
       }
    }
 
@@ -243,11 +776,12 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
    if (count < 1) {
       count = 10;
    }
-   if (count > 20) {
-      count = 20;
+   /* Capped at 10 resident rows to keep stack frame bounded after body[2048] bump. */
+   if (count > 10) {
+      count = 10;
    }
 
-   phone_sms_log_t entries[20];
+   phone_sms_log_t entries[10];
    int actual = phone_db_sms_log_recent(user_id, entries, count);
 
    char *buf = malloc(RESULT_BUF_SIZE);
@@ -262,8 +796,14 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
       pos += snprintf(buf, RESULT_BUF_SIZE, "Recent text messages (%d):\n", actual);
       for (int i = 0; i < actual && pos < RESULT_BUF_SIZE - 512; i++) {
          const char *dir = entries[i].direction == PHONE_DIR_INCOMING ? "From" : "To";
-         const char *name = entries[i].contact_name[0] ? entries[i].contact_name
-                                                       : entries[i].number;
+         /* Show both name and number so the LLM can match either. */
+         char display[96];
+         if (entries[i].contact_name[0]) {
+            snprintf(display, sizeof(display), "%s (%s)", entries[i].contact_name,
+                     entries[i].number);
+         } else {
+            snprintf(display, sizeof(display), "%s", entries[i].number);
+         }
 
          /* Truncate body for log display */
          char preview[200];
@@ -276,8 +816,9 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
             memcpy(preview, entries[i].body, blen + 1);
          }
 
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%d. %s: %s\n   %s\n", i + 1, dir,
-                         name, preview);
+         /* Include DB id so the LLM can target delete_sms {id: N}. */
+         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%d. [id=%lld] %s: %s\n   %s\n", i + 1,
+                         (long long)entries[i].id, dir, display, preview);
       }
    }
 
@@ -329,13 +870,22 @@ static char *phone_tool_callback(const char *action, char *value, int *should_re
       result = handle_call_log(details, user_id);
    } else if (strcmp(action, "sms_log") == 0) {
       result = handle_sms_log(details, user_id);
+   } else if (strcmp(action, "delete_sms") == 0) {
+      result = handle_delete_sms(details, user_id);
+   } else if (strcmp(action, "confirm_delete_sms") == 0) {
+      result = handle_confirm_delete_sms(user_id);
+   } else if (strcmp(action, "delete_call") == 0) {
+      result = handle_delete_call(details, user_id);
+   } else if (strcmp(action, "confirm_delete_call") == 0) {
+      result = handle_confirm_delete_call(user_id);
    } else if (strcmp(action, "status") == 0) {
       result = handle_status();
    } else {
-      char buf[256];
+      char buf[320];
       snprintf(buf, sizeof(buf),
                "Error: unknown action '%s'. Valid: call, confirm_call, answer, hang_up, "
-               "send_sms, confirm_sms, read_sms, call_log, sms_log, status",
+               "send_sms, confirm_sms, read_sms, call_log, sms_log, delete_sms, "
+               "confirm_delete_sms, delete_call, confirm_delete_call, status",
                action);
       result = strdup(buf);
    }
@@ -379,6 +929,14 @@ static void phone_tool_config_parse(toml_table_t *table, void *config) {
    toml_datum_t confirm = toml_bool_in(table, "confirm_outbound");
    if (confirm.ok)
       cfg->confirm_outbound = confirm.u.b;
+
+   toml_datum_t warn = toml_bool_in(table, "warn_on_multi_segment");
+   if (warn.ok)
+      cfg->warn_on_multi_segment = warn.u.b;
+
+   toml_datum_t dlim = toml_int_in(table, "delete_rate_limit_per_hour");
+   if (dlim.ok)
+      cfg->delete_rate_limit_per_hour = (int)dlim.u.i;
 }
 
 /* =============================================================================
@@ -397,13 +955,18 @@ static const treg_param_t phone_params[] = {
                       "'read_sms' (read unread text messages), "
                       "'call_log' (view recent call history), "
                       "'sms_log' (view recent text messages), "
+                      "'delete_sms' (preview an SMS deletion), "
+                      "'confirm_delete_sms' (confirm the pending SMS deletion), "
+                      "'delete_call' (preview a call-record deletion), "
+                      "'confirm_delete_call' (confirm the pending call deletion), "
                       "'status' (check phone/modem status)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "call", "confirm_call", "answer", "hang_up", "send_sms", "confirm_sms",
-                        "read_sms", "call_log", "sms_log", "status" },
-       .enum_count = 10,
+                        "read_sms", "call_log", "sms_log", "delete_sms", "confirm_delete_sms",
+                        "delete_call", "confirm_delete_call", "status" },
+       .enum_count = 14,
    },
    {
        .name = "details",
@@ -416,8 +979,17 @@ static const treg_param_t phone_params[] = {
            "send_sms {target, body} (target: number or contact name, body: message text), "
            "confirm_sms {} (sends confirmed SMS), "
            "read_sms {} (returns unread messages), "
-           "call_log {count?} (recent call history, default 10), "
-           "sms_log {count?} (recent text messages, default 10), "
+           "call_log {count?} (recent call history, default 10; entries show [id=N] for "
+           "use with delete_call), "
+           "sms_log {count?} (recent text messages, default 10; entries show [id=N] for "
+           "use with delete_sms), "
+           "delete_sms {id?, number?, older_than_days?} (exactly one; use the [id=N] "
+           "from sms_log/read_sms output; returns preview — call confirm_delete_sms "
+           "on the next turn when the user agrees), "
+           "confirm_delete_sms {} (confirms the pending SMS deletion; expires 120s after preview), "
+           "delete_call {id?, older_than_days?} (exactly one; returns preview — call "
+           "confirm_delete_call on the next turn), "
+           "confirm_delete_call {} (confirms the pending call deletion), "
            "status {} (phone and modem status)",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
@@ -440,6 +1012,13 @@ static const tool_metadata_t phone_metadata = {
        "Use 'send_sms' to compose a text message (reads back for confirmation). "
        "Use 'read_sms' to check unread text messages. "
        "Use 'call_log' or 'sms_log' to view recent history. "
+       "Use 'delete_sms' or 'delete_call' to remove records — these return a preview. "
+       "Call confirm_delete_sms/confirm_delete_call on the next turn if the user agrees. "
+       "Pending state expires after 120 seconds. "
+       "To delete multiple messages from one sender, use delete_sms with 'number' "
+       "(e.g. {number: '+16786432695'}) — it's one call that deletes them all. "
+       "Do NOT loop over individual ids; do NOT wrap deletes in execute_plan — "
+       "the phone tool is blocked inside plans on purpose. "
        "Use 'status' to check phone and modem status. "
        "Calls and SMS require confirmation before executing (say 'confirm' after review). "
        "The 'target' field can be a contact name (resolved via contacts) or a phone number.",

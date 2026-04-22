@@ -25,12 +25,101 @@
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "tools/phone_db.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
 #include "logging.h"
+
+/* =============================================================================
+ * Helper: normalize a phone number for DB matching
+ *
+ * LLMs emit phone numbers in many formats ("+1-555-123-4567", "(555) 123-4567",
+ * "1 555 123 4567"). Stored rows are E.164 without punctuation ("+15551234567").
+ * Strip whitespace/dashes/parens, keep digits and an optional leading '+',
+ * normalize a bare 10-digit US number to +1 prefix.
+ * ============================================================================= */
+
+void phone_number_format_for_tts(const char *in, char *out, size_t out_size) {
+   if (!out || out_size == 0)
+      return;
+   out[0] = '\0';
+   if (!in)
+      return;
+
+   size_t pos = 0;
+   for (const char *p = in; *p && pos + 2 < out_size; p++) {
+      if (isdigit((unsigned char)*p)) {
+         if (pos > 0)
+            out[pos++] = ' ';
+         out[pos++] = *p;
+      }
+   }
+   out[pos] = '\0';
+}
+
+void phone_number_redact(const char *in, char *out, size_t out_size) {
+   if (!out || out_size == 0)
+      return;
+   out[0] = '\0';
+   if (!in || !*in) {
+      snprintf(out, out_size, "(none)");
+      return;
+   }
+   size_t len = strlen(in);
+   if (len <= 4) {
+      snprintf(out, out_size, "%s", in);
+      return;
+   }
+   snprintf(out, out_size, "...%s", in + len - 4);
+}
+
+void phone_number_normalize(const char *in, char *out, size_t out_size) {
+   if (!out || out_size == 0)
+      return;
+   out[0] = '\0';
+   if (!in)
+      return;
+
+   char digits[32];
+   size_t di = 0;
+   int leading_plus = 0;
+
+   /* Skip leading whitespace */
+   while (*in == ' ' || *in == '\t')
+      in++;
+   if (*in == '+') {
+      leading_plus = 1;
+      in++;
+   }
+
+   /* Copy digits, ignore spaces/dashes/parens/dots */
+   while (*in && di < sizeof(digits) - 1) {
+      if (isdigit((unsigned char)*in))
+         digits[di++] = *in;
+      in++;
+   }
+   digits[di] = '\0';
+
+   /* Bare 10-digit US number → prefix +1. Bare 11-digit starting with 1 → +. */
+   if (!leading_plus) {
+      if (di == 10) {
+         snprintf(out, out_size, "+1%s", digits);
+         return;
+      }
+      if (di == 11 && digits[0] == '1') {
+         snprintf(out, out_size, "+%s", digits);
+         return;
+      }
+      /* Otherwise pass through as-is (no + prefix) for short codes etc. */
+      snprintf(out, out_size, "%s", digits);
+      return;
+   }
+
+   snprintf(out, out_size, "+%s", digits);
+}
 
 /* =============================================================================
  * Helper: safe string copy from SQLite column
@@ -245,9 +334,12 @@ int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max) {
 
    pthread_mutex_lock(&s_db.mutex);
 
+   /* Only unread INBOUND messages — outbound (things the user sent) is not
+    * something they need to "read" again. */
    const char *sql = "SELECT id, user_id, direction, number, contact_name, body, "
                      "timestamp, read FROM phone_sms_log "
-                     "WHERE user_id = ? AND read = 0 ORDER BY timestamp DESC LIMIT ?";
+                     "WHERE user_id = ? AND read = 0 AND direction = 1 "
+                     "ORDER BY timestamp DESC LIMIT ?";
 
    sqlite3_stmt *stmt;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -371,4 +463,339 @@ int phone_db_cleanup(int call_retention_days, int sms_retention_days) {
 
    pthread_mutex_unlock(&s_db.mutex);
    return result;
+}
+
+/* =============================================================================
+ * Delete operations (user-scoped, for the LLM deletion tool)
+ *
+ * These use the new PHONE_DB_SUCCESS/FAILURE/NOT_FOUND codes rather than the
+ * legacy 0/1/-1 convention used by insert/update/query. Migrating the older
+ * functions is tracked separately in docs/TODO.md.
+ * ============================================================================= */
+
+int phone_db_sms_log_delete(int user_id, int64_t id) {
+   if (!s_db.initialized)
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM phone_sms_log WHERE id = ? AND user_id = ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("phone_db: sms delete prepare failed: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, id);
+   sqlite3_bind_int(stmt, 2, user_id);
+
+   int result;
+   if (sqlite3_step(stmt) != SQLITE_DONE) {
+      OLOG_ERROR("phone_db: sms delete failed: %s", sqlite3_errmsg(s_db.db));
+      result = PHONE_DB_FAILURE;
+   } else {
+      result = (sqlite3_changes(s_db.db) > 0) ? PHONE_DB_SUCCESS : PHONE_DB_NOT_FOUND;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_sms_log_delete_by_number(int user_id, const char *number, int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!s_db.initialized || !number)
+      return PHONE_DB_FAILURE;
+
+   char normalized[32];
+   phone_number_normalize(number, normalized, sizeof(normalized));
+   if (normalized[0] == '\0')
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "DELETE FROM phone_sms_log WHERE user_id = ? AND number = ?", -1,
+                               &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("phone_db: sms delete_by_number prepare failed: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, normalized, -1, SQLITE_TRANSIENT);
+
+   int result;
+   if (sqlite3_step(stmt) != SQLITE_DONE) {
+      OLOG_ERROR("phone_db: sms delete_by_number failed: %s", sqlite3_errmsg(s_db.db));
+      result = PHONE_DB_FAILURE;
+   } else {
+      if (out_count)
+         *out_count = sqlite3_changes(s_db.db);
+      result = PHONE_DB_SUCCESS;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_sms_log_count_by_number(int user_id, const char *number) {
+   if (!s_db.initialized || !number)
+      return -1;
+
+   char normalized[32];
+   phone_number_normalize(number, normalized, sizeof(normalized));
+   if (normalized[0] == '\0')
+      return -1;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(
+       s_db.db, "SELECT COUNT(*) FROM phone_sms_log WHERE user_id = ? AND number = ?", -1, &stmt,
+       NULL);
+   if (rc != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return -1;
+   }
+
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, normalized, -1, SQLITE_TRANSIENT);
+
+   int count = -1;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      count = sqlite3_column_int(stmt, 0);
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return count;
+}
+
+int phone_db_call_log_delete(int user_id, int64_t id) {
+   if (!s_db.initialized)
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM phone_call_log WHERE id = ? AND user_id = ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("phone_db: call delete prepare failed: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, id);
+   sqlite3_bind_int(stmt, 2, user_id);
+
+   int result;
+   if (sqlite3_step(stmt) != SQLITE_DONE) {
+      OLOG_ERROR("phone_db: call delete failed: %s", sqlite3_errmsg(s_db.db));
+      result = PHONE_DB_FAILURE;
+   } else {
+      result = (sqlite3_changes(s_db.db) > 0) ? PHONE_DB_SUCCESS : PHONE_DB_NOT_FOUND;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_call_log_delete_older_than(int user_id, time_t cutoff, int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!s_db.initialized)
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "DELETE FROM phone_call_log WHERE user_id = ? AND timestamp < ?", -1,
+                               &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("phone_db: call delete_older_than prepare failed: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+
+   int result;
+   if (sqlite3_step(stmt) != SQLITE_DONE) {
+      OLOG_ERROR("phone_db: call delete_older_than failed: %s", sqlite3_errmsg(s_db.db));
+      result = PHONE_DB_FAILURE;
+   } else {
+      if (out_count)
+         *out_count = sqlite3_changes(s_db.db);
+      result = PHONE_DB_SUCCESS;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_sms_log_get_by_id(int user_id, int64_t id, phone_sms_log_t *out) {
+   if (!s_db.initialized || !out)
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT id, user_id, direction, number, contact_name, body, "
+                               "timestamp, read FROM phone_sms_log "
+                               "WHERE id = ? AND user_id = ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, id);
+   sqlite3_bind_int(stmt, 2, user_id);
+
+   int result;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      row_to_sms_log(stmt, out);
+      result = PHONE_DB_SUCCESS;
+   } else {
+      result = PHONE_DB_NOT_FOUND;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_sms_log_delete_older_than(int user_id, time_t cutoff, int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!s_db.initialized)
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "DELETE FROM phone_sms_log WHERE user_id = ? AND timestamp < ?", -1,
+                               &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("phone_db: sms delete_older_than prepare failed: %s", sqlite3_errmsg(s_db.db));
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+
+   int result;
+   if (sqlite3_step(stmt) != SQLITE_DONE) {
+      OLOG_ERROR("phone_db: sms delete_older_than failed: %s", sqlite3_errmsg(s_db.db));
+      result = PHONE_DB_FAILURE;
+   } else {
+      if (out_count)
+         *out_count = sqlite3_changes(s_db.db);
+      result = PHONE_DB_SUCCESS;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_sms_log_count_older_than(int user_id, time_t cutoff) {
+   if (!s_db.initialized)
+      return -1;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(
+       s_db.db, "SELECT COUNT(*) FROM phone_sms_log WHERE user_id = ? AND timestamp < ?", -1, &stmt,
+       NULL);
+   if (rc != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return -1;
+   }
+
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+
+   int count = -1;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      count = sqlite3_column_int(stmt, 0);
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return count;
+}
+
+int phone_db_call_log_get_by_id(int user_id, int64_t id, phone_call_log_t *out) {
+   if (!s_db.initialized || !out)
+      return PHONE_DB_FAILURE;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT id, user_id, direction, number, contact_name, "
+                               "duration_sec, timestamp, status FROM phone_call_log "
+                               "WHERE id = ? AND user_id = ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, id);
+   sqlite3_bind_int(stmt, 2, user_id);
+
+   int result;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      row_to_call_log(stmt, out);
+      result = PHONE_DB_SUCCESS;
+   } else {
+      result = PHONE_DB_NOT_FOUND;
+   }
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
+int phone_db_call_log_count_older_than(int user_id, time_t cutoff) {
+   if (!s_db.initialized)
+      return -1;
+
+   pthread_mutex_lock(&s_db.mutex);
+
+   sqlite3_stmt *stmt;
+   int rc = sqlite3_prepare_v2(
+       s_db.db, "SELECT COUNT(*) FROM phone_call_log WHERE user_id = ? AND timestamp < ?", -1,
+       &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return -1;
+   }
+
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+
+   int count = -1;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      count = sqlite3_column_int(stmt, 0);
+
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_db.mutex);
+   return count;
 }

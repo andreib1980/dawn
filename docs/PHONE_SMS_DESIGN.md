@@ -660,6 +660,27 @@ Improve contact resolution to support natural language references ("my daughter"
 
 ---
 
+## LLM Message Deletion — SHIPPED (April 2026)
+
+The original tech-debt gap (no way for the LLM to delete SMS/call records) is resolved.
+
+**Implementation**:
+
+- `phone_db.c` / `phone_db.h`: new `PHONE_DB_SUCCESS`/`FAILURE`/`NOT_FOUND` return codes, seven new functions — `phone_db_sms_log_delete`, `_delete_by_number`, `_count_by_number`, `phone_db_call_log_delete`, `_delete_older_than`, `_count_older_than` — plus a shared `phone_number_normalize()` helper so LLM-supplied formats (`"+1-555-..."`, `"(555) ..."`, bare 10-digit US) match stored E.164 rows. Every DELETE is `user_id`-scoped.
+- `phone_tool.c`: four new actions — `delete_sms`, `confirm_delete_sms`, `delete_call`, `confirm_delete_call`. Two-step confirmation with a **120-second TTL** on pending state plus a per-user delete rate limit (10/hour default). Matches the `send_sms`/`confirm_sms` and email-tool pattern — the LLM previews, the user says "confirm" on the next turn. TTL bounds replay windows; rate limit caps prompt-injection-coerced bulk deletes.
+- `phone_sms_log_t.body` widened from `[1024]` → `[2048]` so multi-segment inbound SMS (from the upcoming ECHO PDU work) doesn't truncate. Stack cost held constant by capping recent-query arrays at 10 entries (down from 20) in `handle_read_sms`/`handle_sms_log`.
+- SMS segment-hint added to the `send_sms` confirmation prompt — "This will send as N text messages" when the body exceeds one segment. Gated on `warn_on_multi_segment` config (default `true`).
+- Delete criteria in v1: `id`, `number`, or `older_than_days` — exactly one required. No by-contact-name (LLM pre-resolves). Bulk older-than-days is wired for the **call log** but not yet for SMS (follow-up).
+
+**Still open** — tracked in `docs/TODO.md`:
+- Back-port the 120s TTL to existing `send_sms`/`confirm_sms`.
+- Migrate all `phone_tool` pending state from globals to session-scoped.
+- Clean up `phone_db.c`'s legacy `-1` error returns across insert/update/query.
+- SMS bulk delete by `older_than_days`.
+- WebUI deletion parity (deferred — only build if a user asks).
+
+---
+
 ## Verification Checklist
 
 1. `oasis-echo` starts, opens `/dev/ttyUSB2`, runs init sequence

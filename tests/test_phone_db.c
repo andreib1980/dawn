@@ -214,6 +214,30 @@ static void test_sms_mark_read(void) {
    TEST_ASSERT(count2 < count, "fewer unread after mark");
 }
 
+static void test_sms_unread_excludes_outbound(void) {
+   printf("\n--- test_sms_unread_excludes_outbound ---\n");
+
+   time_t now = time(NULL);
+   /* Insert one inbound (read=0 by default) and one outbound (also read=0 but
+    * direction=OUTGOING). The unread query should only return the inbound. */
+   int user = 50;
+   int64_t in_id = phone_db_sms_log_insert(user, PHONE_DIR_INCOMING, "+15551112222", "In",
+                                           "incoming msg", now);
+   int64_t out_id = phone_db_sms_log_insert(user, PHONE_DIR_OUTGOING, "+15553334444", "Out",
+                                            "outgoing msg", now + 1);
+   (void)in_id;
+   (void)out_id;
+
+   phone_sms_log_t entries[10];
+   int count = phone_db_sms_get_unread(user, entries, 10);
+   TEST_ASSERT(count == 1, "only inbound shows as unread");
+   TEST_ASSERT(entries[0].direction == PHONE_DIR_INCOMING, "result is the inbound row");
+
+   /* Cleanup */
+   phone_db_sms_log_delete(user, in_id);
+   phone_db_sms_log_delete(user, out_id);
+}
+
 static void test_sms_log_recent(void) {
    printf("\n--- test_sms_log_recent ---\n");
 
@@ -287,6 +311,292 @@ static void test_null_params(void) {
 }
 
 /* ============================================================================
+ * Delete Tests (SMS + call, user-scoped, with normalization)
+ * ============================================================================ */
+
+static void test_sms_delete_by_id(void) {
+   printf("\n--- test_sms_delete_by_id ---\n");
+
+   time_t now = time(NULL);
+   int64_t id = phone_db_sms_log_insert(10, PHONE_DIR_INCOMING, "+15557778888", "Del1", "to delete",
+                                        now);
+   TEST_ASSERT(id >= 1, "insert returns id");
+
+   int rc = phone_db_sms_log_delete(10, id);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "delete existing row returns SUCCESS");
+
+   rc = phone_db_sms_log_delete(10, id);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "delete missing row returns NOT_FOUND");
+}
+
+static void test_sms_delete_user_isolation(void) {
+   printf("\n--- test_sms_delete_user_isolation ---\n");
+
+   time_t now = time(NULL);
+   int64_t id = phone_db_sms_log_insert(11, PHONE_DIR_INCOMING, "+15557776666", "Iso", "isolated",
+                                        now);
+
+   /* Wrong user cannot delete */
+   int rc = phone_db_sms_log_delete(12, id);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "other user gets NOT_FOUND");
+
+   /* Row still exists */
+   phone_sms_log_t entries[10];
+   int count = phone_db_sms_log_recent(11, entries, 10);
+   int found = 0;
+   for (int i = 0; i < count; i++)
+      if (entries[i].id == id) {
+         found = 1;
+         break;
+      }
+   TEST_ASSERT(found, "row still present after wrong-user delete attempt");
+
+   /* Cleanup */
+   phone_db_sms_log_delete(11, id);
+}
+
+static void test_sms_delete_by_number(void) {
+   printf("\n--- test_sms_delete_by_number ---\n");
+
+   time_t now = time(NULL);
+   phone_db_sms_log_insert(13, PHONE_DIR_INCOMING, "+15551112222", "Spam", "one", now);
+   phone_db_sms_log_insert(13, PHONE_DIR_OUTGOING, "+15551112222", "Spam", "two", now + 1);
+   phone_db_sms_log_insert(13, PHONE_DIR_INCOMING, "+15551112222", "Spam", "three", now + 2);
+   /* One from a different number shouldn't be touched */
+   phone_db_sms_log_insert(13, PHONE_DIR_INCOMING, "+15559990000", "Other", "keep", now + 3);
+
+   int count = phone_db_sms_log_count_by_number(13, "+15551112222");
+   TEST_ASSERT(count == 3, "count_by_number returns 3");
+
+   int deleted = -1;
+   int rc = phone_db_sms_log_delete_by_number(13, "+15551112222", &deleted);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "delete_by_number returns SUCCESS");
+   TEST_ASSERT(deleted == 3, "delete_by_number reports 3 deleted");
+
+   /* The other-number row must still be there */
+   phone_sms_log_t entries[10];
+   int remaining = phone_db_sms_log_recent(13, entries, 10);
+   TEST_ASSERT(remaining == 1, "unrelated row preserved");
+   TEST_ASSERT(strcmp(entries[0].number, "+15559990000") == 0, "right row preserved");
+
+   /* Deleting again returns 0 count */
+   deleted = -1;
+   rc = phone_db_sms_log_delete_by_number(13, "+15551112222", &deleted);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "second delete still SUCCESS");
+   TEST_ASSERT(deleted == 0, "second delete reports 0 deleted");
+}
+
+static void test_sms_delete_number_normalization(void) {
+   printf("\n--- test_sms_delete_number_normalization ---\n");
+
+   /* Row stored in E.164 */
+   phone_db_sms_log_insert(14, PHONE_DIR_INCOMING, "+15553334444", "Norm", "formatted", time(NULL));
+
+   /* LLM might send in many ways — all should match */
+   int count = phone_db_sms_log_count_by_number(14, "+1-555-333-4444");
+   TEST_ASSERT(count == 1, "dashes normalize");
+
+   count = phone_db_sms_log_count_by_number(14, "(555) 333-4444");
+   TEST_ASSERT(count == 1, "parens + spaces normalize to +1");
+
+   count = phone_db_sms_log_count_by_number(14, "5553334444");
+   TEST_ASSERT(count == 1, "bare 10-digit US number normalizes to +1");
+
+   count = phone_db_sms_log_count_by_number(14, "15553334444");
+   TEST_ASSERT(count == 1, "bare 11-digit with leading 1 normalizes");
+
+   /* Cleanup */
+   int deleted = 0;
+   phone_db_sms_log_delete_by_number(14, "+15553334444", &deleted);
+   TEST_ASSERT(deleted == 1, "cleanup delete succeeded");
+}
+
+static void test_call_delete_by_id(void) {
+   printf("\n--- test_call_delete_by_id ---\n");
+
+   time_t now = time(NULL);
+   int64_t id = phone_db_call_log_insert(15, PHONE_DIR_OUTGOING, "+15550000001", "X", 60, now,
+                                         PHONE_CALL_ANSWERED);
+   TEST_ASSERT(id >= 1, "call insert returns id");
+
+   int rc = phone_db_call_log_delete(15, id);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "delete existing call returns SUCCESS");
+
+   rc = phone_db_call_log_delete(15, id);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "delete missing call returns NOT_FOUND");
+
+   /* Wrong-user isolation */
+   int64_t id2 = phone_db_call_log_insert(15, PHONE_DIR_INCOMING, "+15550000002", "Y", 30, now,
+                                          PHONE_CALL_ANSWERED);
+   rc = phone_db_call_log_delete(16, id2);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "wrong user cannot delete");
+   rc = phone_db_call_log_delete(15, id2);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "correct user deletes it");
+}
+
+static void test_sms_get_by_id(void) {
+   printf("\n--- test_sms_get_by_id ---\n");
+
+   time_t now = time(NULL);
+   int64_t id = phone_db_sms_log_insert(20, PHONE_DIR_INCOMING, "+15554445555", "Byid",
+                                        "by id preview", now);
+   TEST_ASSERT(id >= 1, "insert returns id");
+
+   phone_sms_log_t out;
+   int rc = phone_db_sms_log_get_by_id(20, id, &out);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "get_by_id existing returns SUCCESS");
+   TEST_ASSERT(out.id == id, "row id matches");
+   TEST_ASSERT(strcmp(out.body, "by id preview") == 0, "body matches");
+
+   /* Wrong user */
+   rc = phone_db_sms_log_get_by_id(21, id, &out);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "wrong user → NOT_FOUND");
+
+   /* Missing id */
+   rc = phone_db_sms_log_get_by_id(20, 999999, &out);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "missing id → NOT_FOUND");
+
+   phone_db_sms_log_delete(20, id);
+}
+
+static void test_call_get_by_id(void) {
+   printf("\n--- test_call_get_by_id ---\n");
+
+   time_t now = time(NULL);
+   int64_t id = phone_db_call_log_insert(22, PHONE_DIR_OUTGOING, "+15556667777", "Byid", 60, now,
+                                         PHONE_CALL_ANSWERED);
+
+   phone_call_log_t out;
+   int rc = phone_db_call_log_get_by_id(22, id, &out);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "call get_by_id returns SUCCESS");
+   TEST_ASSERT(out.duration_sec == 60, "duration matches");
+
+   rc = phone_db_call_log_get_by_id(23, id, &out);
+   TEST_ASSERT(rc == PHONE_DB_NOT_FOUND, "wrong user → NOT_FOUND");
+
+   phone_db_call_log_delete(22, id);
+}
+
+static void test_sms_delete_older_than(void) {
+   printf("\n--- test_sms_delete_older_than ---\n");
+
+   time_t now = time(NULL);
+   time_t old_time = now - (45 * 86400);
+   time_t fresh_time = now - (5 * 86400);
+
+   phone_db_sms_log_insert(24, PHONE_DIR_INCOMING, "+15550000001", "Old1", "old 1", old_time);
+   phone_db_sms_log_insert(24, PHONE_DIR_INCOMING, "+15550000002", "Old2", "old 2", old_time + 100);
+   phone_db_sms_log_insert(24, PHONE_DIR_INCOMING, "+15550000003", "Fresh", "fresh", fresh_time);
+
+   time_t cutoff = now - (30 * 86400);
+   int count = phone_db_sms_log_count_older_than(24, cutoff);
+   TEST_ASSERT(count == 2, "count_older_than returns 2");
+
+   int deleted = -1;
+   int rc = phone_db_sms_log_delete_older_than(24, cutoff, &deleted);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "delete_older_than SUCCESS");
+   TEST_ASSERT(deleted == 2, "deleted exactly 2 old SMS");
+
+   phone_sms_log_t remaining[10];
+   int rem = phone_db_sms_log_recent(24, remaining, 10);
+   TEST_ASSERT(rem == 1, "fresh SMS preserved");
+}
+
+static void test_phone_number_normalize(void) {
+   printf("\n--- test_phone_number_normalize ---\n");
+
+   char out[32];
+
+   phone_number_normalize("+15551234567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "+15551234567") == 0, "canonical passes through");
+
+   phone_number_normalize("+1 (555) 123-4567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "+15551234567") == 0, "punctuation stripped");
+
+   phone_number_normalize("5551234567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "+15551234567") == 0, "bare 10-digit gets +1");
+
+   phone_number_normalize("15551234567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "+15551234567") == 0, "bare 11-digit leading 1 gets +");
+
+   phone_number_normalize(NULL, out, sizeof(out));
+   TEST_ASSERT(out[0] == '\0', "NULL input → empty out");
+
+   /* Normalization is idempotent — critical for ingestion + delete consistency */
+   phone_number_normalize("+1-555-123-4567", out, sizeof(out));
+   char out2[32];
+   phone_number_normalize(out, out2, sizeof(out2));
+   TEST_ASSERT(strcmp(out, out2) == 0, "normalize is idempotent");
+
+   /* Garbage / non-digit input produces empty — caller must fallback */
+   phone_number_normalize("abc-def-ghij", out, sizeof(out));
+   TEST_ASSERT(out[0] == '\0', "pure-alpha input produces empty");
+
+   /* Overlong digit run truncates cleanly without crashing */
+   phone_number_normalize("+123456789012345678901234567890", out, sizeof(out));
+   TEST_ASSERT(out[0] == '+', "overlong digit input starts with +");
+   TEST_ASSERT(strlen(out) < sizeof(out), "overlong digit input bounded");
+
+   /* Short code (emergency / SMS shortcode) passes through bare */
+   phone_number_normalize("911", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "911") == 0, "short code preserved");
+
+   /* Redaction */
+   phone_number_redact("+15551234567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "...4567") == 0, "redact keeps last 4");
+
+   phone_number_redact(NULL, out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "(none)") == 0, "redact NULL → (none)");
+
+   phone_number_redact("911", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "911") == 0, "redact short code passes through");
+
+   /* TTS formatter: digits space-separated so Piper pronounces each individually */
+   phone_number_format_for_tts("+15551234567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "1 5 5 5 1 2 3 4 5 6 7") == 0, "TTS format spaces digits");
+
+   phone_number_format_for_tts("(555) 123-4567", out, sizeof(out));
+   TEST_ASSERT(strcmp(out, "5 5 5 1 2 3 4 5 6 7") == 0, "TTS format strips punctuation");
+
+   phone_number_format_for_tts("ABC-GARBAGE", out, sizeof(out));
+   TEST_ASSERT(out[0] == '\0', "TTS format of all-alpha → empty");
+
+   phone_number_format_for_tts(NULL, out, sizeof(out));
+   TEST_ASSERT(out[0] == '\0', "TTS format NULL → empty");
+}
+
+static void test_call_delete_older_than(void) {
+   printf("\n--- test_call_delete_older_than ---\n");
+
+   time_t now = time(NULL);
+   time_t old_time = now - (60 * 86400);  /* 60 days ago */
+   time_t fresh_time = now - (5 * 86400); /* 5 days ago */
+
+   phone_db_call_log_insert(17, PHONE_DIR_OUTGOING, "+15551000001", "Old1", 30, old_time,
+                            PHONE_CALL_ANSWERED);
+   phone_db_call_log_insert(17, PHONE_DIR_OUTGOING, "+15551000002", "Old2", 40, old_time + 100,
+                            PHONE_CALL_ANSWERED);
+   phone_db_call_log_insert(17, PHONE_DIR_OUTGOING, "+15551000003", "Fresh", 50, fresh_time,
+                            PHONE_CALL_ANSWERED);
+
+   /* Cutoff at 30 days → expect 2 deleted */
+   time_t cutoff = now - (30 * 86400);
+   int count = phone_db_call_log_count_older_than(17, cutoff);
+   TEST_ASSERT(count == 2, "count_older_than returns 2");
+
+   int deleted = -1;
+   int rc = phone_db_call_log_delete_older_than(17, cutoff, &deleted);
+   TEST_ASSERT(rc == PHONE_DB_SUCCESS, "delete_older_than SUCCESS");
+   TEST_ASSERT(deleted == 2, "deleted exactly 2 old calls");
+
+   /* Fresh one still there */
+   phone_call_log_t remaining[10];
+   int rem = phone_db_call_log_recent(17, remaining, 10);
+   TEST_ASSERT(rem == 1, "fresh call preserved");
+   TEST_ASSERT(strcmp(remaining[0].contact_name, "Fresh") == 0, "right call preserved");
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -305,6 +615,7 @@ int main(void) {
    test_sms_log_insert();
    test_sms_get_unread();
    test_sms_mark_read();
+   test_sms_unread_excludes_outbound();
    test_sms_log_recent();
    test_sms_user_isolation();
 
@@ -313,6 +624,18 @@ int main(void) {
 
    /* Edge cases */
    test_null_params();
+
+   /* Delete operations (new for SMS deletion feature) */
+   test_sms_delete_by_id();
+   test_sms_delete_user_isolation();
+   test_sms_delete_by_number();
+   test_sms_delete_number_normalization();
+   test_phone_number_normalize();
+   test_sms_get_by_id();
+   test_sms_delete_older_than();
+   test_call_get_by_id();
+   test_call_delete_by_id();
+   test_call_delete_older_than();
 
    teardown_db();
 

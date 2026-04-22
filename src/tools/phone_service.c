@@ -155,20 +155,22 @@ static int resolve_number(int user_id,
       return 1;
    }
 
-   /* If it looks like a number already, validate and use directly */
+   /* If it looks like a number already, validate and normalize */
    if (input[0] == '+' || (input[0] >= '0' && input[0] <= '9')) {
       size_t len = strlen(input);
       if (len < 3 || len > 20) {
          return 1;
       }
-      /* Validate: only digits, +, -, spaces allowed */
+      /* Validate: only digits, +, -, spaces, parens, dots allowed */
       for (size_t i = 0; i < len; i++) {
          char c = input[i];
-         if (c != '+' && c != '-' && c != ' ' && !(c >= '0' && c <= '9')) {
+         if (c != '+' && c != '-' && c != ' ' && c != '(' && c != ')' && c != '.' &&
+             !(c >= '0' && c <= '9')) {
             return 1;
          }
       }
-      snprintf(number_out, number_size, "%s", input);
+      /* Normalize so DB rows use canonical E.164 — matches delete-by-number later. */
+      phone_number_normalize(input, number_out, number_size);
       name_out[0] = '\0';
       return 0;
    }
@@ -180,7 +182,8 @@ static int resolve_number(int user_id,
       return 1; /* no contact found */
    }
 
-   snprintf(number_out, number_size, "%s", results[0].value);
+   /* Normalize stored contact value in case it was entered with punctuation. */
+   phone_number_normalize(results[0].value, number_out, number_size);
    snprintf(name_out, name_size, "%s", results[0].entity_name);
    return 0;
 }
@@ -493,9 +496,19 @@ void phone_service_handle_event(const char *payload, int payload_len) {
    /* --- incoming_call --- */
    if (strcmp(event, "incoming_call") == 0) {
       struct json_object *j_num;
-      const char *number = "";
+      const char *raw_number = "";
       if (json_object_object_get_ex(root, "number", &j_num)) {
-         number = json_object_get_string(j_num);
+         raw_number = json_object_get_string(j_num);
+      }
+
+      /* Normalize so stored format is canonical E.164 — matches delete-by-number.
+       * If normalize strips everything (pure-garbage input), fall back to a bounded
+       * copy of the raw so we don't store empty rows that collide on by-number
+       * queries and lose forensic signal. */
+      char number[24];
+      phone_number_normalize(raw_number, number, sizeof(number));
+      if (number[0] == '\0' && raw_number[0] != '\0') {
+         snprintf(number, sizeof(number), "%s", raw_number);
       }
 
       /* Reverse lookup */
@@ -518,7 +531,9 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       if (contact_name[0]) {
          snprintf(announce, sizeof(announce), "Incoming call from %s", contact_name);
       } else if (number[0]) {
-         snprintf(announce, sizeof(announce), "Incoming call from %s", number);
+         char spoken[128];
+         phone_number_format_for_tts(number, spoken, sizeof(spoken));
+         snprintf(announce, sizeof(announce), "Incoming call from %s", spoken);
       } else {
          snprintf(announce, sizeof(announce), "Incoming call from unknown number");
       }
@@ -544,8 +559,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       }
       publish_hud("incoming_call", hud);
 
-      OLOG_INFO("phone_service: incoming call from %s (%s)", number,
-                contact_name[0] ? contact_name : "unknown");
+      {
+         char redacted[32];
+         phone_number_redact(number, redacted, sizeof(redacted));
+         OLOG_INFO("phone_service: incoming call from %s (%s)", redacted,
+                   contact_name[0] ? contact_name : "unknown");
+      }
    }
 
    /* --- ring (subsequent rings while ringing) --- */
@@ -654,12 +673,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
    /* --- sms_received --- */
    else if (strcmp(event, "sms_received") == 0) {
       struct json_object *j_sender, *j_body, *j_index;
-      const char *sender = "";
+      const char *raw_sender = "";
       const char *body = "";
       int sms_index = -1;
 
       if (json_object_object_get_ex(root, "sender", &j_sender)) {
-         sender = json_object_get_string(j_sender);
+         raw_sender = json_object_get_string(j_sender);
       }
       if (json_object_object_get_ex(root, "body", &j_body)) {
          const char *tmp_body = json_object_get_string(j_body);
@@ -669,6 +688,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       }
       if (json_object_object_get_ex(root, "index", &j_index)) {
          sms_index = json_object_get_int(j_index);
+      }
+
+      /* Normalize sender to canonical E.164 — matches delete-by-number later
+       * even if ECHO or a different carrier path ever delivers punctuation.
+       * Fall back to raw if normalize produces empty so we don't lose signal. */
+      char sender[24];
+      phone_number_normalize(raw_sender, sender, sizeof(sender));
+      if (sender[0] == '\0' && raw_sender[0] != '\0') {
+         snprintf(sender, sizeof(sender), "%s", raw_sender);
       }
 
       /* Reverse lookup sender */
@@ -688,7 +716,14 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       if (contact_name[0]) {
          snprintf(announce, sizeof(announce), "New text message from %s", contact_name);
       } else if (sender[0]) {
-         snprintf(announce, sizeof(announce), "New text message from %s", sender);
+         char spoken[128];
+         phone_number_format_for_tts(sender, spoken, sizeof(spoken));
+         if (spoken[0]) {
+            snprintf(announce, sizeof(announce), "New text message from %s", spoken);
+         } else {
+            /* Sender has no digits at all (e.g., "ABC-GARBAGE") — don't read it. */
+            snprintf(announce, sizeof(announce), "New text message received");
+         }
       } else {
          snprintf(announce, sizeof(announce), "New text message received");
       }
@@ -728,8 +763,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          inject_local_context(ctx);
       }
 
-      OLOG_INFO("phone_service: SMS from %s (%s): %zu bytes", sender,
-                contact_name[0] ? contact_name : "unknown", body_len);
+      {
+         char redacted[32];
+         phone_number_redact(sender, redacted, sizeof(redacted));
+         OLOG_INFO("phone_service: SMS from %s (%s): %zu bytes", redacted,
+                   contact_name[0] ? contact_name : "unknown", body_len);
+      }
 
       /* Delete from SIM after all processing (fire-and-forget — SMS is already in DB) */
       if (sms_id >= 0 && sms_index >= 0) {
