@@ -26,6 +26,7 @@
 #include "tools/phone_tool.h"
 
 #include <json-c/json.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,12 +62,18 @@ static phone_tool_config_t s_config = {
    .delete_rate_limit_per_hour = 10,
 };
 
-/* Delete rate-limit sliding-window timestamps.
+/* Global mutex protecting all mutable phone_tool state.
  *
- * Guards against prompt-injection-coerced confirm_delete_* chains — the nonce
- * (shown in preview) can appear in LLM context if the attacker owns part of
- * the turn, so a hard cap on confirm frequency is defense in depth. Scoped
- * per-user_id, but in practice single-user deployments just see one bucket. */
+ * Tool callbacks can run concurrently across WebUI worker threads — adding
+ * "phone" to SEQUENTIAL_TOOLS only serializes within a single tool-call
+ * batch from one session, not across sessions. This lock guards:
+ *   - s_pending_call_number / s_pending_sms_* / s_pending_delete_*
+ *   - s_delete_buckets[]
+ * Critical sections are short (string copies, timestamp records) so a
+ * single coarse-grained mutex is appropriate. */
+static pthread_mutex_t s_phone_tool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Delete rate-limit sliding-window timestamps. Scoped per-user_id. */
 #define DELETE_BUCKET_SIZE 16
 
 typedef struct {
@@ -80,10 +87,12 @@ typedef struct {
 static delete_bucket_t s_delete_buckets[DELETE_BUCKETS];
 
 /* Returns true if the delete is allowed, false if rate-limited. Records the
- * timestamp on success. */
+ * timestamp on success. Takes s_phone_tool_mutex for the duration. */
 static bool check_delete_rate_limit(int user_id) {
    if (s_config.delete_rate_limit_per_hour <= 0)
       return true; /* disabled */
+
+   pthread_mutex_lock(&s_phone_tool_mutex);
 
    time_t now = time(NULL);
    time_t cutoff = now - 3600;
@@ -130,12 +139,15 @@ static bool check_delete_rate_limit(int user_id) {
       if (bucket->timestamps[i] >= cutoff)
          active++;
    }
-   if (active >= s_config.delete_rate_limit_per_hour)
+   if (active >= s_config.delete_rate_limit_per_hour) {
+      pthread_mutex_unlock(&s_phone_tool_mutex);
       return false;
+   }
 
    unsigned int idx = bucket->count % DELETE_BUCKET_SIZE;
    bucket->timestamps[idx] = now;
    bucket->count++;
+   pthread_mutex_unlock(&s_phone_tool_mutex);
    return true;
 }
 
@@ -153,20 +165,37 @@ static char s_pending_sms_body[1024] = "";
 #define PHONE_TOOL_PENDING_TTL_SEC 120
 
 static char s_pending_delete_kind[16] = "";   /* "sms" or "call" */
+static int s_pending_delete_user_id = -1;     /* user that armed it */
 static int64_t s_pending_delete_id = -1;      /* used if criteria=by-id */
 static char s_pending_delete_number[24] = ""; /* used if criteria=by-number */
 static time_t s_pending_delete_cutoff = 0;    /* used if criteria=older-than */
 static int s_pending_delete_count = 0;        /* preview count shown to user */
 static time_t s_pending_delete_at = 0;        /* arm time for TTL */
 
-static void clear_pending_delete(void) {
+/* Caller must hold s_phone_tool_mutex. */
+static void clear_pending_delete_locked(void) {
    s_pending_delete_kind[0] = '\0';
+   s_pending_delete_user_id = -1;
    s_pending_delete_id = -1;
    s_pending_delete_number[0] = '\0';
    s_pending_delete_cutoff = 0;
    s_pending_delete_count = 0;
    s_pending_delete_at = 0;
 }
+
+static void clear_pending_delete(void) {
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   clear_pending_delete_locked();
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+}
+
+/* Forward decl — used in the delete-preview handlers before the definition. */
+static void arm_pending_delete(int user_id,
+                               const char *kind,
+                               int64_t id,
+                               const char *number,
+                               time_t cutoff,
+                               int preview_count);
 
 /* =============================================================================
  * JSON Helpers
@@ -204,7 +233,9 @@ static int estimate_sms_segments(const char *body) {
 
    bool is_ucs2 = false;
    size_t char_count = 0;
-   for (const unsigned char *p = (const unsigned char *)body; *p;) {
+   const unsigned char *p = (const unsigned char *)body;
+   const unsigned char *end = p + strlen(body);
+   while (p < end) {
       if (*p < 0x80) {
          p++;
          char_count++;
@@ -213,19 +244,30 @@ static int estimate_sms_segments(const char *body) {
          /* UTF-8 multi-byte sequence — advance by length. UCS2 segment limits
           * are in UTF-16 code units, so a 4-byte UTF-8 (non-BMP, e.g. emoji)
           * costs 2 code units (surrogate pair). 2- and 3-byte sequences fit
-          * in one UTF-16 code unit. */
+          * in one UTF-16 code unit. Bounded so truncated/malformed UTF-8
+          * can't read past end. */
+         int n;
+         size_t units;
          if ((*p & 0xE0) == 0xC0) {
-            p += 2;
-            char_count++;
+            n = 2;
+            units = 1;
          } else if ((*p & 0xF0) == 0xE0) {
-            p += 3;
-            char_count++;
+            n = 3;
+            units = 1;
          } else if ((*p & 0xF8) == 0xF0) {
-            p += 4;
-            char_count += 2;
+            n = 4;
+            units = 2;
          } else {
+            n = 1;
+            units = 1;
+         }
+         if (p + n > end) {
+            /* Truncated sequence — advance one byte, treat as single unit. */
             p++;
             char_count++;
+         } else {
+            p += n;
+            char_count += units;
          }
       }
    }
@@ -447,12 +489,7 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
       const char *name = match.contact_name[0] ? match.contact_name : match.number;
 
-      snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "sms");
-      s_pending_delete_id = id;
-      s_pending_delete_number[0] = '\0';
-      s_pending_delete_cutoff = 0;
-      s_pending_delete_count = 1;
-      s_pending_delete_at = time(NULL);
+      arm_pending_delete(user_id, "sms", id, NULL, 0, 1);
 
       snprintf(buf, sizeof(buf),
                "About to delete SMS #%lld [%s %s, %s]: \"%s\". Say 'confirm' to delete.",
@@ -466,8 +503,8 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
          clear_pending_delete();
          return strdup("Error: 'number' must be a non-empty phone number.");
       }
-      int match_count = phone_db_sms_log_count_by_number(user_id, number);
-      if (match_count < 0) {
+      int match_count = 0;
+      if (phone_db_sms_log_count_by_number(user_id, number, &match_count) != PHONE_DB_SUCCESS) {
          clear_pending_delete();
          return strdup("Error: database error counting SMS by number.");
       }
@@ -477,12 +514,7 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
          return strdup(buf);
       }
 
-      snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "sms");
-      s_pending_delete_id = -1;
-      snprintf(s_pending_delete_number, sizeof(s_pending_delete_number), "%s", number);
-      s_pending_delete_cutoff = 0;
-      s_pending_delete_count = match_count;
-      s_pending_delete_at = time(NULL);
+      arm_pending_delete(user_id, "sms", -1, number, 0, match_count);
 
       snprintf(buf, sizeof(buf),
                "About to delete %d SMS message(s) matching number %s. "
@@ -499,8 +531,8 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
    }
    time_t cutoff = time(NULL) - (time_t)days * 86400;
 
-   int match_count = phone_db_sms_log_count_older_than(user_id, cutoff);
-   if (match_count < 0) {
+   int match_count = 0;
+   if (phone_db_sms_log_count_older_than(user_id, cutoff, &match_count) != PHONE_DB_SUCCESS) {
       clear_pending_delete();
       return strdup("Error: database error counting older SMS.");
    }
@@ -510,12 +542,7 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
       return strdup(buf);
    }
 
-   snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "sms");
-   s_pending_delete_id = -1;
-   s_pending_delete_number[0] = '\0';
-   s_pending_delete_cutoff = cutoff;
-   s_pending_delete_count = match_count;
-   s_pending_delete_at = time(NULL);
+   arm_pending_delete(user_id, "sms", -1, NULL, cutoff, match_count);
 
    char cutoff_date[32];
    format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
@@ -526,24 +553,61 @@ static char *handle_delete_sms(struct json_object *details, int user_id) {
    return strdup(buf);
 }
 
+/* Arm pending deletion for the given user. Takes the mutex for the assignment
+ * so an in-flight confirm sees a consistent snapshot. */
+static void arm_pending_delete(int user_id,
+                               const char *kind,
+                               int64_t id,
+                               const char *number,
+                               time_t cutoff,
+                               int preview_count) {
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "%s", kind);
+   s_pending_delete_user_id = user_id;
+   s_pending_delete_id = id;
+   if (number) {
+      snprintf(s_pending_delete_number, sizeof(s_pending_delete_number), "%s", number);
+   } else {
+      s_pending_delete_number[0] = '\0';
+   }
+   s_pending_delete_cutoff = cutoff;
+   s_pending_delete_count = preview_count;
+   s_pending_delete_at = time(NULL);
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+}
+
 /* Shared confirm logic for sms / call. Returns non-NULL error message if any
- * precondition fails; caller proceeds to execute DELETE on NULL return. */
-static char *validate_pending_delete(const char *expected_kind) {
-   if (!s_pending_delete_kind[0])
+ * precondition fails; caller proceeds to execute DELETE on NULL return.
+ * Validates that the confirming user matches the user that armed pending —
+ * defense against cross-session state corruption. */
+static char *validate_pending_delete(const char *expected_kind, int user_id) {
+   pthread_mutex_lock(&s_phone_tool_mutex);
+
+   if (!s_pending_delete_kind[0]) {
+      pthread_mutex_unlock(&s_phone_tool_mutex);
       return strdup("Error: no pending deletion to confirm.");
+   }
+   if (s_pending_delete_user_id != user_id) {
+      /* Don't clear — another user's pending; leave it alone. */
+      pthread_mutex_unlock(&s_phone_tool_mutex);
+      return strdup("Error: no pending deletion to confirm.");
+   }
    if (strcmp(s_pending_delete_kind, expected_kind) != 0) {
-      clear_pending_delete();
+      clear_pending_delete_locked();
+      pthread_mutex_unlock(&s_phone_tool_mutex);
       return strdup("Error: pending deletion is for a different record type.");
    }
    if (time(NULL) - s_pending_delete_at > PHONE_TOOL_PENDING_TTL_SEC) {
-      clear_pending_delete();
+      clear_pending_delete_locked();
+      pthread_mutex_unlock(&s_phone_tool_mutex);
       return strdup("Error: confirmation expired. Please retry the delete request.");
    }
+   pthread_mutex_unlock(&s_phone_tool_mutex);
    return NULL;
 }
 
 static char *handle_confirm_delete_sms(int user_id) {
-   char *err = validate_pending_delete("sms");
+   char *err = validate_pending_delete("sms", user_id);
    if (err)
       return err;
 
@@ -554,38 +618,47 @@ static char *handle_confirm_delete_sms(int user_id) {
       return strdup("Error: too many deletions in the last hour. Try again later.");
    }
 
+   /* Snapshot pending state under the mutex so a concurrent arm can't alter
+    * the criteria mid-execute. */
+   int64_t snap_id;
+   char snap_number[24];
+   time_t snap_cutoff;
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   snap_id = s_pending_delete_id;
+   snprintf(snap_number, sizeof(snap_number), "%s", s_pending_delete_number);
+   snap_cutoff = s_pending_delete_cutoff;
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+
    char buf[256];
    int deleted = 0;
    int rc;
 
-   if (s_pending_delete_id >= 0) {
-      rc = phone_db_sms_log_delete(user_id, s_pending_delete_id);
+   if (snap_id >= 0) {
+      rc = phone_db_sms_log_delete(user_id, snap_id);
       if (rc == PHONE_DB_SUCCESS) {
          deleted = 1;
-         OLOG_INFO("phone_tool: user=%d deleted sms id=%lld", user_id,
-                   (long long)s_pending_delete_id);
+         OLOG_INFO("phone_tool: user=%d deleted sms id=%lld", user_id, (long long)snap_id);
          snprintf(buf, sizeof(buf), "Deleted 1 SMS record.");
       } else if (rc == PHONE_DB_NOT_FOUND) {
-         snprintf(buf, sizeof(buf), "SMS record #%lld no longer exists.",
-                  (long long)s_pending_delete_id);
+         snprintf(buf, sizeof(buf), "SMS record #%lld no longer exists.", (long long)snap_id);
       } else {
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");
       }
-   } else if (s_pending_delete_number[0]) {
-      rc = phone_db_sms_log_delete_by_number(user_id, s_pending_delete_number, &deleted);
+   } else if (snap_number[0]) {
+      rc = phone_db_sms_log_delete_by_number(user_id, snap_number, &deleted);
       if (rc == PHONE_DB_SUCCESS) {
          char redacted[32];
-         phone_number_redact(s_pending_delete_number, redacted, sizeof(redacted));
+         phone_number_redact(snap_number, redacted, sizeof(redacted));
          OLOG_INFO("phone_tool: user=%d deleted %d sms for number=%s", user_id, deleted, redacted);
          snprintf(buf, sizeof(buf), "Deleted %d SMS record(s).", deleted);
       } else {
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");
       }
-   } else if (s_pending_delete_cutoff > 0) {
-      rc = phone_db_sms_log_delete_older_than(user_id, s_pending_delete_cutoff, &deleted);
+   } else if (snap_cutoff > 0) {
+      rc = phone_db_sms_log_delete_older_than(user_id, snap_cutoff, &deleted);
       if (rc == PHONE_DB_SUCCESS) {
          OLOG_INFO("phone_tool: user=%d deleted %d sms older than %lld", user_id, deleted,
-                   (long long)s_pending_delete_cutoff);
+                   (long long)snap_cutoff);
          snprintf(buf, sizeof(buf), "Deleted %d SMS record(s).", deleted);
       } else {
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");
@@ -633,11 +706,7 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
       const char *dir = match.direction == PHONE_DIR_INCOMING ? "in" : "out";
       const char *name = match.contact_name[0] ? match.contact_name : match.number;
 
-      snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "call");
-      s_pending_delete_id = id;
-      s_pending_delete_cutoff = 0;
-      s_pending_delete_count = 1;
-      s_pending_delete_at = time(NULL);
+      arm_pending_delete(user_id, "call", id, NULL, 0, 1);
 
       snprintf(buf, sizeof(buf),
                "About to delete call #%lld [%s %s, %s, %ds]. Say 'confirm' to delete.",
@@ -652,8 +721,8 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
       return strdup("Error: 'older_than_days' must be a positive integer.");
    }
    time_t cutoff = time(NULL) - (time_t)days * 86400;
-   int match_count = phone_db_call_log_count_older_than(user_id, cutoff);
-   if (match_count < 0) {
+   int match_count = 0;
+   if (phone_db_call_log_count_older_than(user_id, cutoff, &match_count) != PHONE_DB_SUCCESS) {
       clear_pending_delete();
       return strdup("Error: database error counting older calls.");
    }
@@ -663,11 +732,7 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
       return strdup(buf);
    }
 
-   snprintf(s_pending_delete_kind, sizeof(s_pending_delete_kind), "call");
-   s_pending_delete_id = -1;
-   s_pending_delete_cutoff = cutoff;
-   s_pending_delete_count = match_count;
-   s_pending_delete_at = time(NULL);
+   arm_pending_delete(user_id, "call", -1, NULL, cutoff, match_count);
 
    char cutoff_date[32];
    format_short_date(cutoff, cutoff_date, sizeof(cutoff_date));
@@ -679,7 +744,7 @@ static char *handle_delete_call(struct json_object *details, int user_id) {
 }
 
 static char *handle_confirm_delete_call(int user_id) {
-   char *err = validate_pending_delete("call");
+   char *err = validate_pending_delete("call", user_id);
    if (err)
       return err;
 
@@ -690,28 +755,34 @@ static char *handle_confirm_delete_call(int user_id) {
       return strdup("Error: too many deletions in the last hour. Try again later.");
    }
 
+   /* Snapshot pending state under the mutex. */
+   int64_t snap_id;
+   time_t snap_cutoff;
+   pthread_mutex_lock(&s_phone_tool_mutex);
+   snap_id = s_pending_delete_id;
+   snap_cutoff = s_pending_delete_cutoff;
+   pthread_mutex_unlock(&s_phone_tool_mutex);
+
    char buf[256];
    int deleted = 0;
    int rc;
 
-   if (s_pending_delete_id >= 0) {
-      rc = phone_db_call_log_delete(user_id, s_pending_delete_id);
+   if (snap_id >= 0) {
+      rc = phone_db_call_log_delete(user_id, snap_id);
       if (rc == PHONE_DB_SUCCESS) {
          deleted = 1;
-         OLOG_INFO("phone_tool: user=%d deleted call id=%lld", user_id,
-                   (long long)s_pending_delete_id);
+         OLOG_INFO("phone_tool: user=%d deleted call id=%lld", user_id, (long long)snap_id);
          snprintf(buf, sizeof(buf), "Deleted 1 call record.");
       } else if (rc == PHONE_DB_NOT_FOUND) {
-         snprintf(buf, sizeof(buf), "Call record #%lld no longer exists.",
-                  (long long)s_pending_delete_id);
+         snprintf(buf, sizeof(buf), "Call record #%lld no longer exists.", (long long)snap_id);
       } else {
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");
       }
-   } else if (s_pending_delete_cutoff > 0) {
-      rc = phone_db_call_log_delete_older_than(user_id, s_pending_delete_cutoff, &deleted);
+   } else if (snap_cutoff > 0) {
+      rc = phone_db_call_log_delete_older_than(user_id, snap_cutoff, &deleted);
       if (rc == PHONE_DB_SUCCESS) {
          OLOG_INFO("phone_tool: user=%d deleted %d calls older than %lld", user_id, deleted,
-                   (long long)s_pending_delete_cutoff);
+                   (long long)snap_cutoff);
          snprintf(buf, sizeof(buf), "Deleted %d call record(s).", deleted);
       } else {
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");

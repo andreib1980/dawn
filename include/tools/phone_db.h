@@ -79,6 +79,10 @@ typedef struct {
  *        rest. "+15551234567" → "...4567". Short strings (<=4 chars) and
  *        empty/NULL inputs pass through unchanged (short codes like "911"
  *        keep forensic value; empty becomes "(none)").
+ *
+ * @param in       Raw phone number (may be NULL/empty).
+ * @param out      Output buffer.
+ * @param out_size Size of out buffer.
  */
 void phone_number_redact(const char *in, char *out, size_t out_size);
 
@@ -87,6 +91,10 @@ void phone_number_redact(const char *in, char *out, size_t out_size);
  *        reads "+15551234567" as "1 5 5 5 1 2 3 4 5 6 7" (each digit spoken
  *        individually) instead of as a billion-dollar integer. Non-digits are
  *        dropped. Empty/NULL produces "".
+ *
+ * @param in       Raw phone number (may be NULL/empty).
+ * @param out      Output buffer receiving space-separated digits.
+ * @param out_size Size of out buffer.
  */
 void phone_number_format_for_tts(const char *in, char *out, size_t out_size);
 
@@ -102,7 +110,7 @@ void phone_number_format_for_tts(const char *in, char *out, size_t out_size);
  *
  * @param in       Raw input (may be NULL/empty → out receives "").
  * @param out      Output buffer.
- * @param out_size sizeof(out).
+ * @param out_size Size of out buffer.
  */
 void phone_number_normalize(const char *in, char *out, size_t out_size);
 
@@ -170,6 +178,8 @@ int phone_db_cleanup(int call_retention_days, int sms_retention_days);
 
 /**
  * @brief Delete a single SMS log entry by ID, scoped to user_id.
+ * @param user_id User ID for isolation.
+ * @param id      SMS row ID.
  * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
  */
 int phone_db_sms_log_delete(int user_id, int64_t id);
@@ -178,6 +188,8 @@ int phone_db_sms_log_delete(int user_id, int64_t id);
  * @brief Delete all SMS log entries matching a phone number, scoped to user_id.
  *        The number is normalized (strip spaces/dashes/parens, ensure leading +)
  *        before lookup so LLM-supplied formats match stored E.164 rows.
+ * @param user_id   User ID for isolation.
+ * @param number    Phone number (any format; normalized internally).
  * @param out_count Rows deleted (may be NULL).
  * @return PHONE_DB_SUCCESS (even if 0 rows), PHONE_DB_FAILURE on SQL error.
  */
@@ -186,21 +198,29 @@ int phone_db_sms_log_delete_by_number(int user_id, const char *number, int *out_
 /**
  * @brief Count SMS log entries matching a phone number (for delete preview).
  *        Normalization matches phone_db_sms_log_delete_by_number.
- * @return Count on success, -1 on error.
+ * @param user_id   User ID for isolation.
+ * @param number    Phone number (any format; normalized internally).
+ * @param out_count Matching row count (on success).
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int phone_db_sms_log_count_by_number(int user_id, const char *number);
+int phone_db_sms_log_count_by_number(int user_id, const char *number, int *out_count);
 
 /**
  * @brief Fetch a single SMS log entry by ID, scoped to user_id.
  *        Avoids the 21 KB stack frame of recent-query when the caller knows
  *        the id (e.g., delete-by-id previews). Also works for entries
  *        outside the recent window.
+ * @param user_id User ID for isolation.
+ * @param id      SMS row ID.
+ * @param out     Output row (populated on SUCCESS).
  * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
  */
 int phone_db_sms_log_get_by_id(int user_id, int64_t id, phone_sms_log_t *out);
 
 /**
  * @brief Delete all SMS log entries older than cutoff, scoped to user_id.
+ * @param user_id   User ID for isolation.
+ * @param cutoff    Unix timestamp — rows with timestamp < cutoff are deleted.
  * @param out_count Rows deleted (may be NULL).
  * @return PHONE_DB_SUCCESS (even if 0 rows), PHONE_DB_FAILURE on SQL error.
  */
@@ -208,24 +228,34 @@ int phone_db_sms_log_delete_older_than(int user_id, time_t cutoff, int *out_coun
 
 /**
  * @brief Count SMS log entries older than cutoff (for delete preview).
- * @return Count on success, -1 on error.
+ * @param user_id   User ID for isolation.
+ * @param cutoff    Unix timestamp — rows with timestamp < cutoff are counted.
+ * @param out_count Matching row count (on success).
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int phone_db_sms_log_count_older_than(int user_id, time_t cutoff);
+int phone_db_sms_log_count_older_than(int user_id, time_t cutoff, int *out_count);
 
 /**
  * @brief Delete a single call log entry by ID, scoped to user_id.
+ * @param user_id User ID for isolation.
+ * @param id      Call log row ID.
  * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
  */
 int phone_db_call_log_delete(int user_id, int64_t id);
 
 /**
  * @brief Fetch a single call log entry by ID, scoped to user_id.
+ * @param user_id User ID for isolation.
+ * @param id      Call log row ID.
+ * @param out     Output row (populated on SUCCESS).
  * @return PHONE_DB_SUCCESS, PHONE_DB_NOT_FOUND, or PHONE_DB_FAILURE.
  */
 int phone_db_call_log_get_by_id(int user_id, int64_t id, phone_call_log_t *out);
 
 /**
  * @brief Delete call log entries older than cutoff, scoped to user_id.
+ * @param user_id   User ID for isolation.
+ * @param cutoff    Unix timestamp — rows with timestamp < cutoff are deleted.
  * @param out_count Rows deleted (may be NULL).
  * @return PHONE_DB_SUCCESS (even if 0 rows), PHONE_DB_FAILURE on SQL error.
  */
@@ -233,8 +263,11 @@ int phone_db_call_log_delete_older_than(int user_id, time_t cutoff, int *out_cou
 
 /**
  * @brief Count call log entries older than cutoff (for delete preview).
- * @return Count on success, -1 on error.
+ * @param user_id   User ID for isolation.
+ * @param cutoff    Unix timestamp — rows with timestamp < cutoff are counted.
+ * @param out_count Matching row count (on success).
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int phone_db_call_log_count_older_than(int user_id, time_t cutoff);
+int phone_db_call_log_count_older_than(int user_id, time_t cutoff, int *out_count);
 
 #endif /* PHONE_DB_H */

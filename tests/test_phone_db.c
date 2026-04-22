@@ -365,7 +365,9 @@ static void test_sms_delete_by_number(void) {
    /* One from a different number shouldn't be touched */
    phone_db_sms_log_insert(13, PHONE_DIR_INCOMING, "+15559990000", "Other", "keep", now + 3);
 
-   int count = phone_db_sms_log_count_by_number(13, "+15551112222");
+   int count = -1;
+   int rc_cnt = phone_db_sms_log_count_by_number(13, "+15551112222", &count);
+   TEST_ASSERT(rc_cnt == PHONE_DB_SUCCESS, "count_by_number returns SUCCESS");
    TEST_ASSERT(count == 3, "count_by_number returns 3");
 
    int deleted = -1;
@@ -393,16 +395,20 @@ static void test_sms_delete_number_normalization(void) {
    phone_db_sms_log_insert(14, PHONE_DIR_INCOMING, "+15553334444", "Norm", "formatted", time(NULL));
 
    /* LLM might send in many ways — all should match */
-   int count = phone_db_sms_log_count_by_number(14, "+1-555-333-4444");
+   int count = 0;
+   phone_db_sms_log_count_by_number(14, "+1-555-333-4444", &count);
    TEST_ASSERT(count == 1, "dashes normalize");
 
-   count = phone_db_sms_log_count_by_number(14, "(555) 333-4444");
+   count = 0;
+   phone_db_sms_log_count_by_number(14, "(555) 333-4444", &count);
    TEST_ASSERT(count == 1, "parens + spaces normalize to +1");
 
-   count = phone_db_sms_log_count_by_number(14, "5553334444");
+   count = 0;
+   phone_db_sms_log_count_by_number(14, "5553334444", &count);
    TEST_ASSERT(count == 1, "bare 10-digit US number normalizes to +1");
 
-   count = phone_db_sms_log_count_by_number(14, "15553334444");
+   count = 0;
+   phone_db_sms_log_count_by_number(14, "15553334444", &count);
    TEST_ASSERT(count == 1, "bare 11-digit with leading 1 normalizes");
 
    /* Cleanup */
@@ -489,7 +495,9 @@ static void test_sms_delete_older_than(void) {
    phone_db_sms_log_insert(24, PHONE_DIR_INCOMING, "+15550000003", "Fresh", "fresh", fresh_time);
 
    time_t cutoff = now - (30 * 86400);
-   int count = phone_db_sms_log_count_older_than(24, cutoff);
+   int count = 0;
+   int rc_cnt = phone_db_sms_log_count_older_than(24, cutoff, &count);
+   TEST_ASSERT(rc_cnt == PHONE_DB_SUCCESS, "count_older_than returns SUCCESS");
    TEST_ASSERT(count == 2, "count_older_than returns 2");
 
    int deleted = -1;
@@ -581,7 +589,9 @@ static void test_call_delete_older_than(void) {
 
    /* Cutoff at 30 days → expect 2 deleted */
    time_t cutoff = now - (30 * 86400);
-   int count = phone_db_call_log_count_older_than(17, cutoff);
+   int count = 0;
+   int rc_cnt = phone_db_call_log_count_older_than(17, cutoff, &count);
+   TEST_ASSERT(rc_cnt == PHONE_DB_SUCCESS, "count_older_than returns SUCCESS");
    TEST_ASSERT(count == 2, "count_older_than returns 2");
 
    int deleted = -1;

@@ -545,14 +545,17 @@ int phone_db_sms_log_delete_by_number(int user_id, const char *number, int *out_
    return result;
 }
 
-int phone_db_sms_log_count_by_number(int user_id, const char *number) {
+int phone_db_sms_log_count_by_number(int user_id, const char *number, int *out_count) {
+   if (!out_count)
+      return PHONE_DB_FAILURE;
+   *out_count = 0;
    if (!s_db.initialized || !number)
-      return -1;
+      return PHONE_DB_FAILURE;
 
    char normalized[32];
    phone_number_normalize(number, normalized, sizeof(normalized));
    if (normalized[0] == '\0')
-      return -1;
+      return PHONE_DB_FAILURE;
 
    pthread_mutex_lock(&s_db.mutex);
 
@@ -562,19 +565,21 @@ int phone_db_sms_log_count_by_number(int user_id, const char *number) {
        NULL);
    if (rc != SQLITE_OK) {
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_text(stmt, 2, normalized, -1, SQLITE_TRANSIENT);
 
-   int count = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW)
-      count = sqlite3_column_int(stmt, 0);
+   int result = PHONE_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      *out_count = sqlite3_column_int(stmt, 0);
+      result = PHONE_DB_SUCCESS;
+   }
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return count;
+   return result;
 }
 
 int phone_db_call_log_delete(int user_id, int64_t id) {
@@ -713,9 +718,12 @@ int phone_db_sms_log_delete_older_than(int user_id, time_t cutoff, int *out_coun
    return result;
 }
 
-int phone_db_sms_log_count_older_than(int user_id, time_t cutoff) {
+int phone_db_sms_log_count_older_than(int user_id, time_t cutoff, int *out_count) {
+   if (!out_count)
+      return PHONE_DB_FAILURE;
+   *out_count = 0;
    if (!s_db.initialized)
-      return -1;
+      return PHONE_DB_FAILURE;
 
    pthread_mutex_lock(&s_db.mutex);
 
@@ -725,19 +733,21 @@ int phone_db_sms_log_count_older_than(int user_id, time_t cutoff) {
        NULL);
    if (rc != SQLITE_OK) {
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
 
-   int count = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW)
-      count = sqlite3_column_int(stmt, 0);
+   int result = PHONE_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      *out_count = sqlite3_column_int(stmt, 0);
+      result = PHONE_DB_SUCCESS;
+   }
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return count;
+   return result;
 }
 
 int phone_db_call_log_get_by_id(int user_id, int64_t id, phone_call_log_t *out) {
@@ -773,9 +783,12 @@ int phone_db_call_log_get_by_id(int user_id, int64_t id, phone_call_log_t *out) 
    return result;
 }
 
-int phone_db_call_log_count_older_than(int user_id, time_t cutoff) {
+int phone_db_call_log_count_older_than(int user_id, time_t cutoff, int *out_count) {
+   if (!out_count)
+      return PHONE_DB_FAILURE;
+   *out_count = 0;
    if (!s_db.initialized)
-      return -1;
+      return PHONE_DB_FAILURE;
 
    pthread_mutex_lock(&s_db.mutex);
 
@@ -785,17 +798,19 @@ int phone_db_call_log_count_older_than(int user_id, time_t cutoff) {
        &stmt, NULL);
    if (rc != SQLITE_OK) {
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
 
-   int count = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW)
-      count = sqlite3_column_int(stmt, 0);
+   int result = PHONE_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      *out_count = sqlite3_column_int(stmt, 0);
+      result = PHONE_DB_SUCCESS;
+   }
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return count;
+   return result;
 }
