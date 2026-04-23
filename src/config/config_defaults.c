@@ -271,6 +271,10 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.embedding_keyword_weight = 0.3f;
    config->memory.embedding_vector_weight = 0.7f;
    config->memory.embedding_backfill_on_startup = true;
+   /* Temporal scoring: +2.3pp R@10 / +0.8pp R@5 on LongMemEval temporal-reasoning
+    * at weight=0.20; plateau at 0.30. Zero cost on queries without temporal
+    * expressions (parser returns "not found", no boost applied).  Safe default. */
+   config->memory.temporal_weight = 0.20f;
 
    /* Shutdown - disabled by default for security */
    config->shutdown.enabled = false;

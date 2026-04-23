@@ -41,11 +41,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "tools/document_db.h"
+#include "tools/time_query_parser.h"
 
 /* =============================================================================
  * Constants
@@ -66,6 +68,17 @@ extern auth_db_state_t s_db;
 
 /* When true, skip keyword boosting (pure cosine baseline) */
 static bool s_no_keyword_boost = false;
+
+/* Temporal-boost weight (v35).  When the query contains a parsed temporal
+ * expression and a chunk has a non-zero created_at, the chunk's score gets
+ * `s_temporal_weight * proximity` added.  proximity is Gaussian decay in
+ * [0,1] from time_query_parser.  0 disables the boost entirely. */
+static float s_temporal_weight = 0.0f;
+
+/* When set, anchors "yesterday"/"last week"/etc to this timestamp (Unix sec)
+ * instead of wall-clock now().  Useful for replaying historical datasets where
+ * queries' "now" should match the dataset's era, not the benchmark run time. */
+static int64_t s_now_override = 0;
 
 /* When set, restrict query results to chunks whose doc has this category (v34).
  * Empty = no filter (default).  Categories are supplied per-add via the optional
@@ -125,6 +138,7 @@ static const char *DDL =
    "  text TEXT NOT NULL,"
    "  embedding BLOB NOT NULL,"
    "  embedding_norm REAL NOT NULL,"
+   "  created_at INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
    ");";
 /* clang-format on */
@@ -188,17 +202,18 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return -1;
 
+   /* Bench mirrors auth_db_core.c statements — must include v35 created_at column. */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO document_chunks (document_id, chunk_index, text, embedding, "
-       "embedding_norm) VALUES (?, ?, ?, ?, ?)",
+       "embedding_norm, created_at) VALUES (?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_doc_chunk_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.chunk_index, c.text, c.embedding, c.embedding_norm, "
-                           "d.id, d.filename, d.filetype "
+                           "d.id, d.filename, d.filetype, c.created_at "
                            "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
                            "WHERE d.user_id = ? OR d.is_global = 1 "
                            "LIMIT ?",
@@ -439,7 +454,16 @@ static int handle_add(struct json_object *cmd) {
          doc_category_set(doc_id, cat);
    }
 
-   int64_t chunk_id = document_db_chunk_create(doc_id, 0, chunk_text, embedding, out_dims, norm);
+   /* Optional per-add created_at for temporal-scoring benchmarks (v35).
+    * Orchestrator passes session timestamps for LoCoMo. 0 = unknown. */
+   int64_t created_at = 0;
+   struct json_object *ts_obj = NULL;
+   if (json_object_object_get_ex(cmd, "created_at", &ts_obj)) {
+      created_at = (int64_t)json_object_get_int64(ts_obj);
+   }
+
+   int64_t chunk_id = document_db_chunk_create(doc_id, 0, chunk_text, embedding, out_dims, norm,
+                                               created_at);
    free(embedding);
 
    if (chunk_id < 0) {
@@ -535,6 +559,24 @@ static int handle_query(struct json_object *cmd) {
          q_category_filter = q;
    }
 
+   /* Parse the query for temporal expressions ONCE.  When --temporal-weight is
+    * 0 (default), we skip the work entirely so baseline runs are unaffected.
+    * Per-call "now" override (cmd.now) takes precedence over CLI --now;
+    * LongMemEval needs this because each question has its own question_date. */
+   time_query_t tq = { 0 };
+   if (s_temporal_weight > 0.0f) {
+      int64_t now_ts = (int64_t)time(NULL);
+      if (s_now_override > 0)
+         now_ts = s_now_override;
+      struct json_object *now_obj = NULL;
+      if (json_object_object_get_ex(cmd, "now", &now_obj)) {
+         int64_t per_call = (int64_t)json_object_get_int64(now_obj);
+         if (per_call > 0)
+            now_ts = per_call;
+      }
+      time_query_parse(query_text, now_ts, &tq);
+   }
+
    for (int i = 0; i < chunk_count; i++) {
       /* Pre-filter by category when set: any chunk whose doc has a different
        * category gets a sentinel score so it sorts to the bottom and never
@@ -550,6 +592,14 @@ static int handle_query(struct json_object *cmd) {
 
       float cosine = embedding_engine_cosine_with_norms(query_vec, chunks[i].embedding, dims,
                                                         query_norm, chunks[i].embedding_norm);
+
+      /* Additive temporal boost: chunks dated near the query's referenced point
+       * get a bump.  Additive (not multiplicative) so a chunk with great cosine
+       * but no timestamp doesn't get penalized — it just doesn't get the bonus. */
+      if (tq.found && chunks[i].created_at > 0) {
+         cosine += s_temporal_weight * time_query_proximity(&tq, chunks[i].created_at);
+      }
+
       scores[i].index = i;
       scores[i].score = cosine;
    }
@@ -690,6 +740,13 @@ static void print_usage(const char *prog) {
            "  --category-filter <name>         Restrict queries to chunks whose doc has\n"
            "                                   this category (set per-add via JSON 'category'\n"
            "                                   field). Per-query 'category' overrides this.\n"
+           "  --temporal-weight <float>        Temporal-boost weight (0 = disabled, default).\n"
+           "                                   Adds w * proximity to chunk cosine when query\n"
+           "                                   contains a parsed temporal expression and the\n"
+           "                                   chunk has a non-zero created_at. Try 0.10–0.30.\n"
+           "  --now <unix_ts>                  Pin 'now' for relative expressions (yesterday,\n"
+           "                                   last week). Useful when replaying historical\n"
+           "                                   datasets — defaults to wall-clock time().\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -707,12 +764,14 @@ int main(int argc, char *argv[]) {
       { "api-key", required_argument, 0, 'k' },
       { "no-keyword-boost", no_argument, 0, 'r' },
       { "category-filter", required_argument, 0, 'c' },
+      { "temporal-weight", required_argument, 0, 't' },
+      { "now", required_argument, 0, 'n' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:rh", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:rh", long_options, NULL)) != -1) {
       switch (opt) {
          case 'p':
             provider = optarg;
@@ -731,6 +790,12 @@ int main(int argc, char *argv[]) {
             break;
          case 'c':
             snprintf(s_category_filter, sizeof(s_category_filter), "%s", optarg);
+            break;
+         case 't':
+            s_temporal_weight = (float)atof(optarg);
+            break;
+         case 'n':
+            s_now_override = (int64_t)atoll(optarg);
             break;
          case 'h':
             print_usage(argv[0]);

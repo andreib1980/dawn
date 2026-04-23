@@ -432,6 +432,11 @@ typedef struct {
    float embedding_keyword_weight;     /* hybrid search keyword weight (0.0-1.0) */
    float embedding_vector_weight;      /* hybrid search vector weight (0.0-1.0) */
    bool embedding_backfill_on_startup; /* backfill existing facts on startup */
+   /* Temporal-query scoring (#3).  When the query contains a parsed temporal
+    * expression (e.g., "in 2020", "last week"), each candidate fact's score
+    * gets `temporal_weight * gaussian_proximity(fact.created_at)` added.
+    * 0 disables; 0.10–0.30 is the useful range. */
+   float temporal_weight;
 } memory_config_t;
 
 /* =============================================================================

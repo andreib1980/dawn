@@ -184,6 +184,7 @@ add_executable(test_memory_embeddings
                test_memory_embeddings.c
                test_memory_embeddings_stub.c
                ${SRC_ROOT}/src/memory/memory_embeddings.c
+               ${SRC_ROOT}/src/tools/time_query_parser.c
                ${SRC_ROOT}/src/core/embedding_engine.c)
 
 target_link_libraries(test_memory_embeddings
@@ -191,6 +192,14 @@ target_link_libraries(test_memory_embeddings
                       sqlite3
                       pthread
                       m)
+
+# Test: Time Query Parser (#3-A)
+# Pure module: parses natural-language temporal expressions in queries.
+add_executable(test_time_query_parser
+               test_time_query_parser.c
+               ${SRC_ROOT}/src/tools/time_query_parser.c)
+
+target_link_libraries(test_time_query_parser m)
 
 # Test: Temporal Relations (v33)
 # Tests memory_db_relation_supersede auto-close behavior + as-of queries.
@@ -305,6 +314,7 @@ add_executable(bench_retrieval
                ${SRC_ROOT}/benchmarks/bench_retrieval.c
                ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
                ${SRC_ROOT}/src/tools/document_db.c
+               ${SRC_ROOT}/src/tools/time_query_parser.c
                ${SRC_ROOT}/src/core/embedding_engine.c
                ${SRC_ROOT}/src/memory/memory_embed_onnx.c
                ${SRC_ROOT}/src/memory/memory_embed_ollama.c

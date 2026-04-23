@@ -278,8 +278,10 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_confidence ON "
     "memory_facts(user_id, confidence DESC);"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(user_id, normalized_hash);"
-    "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category ON "
-    "memory_facts(user_id, category);"
+    /* idx_memory_facts_user_category is created by the v34 migration block (runs
+     * after ALTER TABLE adds the column).  Keeping it here would fail on an
+     * existing pre-v34 DB because CREATE TABLE IF NOT EXISTS is a no-op for
+     * the already-existing table, so the column isn't added until migrations run. */
 
     "CREATE TABLE IF NOT EXISTS memory_preferences ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -352,10 +354,9 @@ static const char *SCHEMA_SQL =
     "memory_relations(subject_entity_id);"
     "CREATE INDEX IF NOT EXISTS idx_memory_relations_object ON memory_relations(object_entity_id);"
     "CREATE INDEX IF NOT EXISTS idx_memory_relations_user ON memory_relations(user_id);"
-    "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity ON "
-    "memory_relations(user_id, valid_to);"
-    "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open ON "
-    "memory_relations(subject_entity_id, relation) WHERE valid_to IS NULL;"
+    /* idx_memory_relations_user_validity + idx_memory_relations_subject_open are
+     * created by the v33 migration block (same reason — runs after the
+     * valid_from/valid_to ALTER so the columns exist). */
 
     /* Scheduler events (v18) */
     "CREATE TABLE IF NOT EXISTS scheduled_events ("
@@ -419,6 +420,9 @@ static const char *SCHEMA_SQL =
     "  created_at INTEGER NOT NULL,"
     "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
     ");"
+    /* document_chunks.created_at added in v35 — used by temporal-query scoring to
+     * boost chunks whose origin date is near the user's referenced point in time
+     * (e.g., "what did we discuss in summer 2021"). 0 = unknown (no boost). */
     "CREATE TABLE IF NOT EXISTS document_chunks ("
     "  id INTEGER PRIMARY KEY,"
     "  document_id INTEGER NOT NULL,"
@@ -426,6 +430,7 @@ static const char *SCHEMA_SQL =
     "  text TEXT NOT NULL,"
     "  embedding BLOB NOT NULL,"
     "  embedding_norm REAL NOT NULL,"
+    "  created_at INTEGER NOT NULL DEFAULT 0,"
     "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
@@ -1659,6 +1664,24 @@ static int create_schema(const char *db_path) {
       }
    }
 
+   /* v35 migration: per-chunk created_at for temporal-query scoring.  0 = unknown
+    * (chunk gets no proximity boost).  Backfill from documents.created_at would
+    * be a follow-up — for v1, only chunks ingested after this migration get a
+    * timestamp; older chunks default to 0 and behave as before. */
+   if (current_version >= 22 && current_version < 35) {
+      const char *v35_sql = "ALTER TABLE document_chunks ADD COLUMN created_at INTEGER "
+                            "  NOT NULL DEFAULT 0;";
+      rc = sqlite3_exec(s_db.db, v35_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v35 migration (chunk created_at) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added created_at to document_chunks (v35)");
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -1677,6 +1700,27 @@ static int create_schema(const char *db_path) {
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: could not create retention index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* Indexes on migration-added columns (v33/v34).  Must run here rather than
+    * in SCHEMA_SQL because on an existing pre-migration DB, CREATE TABLE IF
+    * NOT EXISTS is a no-op, so the new columns don't exist until migrations
+    * run.  Migrations also create these indexes but only fire on DBs with
+    * current_version >= 1 — fresh installs (version 0) skip all migrations
+    * and reach this block instead. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category "
+                     "ON memory_facts(user_id, category);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity "
+                     "ON memory_relations(user_id, valid_to);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open "
+                     "ON memory_relations(subject_entity_id, relation) "
+                     "WHERE valid_to IS NULL",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory v33/v34 indexes: %s", errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
@@ -2584,8 +2628,10 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* fact_get_embeddings: created_at appended last (col 3) for temporal-query
+    * scoring (#3).  Cache loader reads it and stores per-fact for boost computation. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, embedding, embedding_norm FROM memory_facts "
+                           "SELECT id, embedding, embedding_norm, created_at FROM memory_facts "
                            "WHERE user_id = ? AND superseded_by IS NULL AND embedding IS NOT NULL "
                            "ORDER BY confidence DESC LIMIT ?",
                            -1, &s_db.stmt_memory_fact_get_embeddings, NULL);
@@ -2916,19 +2962,23 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* doc_chunk_create: created_at appended last (col 6) — caller passes 0 for
+    * unknown timestamps (older docs, manual ingests).  Schema default is 0. */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO document_chunks (document_id, chunk_index, text, embedding, "
-       "embedding_norm) VALUES (?, ?, ?, ?, ?)",
+       "embedding_norm, created_at) VALUES (?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_doc_chunk_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare doc_chunk_create failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
+   /* doc_chunk_search: created_at appended last so existing column indices in
+    * downstream populators are preserved. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.chunk_index, c.text, c.embedding, c.embedding_norm, "
-                           "d.id, d.filename, d.filetype "
+                           "d.id, d.filename, d.filetype, c.created_at "
                            "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
                            "WHERE d.user_id = ? OR d.is_global = 1 "
                            "LIMIT ?",

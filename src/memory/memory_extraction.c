@@ -393,8 +393,8 @@ static int64_t parse_iso8601_date(const char *s) {
       tm.tm_mday = 1;
       tm.tm_mon = 0;
    }
-   /* timegm() — not portable to all libcs but DAWN already targets glibc.
-    * Falls back to mktime + manual TZ correction if needed. */
+   /* Convert as UTC using timegm().  DAWN currently targets glibc; returning
+    * 0 on failure is sufficient — callers treat 0 as "no validity bound". */
    time_t t = timegm(&tm);
    if (t == (time_t)-1)
       return 0;
@@ -659,6 +659,16 @@ static void process_extraction_response(int user_id,
          }
          if (json_object_object_get_ex(rel, "valid_to", &vt_obj)) {
             valid_to = parse_iso8601_date(json_object_get_string(vt_obj));
+         }
+         /* Sanity-check the range the LLM emitted.  An inverted or zero-length
+          * window would never match as_of queries and interacts badly with the
+          * supersede close logic — drop both bounds and store as open-ended. */
+         if (valid_from != 0 && valid_to != 0 && valid_to <= valid_from) {
+            OLOG_WARNING("memory_extraction: dropping invalid validity range for "
+                         "(%s, %s, %s): [%ld..%ld]",
+                         subj_name, rel_type, obj_name, (long)valid_from, (long)valid_to);
+            valid_from = 0;
+            valid_to = 0;
          }
 
          /* Use supersede so exclusive relations (works_at, lives_in, ...) auto-close

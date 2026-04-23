@@ -31,10 +31,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+#include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "logging.h"
 #include "tools/document_db.h"
+#include "tools/time_query_parser.h"
 #include "tools/tool_registry.h"
 
 /* =============================================================================
@@ -246,9 +249,22 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       return strdup("Error: memory allocation failed.");
    }
 
+   /* Parse the query once for temporal expressions (#3).  Skip the work when
+    * the feature is disabled (temporal_weight == 0), matching the facts path. */
+   time_query_t tq = { 0 };
+   float temporal_weight = g_config.memory.temporal_weight;
+   if (temporal_weight > 0.0f) {
+      time_query_parse(value, (int64_t)time(NULL), &tq);
+   }
+
    for (int i = 0; i < chunk_count; i++) {
       float cosine = embedding_engine_cosine_with_norms(query_vec, chunks[i].embedding, dims,
                                                         query_norm, chunks[i].embedding_norm);
+      /* Additive temporal boost — same shape as memory_embeddings_hybrid_search.
+       * Chunks with no created_at (legacy rows) forfeit the bonus silently. */
+      if (tq.found && chunks[i].created_at > 0) {
+         cosine += temporal_weight * time_query_proximity(&tq, chunks[i].created_at);
+      }
       scores[i].index = i;
       scores[i].score = cosine;
    }

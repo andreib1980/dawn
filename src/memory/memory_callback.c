@@ -460,9 +460,9 @@ static size_t append_graph_context(int user_id,
    bool header_written = false;
 
    for (int i = 0; i < show_count && offset < buf_size - 100; i++) {
-      /* Pre-fetch relations to check if entity has any.  Default to "currently
-       * true" filtering; bypass when caller passed include_historical or asked
-       * for an as-of date in the future of any closed window. */
+      /* Pre-fetch relations to check if entity has any.  When include_historical
+       * is true, return all relations regardless of validity.  Otherwise apply
+       * temporal filtering: relations valid at as_of_ts (0 = now). */
       memory_relation_t rels[8];
       int rel_count;
       if (include_historical) {

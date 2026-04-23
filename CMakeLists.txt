@@ -529,6 +529,7 @@ set(DAWN_SOURCES
     src/tools/tfidf_summarizer.c
     src/tools/url_fetcher.c
     src/tools/html_parser.c
+    src/tools/time_query_parser.c
     src/tools/toml.c
 
     # Config subsystem

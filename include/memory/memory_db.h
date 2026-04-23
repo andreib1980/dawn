@@ -550,11 +550,14 @@ int memory_db_fact_update_embedding(int user_id,
  * @param max_count Maximum entries to return
  * @return Number of embeddings loaded, -1 on error
  */
+/* out_created_ats: optional. Pass NULL when caller doesn't need per-fact
+ * timestamps (temporal-query scoring is the only consumer). */
 int memory_db_fact_get_embeddings(int user_id,
                                   int expected_dims,
                                   int64_t *out_ids,
                                   float *out_embeddings,
                                   float *out_norms,
+                                  int64_t *out_created_ats,
                                   int max_count);
 
 /**

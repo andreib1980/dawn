@@ -42,14 +42,18 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_types.h"
+#include "tools/time_query_parser.h"
 
-/* In-memory embedding cache for fast cosine search */
+/* In-memory embedding cache for fast cosine search.
+ * created_ats added in #3 — per-fact origin timestamps used by temporal-query
+ * scoring.  Loaded together with embeddings so scoring stays single-pass. */
 static struct {
    pthread_mutex_t mutex;
    int user_id;
    int64_t *ids;
    float *embeddings; /* flat: count * dims */
    float *norms;
+   int64_t *created_ats; /* per-fact created_at, parallel to ids */
    int count;
    int capacity;
    int dims;
@@ -96,7 +100,17 @@ static int s_backfill_user_id;
  * non-zero = already done, skip.
  * ============================================================================= */
 
-#define CATEGORY_BACKFILL_THRESHOLD 0.45f
+/* Calibrated against live DAWN memory (1122 facts, all-MiniLM-L6-v2-int8):
+ *   0.45 → 0.3%  classified (almost nothing — model compresses cosines heavily)
+ *   0.30 → 7.4% classified (too conservative)
+ *   0.25 → 15.7% classified — reasonable working default.
+ *
+ * MiniLM typically produces cosines in [0.10, 0.45] even for strongly related
+ * content.  Non-match cosines cluster around 0.10-0.18, so 0.25 still separates
+ * signal from noise while catching directionally-correct matches.  Going lower
+ * (0.20) mostly inflates already-dominant categories rather than bringing in
+ * the sparser ones — those are seed-quality issues, not threshold issues. */
+#define CATEGORY_BACKFILL_THRESHOLD 0.25f
 #define CATEGORY_BACKFILL_BATCH_SIZE 25
 #define CATEGORY_BACKFILL_FETCH 200
 
@@ -186,6 +200,13 @@ static float *build_category_centroids(int *out_dims) {
          for (int d = 0; d < dims; d++)
             cent[d] /= n;
       }
+      /* Health check: log the final centroid norm.  A healthy unit vector prints
+       * ~1.0; zeros or near-zero mean all embeds failed for this category. */
+      float check_sq = 0.0f;
+      for (int d = 0; d < dims; d++)
+         check_sq += cent[d] * cent[d];
+      OLOG_INFO("memory_embeddings: centroid[%s] seeds=%d norm=%.4f", CATEGORY_SEEDS[c].category,
+                seed_count, sqrtf(check_sq));
    }
 
    *out_dims = dims;
@@ -281,69 +302,133 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
    int classified = 0;
    int touched = 0;
    int loops = 0;
+   int64_t cursor_id = 0;      /* id-based pagination (prevents infinite loop) */
+   bool sample_logged = false; /* one-time cosine-score sample for tuning */
+   int per_cat_count[CATEGORY_SEEDS_COUNT] = { 0 }; /* assignment distribution */
+
+   /* Hoist the per-batch scratch buffer (~1.6 MB for 200 rows × 2048-dim float
+    * array) out of the loop to avoid repeated alloc+zero churn on the heap.
+    * The buffer is reused across all batches; ids/dims overwritten each pass. */
+   typedef struct {
+      int64_t id;
+      float emb[MAX_EMBEDDING_DIMS];
+      int emb_dims;
+   } row_t;
+   row_t *rows = calloc(CATEGORY_BACKFILL_FETCH, sizeof(row_t));
+   if (!rows)
+      return -1;
 
    while (!atomic_load(&s_backfill_shutdown)) {
-      /* Pull a batch of unclassified facts with embeddings. */
-      AUTH_DB_LOCK_OR_RETURN(-1);
+      /* Pull the next batch by id > cursor.  This is the fix for the infinite
+       * loop that hit prod: if every fact classifies as 'general', the UPDATE
+       * doesn't fire and WHERE category='general' keeps returning the same rows. */
+      pthread_mutex_lock(&s_db.mutex);
+      if (!s_db.initialized) {
+         pthread_mutex_unlock(&s_db.mutex);
+         free(rows);
+         return -1;
+      }
       sqlite3_stmt *stmt = NULL;
       int rc = sqlite3_prepare_v2(s_db.db,
                                   "SELECT id, embedding, embedding_norm FROM memory_facts "
                                   "WHERE user_id = ? AND superseded_by IS NULL "
-                                  "  AND embedding IS NOT NULL AND category = 'general' "
+                                  "  AND embedding IS NOT NULL AND id > ? "
+                                  "  AND category = 'general' "
                                   "ORDER BY id ASC LIMIT ?",
                                   -1, &stmt, NULL);
       if (rc != SQLITE_OK) {
          AUTH_DB_UNLOCK();
+         free(rows);
          return -1;
       }
       sqlite3_bind_int(stmt, 1, user_id);
-      sqlite3_bind_int(stmt, 2, CATEGORY_BACKFILL_FETCH);
+      sqlite3_bind_int64(stmt, 2, cursor_id);
+      sqlite3_bind_int(stmt, 3, CATEGORY_BACKFILL_FETCH);
 
-      /* Materialize batch out of the lock — embeddings are blobs we reference
-       * for the duration of the row, so copy before stepping next. */
-      typedef struct {
-         int64_t id;
-         float emb[MAX_EMBEDDING_DIMS];
-         int emb_dims;
-      } row_t;
-      row_t *rows = calloc(CATEGORY_BACKFILL_FETCH, sizeof(row_t));
-      if (!rows) {
-         sqlite3_finalize(stmt);
-         AUTH_DB_UNLOCK();
-         return -1;
-      }
+      /* rows buffer is pre-allocated above the while loop — just reset count. */
       int batch_count = 0;
+      int64_t batch_max_id = cursor_id;
       while (batch_count < CATEGORY_BACKFILL_FETCH && sqlite3_step(stmt) == SQLITE_ROW) {
-         rows[batch_count].id = sqlite3_column_int64(stmt, 0);
+         int64_t row_id = sqlite3_column_int64(stmt, 0);
+         if (row_id > batch_max_id)
+            batch_max_id = row_id;
          const void *blob = sqlite3_column_blob(stmt, 1);
          int blob_bytes = sqlite3_column_bytes(stmt, 1);
          int row_dims = blob_bytes / (int)sizeof(float);
          if (blob && row_dims == dims && row_dims <= MAX_EMBEDDING_DIMS) {
+            rows[batch_count].id = row_id;
             memcpy(rows[batch_count].emb, blob, (size_t)blob_bytes);
             rows[batch_count].emb_dims = row_dims;
             batch_count++;
          }
          /* Skip facts with mismatched dims (different embedding model than centroids). */
       }
+      cursor_id = batch_max_id; /* advance past this batch regardless of UPDATE results */
       sqlite3_finalize(stmt);
       AUTH_DB_UNLOCK();
 
-      if (batch_count == 0) {
-         free(rows);
+      if (batch_count == 0)
          break;
+
+      /* Phase 1: classify this batch WITHOUT holding the DB lock.  Rows already
+       * have embeddings copied into stack-local storage, so dot products are
+       * pure CPU work with no DB access.  Holding the lock across these loops
+       * would block unrelated DB traffic (session writes, fact updates, etc.)
+       * for ~1ms × batch_size. */
+      const char *assigned_cat[CATEGORY_BACKFILL_FETCH]; /* parallel to rows[] */
+      for (int i = 0; i < batch_count && !atomic_load(&s_backfill_shutdown); i++) {
+         /* One-time diagnostic on the very first fact — logs raw cosines against
+          * each centroid so the threshold can be tuned from real data.  Fires
+          * once per user per backfill run. */
+         if (!sample_logged) {
+            float best = -1.0f;
+            int best_idx = -1;
+            for (int c = 0; c < CATEGORY_SEEDS_COUNT; c++) {
+               const float *cent = centroids + (size_t)c * dims;
+               float dot = 0.0f;
+               for (int d = 0; d < dims; d++)
+                  dot += rows[i].emb[d] * cent[d];
+               OLOG_INFO("memory_embeddings: sample fact_id=%lld vs %s = %.4f",
+                         (long long)rows[i].id, CATEGORY_SEEDS[c].category, dot);
+               if (dot > best) {
+                  best = dot;
+                  best_idx = c;
+               }
+            }
+            OLOG_INFO("memory_embeddings: sample best=%s @ %.4f (threshold=%.2f)",
+                      best_idx >= 0 ? CATEGORY_SEEDS[best_idx].category : "(none)", best,
+                      CATEGORY_BACKFILL_THRESHOLD);
+            sample_logged = true;
+         }
+
+         assigned_cat[i] = classify_fact_embedding(rows[i].emb, centroids, dims,
+                                                   CATEGORY_BACKFILL_THRESHOLD);
+         touched++;
       }
 
-      /* Classify and batch-UPDATE under one transaction to amortize lock cost. */
-      AUTH_DB_LOCK_OR_RETURN(-1);
+      /* Phase 2: apply the UPDATEs under one transaction.  Lock held only for
+       * the SQLite work, not the cosine math. */
+      pthread_mutex_lock(&s_db.mutex);
+      if (!s_db.initialized) {
+         pthread_mutex_unlock(&s_db.mutex);
+         free(rows);
+         return -1;
+      }
       char *errmsg = NULL;
-      sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, &errmsg);
+      int begin_rc = sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, &errmsg);
+      if (begin_rc != SQLITE_OK) {
+         OLOG_ERROR("memory_embeddings: BEGIN failed in category backfill: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         pthread_mutex_unlock(&s_db.mutex);
+         free(rows);
+         return -1;
+      }
       sqlite3_free(errmsg);
       errmsg = NULL;
 
       for (int i = 0; i < batch_count && !atomic_load(&s_backfill_shutdown); i++) {
-         const char *cat = classify_fact_embedding(rows[i].emb, centroids, dims,
-                                                   CATEGORY_BACKFILL_THRESHOLD);
-         touched++;
+         const char *cat = assigned_cat[i];
          if (strcmp(cat, "general") == 0)
             continue; /* Leave the column at its current 'general' value. */
 
@@ -354,15 +439,30 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
          sqlite3_bind_int64(upd_stmt, 2, rows[i].id);
          if (sqlite3_step(upd_stmt) == SQLITE_DONE) {
             classified++;
+            /* Tally for the final distribution log */
+            for (int c = 0; c < CATEGORY_SEEDS_COUNT; c++) {
+               if (strcmp(cat, CATEGORY_SEEDS[c].category) == 0) {
+                  per_cat_count[c]++;
+                  break;
+               }
+            }
          }
          sqlite3_reset(upd_stmt);
       }
 
-      sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);
+      int commit_rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);
+      if (commit_rc != SQLITE_OK) {
+         OLOG_ERROR("memory_embeddings: COMMIT failed in category backfill: %s — rolling back",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         pthread_mutex_unlock(&s_db.mutex);
+         free(rows);
+         return -1;
+      }
       sqlite3_free(errmsg);
       AUTH_DB_UNLOCK();
-
-      free(rows);
 
       /* If we got fewer than the fetch limit, no more unclassified facts remain. */
       if (batch_count < CATEGORY_BACKFILL_FETCH)
@@ -377,8 +477,15 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
       }
    }
 
-   OLOG_INFO("memory_embeddings: category backfill user=%d touched=%d assigned=%d", user_id,
-             touched, classified);
+   free(rows);
+
+   OLOG_INFO("memory_embeddings: category backfill user=%d touched=%d assigned=%d (general=%d)",
+             user_id, touched, classified, touched - classified);
+   for (int c = 0; c < CATEGORY_SEEDS_COUNT; c++) {
+      if (per_cat_count[c] > 0) {
+         OLOG_INFO("memory_embeddings:   %s: %d", CATEGORY_SEEDS[c].category, per_cat_count[c]);
+      }
+   }
    return classified;
 }
 
@@ -410,9 +517,11 @@ static void cache_free_data(void) {
    free(s_cache.ids);
    free(s_cache.embeddings);
    free(s_cache.norms);
+   free(s_cache.created_ats);
    s_cache.ids = NULL;
    s_cache.embeddings = NULL;
    s_cache.norms = NULL;
+   s_cache.created_ats = NULL;
    s_cache.count = 0;
    s_cache.capacity = 0;
    s_cache.valid = false;
@@ -434,14 +543,15 @@ static int cache_load(int user_id) {
    s_cache.ids = malloc(cap * sizeof(int64_t));
    s_cache.embeddings = malloc((size_t)cap * (size_t)dims * sizeof(float));
    s_cache.norms = malloc(cap * sizeof(float));
+   s_cache.created_ats = malloc(cap * sizeof(int64_t));
 
-   if (!s_cache.ids || !s_cache.embeddings || !s_cache.norms) {
+   if (!s_cache.ids || !s_cache.embeddings || !s_cache.norms || !s_cache.created_ats) {
       cache_free_data();
       return -1;
    }
 
    int loaded = memory_db_fact_get_embeddings(user_id, dims, s_cache.ids, s_cache.embeddings,
-                                              s_cache.norms, cap);
+                                              s_cache.norms, s_cache.created_ats, cap);
    if (loaded < 0) {
       cache_free_data();
       return -1;
@@ -711,6 +821,14 @@ int memory_embeddings_hybrid_search(int user_id,
 
    float kw_weight = g_config.memory.embedding_keyword_weight;
    float vec_weight = g_config.memory.embedding_vector_weight;
+   float temporal_weight = g_config.memory.temporal_weight;
+
+   /* Parse temporal expression in the query (only when feature is enabled).
+    * Cost is a single-pass strstr scan; skipped entirely when weight is 0. */
+   time_query_t tq = { 0 };
+   if (temporal_weight > 0.0f && query) {
+      time_query_parse(query, (int64_t)time(NULL), &tq);
+   }
 
    /* If no embeddings available, return keyword results directly */
    if (!memory_embeddings_available() || !query) {
@@ -778,6 +896,13 @@ int memory_embeddings_hybrid_search(int user_id,
       }
 
       float hybrid = kw_weight * kw_score + vec_weight * cosine;
+
+      /* Additive temporal boost.  Additive (not multiplicative) so undated facts
+       * aren't penalized — they simply forfeit the bonus. */
+      if (tq.found && s_cache.created_ats[i] > 0) {
+         hybrid += temporal_weight * time_query_proximity(&tq, s_cache.created_ats[i]);
+      }
+
       if (hybrid > 0.01f) { /* Skip near-zero results */
          merged[merged_count].fact_id = s_cache.ids[i];
          merged[merged_count].score = hybrid;

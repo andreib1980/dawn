@@ -71,6 +71,7 @@ typedef struct {
    int64_t document_id;
    char doc_filename[DOC_FILENAME_MAX];
    char doc_filetype[DOC_FILETYPE_MAX];
+   int64_t created_at; /* v35 — chunk origin timestamp; 0 = unknown */
 } document_chunk_t;
 
 /* =============================================================================
@@ -159,7 +160,8 @@ int64_t document_db_chunk_create(int64_t document_id,
                                  const char *text,
                                  const float *embedding,
                                  int dims,
-                                 float embedding_norm);
+                                 float embedding_norm,
+                                 int64_t created_at);
 
 /**
  * @brief Find a document by name (exact match preferred, then partial)

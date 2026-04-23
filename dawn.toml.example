@@ -391,6 +391,10 @@
                                   # Env: DAWN_MEMORY_EMBEDDINGS_KEYWORD_WEIGHT
 # vector_weight = 0.70            # Weight for vector similarity in hybrid search (0.0-1.0)
                                   # Env: DAWN_MEMORY_EMBEDDINGS_VECTOR_WEIGHT
+# temporal_weight = 0.20          # Boost for date-anchored queries ("last week",
+                                  # "in 2023", "summer 2022"). 0 disables. 0.20
+                                  # validated on LongMemEval temporal-reasoning
+                                  # (+2.3pp R@10) and LoCoMo cat-2 (+3.2pp).
 # backfill_on_startup = true      # Generate missing embeddings on startup
                                   # Env: DAWN_MEMORY_EMBEDDINGS_BACKFILL_ON_STARTUP
 

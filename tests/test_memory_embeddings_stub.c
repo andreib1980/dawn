@@ -67,12 +67,14 @@ int memory_db_fact_get_embeddings(int user_id,
                                   int64_t *out_ids,
                                   float *out_embeddings,
                                   float *out_norms,
+                                  int64_t *out_created_ats,
                                   int max_count) {
    (void)user_id;
    (void)expected_dims;
    (void)out_ids;
    (void)out_embeddings;
    (void)out_norms;
+   (void)out_created_ats;
    (void)max_count;
    return 0;
 }

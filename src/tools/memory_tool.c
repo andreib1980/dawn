@@ -121,10 +121,10 @@ static const treg_param_t memory_params[] = {
    },
    {
        .name = "include_historical",
-       .description = "Set to 'true' to include closed relations (those with a past valid_to) "
-                      "in 'search' results. Default 'false' returns only currently-valid "
+       .description = "Set to true to include closed relations (those with a past valid_to) "
+                      "in 'search' results. Default false returns only currently-valid "
                       "relations.",
-       .type = TOOL_PARAM_TYPE_STRING,
+       .type = TOOL_PARAM_TYPE_BOOL,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "include_historical",

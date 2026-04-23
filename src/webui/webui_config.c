@@ -730,10 +730,12 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                             config->memory.embedding_keyword_weight);
       JSON_TO_CONFIG_DOUBLE(section, "embedding_vector_weight",
                             config->memory.embedding_vector_weight);
+      JSON_TO_CONFIG_DOUBLE(section, "temporal_weight", config->memory.temporal_weight);
       JSON_TO_CONFIG_BOOL(section, "embedding_backfill_on_startup",
                           config->memory.embedding_backfill_on_startup);
       CONFIG_CLAMP(config->memory.embedding_keyword_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.embedding_vector_weight, 0.0f, 1.0f);
+      CONFIG_CLAMP(config->memory.temporal_weight, 0.0f, 1.0f);
    }
 
    /* [shutdown] */

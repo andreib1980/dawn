@@ -373,7 +373,8 @@ int64_t document_db_chunk_create(int64_t document_id,
                                  const char *text,
                                  const float *embedding,
                                  int dims,
-                                 float embedding_norm) {
+                                 float embedding_norm,
+                                 int64_t created_at) {
    if (!text || !embedding || dims <= 0)
       return -1;
 
@@ -387,6 +388,7 @@ int64_t document_db_chunk_create(int64_t document_id,
    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_TRANSIENT);
    sqlite3_bind_blob(stmt, 4, embedding, dims * (int)sizeof(float), SQLITE_TRANSIENT);
    sqlite3_bind_double(stmt, 5, (double)embedding_norm);
+   sqlite3_bind_int64(stmt, 6, created_at); /* 0 = unknown — schema default also 0 */
 
    int rc = sqlite3_step(stmt);
    int64_t chunk_id = -1;
@@ -440,6 +442,7 @@ int document_db_chunk_search_load(int user_id,
       c->document_id = sqlite3_column_int64(stmt, 5);
       col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 6);
       col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 7);
+      c->created_at = sqlite3_column_int64(stmt, 8); /* v35 — 0 if column was NULL/0 */
 
       count++;
    }

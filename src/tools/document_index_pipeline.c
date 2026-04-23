@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
@@ -163,6 +164,12 @@ int document_index_text(int user_id,
    int failed_count = 0;
 
    if (emb_buf) {
+      /* Capture ingest time once so all chunks of the same document share an
+       * identical created_at.  Calling time(NULL) per-chunk would give chunks
+       * slightly different timestamps across a slow embedding pass, which
+       * contradicts the "inherit from the document's ingest time" intent. */
+      int64_t ingest_ts = (int64_t)time(NULL);
+
       for (int i = 0; i < chunks.count; i++) {
          int out_dims = 0;
          int rc = embedding_engine_embed(chunks.chunks[i], emb_buf, dims, &out_dims);
@@ -173,7 +180,7 @@ int document_index_text(int user_id,
 
          float norm = embedding_engine_l2_norm(emb_buf, dims);
          int64_t chunk_id = document_db_chunk_create(doc_id, i, chunks.chunks[i], emb_buf, dims,
-                                                     norm);
+                                                     norm, ingest_ts);
          if (chunk_id >= 0) {
             embedded_count++;
          } else {

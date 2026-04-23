@@ -1307,6 +1307,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_double(config->memory.embedding_keyword_weight));
    json_object_object_add(memory, "embedding_vector_weight",
                           json_object_new_double(config->memory.embedding_vector_weight));
+   json_object_object_add(memory, "temporal_weight",
+                          json_object_new_double(config->memory.temporal_weight));
    json_object_object_add(memory, "embedding_backfill_on_startup",
                           json_object_new_boolean(config->memory.embedding_backfill_on_startup));
    json_object_object_add(root, "memory", memory);
@@ -1846,6 +1848,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    }
    fprintf(fp, "keyword_weight = %.2f\n", config->memory.embedding_keyword_weight);
    fprintf(fp, "vector_weight = %.2f\n", config->memory.embedding_vector_weight);
+   fprintf(fp, "temporal_weight = %.2f\n", config->memory.temporal_weight);
    fprintf(fp, "backfill_on_startup = %s\n",
            config->memory.embedding_backfill_on_startup ? "true" : "false");
 

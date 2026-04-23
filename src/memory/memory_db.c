@@ -1404,6 +1404,7 @@ int memory_db_fact_get_embeddings(int user_id,
                                   int64_t *out_ids,
                                   float *out_embeddings,
                                   float *out_norms,
+                                  int64_t *out_created_ats,
                                   int max_count) {
    if (!out_ids || !out_embeddings || !out_norms || max_count <= 0 || expected_dims <= 0)
       return -1;
@@ -1430,6 +1431,11 @@ int memory_db_fact_get_embeddings(int user_id,
          memcpy(out_embeddings + count * expected_dims, blob, (size_t)expected_bytes);
       }
       out_norms[count] = (float)sqlite3_column_double(s_db.stmt_memory_fact_get_embeddings, 2);
+      /* created_at appended col 3 (v35).  out_created_ats may be NULL when caller
+       * doesn't need temporal scoring — keeps the function backward-tolerant. */
+      if (out_created_ats) {
+         out_created_ats[count] = sqlite3_column_int64(s_db.stmt_memory_fact_get_embeddings, 3);
+      }
       count++;
    }
 
@@ -1694,11 +1700,28 @@ int memory_db_relation_supersede(int user_id,
    }
 
    /* Auto-close prior open exclusive relation, if any.  Idempotency check (object
-    * mismatch) lives in the prepared statement's WHERE clause. */
-   if (relation_is_exclusive(relation)) {
+    * mismatch) lives in the prepared statement's WHERE clause.
+    *
+    * Two orthogonal questions govern whether we close and, if so, at what time:
+    *
+    *   1. Does the new relation represent a currently-true state?
+    *        Yes: valid_to == 0 (open-ended) OR valid_to > now().
+    *        No:  valid_to is in the past (bounded historical slice).
+    *      Only currently-true relations should supersede the existing open row.
+    *      Ingesting a bounded historical fact ("Alice worked at Google 2018-2020")
+    *      must NOT close the present-day Microsoft row — that would erase reality.
+    *
+    *   2. If we do close, at what boundary?
+    *        - new valid_from when provided (avoids overlapping validity windows)
+    *        - now() otherwise
+    */
+   int64_t now_ts = (int64_t)time(NULL);
+   bool new_is_current = (valid_to <= 0) || (valid_to > now_ts);
+   if (relation_is_exclusive(relation) && new_is_current) {
+      int64_t close_time = (valid_from > 0) ? valid_from : now_ts;
       sqlite3_stmt *close_stmt = s_db.stmt_memory_relation_close_open;
       sqlite3_reset(close_stmt);
-      sqlite3_bind_int64(close_stmt, 1, (int64_t)time(NULL));
+      sqlite3_bind_int64(close_stmt, 1, close_time);
       sqlite3_bind_int(close_stmt, 2, user_id);
       sqlite3_bind_int64(close_stmt, 3, subject_entity_id);
       sqlite3_bind_text(close_stmt, 4, relation, -1, SQLITE_TRANSIENT);

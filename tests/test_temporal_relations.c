@@ -51,7 +51,10 @@ static int tests_failed = 0;
       }                                \
    } while (0)
 
-/* DDL mirroring auth_db_core.c v33 schema (relevant subset). */
+/* DDL mirroring auth_db_core.c (relevant subset).  Covers v19 base tables
+ * (memory_entities, memory_facts) plus v33 additions (memory_relations with
+ * valid_from/valid_to) and v34 additions (memory_facts.category) — these
+ * tests exercise both temporal relations and the canonical category list. */
 /* clang-format off */
 static const char *DDL =
    "CREATE TABLE IF NOT EXISTS users ("
@@ -276,6 +279,81 @@ static void test_list_by_subject_at(void) {
    TEST_ASSERT(found_b, "as-of 2500 includes CityB row");
 }
 
+static void test_supersede_closes_at_new_valid_from(void) {
+   printf("\n--- test_supersede_closes_at_new_valid_from ---\n");
+
+   /* Historical ingestion: Alice works_at Google 2018-2020, then Microsoft
+    * starting 2020.  If supersede closes Google at time(NULL) instead of the
+    * new row's valid_from, both rows overlap from 2020..now and
+    * list_by_subject_at(2019) would return both. */
+   int64_t t2018 = 1514764800; /* 2018-01-01 */
+   int64_t t2020 = 1577836800; /* 2020-01-01 */
+
+   /* Reset subject 10's works_at rows from prior tests */
+   sqlite3_exec(s_db.db,
+                "DELETE FROM memory_relations WHERE subject_entity_id = 10 "
+                "AND relation = 'works_at'",
+                NULL, NULL, NULL);
+
+   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0);
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0);
+
+   /* As-of 2019: only Google should be valid */
+   memory_relation_t out[10];
+   int n = memory_db_relation_list_by_subject_at(1, 10, 1546300800 /* 2019 */, out, 10);
+   int works_at_count = 0;
+   for (int i = 0; i < n; i++) {
+      if (strcmp(out[i].relation, "works_at") == 0)
+         works_at_count++;
+   }
+   TEST_ASSERT(works_at_count == 1,
+               "as-of 2019: exactly one works_at (Google) — no overlap with Microsoft");
+}
+
+static void test_supersede_skips_close_for_historical_insert(void) {
+   printf("\n--- test_supersede_skips_close_for_historical_insert ---\n");
+
+   /* Reset subject 10's works_at rows from prior tests */
+   sqlite3_exec(s_db.db,
+                "DELETE FROM memory_relations WHERE subject_entity_id = 10 "
+                "AND relation = 'works_at'",
+                NULL, NULL, NULL);
+
+   /* Establish current reality: Alice works_at Microsoft, ongoing */
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0);
+
+   /* Ingest a HISTORICAL fact discovered later: Alice worked at Google 2018-2020.
+    * This must NOT close the current Microsoft row — it's adding a bounded
+    * historical slice, not superseding the present. */
+   int64_t t2018 = 1514764800;
+   int64_t t2020 = 1577836800;
+   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020);
+
+   /* Microsoft row should still be open (valid_to NULL). */
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT COUNT(*) FROM memory_relations "
+                      "WHERE subject_entity_id = 10 AND relation = 'works_at' "
+                      "  AND object_entity_id = 21 AND valid_to IS NULL",
+                      -1, &stmt, NULL);
+   int open_microsoft = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      open_microsoft = sqlite3_column_int(stmt, 0);
+   sqlite3_finalize(stmt);
+   TEST_ASSERT(open_microsoft == 1,
+               "historical insert does not close the current (open) Microsoft row");
+
+   /* As-of 2019 returns Google only; as-of now returns Microsoft only. */
+   memory_relation_t out[10];
+   int n = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10);
+   bool found_google_2019 = false;
+   for (int i = 0; i < n; i++) {
+      if (strcmp(out[i].relation, "works_at") == 0 && out[i].object_entity_id == 20)
+         found_google_2019 = true;
+   }
+   TEST_ASSERT(found_google_2019, "as-of 2019: Google row is valid");
+}
+
 static void test_canonical_categories(void) {
    printf("\n--- test_canonical_categories ---\n");
 
@@ -295,6 +373,8 @@ int main(void) {
    test_supersede_idempotent_same_object();
    test_non_exclusive_does_not_close();
    test_list_by_subject_at();
+   test_supersede_closes_at_new_valid_from();
+   test_supersede_skips_close_for_historical_insert();
    test_canonical_categories();
 
    printf("\n=========================================\n");

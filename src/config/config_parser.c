@@ -1117,12 +1117,14 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_STRING(embeddings, "endpoint", config->embedding_endpoint);
       PARSE_DOUBLE(embeddings, "keyword_weight", config->embedding_keyword_weight);
       PARSE_DOUBLE(embeddings, "vector_weight", config->embedding_vector_weight);
+      PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
    }
 
    /* Clamp embedding weights to 0.0-1.0 */
    CONFIG_CLAMP(config->embedding_keyword_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->embedding_vector_weight, 0.0f, 1.0f);
+   CONFIG_CLAMP(config->temporal_weight, 0.0f, 1.0f);
 }
 
 static void parse_shutdown(toml_table_t *table, shutdown_config_t *config) {

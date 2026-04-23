@@ -81,6 +81,7 @@ static const char *DDL =
    "  text TEXT NOT NULL,"
    "  embedding BLOB NOT NULL,"
    "  embedding_norm REAL NOT NULL,"
+   "  created_at INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
    ");";
 /* clang-format on */
@@ -145,17 +146,20 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return -1;
 
+   /* Mirrors the v35 shape in auth_db_core.c — tests were silently passing
+    * before because out-of-range bind/column accesses fail without propagating
+    * an error code, masking drift between this harness and production SQL. */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO document_chunks (document_id, chunk_index, text, embedding, "
-       "embedding_norm) VALUES (?, ?, ?, ?, ?)",
+       "embedding_norm, created_at) VALUES (?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_doc_chunk_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT c.id, c.chunk_index, c.text, c.embedding, c.embedding_norm, "
-                           "d.id, d.filename, d.filetype "
+                           "d.id, d.filename, d.filetype, c.created_at "
                            "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
                            "WHERE d.user_id = ? OR d.is_global = 1 "
                            "LIMIT ?",
@@ -513,9 +517,9 @@ static void test_chunk_create_and_read(void) {
 
    /* Create 3 chunks with dummy embeddings */
    float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-   int64_t c0 = document_db_chunk_create(doc_id, 0, "First chunk text.", emb, 4, 1.0f);
-   int64_t c1 = document_db_chunk_create(doc_id, 1, "Second chunk text.", emb, 4, 1.0f);
-   int64_t c2 = document_db_chunk_create(doc_id, 2, "Third chunk text.", emb, 4, 1.0f);
+   int64_t c0 = document_db_chunk_create(doc_id, 0, "First chunk text.", emb, 4, 1.0f, 0);
+   int64_t c1 = document_db_chunk_create(doc_id, 1, "Second chunk text.", emb, 4, 1.0f, 0);
+   int64_t c2 = document_db_chunk_create(doc_id, 2, "Third chunk text.", emb, 4, 1.0f, 0);
    TEST_ASSERT(c0 > 0, "chunk 0 created");
    TEST_ASSERT(c1 > 0, "chunk 1 created");
    TEST_ASSERT(c2 > 0, "chunk 2 created");
@@ -575,8 +579,8 @@ static void test_cascade_delete(void) {
    TEST_ASSERT(doc_id > 0, "create doc for cascade test");
 
    float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
-   document_db_chunk_create(doc_id, 0, "Chunk A", emb, 4, 1.0f);
-   document_db_chunk_create(doc_id, 1, "Chunk B", emb, 4, 1.0f);
+   document_db_chunk_create(doc_id, 0, "Chunk A", emb, 4, 1.0f, 0);
+   document_db_chunk_create(doc_id, 1, "Chunk B", emb, 4, 1.0f, 0);
 
    /* Verify chunks exist */
    document_chunk_t chunks[5];

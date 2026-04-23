@@ -911,6 +911,17 @@
                      step: 0.05,
                      displayValue: (v) => Math.round(v * 100) + '%',
                   },
+                  temporal_weight: {
+                     type: 'range',
+                     label: 'Temporal Match Strength',
+                     hint: 'Boost when the query mentions a time ("last week", "in September", "in 2023") and the memory has a matching date. 0 disables. Default 0.20.',
+                     configPath: 'memory.temporal_weight',
+                     min: 0,
+                     max: 1,
+                     step: 0.05,
+                     displayValue: (v) => Math.round(v * 100) + '%',
+                     advanced: true,
+                  },
                   embedding_backfill_on_startup: {
                      type: 'checkbox',
                      label: 'Index Existing Memories',

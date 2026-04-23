@@ -43,7 +43,15 @@ class BenchRetrieval:
    """Manages the bench_retrieval C binary subprocess."""
 
    def __init__(
-      self, binary_path, provider="onnx", model="", endpoint="", api_key="", raw_mode=False
+      self,
+      binary_path,
+      provider="onnx",
+      model="",
+      endpoint="",
+      api_key="",
+      raw_mode=False,
+      temporal_weight=0.0,
+      now_override=None,
    ):
       cmd = [binary_path, "--provider", provider]
       if model:
@@ -54,6 +62,10 @@ class BenchRetrieval:
          cmd += ["--api-key", api_key]
       if raw_mode:
          cmd += ["--no-keyword-boost"]
+      if temporal_weight > 0.0:
+         cmd += ["--temporal-weight", str(temporal_weight)]
+      if now_override is not None:
+         cmd += ["--now", str(int(now_override))]
 
       self.proc = subprocess.Popen(
          cmd,
@@ -64,32 +76,44 @@ class BenchRetrieval:
          bufsize=1,
       )
 
-      # Read ready message — skip OLOG preamble lines (logging is on stdout)
-      self.ready_info = None
-      for _ in range(50):
-         line = self.proc.stdout.readline().strip()
-         if not line:
-            continue
-         if line.startswith("{"):
-            self.ready_info = json.loads(line)
-            break
+      # Read ready message — skip OLOG preamble lines (logging is on stdout).
+      # Time-based so verbose startup logging never exhausts a fixed line cap.
+      self.ready_info = self._read_json_line(timeout=30.0, what="ready message")
       if not self.ready_info or self.ready_info.get("status") != "ready":
          raise RuntimeError("bench_retrieval failed to start (no ready JSON)")
+
+   def _read_json_line(self, timeout, what):
+      """Read lines from bench stdout until one parses as JSON or we time out.
+      Handles arbitrary amounts of interleaved OLOG output without a line cap."""
+      import select, time
+      deadline = time.monotonic() + timeout
+      fd = self.proc.stdout.fileno()
+      while time.monotonic() < deadline:
+         remaining = deadline - time.monotonic()
+         ready, _, _ = select.select([fd], [], [], remaining)
+         if not ready:
+            break  # timeout
+         line = self.proc.stdout.readline()
+         if not line:
+            raise RuntimeError(f"bench_retrieval exited before sending {what}")
+         line = line.strip()
+         if line.startswith("{"):
+            return json.loads(line)
+         # else: OLOG preamble, keep reading
+      raise RuntimeError(f"bench_retrieval: timed out waiting for {what}")
 
    def _send(self, obj):
       """Send a JSON command and read the response, skipping OLOG preamble lines."""
       self.proc.stdin.write(json.dumps(obj) + "\n")
       self.proc.stdin.flush()
-      for _ in range(200):
-         line = self.proc.stdout.readline().strip()
-         if not line:
-            continue
-         if line.startswith("{"):
-            return json.loads(line)
-      raise RuntimeError(f"bench_retrieval: no JSON response for {obj.get('cmd')}")
+      return self._read_json_line(timeout=120.0, what=f"response to {obj.get('cmd')}")
 
-   def add(self, doc_id, text):
-      return self._send({"cmd": "add", "id": doc_id, "text": text})
+   def add(self, doc_id, text, created_at=None):
+      """Optional created_at (Unix seconds) feeds the temporal-scoring boost."""
+      cmd = {"cmd": "add", "id": doc_id, "text": text}
+      if created_at is not None:
+         cmd["created_at"] = int(created_at)
+      return self._send(cmd)
 
    def query(self, text, top_k=10):
       return self._send({"cmd": "query", "text": text, "top_k": top_k})
@@ -315,6 +339,19 @@ def extract_locomo_evidence_ids(evidence, granularity):
       return sessions
 
 
+def parse_locomo_session_date(s):
+   """Parse LoCoMo's 'H:MM am/pm on D Month, YYYY' format → Unix seconds (UTC).
+   Returns 0 on failure (chunk gets no temporal boost)."""
+   if not s:
+      return 0
+   import datetime
+   try:
+      dt = datetime.datetime.strptime(s, "%I:%M %p on %d %B, %Y")
+      return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+   except (ValueError, TypeError):
+      return 0
+
+
 def run_locomo(engine, dataset_path, limit=0, granularity="dialog"):
    """Run LoCoMo benchmark. Returns metrics dict."""
    with open(dataset_path) as f:
@@ -359,15 +396,17 @@ def run_locomo(engine, dataset_path, limit=0, granularity="dialog"):
 
       engine.reset()
 
-      # Ingest
+      # Ingest — pass session timestamp so temporal-query scoring (#3) can
+      # boost dialogs from the right month/year ("in summer 2023").
       for sess in sessions:
+         session_ts = parse_locomo_session_date(sess["date"])
          if granularity == "dialog":
             for d in sess["dialogs"]:
                dia_id = d.get("dia_id", f"D{sess['session_num']}:?")
                speaker = d.get("speaker", "?")
                text = d.get("text", "")
                doc = f'{speaker} said, "{text}"'
-               engine.add(dia_id, doc)
+               engine.add(dia_id, doc, created_at=session_ts)
          else:
             texts = []
             for d in sess["dialogs"]:
@@ -375,7 +414,7 @@ def run_locomo(engine, dataset_path, limit=0, granularity="dialog"):
                text = d.get("text", "")
                texts.append(f'{speaker} said, "{text}"')
             doc = "\n".join(texts)
-            engine.add(f"session_{sess['session_num']}", doc)
+            engine.add(f"session_{sess['session_num']}", doc, created_at=session_ts)
 
       # Evaluate QA pairs — LoCoMo uses 'qa' key
       qa_pairs = entry.get("qa", entry.get("QA", entry.get("qa_pairs", [])))
@@ -608,6 +647,20 @@ def main():
       "LongMemEval eval code) or strict (only has_answer turns)",
    )
    parser.add_argument("--output", help="Save results JSON to file")
+   parser.add_argument(
+      "--temporal-weight",
+      type=float,
+      default=0.0,
+      help="Temporal-boost weight (0 = disabled, default). Try 0.10–0.30 for "
+      "LoCoMo cat-3 lift. Requires datasets that pass timestamps (LoCoMo).",
+   )
+   parser.add_argument(
+      "--now",
+      type=int,
+      default=None,
+      help="Pin 'now' (Unix seconds) for relative expressions in queries. For LoCoMo, "
+      "use ~1707000000 (early 2024) to anchor 'last week'/'recently' to the dataset era.",
+   )
 
    args = parser.parse_args()
 
@@ -621,6 +674,8 @@ def main():
       endpoint=args.endpoint,
       api_key=args.api_key,
       raw_mode=args.raw,
+      temporal_weight=args.temporal_weight,
+      now_override=args.now,
    )
    print(
       f"  Ready: {engine.dims} dims, provider={engine.provider}, mode={engine.mode}",
