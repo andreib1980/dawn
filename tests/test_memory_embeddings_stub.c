@@ -22,15 +22,26 @@
  * symbols so the test can link memory_embeddings.c without the full daemon.
  */
 
+#define AUTH_DB_INTERNAL_ALLOWED
+
 #include <stddef.h>
 #include <stdint.h>
 
+#include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "memory/memory_embeddings.h"
 
 /* Global config stubs */
 dawn_config_t g_config;
 secrets_config_t g_secrets;
+
+/* Stub auth_db state.  Category backfill paths in memory_embeddings.c reference
+ * s_db; we never call the backfill from these tests, but the symbol must link. */
+auth_db_state_t s_db = {
+   .db = NULL,
+   .mutex = PTHREAD_MUTEX_INITIALIZER,
+   .initialized = false,
+};
 
 /* Provider stubs — test never calls init/embed */
 const embedding_provider_t embedding_provider_onnx = { .name = "onnx" };

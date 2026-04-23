@@ -188,6 +188,22 @@ add_executable(test_memory_embeddings
 
 target_link_libraries(test_memory_embeddings
                       dawn_common
+                      sqlite3
+                      pthread
+                      m)
+
+# Test: Temporal Relations (v33)
+# Tests memory_db_relation_supersede auto-close behavior + as-of queries.
+# Links memory_db.c against an in-memory SQLite, stubs out auth_db and config.
+add_executable(test_temporal_relations
+               test_temporal_relations.c
+               test_temporal_relations_stub.c
+               ${SRC_ROOT}/src/memory/memory_db.c
+               ${SRC_ROOT}/src/memory/memory_similarity.c)
+
+target_link_libraries(test_temporal_relations
+                      dawn_common
+                      sqlite3
                       pthread
                       m)
 

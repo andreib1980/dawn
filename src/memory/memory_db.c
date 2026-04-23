@@ -38,6 +38,14 @@
 /* Forward declarations for helpers used across sections */
 static void populate_entity_from_row(sqlite3_stmt *stmt, memory_entity_t *entity);
 
+/* Canonical fact category labels (v34).  Single source of truth referenced by
+ * extraction allowlist (memory_extraction.c), tool enum_values (memory_tool.c),
+ * and centroid seed table (memory_embeddings.c).  See memory_types.h. */
+const char *const MEMORY_FACT_CATEGORIES[] = { "personal",    "professional", "relationships",
+                                               "health",      "interests",    "practical",
+                                               "preferences", "general",      NULL };
+const int MEMORY_FACT_CATEGORY_COUNT = 8;
+
 /* =============================================================================
  * Helper: Build LIKE pattern with wildcards
  * ============================================================================= */
@@ -75,6 +83,9 @@ static void build_like_pattern(const char *keywords, char *out_pattern, size_t m
  * Helper: Populate fact from statement row
  * ============================================================================= */
 
+/* Reads from SELECTs ordered: id, user_id, fact_text, confidence, source,
+ * created_at, last_accessed, access_count, superseded_by, category.
+ * category appended last (col 9, v34) so existing column indices are preserved. */
 static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->id = sqlite3_column_int64(stmt, 0);
    fact->user_id = sqlite3_column_int(stmt, 1);
@@ -97,6 +108,15 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->last_accessed = (time_t)sqlite3_column_int64(stmt, 6);
    fact->access_count = sqlite3_column_int(stmt, 7);
    fact->superseded_by = sqlite3_column_int64(stmt, 8);
+
+   const char *category = (const char *)sqlite3_column_text(stmt, 9);
+   if (category) {
+      strncpy(fact->category, category, MEMORY_CATEGORY_MAX - 1);
+      fact->category[MEMORY_CATEGORY_MAX - 1] = '\0';
+   } else {
+      strncpy(fact->category, "general", MEMORY_CATEGORY_MAX - 1);
+      fact->category[MEMORY_CATEGORY_MAX - 1] = '\0';
+   }
 }
 
 /* =============================================================================
@@ -177,10 +197,16 @@ static void populate_summary_from_row(sqlite3_stmt *stmt, memory_summary_t *summ
 int64_t memory_db_fact_create(int user_id,
                               const char *fact_text,
                               float confidence,
-                              const char *source) {
+                              const char *source,
+                              const char *category) {
    if (!fact_text || !source) {
       return -1;
    }
+
+   /* category may be NULL — schema default 'general' applies via the column DEFAULT,
+    * but we explicitly bind to keep the SQL pure (no default-fallback ambiguity
+    * across SQLite versions). */
+   const char *cat = (category && *category) ? category : "general";
 
    /* Compute normalized hash for deduplication */
    uint32_t normalized_hash = memory_normalize_and_hash(fact_text);
@@ -193,8 +219,9 @@ int64_t memory_db_fact_create(int user_id,
    sqlite3_bind_text(stmt, 2, fact_text, -1, SQLITE_STATIC);
    sqlite3_bind_double(stmt, 3, confidence);
    sqlite3_bind_text(stmt, 4, source, -1, SQLITE_STATIC);
-   sqlite3_bind_int64(stmt, 5, (int64_t)time(NULL));
-   sqlite3_bind_int64(stmt, 6, (int64_t)normalized_hash);
+   sqlite3_bind_text(stmt, 5, cat, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 6, (int64_t)time(NULL));
+   sqlite3_bind_int64(stmt, 7, (int64_t)normalized_hash);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);
@@ -208,9 +235,63 @@ int64_t memory_db_fact_create(int user_id,
    int64_t id = sqlite3_last_insert_rowid(s_db.db);
    AUTH_DB_UNLOCK();
 
-   OLOG_INFO("memory_db: created fact %ld for user %d (hash=%u)", (long)id, user_id,
-             normalized_hash);
+   OLOG_INFO("memory_db: created fact %ld for user %d (hash=%u, category=%s)", (long)id, user_id,
+             normalized_hash, cat);
    return id;
+}
+
+/* Category-filtered keyword search.  Pre-filters at the SQL level so the embedding
+ * cache and hybrid scoring downstream only see facts in the requested category. */
+int memory_db_fact_search_by_category(int user_id,
+                                      const char *keywords,
+                                      const char *category,
+                                      memory_fact_t *out_facts,
+                                      int max_facts) {
+   if (!keywords || !category || !out_facts || max_facts <= 0) {
+      return -1;
+   }
+
+   char pattern[MEMORY_FACT_TEXT_MAX];
+   build_like_pattern(keywords, pattern, sizeof(pattern));
+
+   AUTH_DB_LOCK_OR_RETURN(-1);
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_fact_search_by_category;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, category, -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, pattern, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 4, max_facts);
+
+   int count = 0;
+   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
+      populate_fact_from_row(stmt, &out_facts[count]);
+      count++;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   return count;
+}
+
+/* Per-fact category UPDATE used by the centroid backfill pass (v34).
+ * Caller batches these inside a transaction to amortize lock cost. */
+int memory_db_fact_update_category(int64_t fact_id, const char *category) {
+   if (!category || !*category)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_fact_update_category;
+   sqlite3_reset(stmt);
+   sqlite3_bind_text(stmt, 1, category, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 2, fact_id);
+
+   int rc = sqlite3_step(stmt);
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+
+   return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact) {
@@ -1505,13 +1586,34 @@ int memory_db_entity_update_embedding(int64_t entity_id,
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+/* Exclusive relations have at-most-one open instance per (subject, relation).
+ * When extraction stores a new such relation with a different object,
+ * memory_db_relation_supersede() auto-closes the prior open row.
+ * Non-exclusive relations (likes, knows, has_pet) skip the close branch. */
+static const char *EXCLUSIVE_RELATIONS[] = { "works_at", "lives_in", "married_to", "attends_school",
+                                             "owns_vehicle" };
+static const int EXCLUSIVE_RELATIONS_COUNT = (int)(sizeof(EXCLUSIVE_RELATIONS) /
+                                                   sizeof(EXCLUSIVE_RELATIONS[0]));
+
+static bool relation_is_exclusive(const char *relation) {
+   if (!relation)
+      return false;
+   for (int i = 0; i < EXCLUSIVE_RELATIONS_COUNT; i++) {
+      if (strcmp(relation, EXCLUSIVE_RELATIONS[i]) == 0)
+         return true;
+   }
+   return false;
+}
+
 int memory_db_relation_create(int user_id,
                               int64_t subject_entity_id,
                               const char *relation,
                               int64_t object_entity_id,
                               const char *object_value,
                               int64_t fact_id,
-                              float confidence) {
+                              float confidence,
+                              int64_t valid_from,
+                              int64_t valid_to) {
    if (!relation)
       return MEMORY_DB_FAILURE;
 
@@ -1542,6 +1644,17 @@ int memory_db_relation_create(int user_id,
 
    sqlite3_bind_double(s_db.stmt_memory_relation_create, 7, (double)confidence);
 
+   if (valid_from > 0) {
+      sqlite3_bind_int64(s_db.stmt_memory_relation_create, 8, valid_from);
+   } else {
+      sqlite3_bind_null(s_db.stmt_memory_relation_create, 8);
+   }
+   if (valid_to > 0) {
+      sqlite3_bind_int64(s_db.stmt_memory_relation_create, 9, valid_to);
+   } else {
+      sqlite3_bind_null(s_db.stmt_memory_relation_create, 9);
+   }
+
    int rc = sqlite3_step(s_db.stmt_memory_relation_create);
    sqlite3_reset(s_db.stmt_memory_relation_create);
    AUTH_DB_UNLOCK();
@@ -1549,6 +1662,130 @@ int memory_db_relation_create(int user_id,
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+/* Transactional close-and-create.  For exclusive relations (works_at, lives_in, ...)
+ * any existing open row with a different object is closed (valid_to = now()) before
+ * the new row is inserted.  Both writes happen under one BEGIN IMMEDIATE so other
+ * workers can never observe a state with zero open rows for the same (subject, relation).
+ *
+ * Non-exclusive relations skip the close branch — multiple open rows are valid
+ * (a user can like many things, know many people). */
+int memory_db_relation_supersede(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 int64_t object_entity_id,
+                                 const char *object_value,
+                                 int64_t fact_id,
+                                 float confidence,
+                                 int64_t valid_from,
+                                 int64_t valid_to) {
+   if (!relation)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Begin transaction.  Any failure rolls back and leaves the graph unchanged. */
+   char *errmsg = NULL;
+   int rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("memory_db: relation_supersede begin failed: %s", errmsg ? errmsg : "unknown");
+      sqlite3_free(errmsg);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   /* Auto-close prior open exclusive relation, if any.  Idempotency check (object
+    * mismatch) lives in the prepared statement's WHERE clause. */
+   if (relation_is_exclusive(relation)) {
+      sqlite3_stmt *close_stmt = s_db.stmt_memory_relation_close_open;
+      sqlite3_reset(close_stmt);
+      sqlite3_bind_int64(close_stmt, 1, (int64_t)time(NULL));
+      sqlite3_bind_int(close_stmt, 2, user_id);
+      sqlite3_bind_int64(close_stmt, 3, subject_entity_id);
+      sqlite3_bind_text(close_stmt, 4, relation, -1, SQLITE_TRANSIENT);
+      if (object_entity_id > 0) {
+         sqlite3_bind_int64(close_stmt, 5, object_entity_id);
+      } else {
+         sqlite3_bind_null(close_stmt, 5);
+      }
+      if (object_value) {
+         sqlite3_bind_text(close_stmt, 6, object_value, -1, SQLITE_TRANSIENT);
+      } else {
+         sqlite3_bind_null(close_stmt, 6);
+      }
+      rc = sqlite3_step(close_stmt);
+      sqlite3_reset(close_stmt);
+      if (rc != SQLITE_DONE) {
+         OLOG_ERROR("memory_db: relation_supersede close failed: %s", sqlite3_errmsg(s_db.db));
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         AUTH_DB_UNLOCK();
+         return MEMORY_DB_FAILURE;
+      }
+      int closed = sqlite3_changes(s_db.db);
+      if (closed > 0) {
+         OLOG_INFO("memory_db: closed %d superseded '%s' relation(s) for subject %ld", closed,
+                   relation, (long)subject_entity_id);
+      }
+   }
+
+   /* Insert the new row using the existing prepared statement.  Inlined here
+    * because we hold the auth_db lock; can't call memory_db_relation_create which
+    * would re-acquire it. */
+   sqlite3_stmt *create_stmt = s_db.stmt_memory_relation_create;
+   sqlite3_reset(create_stmt);
+   sqlite3_bind_int(create_stmt, 1, user_id);
+   sqlite3_bind_int64(create_stmt, 2, subject_entity_id);
+   sqlite3_bind_text(create_stmt, 3, relation, -1, SQLITE_TRANSIENT);
+   if (object_entity_id > 0) {
+      sqlite3_bind_int64(create_stmt, 4, object_entity_id);
+   } else {
+      sqlite3_bind_null(create_stmt, 4);
+   }
+   if (object_value) {
+      sqlite3_bind_text(create_stmt, 5, object_value, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(create_stmt, 5);
+   }
+   if (fact_id > 0) {
+      sqlite3_bind_int64(create_stmt, 6, fact_id);
+   } else {
+      sqlite3_bind_null(create_stmt, 6);
+   }
+   sqlite3_bind_double(create_stmt, 7, (double)confidence);
+   if (valid_from > 0) {
+      sqlite3_bind_int64(create_stmt, 8, valid_from);
+   } else {
+      sqlite3_bind_null(create_stmt, 8);
+   }
+   if (valid_to > 0) {
+      sqlite3_bind_int64(create_stmt, 9, valid_to);
+   } else {
+      sqlite3_bind_null(create_stmt, 9);
+   }
+   rc = sqlite3_step(create_stmt);
+   sqlite3_reset(create_stmt);
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: relation_supersede insert failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("memory_db: relation_supersede commit failed: %s", errmsg ? errmsg : "unknown");
+      sqlite3_free(errmsg);
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   AUTH_DB_UNLOCK();
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Reads SELECTs ordered: id, subject_entity_id, relation, object_entity_id,
+ * object_name, confidence, valid_from, valid_to.  valid_* columns appended last
+ * (cols 6, 7, v33).  COALESCE in SQL converts SQL NULL → 0 in C. */
 static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *rel) {
    rel->id = sqlite3_column_int64(stmt, 0);
    rel->subject_entity_id = sqlite3_column_int64(stmt, 1);
@@ -1568,6 +1805,10 @@ static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *re
    }
 
    rel->confidence = (float)sqlite3_column_double(stmt, 5);
+
+   /* COALESCE in SQL means 0 if NULL — caller treats 0 as "open-ended". */
+   rel->valid_from = sqlite3_column_int64(stmt, 6);
+   rel->valid_to = sqlite3_column_int64(stmt, 7);
 }
 
 int memory_db_relation_list_by_subject(int user_id,
@@ -1620,17 +1861,54 @@ int memory_db_relation_list_by_object(int user_id,
    return count;
 }
 
+/* As-of variant.  When as_of_ts == 0, defaults to "currently valid".  Used by
+ * the entity-recall block in memory_callback when the LLM passes as_of, and as
+ * the default temporal filter for current-state queries. */
+int memory_db_relation_list_by_subject_at(int user_id,
+                                          int64_t subject_entity_id,
+                                          int64_t as_of_ts,
+                                          memory_relation_t *out,
+                                          int max) {
+   if (!out || max <= 0)
+      return -1;
+
+   if (as_of_ts <= 0)
+      as_of_ts = (int64_t)time(NULL);
+
+   AUTH_DB_LOCK_OR_RETURN(-1);
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_relation_list_by_subject_at;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, subject_entity_id);
+   sqlite3_bind_int64(stmt, 3, as_of_ts);
+   sqlite3_bind_int64(stmt, 4, as_of_ts);
+   sqlite3_bind_int(stmt, 5, max);
+
+   int count = 0;
+   while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+      populate_relation_from_row(stmt, &out[count]);
+      count++;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   return count;
+}
+
 int memory_db_relation_list_all_by_user(int user_id, memory_relation_t *out, int max) {
    if (!out || max <= 0)
       return -1;
 
    AUTH_DB_LOCK_OR_RETURN(-1);
 
-   /* Single query: all relations for this user, ordered by subject for grouping */
+   /* Single query: all relations for this user, ordered by subject for grouping.
+    * valid_from/valid_to appended last (v33) to match populate_relation_from_row order. */
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
                                "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
-                               "COALESCE(e.name, r.object_value) AS object_name, r.confidence "
+                               "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+                               "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
                                "FROM memory_relations r "
                                "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
                                "WHERE r.user_id = ? ORDER BY r.subject_entity_id LIMIT ?",

@@ -71,12 +71,30 @@ typedef struct {
    int user_id;
    char fact_text[MEMORY_FACT_TEXT_MAX];
    float confidence;
-   char source[MEMORY_SOURCE_MAX]; /* "explicit" or "inferred" */
+   char source[MEMORY_SOURCE_MAX];     /* "explicit" or "inferred" */
+   char category[MEMORY_CATEGORY_MAX]; /* One of MEMORY_FACT_CATEGORIES (v34) */
    time_t created_at;
    time_t last_accessed;
    int access_count;
    int64_t superseded_by; /* ID of fact that replaced this one, or 0 */
 } memory_fact_t;
+
+/* =============================================================================
+ * Canonical fact category labels (v34).
+ *
+ * Single source of truth referenced by:
+ *   - extraction allowlist  (memory_extraction.c)
+ *   - LLM tool enum_values  (memory_tool.c)
+ *   - centroid seed table   (memory_embeddings.c)
+ *
+ * NULL-terminated.  "general" is the always-present fallback when a fact does
+ * not clearly fit any other category.  Add new labels at the end and bump
+ * MEMORY_FACT_CATEGORY_COUNT — the schema accepts arbitrary TEXT, so old DBs
+ * tolerate additions.
+ * ============================================================================= */
+
+extern const char *const MEMORY_FACT_CATEGORIES[];
+extern const int MEMORY_FACT_CATEGORY_COUNT;
 
 /* =============================================================================
  * Memory Preference Structure
@@ -165,6 +183,7 @@ typedef struct {
 typedef struct {
    char text[MEMORY_FACT_TEXT_MAX];
    char source[MEMORY_SOURCE_MAX];
+   char category[MEMORY_CATEGORY_MAX]; /* Validated against MEMORY_FACT_CATEGORIES (v34) */
    float confidence;
 } memory_extracted_fact_t;
 
@@ -209,6 +228,10 @@ typedef struct {
    int64_t object_entity_id;                 /* 0 if literal value */
    char object_name[MEMORY_ENTITY_NAME_MAX]; /* Resolved entity name or literal */
    float confidence;
+   /* Validity period (v33).  0 = NULL in SQL = open-ended.
+    * "currently true" predicate: valid_to == 0 || valid_to > now() */
+   int64_t valid_from;
+   int64_t valid_to;
 } memory_relation_t;
 
 #ifdef __cplusplus

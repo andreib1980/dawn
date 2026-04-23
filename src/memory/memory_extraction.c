@@ -23,6 +23,8 @@
  * Extracts facts, preferences, and summaries from conversation history.
  */
 
+#define _GNU_SOURCE /* strptime */
+
 #include "memory/memory_extraction.h"
 
 #include <pthread.h>
@@ -52,8 +54,10 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "Extract the following and respond ONLY with valid JSON:\n"
     "{\n"
     "  \"facts\": [\n"
-    "    {\"text\": \"factual statement about user\", \"source\": \"explicit|inferred\", "
-    "\"confidence\": 0.0-1.0}\n"
+    "    {\"text\": \"factual statement about user\", "
+    "\"category\": \"personal|professional|relationships|health|interests|practical|"
+    "preferences|general\", "
+    "\"source\": \"explicit|inferred\", \"confidence\": 0.0-1.0}\n"
     "  ],\n"
     "  \"preferences\": [\n"
     "    {\"category\": \"verbosity\", \"value\": \"prefers concise responses\", "
@@ -68,7 +72,9 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "  ],\n"
     "  \"relations\": [\n"
     "    {\"subject\": \"entity name\", \"relation\": \"has_pet|lives_in|works_at|likes|is_a\", "
-    "\"object\": \"entity name or value\"}\n"
+    "\"object\": \"entity name or value\", "
+    "\"valid_from\": \"YYYY-MM-DD or YYYY (optional)\", "
+    "\"valid_to\": \"YYYY-MM-DD or YYYY (optional)\"}\n"
     "  ],\n"
     "  \"summary\": \"1-2 sentence conversation summary\",\n"
     "  \"title\": \"short conversation title, max 40 chars\",\n"
@@ -77,6 +83,16 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "Guidelines:\n"
     "- \"explicit\" source: user directly stated it\n"
     "- \"inferred\" source: reasonably deduced from context\n"
+    "- Fact category: pick the SINGLE dominant category. Only use \"general\" if the fact "
+    "is truly cross-cutting and fits no other category.\n"
+    "  * personal: biographical (name, age, where born, where grew up)\n"
+    "  * professional: job, employer, education, skills\n"
+    "  * relationships: family, friends, contacts (the user's connections to other people)\n"
+    "  * health: medical, fitness, dietary, allergies\n"
+    "  * interests: hobbies, media tastes, travel, sports\n"
+    "  * practical: home, vehicles, schedules, routines, addresses, accounts\n"
+    "  * preferences: communication style, UI tastes, formats (overlaps preferences[]; "
+    "use this category for free-text preference facts)\n"
     "- Use short, simple categories for preferences (e.g., \"verbosity\", \"humor\", "
     "\"formality\", \"detail_level\", \"units\", \"theme\")\n"
     "- Only include facts that are specific to this user, not general knowledge\n"
@@ -84,6 +100,9 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "- List corrections if new information contradicts existing profile\n"
     "- Extract named entities (people, pets, places, organizations) mentioned by the user\n"
     "- Extract relationships between entities (e.g., user owns pet, person works at org)\n"
+    "- For relations with time bounds (e.g., \"worked at Google 2018-2022\"), include "
+    "valid_from and/or valid_to. Year-only is OK — emit YYYY-01-01 (e.g., \"2018-01-01\"). "
+    "Omit fields when no time information is given.\n"
     "- IMPORTANT: Reuse entity names from EXISTING USER PROFILE exactly as listed. "
     "Do NOT create alternate names for the same entity (e.g., use \"Kris\" not \"Kris Kersey\" "
     "if \"Kris\" is already known)\n"
@@ -338,6 +357,51 @@ static void utf8_truncate(char *str, size_t max_bytes) {
 }
 
 /* =============================================================================
+ * Helpers: Category validation + ISO-8601 date parsing
+ * ============================================================================= */
+
+/* Validate against canonical taxonomy from memory_db.c; fall back to "general"
+ * on miss.  We log unknowns at INFO so taxonomy drift is visible without spam. */
+static const char *validate_fact_category(const char *raw) {
+   if (!raw || !*raw)
+      return "general";
+   for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
+      if (strcmp(raw, MEMORY_FACT_CATEGORIES[i]) == 0) {
+         return MEMORY_FACT_CATEGORIES[i];
+      }
+   }
+   OLOG_INFO("memory_extraction: unknown category '%s', mapping to 'general'", raw);
+   return "general";
+}
+
+/* Parse ISO-8601 date strings the LLM may emit.  Tries:
+ *   YYYY-MM-DD  -> exact day at 00:00:00 UTC
+ *   YYYY        -> Jan 1 of that year at 00:00:00 UTC
+ * Returns 0 on parse failure (callers treat 0 as NULL/open-ended). */
+static int64_t parse_iso8601_date(const char *s) {
+   if (!s || !*s)
+      return 0;
+   struct tm tm = { 0 };
+   /* Try full date first. */
+   char *end = strptime(s, "%Y-%m-%d", &tm);
+   if (!end) {
+      /* Year-only fallback. */
+      memset(&tm, 0, sizeof(tm));
+      end = strptime(s, "%Y", &tm);
+      if (!end)
+         return 0;
+      tm.tm_mday = 1;
+      tm.tm_mon = 0;
+   }
+   /* timegm() — not portable to all libcs but DAWN already targets glibc.
+    * Falls back to mktime + manual TZ correction if needed. */
+   time_t t = timegm(&tm);
+   if (t == (time_t)-1)
+      return 0;
+   return (int64_t)t;
+}
+
+/* =============================================================================
  * Helper: Parse extraction response
  * ============================================================================= */
 
@@ -371,6 +435,7 @@ static void process_extraction_response(int user_id,
          if (json_object_object_get_ex(fact, "text", &text_obj)) {
             const char *text = json_object_get_string(text_obj);
             const char *source = "inferred";
+            const char *category = "general";
             float confidence = 0.7f;
 
             if (json_object_object_get_ex(fact, "source", &source_obj)) {
@@ -379,14 +444,18 @@ static void process_extraction_response(int user_id,
             if (json_object_object_get_ex(fact, "confidence", &conf_obj)) {
                confidence = (float)json_object_get_double(conf_obj);
             }
+            struct json_object *cat_obj;
+            if (json_object_object_get_ex(fact, "category", &cat_obj)) {
+               category = validate_fact_category(json_object_get_string(cat_obj));
+            }
 
             /* Check for duplicates before storing */
             memory_fact_t similar[3];
             int similar_count = memory_db_fact_find_similar(user_id, text, similar, 3);
 
             if (similar_count == 0) {
-               int64_t fact_id = memory_db_fact_create(user_id, text, confidence, source);
-               OLOG_INFO("memory_extraction: stored fact: %s", text);
+               int64_t fact_id = memory_db_fact_create(user_id, text, confidence, source, category);
+               OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
                /* Embed the new fact for semantic search */
                if (fact_id > 0 && memory_embeddings_available()) {
                   memory_embeddings_embed_and_store(user_id, fact_id, text);
@@ -445,7 +514,7 @@ static void process_extraction_response(int user_id,
 
             if (similar_count > 0) {
                /* Create new fact and supersede old one */
-               int64_t new_id = memory_db_fact_create(user_id, new_fact, 0.9f, "explicit");
+               int64_t new_id = memory_db_fact_create(user_id, new_fact, 0.9f, "explicit", NULL);
                if (new_id > 0) {
                   memory_db_fact_supersede(similar[0].id, new_id);
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
@@ -582,10 +651,29 @@ static void process_extraction_response(int user_id,
             }
          }
 
-         memory_db_relation_create(user_id, subj_id, rel_type, obj_entity_id,
-                                   (obj_entity_id == 0) ? obj_name : NULL, 0, 0.8f);
+         /* Parse optional validity period.  Default 0 = NULL/open-ended. */
+         int64_t valid_from = 0, valid_to = 0;
+         struct json_object *vf_obj, *vt_obj;
+         if (json_object_object_get_ex(rel, "valid_from", &vf_obj)) {
+            valid_from = parse_iso8601_date(json_object_get_string(vf_obj));
+         }
+         if (json_object_object_get_ex(rel, "valid_to", &vt_obj)) {
+            valid_to = parse_iso8601_date(json_object_get_string(vt_obj));
+         }
+
+         /* Use supersede so exclusive relations (works_at, lives_in, ...) auto-close
+          * any prior open instance with a different object.  Non-exclusive relations
+          * skip the close branch internally.  Both writes happen in one transaction. */
+         memory_db_relation_supersede(user_id, subj_id, rel_type, obj_entity_id,
+                                      (obj_entity_id == 0) ? obj_name : NULL, 0, 0.8f, valid_from,
+                                      valid_to);
          relations_stored++;
-         OLOG_INFO("memory_extraction: relation: (%s, %s, %s)", subj_name, rel_type, obj_name);
+         if (valid_from || valid_to) {
+            OLOG_INFO("memory_extraction: relation: (%s, %s, %s) valid [%ld..%ld]", subj_name,
+                      rel_type, obj_name, (long)valid_from, (long)valid_to);
+         } else {
+            OLOG_INFO("memory_extraction: relation: (%s, %s, %s)", subj_name, rel_type, obj_name);
+         }
       }
    }
 

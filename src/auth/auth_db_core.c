@@ -81,7 +81,7 @@ static const char *SCHEMA_SQL =
     "   version INTEGER PRIMARY KEY"
     ");"
 
-    /* Users table */
+    /* Users table (categories_backfilled_at added in v34 — gates lazy fact-category backfill) */
     "CREATE TABLE IF NOT EXISTS users ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "   username TEXT UNIQUE NOT NULL,"
@@ -90,7 +90,8 @@ static const char *SCHEMA_SQL =
     "   created_at INTEGER NOT NULL,"
     "   last_login INTEGER,"
     "   failed_attempts INTEGER DEFAULT 0,"
-    "   lockout_until INTEGER DEFAULT 0"
+    "   lockout_until INTEGER DEFAULT 0,"
+    "   categories_backfilled_at INTEGER DEFAULT 0"
     ");"
 
     /* Sessions table */
@@ -262,6 +263,7 @@ static const char *SCHEMA_SQL =
     "   fact_text TEXT NOT NULL,"
     "   confidence REAL DEFAULT 1.0,"
     "   source TEXT DEFAULT 'inferred',"
+    "   category TEXT NOT NULL DEFAULT 'general',"
     "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "   last_accessed INTEGER,"
     "   access_count INTEGER DEFAULT 0,"
@@ -276,6 +278,8 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_confidence ON "
     "memory_facts(user_id, confidence DESC);"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(user_id, normalized_hash);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category ON "
+    "memory_facts(user_id, category);"
 
     "CREATE TABLE IF NOT EXISTS memory_preferences ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -325,6 +329,8 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_entities_user ON memory_entities(user_id);"
 
+    /* memory_relations: valid_from/valid_to added in v33.  NULL = open-ended (no bound).
+     * "currently true" predicate: valid_to IS NULL OR valid_to > now() */
     "CREATE TABLE IF NOT EXISTS memory_relations ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  user_id INTEGER NOT NULL,"
@@ -335,6 +341,8 @@ static const char *SCHEMA_SQL =
     "  fact_id INTEGER,"
     "  confidence REAL DEFAULT 0.8,"
     "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "  valid_from INTEGER DEFAULT NULL,"
+    "  valid_to INTEGER DEFAULT NULL,"
     "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
@@ -344,6 +352,10 @@ static const char *SCHEMA_SQL =
     "memory_relations(subject_entity_id);"
     "CREATE INDEX IF NOT EXISTS idx_memory_relations_object ON memory_relations(object_entity_id);"
     "CREATE INDEX IF NOT EXISTS idx_memory_relations_user ON memory_relations(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity ON "
+    "memory_relations(user_id, valid_to);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open ON "
+    "memory_relations(subject_entity_id, relation) WHERE valid_to IS NULL;"
 
     /* Scheduler events (v18) */
     "CREATE TABLE IF NOT EXISTS scheduled_events ("
@@ -1599,6 +1611,54 @@ static int create_schema(const char *db_path) {
       OLOG_INFO("auth_db: added missed_notifications table (v32)");
    }
 
+   /* v33 migration: temporal validity columns on memory_relations.
+    * NULL = open-ended (no bound).  "currently true" predicate:
+    *   valid_to IS NULL OR valid_to > strftime('%s','now')
+    * Future relation-decay implementations should skip rows where valid_to is set
+    * and in the past — those are historical facts, not stale beliefs. */
+   if (current_version >= 19 && current_version < 33) {
+      const char *v33_sql = "ALTER TABLE memory_relations ADD COLUMN valid_from INTEGER "
+                            "  DEFAULT NULL;"
+                            "ALTER TABLE memory_relations ADD COLUMN valid_to INTEGER "
+                            "  DEFAULT NULL;"
+                            "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity "
+                            "  ON memory_relations(user_id, valid_to);"
+                            "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open "
+                            "  ON memory_relations(subject_entity_id, relation) "
+                            "  WHERE valid_to IS NULL;";
+      rc = sqlite3_exec(s_db.db, v33_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         /* Column may already exist if a previous migration partially ran — log and continue. */
+         OLOG_WARNING("auth_db: v33 migration (memory_relations validity) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added valid_from/valid_to to memory_relations (v33)");
+      }
+   }
+
+   /* v34 migration: fact category column + per-user backfill gate.
+    * categories_backfilled_at = 0 means embedding-centroid classification has not yet run
+    * for that user; memory_embeddings_start_backfill() picks it up on next session. */
+   if (current_version >= 1 && current_version < 34) {
+      const char *v34_sql = "ALTER TABLE memory_facts ADD COLUMN category TEXT NOT NULL "
+                            "  DEFAULT 'general';"
+                            "ALTER TABLE users ADD COLUMN categories_backfilled_at INTEGER "
+                            "  DEFAULT 0;"
+                            "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category "
+                            "  ON memory_facts(user_id, category);";
+      rc = sqlite3_exec(s_db.db, v34_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v34 migration (fact category) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added category column + backfill gate (v34)");
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2173,11 +2233,12 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Memory fact statements */
+   /* Memory fact statements.  category column appended last in all SELECTs (column 9)
+    * to preserve existing column indices in populate_fact_from_row. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
-                           "created_at, normalized_hash) "
-                           "VALUES (?, ?, ?, ?, ?, ?)",
+                           "category, created_at, normalized_hash) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -2187,7 +2248,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by FROM memory_facts WHERE id = ?",
+       "access_count, superseded_by, category FROM memory_facts WHERE id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_get failed: %s", sqlite3_errmsg(s_db.db));
@@ -2197,7 +2258,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by FROM memory_facts "
+       "access_count, superseded_by, category FROM memory_facts "
        "WHERE user_id = ? AND superseded_by IS NULL "
        "ORDER BY confidence DESC LIMIT ? OFFSET ?",
        -1, &s_db.stmt_memory_fact_list, NULL);
@@ -2209,12 +2270,37 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by FROM memory_facts "
+       "access_count, superseded_by, category FROM memory_facts "
        "WHERE user_id = ? AND superseded_by IS NULL AND fact_text LIKE ? ESCAPE '\\' "
        "ORDER BY confidence DESC LIMIT ?",
        -1, &s_db.stmt_memory_fact_search, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_search failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Category-filtered keyword search (v34).  Pre-filters fact-ID set so hybrid
+    * scoring downstream operates only on facts in the requested category. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE user_id = ? AND superseded_by IS NULL AND category = ? "
+       "AND fact_text LIKE ? ESCAPE '\\' "
+       "ORDER BY confidence DESC LIMIT ?",
+       -1, &s_db.stmt_memory_fact_search_by_category, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_search_by_category failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Per-fact category UPDATE used by the centroid backfill pass (v34). */
+   rc = sqlite3_prepare_v2(s_db.db, "UPDATE memory_facts SET category = ? WHERE id = ?", -1,
+                           &s_db.stmt_memory_fact_update_category, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_update_category failed: %s",
+                 sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2396,7 +2482,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by FROM memory_facts "
+       "access_count, superseded_by, category FROM memory_facts "
        "WHERE user_id = ? AND superseded_by IS NULL AND fact_text LIKE ? ESCAPE '\\' "
        "AND created_at >= ? ORDER BY confidence DESC LIMIT ?",
        -1, &s_db.stmt_memory_fact_search_since, NULL);
@@ -2421,7 +2507,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by FROM memory_facts "
+       "access_count, superseded_by, category FROM memory_facts "
        "WHERE user_id = ? AND superseded_by IS NULL AND created_at >= ? "
        "ORDER BY created_at DESC LIMIT ?",
        -1, &s_db.stmt_memory_fact_list_since, NULL);
@@ -2566,19 +2652,39 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Memory relation statements.  valid_from/valid_to appended last in all SELECTs
+    * (columns 6, 7) to preserve existing column indices in populate_relation_from_row. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
-                           "object_entity_id, object_value, fact_id, confidence, created_at) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))",
+                           "object_entity_id, object_value, fact_id, confidence, created_at, "
+                           "valid_from, valid_to) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?)",
                            -1, &s_db.stmt_memory_relation_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare relation_create failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
+   /* Auto-close superseded exclusive relations (v33).  Used inside
+    * memory_db_relation_supersede() before the new INSERT.  The (object_entity_id != ?
+    * OR object_value != ?) clause skips when the user re-mentions the same target —
+    * idempotency check.  COALESCE guards against NULL comparisons. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_relations SET valid_to = ? "
+                           "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
+                           "  AND valid_to IS NULL "
+                           "  AND (COALESCE(object_entity_id, 0) != COALESCE(?, 0) "
+                           "    OR COALESCE(object_value, '') != COALESCE(?, ''))",
+                           -1, &s_db.stmt_memory_relation_close_open, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare relation_close_open failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
-                           "COALESCE(e.name, r.object_value) AS object_name, r.confidence "
+                           "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
                            "FROM memory_relations r "
                            "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
                            "WHERE r.user_id = ? AND r.subject_entity_id = ? LIMIT ?",
@@ -2588,9 +2694,31 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* As-of variant: returns relations valid at the given timestamp.  Bounds:
+    *   valid_from IS NULL or valid_from <= as_of
+    *   valid_to   IS NULL or valid_to   >  as_of
+    * Pass strftime('%s','now') as as_of for the "currently true" common case. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
-                           "COALESCE(e.name, r.object_value) AS object_name, r.confidence "
+                           "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
+                           "FROM memory_relations r "
+                           "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
+                           "WHERE r.user_id = ? AND r.subject_entity_id = ? "
+                           "  AND (r.valid_from IS NULL OR r.valid_from <= ?) "
+                           "  AND (r.valid_to IS NULL OR r.valid_to > ?) "
+                           "LIMIT ?",
+                           -1, &s_db.stmt_memory_relation_list_by_subject_at, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare relation_list_by_subject_at failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
+                           "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
                            "FROM memory_relations r "
                            "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
                            "WHERE r.user_id = ? AND r.object_entity_id = ? LIMIT ?",
@@ -3466,6 +3594,12 @@ static void finalize_statements(void) {
    if (s_db.stmt_memory_summary_list_since)
       sqlite3_finalize(s_db.stmt_memory_summary_list_since);
 
+   /* Category-filtered fact statements (v34) */
+   if (s_db.stmt_memory_fact_search_by_category)
+      sqlite3_finalize(s_db.stmt_memory_fact_search_by_category);
+   if (s_db.stmt_memory_fact_update_category)
+      sqlite3_finalize(s_db.stmt_memory_fact_update_category);
+
    /* Deduplication and pruning statements */
    if (s_db.stmt_memory_fact_find_by_hash)
       sqlite3_finalize(s_db.stmt_memory_fact_find_by_hash);
@@ -3509,8 +3643,12 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_entity_get_embeddings);
    if (s_db.stmt_memory_relation_create)
       sqlite3_finalize(s_db.stmt_memory_relation_create);
+   if (s_db.stmt_memory_relation_close_open)
+      sqlite3_finalize(s_db.stmt_memory_relation_close_open);
    if (s_db.stmt_memory_relation_list_by_subject)
       sqlite3_finalize(s_db.stmt_memory_relation_list_by_subject);
+   if (s_db.stmt_memory_relation_list_by_subject_at)
+      sqlite3_finalize(s_db.stmt_memory_relation_list_by_subject_at);
    if (s_db.stmt_memory_relation_list_by_object)
       sqlite3_finalize(s_db.stmt_memory_relation_list_by_object);
    if (s_db.stmt_memory_entity_search)

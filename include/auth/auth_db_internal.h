@@ -48,7 +48,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 32
+#define AUTH_DB_SCHEMA_VERSION 34
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -174,6 +174,10 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_list_since;
    sqlite3_stmt *stmt_memory_summary_list_since;
 
+   /* Category-filtered fact queries (v34) */
+   sqlite3_stmt *stmt_memory_fact_search_by_category;
+   sqlite3_stmt *stmt_memory_fact_update_category;
+
    /* Extraction tracking */
    sqlite3_stmt *stmt_conv_get_last_extracted;
    sqlite3_stmt *stmt_conv_set_last_extracted;
@@ -206,7 +210,9 @@ typedef struct {
    sqlite3_stmt *stmt_memory_entity_update_embedding;
    sqlite3_stmt *stmt_memory_entity_get_embeddings;
    sqlite3_stmt *stmt_memory_relation_create;
+   sqlite3_stmt *stmt_memory_relation_close_open; /* v33 — supersede helper */
    sqlite3_stmt *stmt_memory_relation_list_by_subject;
+   sqlite3_stmt *stmt_memory_relation_list_by_subject_at; /* v33 — as-of variant */
    sqlite3_stmt *stmt_memory_relation_list_by_object;
    sqlite3_stmt *stmt_memory_entity_search;
    sqlite3_stmt *stmt_memory_entity_delete;

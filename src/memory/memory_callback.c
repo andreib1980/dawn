@@ -23,8 +23,11 @@
  * Handles the memory tool actions: search, remember, forget.
  */
 
+#define _GNU_SOURCE /* strptime + timegm for as_of date parsing */
+
 #include <ctype.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -389,10 +392,17 @@ static int tokenize_query(const char *keywords, char tokens[][64], int max_token
 
 /* =============================================================================
  * Helper: Append entity graph context to search results
+ *
+ * as_of_ts (v33): timestamp at which to evaluate relation validity.
+ *   0 = "currently true" (now()).
+ *   non-zero = relations valid at that historical timestamp.
+ * include_historical: when true, bypasses validity filter (returns all rows).
  * ============================================================================= */
 
 static size_t append_graph_context(int user_id,
                                    const char *keywords,
+                                   int64_t as_of_ts,
+                                   bool include_historical,
                                    char *buf,
                                    size_t buf_size,
                                    size_t offset) {
@@ -450,9 +460,20 @@ static size_t append_graph_context(int user_id,
    bool header_written = false;
 
    for (int i = 0; i < show_count && offset < buf_size - 100; i++) {
-      /* Pre-fetch relations to check if entity has any */
+      /* Pre-fetch relations to check if entity has any.  Default to "currently
+       * true" filtering; bypass when caller passed include_historical or asked
+       * for an as-of date in the future of any closed window. */
       memory_relation_t rels[8];
-      int rel_count = memory_db_relation_list_by_subject(user_id, entity_ids[i], rels, 8);
+      int rel_count;
+      if (include_historical) {
+         rel_count = memory_db_relation_list_by_subject(user_id, entity_ids[i], rels, 8);
+      } else {
+         rel_count = memory_db_relation_list_by_subject_at(user_id, entity_ids[i], as_of_ts, rels,
+                                                           8);
+      }
+      /* Incoming relations: no temporal filter helper today; subject-side filter is
+       * the high-value case (e.g., "where does Alice work").  Object-side stays
+       * unfiltered for v1 — incoming recall is contextual, less likely to confuse. */
       memory_relation_t in_rels[8];
       int in_count = memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8);
 
@@ -489,7 +510,17 @@ static size_t append_graph_context(int user_id,
  * Action: Search
  * ============================================================================= */
 
-static char *memory_action_search(int user_id, const char *keywords, time_t since_ts) {
+/* category (v34): when non-NULL/non-empty, pre-filters fact-ID set by exact category
+ *   match before hybrid scoring.  Bypasses time_range path (categories layer above
+ *   recency for now — combinable in a follow-up if useful).
+ * as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
+ * include_historical (v33): bypass relation validity filter entirely. */
+static char *memory_action_search(int user_id,
+                                  const char *keywords,
+                                  time_t since_ts,
+                                  const char *category,
+                                  int64_t as_of_ts,
+                                  bool include_historical) {
    if (!keywords || strlen(keywords) == 0) {
       return strdup("Please provide search keywords.");
    }
@@ -511,8 +542,15 @@ static char *memory_action_search(int user_id, const char *keywords, time_t sinc
    memory_fact_t facts[10];
    int kw_scores[10];
    int fact_count = 0;
+   bool category_filter_active = (category && *category);
 
-   if (token_count <= 1) {
+   if (category_filter_active) {
+      /* Category pre-filter is independent of token count — single SQL per query.
+       * Score-vs-time combinability deferred (see decision #7). */
+      fact_count = memory_db_fact_search_by_category(user_id, keywords, category, facts, 10);
+      for (int i = 0; i < fact_count; i++)
+         kw_scores[i] = 1;
+   } else if (token_count <= 1) {
       /* Single word or empty: use original single-call path */
       fact_count = (since_ts > 0)
                        ? memory_db_fact_search_since(user_id, keywords, since_ts, facts, 10)
@@ -646,7 +684,8 @@ static char *memory_action_search(int user_id, const char *keywords, time_t sinc
    }
 
    /* Append entity graph context */
-   offset = append_graph_context(user_id, keywords, result, buf_size, offset);
+   offset = append_graph_context(user_id, keywords, as_of_ts, include_historical, result, buf_size,
+                                 offset);
 
    if (offset == 0) {
       snprintf(result, buf_size, "No memories found matching '%s'.", keywords);
@@ -722,7 +761,7 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
    }
 
    /* No duplicates found - store the new fact */
-   int64_t fact_id = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit");
+   int64_t fact_id = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL);
 
    if (fact_id < 0) {
       return strdup("Failed to store the fact. Please try again.");
@@ -888,9 +927,13 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
              value ? value : "(null)", user_id);
 
    if (strcmp(actionName, "search") == 0) {
-      /* Extract base keywords and optional time_range from encoded value */
+      /* Extract base keywords and optional time_range / category / as_of /
+       * include_historical from encoded value. */
       char keywords[512] = "";
       time_t since_ts = 0;
+      char category[MEMORY_CATEGORY_MAX] = "";
+      int64_t as_of_ts = 0;
+      bool include_historical = false;
 
       if (value) {
          tool_param_extract_base(value, keywords, sizeof(keywords));
@@ -904,9 +947,52 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
                   since_ts = 0;
             }
          }
+
+         /* category param: validate against canonical taxonomy; ignore unknowns. */
+         char raw_cat[MEMORY_CATEGORY_MAX] = "";
+         if (tool_param_extract_custom(value, "category", raw_cat, sizeof(raw_cat)) && raw_cat[0]) {
+            for (int i = 0; i < MEMORY_FACT_CATEGORY_COUNT; i++) {
+               if (strcmp(raw_cat, MEMORY_FACT_CATEGORIES[i]) == 0) {
+                  strncpy(category, raw_cat, sizeof(category) - 1);
+                  category[sizeof(category) - 1] = '\0';
+                  break;
+               }
+            }
+            if (!category[0]) {
+               OLOG_INFO("memory_callback: ignoring unknown category '%s'", raw_cat);
+            }
+         }
+
+         /* as_of: ISO-8601 date for relation validity at a historical point. */
+         char as_of_str[32] = "";
+         if (tool_param_extract_custom(value, "as_of", as_of_str, sizeof(as_of_str)) &&
+             as_of_str[0]) {
+            struct tm tm = { 0 };
+            char *end = strptime(as_of_str, "%Y-%m-%d", &tm);
+            if (!end) {
+               memset(&tm, 0, sizeof(tm));
+               end = strptime(as_of_str, "%Y", &tm);
+               if (end) {
+                  tm.tm_mday = 1;
+                  tm.tm_mon = 0;
+               }
+            }
+            if (end) {
+               time_t t = timegm(&tm);
+               if (t != (time_t)-1)
+                  as_of_ts = (int64_t)t;
+            }
+         }
+
+         /* include_historical: "true" / "false" string. */
+         char hist[8] = "";
+         if (tool_param_extract_custom(value, "include_historical", hist, sizeof(hist))) {
+            include_historical = (strcmp(hist, "true") == 0);
+         }
       }
 
-      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts);
+      return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts,
+                                  category[0] ? category : NULL, as_of_ts, include_historical);
    } else if (strcmp(actionName, "remember") == 0) {
       return memory_action_remember(user_id, value);
    } else if (strcmp(actionName, "forget") == 0) {

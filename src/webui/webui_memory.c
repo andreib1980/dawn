@@ -1200,7 +1200,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             json_object_array_add(preview_arr, preview_item);
 
             if (commit) {
-               memory_db_fact_create(conn->auth_user_id, truncated, confidence, "import");
+               memory_db_fact_create(conn->auth_user_id, truncated, confidence, "import", NULL);
             }
             imported_facts++;
          }
@@ -1337,7 +1337,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_array_add(preview_arr, preview_item);
 
          if (commit) {
-            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import");
+            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import", NULL);
          }
          imported_facts++;
 

@@ -28,6 +28,7 @@
 
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "memory/memory_types.h" /* MEMORY_FACT_CATEGORIES */
 #include "tools/tool_registry.h"
 
 /* Forward declaration of callback from memory/memory_callback.c */
@@ -90,6 +91,44 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "target_name",
    },
+   /* v34 — fact-category pre-filter for retrieval.  Mirrors the canonical
+    * MEMORY_FACT_CATEGORIES taxonomy in memory_db.c.  Inline duplication is
+    * intentional: tool registry needs compile-time enum_values, and centralizing
+    * it via a runtime pointer would force a registry-shape change. */
+   {
+       .name = "category",
+       .description = "Optional category filter for 'search'/'recent'. Restricts results to "
+                      "facts in one topic area (e.g., ask only about professional or health "
+                      "memories). Improves retrieval precision on focused queries.",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "category",
+       .enum_values = { "personal", "professional", "relationships", "health", "interests",
+                        "practical", "preferences", "general" },
+       .enum_count = 8,
+   },
+   /* v33 — relation validity at a historical timestamp. */
+   {
+       .name = "as_of",
+       .description = "Optional ISO date (YYYY-MM-DD or YYYY) for 'search'. Returns relations "
+                      "valid at that point in time (e.g., 'who did Alice work for in 2020'). "
+                      "Defaults to now() when omitted.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "as_of",
+   },
+   {
+       .name = "include_historical",
+       .description = "Set to 'true' to include closed relations (those with a past valid_to) "
+                      "in 'search' results. Default 'false' returns only currently-valid "
+                      "relations.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "include_historical",
+   },
 };
 
 /* ========== Tool Metadata ========== */
@@ -120,7 +159,7 @@ static const tool_metadata_t memory_metadata = {
                   "person/pet/place (query: source name to delete, target_name: entity to keep). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 4,
+   .param_count = 7,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,

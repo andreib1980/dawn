@@ -64,18 +64,29 @@ class BenchRetrieval:
          bufsize=1,
       )
 
-      # Read ready message
-      line = self.proc.stdout.readline().strip()
-      self.ready_info = json.loads(line)
-      if self.ready_info.get("status") != "ready":
-         raise RuntimeError(f"bench_retrieval failed to start: {line}")
+      # Read ready message — skip OLOG preamble lines (logging is on stdout)
+      self.ready_info = None
+      for _ in range(50):
+         line = self.proc.stdout.readline().strip()
+         if not line:
+            continue
+         if line.startswith("{"):
+            self.ready_info = json.loads(line)
+            break
+      if not self.ready_info or self.ready_info.get("status") != "ready":
+         raise RuntimeError("bench_retrieval failed to start (no ready JSON)")
 
    def _send(self, obj):
-      """Send a JSON command and read the response."""
+      """Send a JSON command and read the response, skipping OLOG preamble lines."""
       self.proc.stdin.write(json.dumps(obj) + "\n")
       self.proc.stdin.flush()
-      line = self.proc.stdout.readline().strip()
-      return json.loads(line)
+      for _ in range(200):
+         line = self.proc.stdout.readline().strip()
+         if not line:
+            continue
+         if line.startswith("{"):
+            return json.loads(line)
+      raise RuntimeError(f"bench_retrieval: no JSON response for {obj.get('cmd')}")
 
    def add(self, doc_id, text):
       return self._send({"cmd": "add", "id": doc_id, "text": text})

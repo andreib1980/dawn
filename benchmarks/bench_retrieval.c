@@ -67,6 +67,34 @@ extern auth_db_state_t s_db;
 /* When true, skip keyword boosting (pure cosine baseline) */
 static bool s_no_keyword_boost = false;
 
+/* When set, restrict query results to chunks whose doc has this category (v34).
+ * Empty = no filter (default).  Categories are supplied per-add via the optional
+ * "category" field in the add command. */
+#define BENCH_MAX_DOC_CATEGORIES 32
+static char s_category_filter[32] = "";
+static struct {
+   int64_t doc_id;
+   char category[32];
+} s_doc_categories[BENCH_MAX_CHUNKS];
+static int s_doc_categories_count = 0;
+
+static void doc_category_set(int64_t doc_id, const char *category) {
+   if (s_doc_categories_count >= BENCH_MAX_CHUNKS)
+      return;
+   s_doc_categories[s_doc_categories_count].doc_id = doc_id;
+   snprintf(s_doc_categories[s_doc_categories_count].category, BENCH_MAX_DOC_CATEGORIES, "%s",
+            category ? category : "");
+   s_doc_categories_count++;
+}
+
+static const char *doc_category_get(int64_t doc_id) {
+   for (int i = 0; i < s_doc_categories_count; i++) {
+      if (s_doc_categories[i].doc_id == doc_id)
+         return s_doc_categories[i].category;
+   }
+   return "";
+}
+
 /* =============================================================================
  * Database Setup (mirrors tests/test_document_db.c)
  * ============================================================================= */
@@ -403,6 +431,14 @@ static int handle_add(struct json_object *cmd) {
       return -1;
    }
 
+   /* Optional per-add category for filtered-retrieval benchmarks (v34) */
+   struct json_object *cat_obj = NULL;
+   if (json_object_object_get_ex(cmd, "category", &cat_obj)) {
+      const char *cat = json_object_get_string(cat_obj);
+      if (cat && *cat)
+         doc_category_set(doc_id, cat);
+   }
+
    int64_t chunk_id = document_db_chunk_create(doc_id, 0, chunk_text, embedding, out_dims, norm);
    free(embedding);
 
@@ -490,7 +526,28 @@ static int handle_query(struct json_object *cmd) {
       return -1;
    }
 
+   /* Per-query category override falls back to CLI-set s_category_filter. */
+   const char *q_category_filter = s_category_filter;
+   struct json_object *qcat_obj = NULL;
+   if (json_object_object_get_ex(cmd, "category", &qcat_obj)) {
+      const char *q = json_object_get_string(qcat_obj);
+      if (q && *q)
+         q_category_filter = q;
+   }
+
    for (int i = 0; i < chunk_count; i++) {
+      /* Pre-filter by category when set: any chunk whose doc has a different
+       * category gets a sentinel score so it sorts to the bottom and never
+       * appears in top_k.  Same-category and unlabeled docs proceed normally. */
+      if (q_category_filter && *q_category_filter) {
+         const char *chunk_cat = doc_category_get(chunks[i].document_id);
+         if (chunk_cat[0] && strcmp(chunk_cat, q_category_filter) != 0) {
+            scores[i].index = i;
+            scores[i].score = -1.0f;
+            continue;
+         }
+      }
+
       float cosine = embedding_engine_cosine_with_norms(query_vec, chunks[i].embedding, dims,
                                                         query_norm, chunks[i].embedding_norm);
       scores[i].index = i;
@@ -554,6 +611,7 @@ static int handle_reset(void) {
    pthread_mutex_unlock(&s_db.mutex);
 
    s_add_counter = 0;
+   s_doc_categories_count = 0;
 
    fprintf(stdout, "{\"status\":\"ok\"}\n");
    fflush(stdout);
@@ -629,6 +687,9 @@ static void print_usage(const char *prog) {
            "  --endpoint <url>                 Endpoint URL for HTTP providers\n"
            "  --api-key <key>                  API key for OpenAI provider\n"
            "  --no-keyword-boost               Disable keyword boosting (raw cosine only)\n"
+           "  --category-filter <name>         Restrict queries to chunks whose doc has\n"
+           "                                   this category (set per-add via JSON 'category'\n"
+           "                                   field). Per-query 'category' overrides this.\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -645,12 +706,13 @@ int main(int argc, char *argv[]) {
       { "endpoint", required_argument, 0, 'e' },
       { "api-key", required_argument, 0, 'k' },
       { "no-keyword-boost", no_argument, 0, 'r' },
+      { "category-filter", required_argument, 0, 'c' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:rh", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:rh", long_options, NULL)) != -1) {
       switch (opt) {
          case 'p':
             provider = optarg;
@@ -666,6 +728,9 @@ int main(int argc, char *argv[]) {
             break;
          case 'r':
             s_no_keyword_boost = true;
+            break;
+         case 'c':
+            snprintf(s_category_filter, sizeof(s_category_filter), "%s", optarg);
             break;
          case 'h':
             print_usage(argv[0]);
