@@ -35,6 +35,8 @@
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_openai_internal.h"
+#include "llm/llm_openai_responses.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
 #include "llm/sse_parser.h"
@@ -51,6 +53,12 @@ extern int llm_curl_progress_callback(void *clientp,
                                       curl_off_t dlnow,
                                       curl_off_t ultotal,
                                       curl_off_t ulnow);
+
+/* Forward declaration: defined further down; used by the public entry-point
+ * guards to refuse Responses-only models on /v1/chat/completions paths. */
+static bool should_dispatch_to_responses_api(const char *api_key,
+                                             const char *base_url,
+                                             const char *model_name);
 
 /**
  * @brief Check if current session is remote (WebUI, DAP, etc.)
@@ -619,13 +627,7 @@ static struct json_object *strip_vision_content(struct json_object *history) {
    return sanitized;
 }
 
-/**
- * @brief Build HTTP headers for OpenAI API request
- *
- * @param api_key API key (NULL for local LLM, required for cloud)
- * @return CURL header list (caller must free with curl_slist_free_all)
- */
-static struct curl_slist *build_openai_headers(const char *api_key) {
+struct curl_slist *llm_openai_build_headers(const char *api_key) {
    struct curl_slist *headers = NULL;
 
    headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -649,6 +651,17 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
                                  const char *base_url,
                                  const char *api_key,
                                  const char *model) {
+   /* This is the non-streaming utility entry point — only used for cold paths
+    * (search summarization, etc.) where tools aren't sent. If a future caller
+    * routes a Responses-only model through here it will silently fail with
+    * HTTP 400, so refuse up front and tell the caller what to do. */
+   if (should_dispatch_to_responses_api(api_key, base_url, model)) {
+      OLOG_ERROR("OpenAI: model '%s' requires /v1/responses; "
+                 "use llm_openai_streaming_single_shot() instead",
+                 model ? model : "(default)");
+      return NULL;
+   }
+
    CURL *curl_handle = NULL;
    CURLcode res = -1;
    struct curl_slist *headers = NULL;
@@ -783,7 +796,7 @@ char *llm_openai_chat_completion(struct json_object *conversation_history,
 
    curl_handle = curl_easy_init();
    if (curl_handle) {
-      headers = build_openai_headers(api_key);
+      headers = llm_openai_build_headers(api_key);
 
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -1032,14 +1045,7 @@ static void openai_sse_event_handler(const char *event_type,
 /* Maximum tool call iterations to prevent infinite loops (used by old recursive path) */
 #define MAX_TOOL_ITERATIONS 8
 
-/**
- * @brief Extract error message from OpenAI/compatible API error response
- *
- * Parses JSON like: {"error": {"message": "...", "code": "..."}}
- * Returns a formatted error message or a default message if parsing fails.
- * The returned string is thread-local and should not be freed.
- */
-static const char *parse_api_error_message(const char *response_body, long http_code) {
+const char *llm_openai_parse_error_message(const char *response_body, long http_code) {
    static _Thread_local char error_msg[512];
 
    if (!response_body || response_body[0] == '\0') {
@@ -1074,6 +1080,63 @@ static const char *parse_api_error_message(const char *response_body, long http_
 
    json_object_put(root);
    return error_msg;
+}
+
+bool llm_openai_is_gpt5_base_family(const char *model_name) {
+   if (strncmp(model_name, "gpt-5", 5) != 0) {
+      return false;
+   }
+   /* "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5-2025-08-07" → base family.
+    * "gpt-5.1", "gpt-5.2", "gpt-5.4" → versioned variant. */
+   char next = model_name[5];
+   return next == '\0' || next == '-';
+}
+
+bool llm_openai_model_prefers_responses_api(const char *model_name) {
+   /* gpt-5.4, gpt-5.4-mini, and any gpt-5.4-* variant. OpenAI rejects reasoning_effort
+    * combined with function tools on /v1/chat/completions for these models and directs
+    * callers to /v1/responses. Require a boundary char so we don't false-match a
+    * future "gpt-5.40" or "gpt-5.4xyz" model that may not share the restriction. */
+   if (!model_name || strncmp(model_name, "gpt-5.4", 7) != 0) {
+      return false;
+   }
+   char next = model_name[7];
+   return next == '\0' || next == '-' || next == '.';
+}
+
+const char *llm_openai_clamp_effort_for_model(const char *model_name, const char *effort) {
+   if (!effort || !*effort)
+      return "medium";
+   if (!model_name || !*model_name)
+      return effort;
+
+   bool is_gpt5_base = llm_openai_is_gpt5_base_family(model_name);
+   bool is_gpt5_versioned = (strncmp(model_name, "gpt-5", 5) == 0 &&
+                             !is_gpt5_base); /* 5.1 / 5.2 / 5.4 / ... */
+   /* Major version after "gpt-5." — used to detect gpt-5.2+ which accept xhigh.
+    * gpt-5.1 has none/low/medium/high but no xhigh; 5.2+ accepts xhigh. */
+   bool accepts_xhigh = false;
+   bool accepts_none = false;
+   if (is_gpt5_versioned) {
+      accepts_none = true; /* 5.1+ all accept none */
+      /* 5.2 / 5.4 / future 5.x where x>=2 accept xhigh */
+      char minor = model_name[6]; /* char after "gpt-5." */
+      if (minor >= '2' && minor <= '9')
+         accepts_xhigh = true;
+   }
+
+   if (strcmp(effort, "xhigh") == 0 && !accepts_xhigh) {
+      return "high";
+   }
+   if (strcmp(effort, "none") == 0 && !accepts_none) {
+      /* gpt-5 base accepts "minimal" as the lowest; everything else (Gemini,
+       * o-series): no "none" and no "minimal" — fall back to "low". */
+      return is_gpt5_base ? "minimal" : "low";
+   }
+   if (strcmp(effort, "minimal") == 0 && !is_gpt5_base) {
+      return "low";
+   }
+   return effort;
 }
 
 /**
@@ -1217,12 +1280,8 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          if (strcmp(thinking_mode, "disabled") == 0) {
             // GPT-5 family: disable/minimize reasoning
             if (is_gpt5) {
-               // GPT-5.2 supports "none", others use "minimal" for lowest reasoning
-               if (strncmp(model_name, "gpt-5.2", 7) == 0) {
-                  effort = "none";
-               } else {
-                  effort = "minimal";
-               }
+               // Only the gpt-5 base family accepts "minimal"; gpt-5.1+ use "none".
+               effort = llm_openai_is_gpt5_base_family(model_name) ? "minimal" : "none";
             }
             // Gemini 2.5+/3.x: reasoning cannot be fully disabled, use "low" as minimum
             else if (is_gemini_thinking) {
@@ -1241,10 +1300,9 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          }
 
          if (effort != NULL) {
-            // Both OpenAI and Gemini (via OpenAI-compatible API) use reasoning_effort
-            // Note: Gemini's OpenAI-compatible endpoint doesn't support google.thinking_config
-            // extension, so we can't get visible thinking content. The model still does
-            // internal reasoning based on reasoning_effort level.
+            /* Clamp to what this specific model accepts on chat completions —
+             * older OpenAI families and Gemini OAI-compat reject xhigh/none. */
+            effort = llm_openai_clamp_effort_for_model(model_name, effort);
             json_object_object_add(root, "reasoning_effort", json_object_new_string(effort));
             OLOG_INFO("Cloud LLM: Reasoning effort set to '%s' for model %s", effort, model_name);
          }
@@ -1466,7 +1524,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    curl_handle = curl_easy_init();
    if (curl_handle) {
-      headers = build_openai_headers(api_key);
+      headers = llm_openai_build_headers(api_key);
 
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
 
@@ -1563,7 +1621,8 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          /* Send error to WebUI client if connected */
          session_t *session = session_get_command_context();
          if (session && session->type == SESSION_TYPE_WEBUI) {
-            const char *error_msg = parse_api_error_message(streaming_ctx.raw_buffer, http_code);
+            const char *error_msg = llm_openai_parse_error_message(streaming_ctx.raw_buffer,
+                                                                   http_code);
             webui_send_error(session, error_code, error_msg);
          }
 #endif
@@ -1883,9 +1942,50 @@ char *llm_openai_chat_completion_streaming(struct json_object *conversation_hist
                                            const char *model,
                                            llm_openai_text_chunk_callback chunk_callback,
                                            void *callback_userdata) {
+   /* See llm_openai_chat_completion(): refuse Responses-only models on the
+    * chat-completions transport rather than failing with HTTP 400 mid-stream. */
+   if (should_dispatch_to_responses_api(api_key, base_url, model)) {
+      OLOG_ERROR("OpenAI: model '%s' requires /v1/responses; "
+                 "use llm_openai_streaming_single_shot() instead",
+                 model ? model : "(default)");
+      return NULL;
+   }
    return llm_openai_streaming_internal(conversation_history, input_text, vision_images,
                                         vision_image_sizes, vision_image_count, base_url, api_key,
                                         model, chunk_callback, callback_userdata, 0);
+}
+
+/**
+ * @brief Decide whether this call should use /v1/responses instead of /v1/chat/completions.
+ *
+ * Triggers when api_key is set (cloud path only), and the configured mode permits it:
+ *   - "auto"   (default) — route iff llm_openai_model_prefers_responses_api(model)
+ *   - "always"           — route every cloud OpenAI call
+ *   - "never"            — never route (gpt-5.4 will fail per OpenAI's HTTP 400)
+ *
+ * Local LLMs and non-OpenAI cloud providers (Gemini OpenAI-compat, etc.) never route.
+ */
+static bool should_dispatch_to_responses_api(const char *api_key,
+                                             const char *base_url,
+                                             const char *model_name) {
+   if (!api_key)
+      return false; /* Local LLM */
+   if (!model_name || !*model_name)
+      return false;
+   /* Gemini's OpenAI-compatible endpoint doesn't speak Responses */
+   if (base_url && strstr(base_url, "generativelanguage.googleapis.com"))
+      return false;
+
+   const char *mode = g_config.llm.cloud.openai_use_responses_api;
+   if (!mode || !*mode)
+      mode = "auto";
+
+   if (strcmp(mode, "never") == 0)
+      return false;
+   if (strcmp(mode, "always") == 0)
+      return true;
+   /* auto */
+   return llm_openai_model_prefers_responses_api(model_name);
 }
 
 int llm_openai_streaming_single_shot(struct json_object *conversation_history,
@@ -1914,6 +2014,22 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
       return 1;
    }
    memset(result, 0, sizeof(*result));
+
+   /* Route to /v1/responses for gpt-5.4 family (and any operator-forced model). */
+   {
+      const char *route_model = model;
+      if (!route_model || !*route_model) {
+         route_model = (api_key == NULL) ? g_config.llm.local.model
+                                         : llm_get_default_openai_model();
+      }
+      if (should_dispatch_to_responses_api(api_key, base_url, route_model)) {
+         return llm_openai_responses_streaming_single_shot(conversation_history, input_text,
+                                                           vision_images, vision_image_sizes,
+                                                           vision_image_count, base_url, api_key,
+                                                           route_model, chunk_callback,
+                                                           callback_userdata, iteration, result);
+      }
+   }
 
    /* Filter and convert history (same as llm_openai_streaming_internal) */
    json_object *filtered_history = filter_orphaned_tool_messages(conversation_history);
@@ -1959,7 +2075,7 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
          const char *effort = NULL;
          if (strcmp(thinking_mode, "disabled") == 0) {
             if (is_gpt5) {
-               effort = (strncmp(model_name, "gpt-5.2", 7) == 0) ? "none" : "minimal";
+               effort = llm_openai_is_gpt5_base_family(model_name) ? "minimal" : "none";
             } else if (is_gemini_thinking) {
                effort = "low";
             }
@@ -1972,6 +2088,7 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
             }
          }
          if (effort != NULL) {
+            effort = llm_openai_clamp_effort_for_model(model_name, effort);
             json_object_object_add(root, "reasoning_effort", json_object_new_string(effort));
          }
       }
@@ -2123,7 +2240,7 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
          return 1;
       }
 
-      headers = build_openai_headers(api_key);
+      headers = llm_openai_build_headers(api_key);
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -2214,7 +2331,8 @@ int llm_openai_streaming_single_shot(struct json_object *conversation_history,
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
       if (session && session->type == SESSION_TYPE_WEBUI) {
-         const char *error_msg = parse_api_error_message(streaming_ctx.raw_buffer, http_code);
+         const char *error_msg = llm_openai_parse_error_message(streaming_ctx.raw_buffer,
+                                                                http_code);
          webui_send_error(session, "LLM_ERROR", error_msg);
       }
 #endif

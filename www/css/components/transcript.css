@@ -841,3 +841,13 @@ body.debug-mode .transcript-entry.debug {
    font-style: italic;
    color: var(--text-tertiary);
 }
+
+/* OpenAI Responses path: thinking block kept alive for token-merge but the
+ * model emitted no summary text. Reuse the reasoning-only placeholder styling
+ * so the empty content area reads as "intentional absence" rather than
+ * "missing data". */
+.thinking-content.no-summary {
+   font-family: inherit;
+   font-style: italic;
+   color: var(--text-tertiary);
+}

@@ -48,8 +48,19 @@
    }
 
    /**
+    * Format a thinking-block stats line. Mirrors the live-streaming helper so
+    * historical messages render with the same "(2.0s, 43 tokens)" shape.
+    */
+   function formatThinkingStats(durationSec, tokens) {
+      const parts = [];
+      if (durationSec) parts.push(`${durationSec}s`);
+      if (tokens > 0) parts.push(`${tokens.toLocaleString()} tokens`);
+      return parts.length ? `(${parts.join(', ')})` : '';
+   }
+
+   /**
     * Create a thinking block element for display
-    * @param {Object} thinking - Thinking data {provider, duration, content}
+    * @param {Object} thinking - Thinking data {provider, duration, content, tokens?}
     * @returns {HTMLElement}
     */
    function createThinkingBlock(thinking) {
@@ -58,21 +69,44 @@
       entry.setAttribute('role', 'region');
       entry.setAttribute('aria-label', 'AI thinking process');
 
+      // Keep in sync with providerDisplayLabel() in streaming.js. Separate IIFEs
+      // can't share the helper without a shared module, so the mapping is
+      // duplicated here — update both sites when adding a new provider.
       const providerLabel =
          thinking.provider === 'claude'
             ? 'Claude'
             : thinking.provider === 'local'
               ? 'Local LLM'
-              : 'AI';
+              : thinking.provider === 'openai'
+                ? 'OpenAI'
+                : thinking.provider === 'gemini'
+                  ? 'Gemini'
+                  : 'AI';
+
+      const stats = formatThinkingStats(thinking.duration, thinking.tokens || 0);
+      const hasContent = thinking.content && thinking.content.trim().length > 0;
+      // "reasoned" when there's no summary text but the provider was OpenAI
+      // (Responses path keeps an empty thinking marker so the merged token count
+      // has somewhere to land — see streaming.js finalizeThinking).
+      const verb = hasContent ? 'thought' : thinking.provider === 'openai' ? 'reasoned' : 'thought';
+      const contentHtml = hasContent
+         ? DawnFormat.escapeHtml(thinking.content).replace(/\n/g, '<br>')
+         : '<em>No reasoning summary available for this turn.</em>';
+      const contentClass = hasContent ? 'thinking-content' : 'thinking-content no-summary';
+
+      // Defense-in-depth: thinking.duration / thinking.provider come from a regex
+      // capture on persisted text and could in principle contain HTML — escape.
+      const safeDuration = DawnFormat.escapeHtml(stats);
+      const safeLabel = DawnFormat.escapeHtml(`${providerLabel} ${verb}`);
 
       entry.innerHTML = `
       <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
         <span class="thinking-icon" aria-hidden="true">💭</span>
-        <span class="thinking-label">${providerLabel} thought</span>
-        <span class="thinking-duration">(${thinking.duration}s)</span>
+        <span class="thinking-label">${safeLabel}</span>
+        <span class="thinking-duration">${safeDuration}</span>
         <span class="thinking-toggle" aria-hidden="true">▼</span>
       </div>
-      <div class="thinking-content">${DawnFormat.escapeHtml(thinking.content).replace(/\n/g, '<br>')}</div>
+      <div class="${contentClass}">${contentHtml}</div>
     `;
 
       // Add click handler for toggle
@@ -148,14 +182,15 @@
       entry.setAttribute('aria-label', 'AI reasoning summary');
 
       const tokens = reasoning.tokens || 0;
+      const stats = DawnFormat.escapeHtml(formatThinkingStats(null, tokens));
       entry.innerHTML = `
       <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
         <span class="thinking-icon" aria-hidden="true">🧠</span>
         <span class="thinking-label">OpenAI reasoned</span>
-        <span class="thinking-duration">(${tokens.toLocaleString()} tokens)</span>
+        <span class="thinking-duration">${stats}</span>
       </div>
-      <div class="thinking-content">
-        <em>Reasoning content is not accessible from OpenAI reasoning models.</em>
+      <div class="thinking-content no-summary">
+        <em>No reasoning summary available for this turn.</em>
       </div>
     `;
 
@@ -514,42 +549,40 @@
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
-      // Handle thinking content in assistant messages
+      // Handle thinking + reasoning markers in assistant messages.
+      // Persistence stores them as separate <dawn:thinking> and <dawn:reasoning>
+      // tags. When both are present (Responses API), merge the token count into
+      // the thinking block so the user sees one panel with both stats.
       let thinkingBlock = null;
-      if (role === 'assistant' && containsThinkingContent(text)) {
-         const { thinking, remaining } = extractThinkingContent(text);
-         if (thinking) {
-            thinkingBlock = createThinkingBlock(thinking);
-            if (remaining.length > 0) {
-               text = remaining;
-            } else {
-               // Only thinking content, insert and return
-               if (beforeElement) {
-                  transcript.insertBefore(thinkingBlock, beforeElement);
-               } else {
-                  transcript.appendChild(thinkingBlock);
-               }
-               return;
-            }
-         }
-      }
-
-      // Handle reasoning content (OpenAI o-series)
       let reasoningBlock = null;
-      if (role === 'assistant' && containsReasoningContent(text)) {
-         const { reasoning, remaining } = extractReasoningContent(text);
-         if (reasoning) {
-            reasoningBlock = createReasoningBlock(reasoning);
-            if (remaining.length > 0) {
-               text = remaining;
+      if (role === 'assistant') {
+         let thinkingData = null;
+         let reasoningData = null;
+         if (containsThinkingContent(text)) {
+            const r = extractThinkingContent(text);
+            thinkingData = r.thinking;
+            text = r.remaining;
+         }
+         if (containsReasoningContent(text)) {
+            const r = extractReasoningContent(text);
+            reasoningData = r.reasoning;
+            text = r.remaining;
+         }
+         if (thinkingData) {
+            if (reasoningData) thinkingData.tokens = reasoningData.tokens;
+            thinkingBlock = createThinkingBlock(thinkingData);
+         } else if (reasoningData) {
+            // Opaque reasoning (legacy chat-completions o-series): standalone block.
+            reasoningBlock = createReasoningBlock(reasoningData);
+         }
+         if ((thinkingBlock || reasoningBlock) && text.length === 0) {
+            const block = thinkingBlock || reasoningBlock;
+            if (beforeElement) {
+               transcript.insertBefore(block, beforeElement);
             } else {
-               if (beforeElement) {
-                  transcript.insertBefore(reasoningBlock, beforeElement);
-               } else {
-                  transcript.appendChild(reasoningBlock);
-               }
-               return;
+               transcript.appendChild(block);
             }
+            return;
          }
       }
 
@@ -648,12 +681,15 @@
          firstTextEl.appendChild(createDocumentChips(docData.documents));
       }
 
-      // Insert thinking/reasoning block first if present
-      if (thinkingBlock && beforeElement) {
-         transcript.insertBefore(thinkingBlock, beforeElement);
-      }
-      if (reasoningBlock && beforeElement) {
-         transcript.insertBefore(reasoningBlock, beforeElement);
+      // Insert thinking/reasoning block first if present (only one will be set —
+      // they're mutually exclusive in the merged-render flow above)
+      const auxBlock = thinkingBlock || reasoningBlock;
+      if (auxBlock) {
+         if (beforeElement) {
+            transcript.insertBefore(auxBlock, beforeElement);
+         } else {
+            transcript.appendChild(auxBlock);
+         }
       }
 
       // Insert the entry FIRST (before loading images) for immediate visibility
@@ -708,36 +744,33 @@
          }
       }
 
-      // Check for thinking content in assistant messages (from history)
-      if (role === 'assistant' && containsThinkingContent(text)) {
-         const { thinking, remaining } = extractThinkingContent(text);
-         if (thinking) {
-            // Add thinking block first
-            const thinkingBlock = createThinkingBlock(thinking);
-            transcript.appendChild(thinkingBlock);
-
-            // Continue processing the remaining text
-            if (remaining.length > 0) {
-               text = remaining;
-            } else {
-               transcript.scrollTop = transcript.scrollHeight;
-               return;
-            }
+      // Check for thinking + reasoning markers in assistant messages (from history).
+      // Persistence stores them as separate <dawn:thinking> and <dawn:reasoning>
+      // tags. When both are present (Responses API), merge token count into the
+      // thinking block — single panel with both stats.
+      if (role === 'assistant') {
+         let thinkingData = null;
+         let reasoningData = null;
+         if (containsThinkingContent(text)) {
+            const r = extractThinkingContent(text);
+            thinkingData = r.thinking;
+            text = r.remaining;
          }
-      }
-
-      // Check for reasoning content in assistant messages (from history - OpenAI o-series)
-      if (role === 'assistant' && containsReasoningContent(text)) {
-         const { reasoning, remaining } = extractReasoningContent(text);
-         if (reasoning) {
-            // Add reasoning block first (before the response)
-            const reasoningBlock = createReasoningBlock(reasoning);
-            transcript.appendChild(reasoningBlock);
-
-            // Continue processing the remaining text
-            if (remaining.length > 0) {
-               text = remaining;
-            } else {
+         if (containsReasoningContent(text)) {
+            const r = extractReasoningContent(text);
+            reasoningData = r.reasoning;
+            text = r.remaining;
+         }
+         let block = null;
+         if (thinkingData) {
+            if (reasoningData) thinkingData.tokens = reasoningData.tokens;
+            block = createThinkingBlock(thinkingData);
+         } else if (reasoningData) {
+            block = createReasoningBlock(reasoningData);
+         }
+         if (block) {
+            transcript.appendChild(block);
+            if (text.length === 0) {
                transcript.scrollTop = transcript.scrollHeight;
                return;
             }

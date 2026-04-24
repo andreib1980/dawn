@@ -182,6 +182,8 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_LLM_CLOUD_PROVIDER", config->llm.cloud.provider);
    ENV_STRING("DAWN_LLM_CLOUD_ENDPOINT", config->llm.cloud.endpoint);
    ENV_BOOL("DAWN_LLM_CLOUD_VISION_ENABLED", config->llm.cloud.vision_enabled);
+   ENV_STRING("DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API",
+              config->llm.cloud.openai_use_responses_api);
    ENV_INT("DAWN_LLM_CLOUD_OPENAI_DEFAULT_MODEL_IDX", config->llm.cloud.openai_default_model_idx);
    ENV_INT("DAWN_LLM_CLOUD_CLAUDE_DEFAULT_MODEL_IDX", config->llm.cloud.claude_default_model_idx);
    ENV_INT("DAWN_LLM_CLOUD_GEMINI_DEFAULT_MODEL_IDX", config->llm.cloud.gemini_default_model_idx);
@@ -327,6 +329,7 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[llm.cloud]\n");
    printf("  provider = \"%s\"\n", config->llm.cloud.provider);
    printf("  endpoint = \"%s\"\n", config->llm.cloud.endpoint);
+   printf("  openai_use_responses_api = \"%s\"\n", config->llm.cloud.openai_use_responses_api);
    printf("  openai_default_model_idx = %d\n", config->llm.cloud.openai_default_model_idx);
    printf("  claude_default_model_idx = %d\n", config->llm.cloud.claude_default_model_idx);
    printf("  gemini_default_model_idx = %d\n", config->llm.cloud.gemini_default_model_idx);
@@ -666,6 +669,11 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_STR("endpoint", config->llm.cloud.endpoint, "DAWN_LLM_CLOUD_ENDPOINT",
                      detect_source_str(config->llm.cloud.endpoint, defaults.llm.cloud.endpoint,
                                        "DAWN_LLM_CLOUD_ENDPOINT"));
+   PRINT_SETTING_STR("openai_use_responses_api", config->llm.cloud.openai_use_responses_api,
+                     "DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API",
+                     detect_source_str(config->llm.cloud.openai_use_responses_api,
+                                       defaults.llm.cloud.openai_use_responses_api,
+                                       "DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API"));
    PRINT_SETTING_INT("openai_default_model_idx", config->llm.cloud.openai_default_model_idx,
                      "DAWN_LLM_CLOUD_OPENAI_DEFAULT_MODEL_IDX",
                      detect_source_int(config->llm.cloud.openai_default_model_idx,
@@ -1140,6 +1148,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->llm.thinking.budget_medium));
    json_object_object_add(thinking, "budget_high",
                           json_object_new_int(config->llm.thinking.budget_high));
+   json_object_object_add(thinking, "budget_xhigh",
+                          json_object_new_int(config->llm.thinking.budget_xhigh));
    json_object_object_add(llm, "thinking", thinking);
 
    /* Context management settings */
@@ -1720,6 +1730,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "budget_low = %d\n", config->llm.thinking.budget_low);
    fprintf(fp, "budget_medium = %d\n", config->llm.thinking.budget_medium);
    fprintf(fp, "budget_high = %d\n", config->llm.thinking.budget_high);
+   fprintf(fp, "budget_xhigh = %d\n", config->llm.thinking.budget_xhigh);
 
    fprintf(fp, "\n[search]\n");
    fprintf(fp, "engine = \"%s\"\n", config->search.engine);

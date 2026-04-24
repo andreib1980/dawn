@@ -62,7 +62,23 @@ static void record_ttft_if_first_token(llm_stream_context_t *ctx) {
 
 /**
  * @brief Append text to accumulated response buffer
+ *
+ * Forward declaration so the public wrappers can be defined before the static
+ * definition without confusing the compiler.
  */
+static int append_to_accumulated(llm_stream_context_t *ctx, const char *text);
+static int append_to_thinking(llm_stream_context_t *ctx, const char *text);
+
+void llm_stream_append_text(llm_stream_context_t *ctx, const char *text) {
+   if (ctx)
+      append_to_accumulated(ctx, text);
+}
+
+void llm_stream_append_thinking(llm_stream_context_t *ctx, const char *text) {
+   if (ctx)
+      append_to_thinking(ctx, text);
+}
+
 static int append_to_accumulated(llm_stream_context_t *ctx, const char *text) {
    if (!text || !*text) {
       return 1;

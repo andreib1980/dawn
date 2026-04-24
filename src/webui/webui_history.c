@@ -34,6 +34,7 @@
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
 #include "version.h"
@@ -341,18 +342,23 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
    }
 
    /* Trigger memory extraction for old conversation before creating new one (async, non-blocking).
-    * This captures the conversation state before switching to a fresh context. */
+    * This captures the conversation state before switching to a fresh context.
+    * Strip _provider_state first — see llm_history_strip_provider_state docs. */
    if (conn->session && !should_skip_memory_extraction(conn)) {
       struct json_object *old_history = session_get_history(conn->session);
       if (old_history) {
          int msg_count = json_object_array_length(old_history);
          if (msg_count >= 2) {
-            memory_extraction_fallback_t fb;
-            memory_extraction_build_fallback(conn->session, &fb);
-            OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before new",
-                      (long long)conn->active_conversation_id);
-            memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
-                                      old_history, msg_count, 0, &fb);
+            struct json_object *clean = llm_history_strip_provider_state(old_history);
+            if (clean) {
+               memory_extraction_fallback_t fb;
+               memory_extraction_build_fallback(conn->session, &fb);
+               OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before new",
+                         (long long)conn->active_conversation_id);
+               memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
+                                         clean, msg_count, 0, &fb);
+               json_object_put(clean);
+            }
          }
          json_object_put(old_history);
       }
@@ -438,18 +444,23 @@ void handle_clear_session(ws_connection_t *conn) {
       return;
    }
 
-   /* Trigger memory extraction before clearing (captures conversation state) */
+   /* Trigger memory extraction before clearing (captures conversation state).
+    * Strip _provider_state first — see llm_history_strip_provider_state docs. */
    if (!should_skip_memory_extraction(conn)) {
       struct json_object *old_history = session_get_history(conn->session);
       if (old_history) {
          int msg_count = json_object_array_length(old_history);
          if (msg_count >= 2) {
-            memory_extraction_fallback_t fb;
-            memory_extraction_build_fallback(conn->session, &fb);
-            OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before clear",
-                      (long long)conn->active_conversation_id);
-            memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
-                                      old_history, msg_count, 0, &fb);
+            struct json_object *clean = llm_history_strip_provider_state(old_history);
+            if (clean) {
+               memory_extraction_fallback_t fb;
+               memory_extraction_build_fallback(conn->session, &fb);
+               OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before clear",
+                         (long long)conn->active_conversation_id);
+               memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
+                                         clean, msg_count, 0, &fb);
+               json_object_put(clean);
+            }
          }
          json_object_put(old_history);
       }
@@ -649,12 +660,18 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
       if (old_history) {
          int msg_count = json_object_array_length(old_history);
          if (msg_count >= 2) {
-            memory_extraction_fallback_t fb;
-            memory_extraction_build_fallback(conn->session, &fb);
-            OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before switch",
-                      (long long)conn->active_conversation_id);
-            memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
-                                      old_history, msg_count, 0, &fb);
+            /* Strip _provider_state before forwarding to extraction (cross-provider
+             * leak guard — see llm_history_strip_provider_state docs). */
+            struct json_object *clean = llm_history_strip_provider_state(old_history);
+            if (clean) {
+               memory_extraction_fallback_t fb;
+               memory_extraction_build_fallback(conn->session, &fb);
+               OLOG_INFO("WebUI: Triggering memory extraction for conversation %lld before switch",
+                         (long long)conn->active_conversation_id);
+               memory_trigger_extraction(conn->auth_user_id, conn->active_conversation_id, NULL,
+                                         clean, msg_count, 0, &fb);
+               json_object_put(clean);
+            }
          }
          json_object_put(old_history);
       }
@@ -812,6 +829,9 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
             json_object_object_add(llm_settings, "thinking_mode",
                                    json_object_new_string(conv.thinking_mode[0] ? conv.thinking_mode
                                                                                 : ""));
+            json_object_object_add(llm_settings, "reasoning_effort",
+                                   json_object_new_string(
+                                       conv.reasoning_effort[0] ? conv.reasoning_effort : ""));
             json_object_object_add(resp_payload, "llm_settings", llm_settings);
 
             json_object_object_add(resp_payload, "llm_locked",
@@ -1258,6 +1278,7 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
    const char *model = NULL;
    const char *tools_mode = NULL;
    const char *thinking_mode = NULL;
+   const char *reasoning_effort = NULL;
 
    json_object *val;
    if (json_object_object_get_ex(settings_obj, "llm_type", &val)) {
@@ -1275,11 +1296,15 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
    if (json_object_object_get_ex(settings_obj, "thinking_mode", &val)) {
       thinking_mode = json_object_get_string(val);
    }
+   if (json_object_object_get_ex(settings_obj, "reasoning_effort", &val)) {
+      reasoning_effort = json_object_get_string(val);
+   }
 
    /* Validate input lengths against database field sizes */
    if ((llm_type && strlen(llm_type) > 15) || (cloud_provider && strlen(cloud_provider) > 15) ||
        (model && strlen(model) > 63) || (tools_mode && strlen(tools_mode) > 15) ||
-       (thinking_mode && strlen(thinking_mode) > 15)) {
+       (thinking_mode && strlen(thinking_mode) > 15) ||
+       (reasoning_effort && strlen(reasoning_effort) > 15)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Field value too long"));
       json_object_object_add(response, "payload", resp_payload);
@@ -1290,7 +1315,7 @@ void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *pay
 
    /* Lock settings in database (only works if message_count == 0) */
    int result = conv_db_lock_llm_settings(conv_id, conn->auth_user_id, llm_type, cloud_provider,
-                                          model, tools_mode, thinking_mode);
+                                          model, tools_mode, thinking_mode, reasoning_effort);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));

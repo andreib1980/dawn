@@ -1948,14 +1948,18 @@ void llm_tools_set_current_config(const llm_resolved_config_t *config) {
 }
 
 const char *llm_get_current_thinking_mode(void) {
-   /* Priority: thread-local config > global config > default */
+   /* Priority: thread-local config > global config > default.
+    * "auto" is treated as a synonym of "enabled" by all providers (see
+    * llm_openai.c, llm_openai_responses.c, llm_claude_format.c) and remains
+    * accepted from legacy DB rows / older clients. The default is "enabled"
+    * since the WebUI dropdown only emits disabled/enabled. */
    if (tl_current_config && tl_current_config->thinking_mode[0] != '\0') {
       return tl_current_config->thinking_mode;
    }
    if (g_config.llm.thinking.mode[0] != '\0') {
       return g_config.llm.thinking.mode;
    }
-   return "auto";
+   return "enabled";
 }
 
 const char *llm_get_current_reasoning_effort(void) {
@@ -1970,17 +1974,31 @@ const char *llm_get_current_reasoning_effort(void) {
 }
 
 int llm_get_effective_budget_tokens(void) {
-   /* Map reasoning_effort to configured budget using first-char for efficiency */
+   /* Map reasoning_effort to configured budget using first-char for efficiency.
+    *
+    * Effort vocabulary across providers:
+    *   none    — gpt-5.4 / gpt-5.1+ only ("don't reason"). For Claude (which has
+    *             no API "none"), map to budget_low so the thinking block at least
+    *             has a minimum viable budget if "none" leaks through.
+    *   low     — Claude budget_low.    OpenAI/Gemini pass through.
+    *   medium  — Claude budget_medium. OpenAI/Gemini pass through. Default.
+    *   high    — Claude budget_high.   OpenAI/Gemini pass through.
+    *   xhigh   — Claude budget_xhigh.  OpenAI gpt-5.2/5.4 pass through; older OpenAI
+    *             and Gemini get clamped to "high" at request build time. */
    const char *effort = llm_get_current_reasoning_effort();
    int budget;
    switch (effort[0]) {
-      case 'l':
+      case 'n': /* none */
+      case 'l': /* low */
          budget = g_config.llm.thinking.budget_low;
          break;
-      case 'h':
+      case 'x': /* xhigh */
+         budget = g_config.llm.thinking.budget_xhigh;
+         break;
+      case 'h': /* high */
          budget = g_config.llm.thinking.budget_high;
          break;
-      default:
+      default: /* medium */
          budget = g_config.llm.thinking.budget_medium;
          break;
    }
@@ -2193,6 +2211,34 @@ int llm_tools_build_disabled_hint(bool is_remote, char *buffer, size_t buffer_si
    return len;
 }
 
+struct json_object *llm_history_strip_provider_state(struct json_object *history) {
+   if (!history || json_object_get_type(history) != json_type_array) {
+      return NULL;
+   }
+
+   /* Deep-copy via json-c's deep_copy (single pass, no serializer round-trip)
+    * then strip transient fields from each message. */
+   struct json_object *copy = NULL;
+   if (json_object_deep_copy(history, &copy, NULL) != 0 || !copy) {
+      if (copy)
+         json_object_put(copy);
+      return NULL;
+   }
+   if (json_object_get_type(copy) != json_type_array) {
+      json_object_put(copy);
+      return NULL;
+   }
+
+   int n = json_object_array_length(copy);
+   for (int i = 0; i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(copy, i);
+      if (msg && json_object_get_type(msg) == json_type_object) {
+         json_object_object_del(msg, "_provider_state");
+      }
+   }
+   return copy;
+}
+
 void llm_tool_response_free(llm_tool_response_t *response) {
    if (response) {
       if (response->text) {
@@ -2206,6 +2252,14 @@ void llm_tool_response_free(llm_tool_response_t *response) {
       if (response->thinking_signature) {
          free(response->thinking_signature);
          response->thinking_signature = NULL;
+      }
+      if (response->response_id) {
+         free(response->response_id);
+         response->response_id = NULL;
+      }
+      if (response->provider_state_json) {
+         free(response->provider_state_json);
+         response->provider_state_json = NULL;
       }
    }
 }

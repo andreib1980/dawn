@@ -341,6 +341,13 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
       strcpy(conv_out->origin, "webui"); /* Default for old conversations */
    }
 
+   /* Reasoning effort (schema v36+) */
+   const char *reasoning_effort = (const char *)sqlite3_column_text(s_db.stmt_conv_get, 18);
+   if (reasoning_effort) {
+      strncpy(conv_out->reasoning_effort, reasoning_effort, sizeof(conv_out->reasoning_effort) - 1);
+      conv_out->reasoning_effort[sizeof(conv_out->reasoning_effort) - 1] = '\0';
+   }
+
    sqlite3_reset(s_db.stmt_conv_get);
    AUTH_DB_UNLOCK();
 
@@ -1043,7 +1050,8 @@ int conv_db_lock_llm_settings(int64_t conv_id,
                               const char *cloud_provider,
                               const char *model,
                               const char *tools_mode,
-                              const char *thinking_mode) {
+                              const char *thinking_mode,
+                              const char *reasoning_effort) {
    if (conv_id <= 0) {
       return AUTH_DB_INVALID;
    }
@@ -1053,7 +1061,7 @@ int conv_db_lock_llm_settings(int64_t conv_id,
    /* Update LLM settings only if message_count is 0 (prevents race conditions) */
    const char *sql = "UPDATE conversations SET "
                      "llm_type = ?, cloud_provider = ?, model = ?, "
-                     "tools_mode = ?, thinking_mode = ? "
+                     "tools_mode = ?, thinking_mode = ?, reasoning_effort = ? "
                      "WHERE id = ? AND user_id = ? AND message_count = 0";
 
    sqlite3_stmt *stmt = NULL;
@@ -1070,8 +1078,9 @@ int conv_db_lock_llm_settings(int64_t conv_id,
    sqlite3_bind_text(stmt, 3, model ? model : "", -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 4, tools_mode ? tools_mode : "", -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 5, thinking_mode ? thinking_mode : "", -1, SQLITE_STATIC);
-   sqlite3_bind_int64(stmt, 6, conv_id);
-   sqlite3_bind_int(stmt, 7, user_id);
+   sqlite3_bind_text(stmt, 6, reasoning_effort ? reasoning_effort : "", -1, SQLITE_STATIC);
+   sqlite3_bind_int64(stmt, 7, conv_id);
+   sqlite3_bind_int(stmt, 8, user_id);
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -1095,7 +1104,8 @@ int conv_db_update_llm_settings(int64_t conv_id,
                                 const char *cloud_provider,
                                 const char *model,
                                 const char *tools_mode,
-                                const char *thinking_mode) {
+                                const char *thinking_mode,
+                                const char *reasoning_effort) {
    if (conv_id <= 0) {
       return AUTH_DB_INVALID;
    }
@@ -1104,7 +1114,7 @@ int conv_db_update_llm_settings(int64_t conv_id,
 
    const char *sql = "UPDATE conversations SET "
                      "llm_type = ?, cloud_provider = ?, model = ?, "
-                     "tools_mode = ?, thinking_mode = ? "
+                     "tools_mode = ?, thinking_mode = ?, reasoning_effort = ? "
                      "WHERE id = ? AND user_id = ?";
 
    sqlite3_stmt *stmt = NULL;
@@ -1120,8 +1130,9 @@ int conv_db_update_llm_settings(int64_t conv_id,
    sqlite3_bind_text(stmt, 3, model ? model : "", -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 4, tools_mode ? tools_mode : "", -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 5, thinking_mode ? thinking_mode : "", -1, SQLITE_STATIC);
-   sqlite3_bind_int64(stmt, 6, conv_id);
-   sqlite3_bind_int(stmt, 7, user_id);
+   sqlite3_bind_text(stmt, 6, reasoning_effort ? reasoning_effort : "", -1, SQLITE_STATIC);
+   sqlite3_bind_int64(stmt, 7, conv_id);
+   sqlite3_bind_int(stmt, 8, user_id);
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);

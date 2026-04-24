@@ -18,6 +18,27 @@
       onSaveMessage: null, // (role, text) => void - save message to history
    };
 
+   /**
+    * Display label for an LLM provider in the thinking-block header.
+    * Used at two sites within this module (handleThinkingStart + finalizeThinking).
+    * The reload path lives in transcript.js's IIFE and duplicates this mapping
+    * inline — keep the two in sync when adding new providers.
+    */
+   function providerDisplayLabel(provider) {
+      switch (provider) {
+         case 'claude':
+            return 'Claude';
+         case 'local':
+            return 'Local LLM';
+         case 'openai':
+            return 'OpenAI';
+         case 'gemini':
+            return 'Gemini';
+         default:
+            return 'AI';
+      }
+   }
+
    // =============================================================================
    // Stream Start
    // =============================================================================
@@ -263,23 +284,34 @@
       if (fullContent && callbacks.onSaveMessage) {
          let contentToSave = fullContent;
 
-         // Include thinking content if present (from finalized thinking block)
-         if (
-            DawnState.thinkingState.finalizedContent &&
-            DawnState.thinkingState.finalizedContent.trim()
-         ) {
-            const provider = DawnState.thinkingState.finalizedProvider || 'unknown';
-            const duration = DawnState.thinkingState.finalizedDuration || '0';
-            // Prefix with thinking block marker
+         // Persist thinking marker. Two cases:
+         //   (a) Finalized thinking content present → save normally with content.
+         //   (b) Empty content but provider emitted reasoning tokens (OpenAI Responses
+         //       case where the model didn't emit a summary) → still save an empty
+         //       thinking marker so the reload path produces ONE merged panel rather
+         //       than a standalone "OpenAI reasoned" fallback block.
+         const finContent = DawnState.thinkingState.finalizedContent;
+         const finProvider = DawnState.thinkingState.finalizedProvider || 'unknown';
+         const finDuration = DawnState.thinkingState.finalizedDuration || '0';
+         const hasThinkingContent = finContent && finContent.trim();
+         const hasReasoningTokens = DawnState.streamingState.reasoningTokens > 0;
+         if (hasThinkingContent) {
             contentToSave =
-               `<dawn:thinking provider="${provider}" duration="${duration}">\n` +
-               DawnState.thinkingState.finalizedContent +
+               `<dawn:thinking provider="${finProvider}" duration="${finDuration}">\n` +
+               finContent +
+               '\n</dawn:thinking>\n' +
+               contentToSave;
+         } else if (hasReasoningTokens && finProvider !== 'unknown') {
+            /* Empty thinking marker — preserves provider/duration for the merged
+             * render. Token count attaches via the dawn:reasoning marker below. */
+            contentToSave =
+               `<dawn:thinking provider="${finProvider}" duration="${finDuration}">\n` +
                '\n</dawn:thinking>\n' +
                contentToSave;
          }
 
-         // Include reasoning tokens if present (OpenAI o-series)
-         if (DawnState.streamingState.reasoningTokens > 0) {
+         // Include reasoning tokens if present (OpenAI Responses + o-series)
+         if (hasReasoningTokens) {
             contentToSave =
                `<dawn:reasoning tokens="${DawnState.streamingState.reasoningTokens}"/>\n` +
                contentToSave;
@@ -353,12 +385,7 @@
       entry.setAttribute('role', 'region');
       entry.setAttribute('aria-label', 'AI thinking process');
 
-      const providerLabel =
-         payload.provider === 'claude'
-            ? 'Claude'
-            : payload.provider === 'local'
-              ? 'Local LLM'
-              : 'AI';
+      const providerLabel = providerDisplayLabel(payload.provider);
 
       entry.innerHTML = `
       <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
@@ -380,7 +407,21 @@
          }
       });
 
-      transcript.appendChild(entry);
+      // For multi-iteration tool calls (Responses API), the in-flight assistant
+      // entry from the prior iteration's stream is in the transcript. Insert the
+      // new thinking block before it so the visual order stays
+      //   USER → thinking → (tool calls) → thinking → ASSISTANT.
+      //
+      // Anchor strictly to `.streaming` — querying any `.assistant` matches
+      // prior-turn entries too, which would put the first thinking block of a
+      // new turn ABOVE the just-typed user message.
+      const streamingEntry = transcript.querySelector('.transcript-entry.assistant.streaming');
+      if (streamingEntry) {
+         transcript.insertBefore(entry, streamingEntry);
+      } else {
+         /* First thinking_start of a turn — stream hasn't begun yet, just append. */
+         transcript.appendChild(entry);
+      }
 
       // Update thinking state
       DawnState.thinkingState.active = true;
@@ -486,19 +527,20 @@
          const duration = entry.querySelector('.thinking-duration');
 
          if (label) {
-            const providerLabel =
-               DawnState.thinkingState.provider === 'claude'
-                  ? 'Claude'
-                  : DawnState.thinkingState.provider === 'local'
-                    ? 'Local LLM'
-                    : 'AI';
-            label.textContent = hasContent
-               ? `${providerLabel} thought`
-               : `${providerLabel} thinking`;
+            const providerLabel = providerDisplayLabel(DawnState.thinkingState.provider);
+            // Use "reasoned" instead of "thought" when there's no summary text —
+            // OpenAI Responses keeps an empty block alive for the token-count merge.
+            const verb = hasContent
+               ? 'thought'
+               : DawnState.thinkingState.provider === 'openai'
+                 ? 'reasoned'
+                 : 'thinking';
+            label.textContent = `${providerLabel} ${verb}`;
          }
 
          if (duration) {
-            duration.textContent = `(${durationSec}s)`;
+            // Token count (if it arrives) is appended later by handleReasoningSummary.
+            duration.textContent = formatThinkingStats(durationSec, 0);
          }
 
          // Add completed class for styling
@@ -513,9 +555,21 @@
             );
          }
 
-         // Remove if no content
+         // Empty content handling. For OpenAI Responses, reasoning_summary is about
+         // to fire with token counts — keep the block so the merge logic can attach
+         // tokens, and replace the empty content area with a brief placeholder. For
+         // other providers (Claude/local) an empty thinking-block is just noise, so
+         // remove it as before.
          if (!hasContent && DawnState.thinkingState.content.trim() === '') {
-            entry.remove();
+            if (DawnState.thinkingState.provider === 'openai') {
+               if (DawnState.thinkingState.contentElement) {
+                  DawnState.thinkingState.contentElement.classList.add('no-summary');
+                  DawnState.thinkingState.contentElement.innerHTML =
+                     '<em>No reasoning summary emitted for this turn.</em>';
+               }
+            } else {
+               entry.remove();
+            }
          }
       }
 
@@ -556,8 +610,29 @@
    // =============================================================================
 
    /**
-    * Handle reasoning_summary: Create a summary block for OpenAI o-series reasoning
-    * OpenAI doesn't expose reasoning content, only token count
+    * Format a finalized thinking-block duration line with whichever stats are available.
+    * @param {string|null} durationSec - "2.0" style duration (no unit), or null
+    * @param {number} tokens - reasoning token count, 0 if unknown
+    * @returns {string} text like "(2.0s, 43 tokens)" / "(2.0s)" / "(43 tokens)"
+    */
+   function formatThinkingStats(durationSec, tokens) {
+      const parts = [];
+      if (durationSec) parts.push(`${durationSec}s`);
+      if (tokens > 0) parts.push(`${tokens.toLocaleString()} tokens`);
+      return parts.length ? `(${parts.join(', ')})` : '';
+   }
+
+   /**
+    * Handle reasoning_summary: token count for the most recent reasoning turn.
+    *
+    * Two cases:
+    *   1. A thinking-block was just streamed (e.g. /v1/responses path that surfaces
+    *      reasoning_summary_text deltas) — merge the token count into that block's
+    *      duration line so the user sees both metrics without two side-by-side panels.
+    *   2. No thinking-block exists (e.g. legacy chat-completions o-series, where the
+    *      reasoning content is opaque) — fall back to a standalone reasoning-only
+    *      block that surfaces the token count alongside an "(no content)" note.
+    *
     * @param {Object} payload - { stream_id, reasoning_tokens }
     */
    function handleReasoningSummary(payload) {
@@ -569,7 +644,37 @@
       const tokens = payload.reasoning_tokens || 0;
       if (tokens <= 0) return;
 
-      // Create a collapsed thinking block that shows reasoning tokens
+      // Store reasoning tokens for saving with the message regardless of UI path
+      DawnState.streamingState.reasoningTokens = tokens;
+
+      // Case 1: merge into the current turn's finalized thinking-block (Responses API).
+      // Scope to blocks after the last .entry.user to avoid merging into a prior
+      // turn's thinking panel when the provider changes mid-conversation.
+      const lastUserEntry = Array.from(transcript.querySelectorAll('.entry.user')).pop();
+      const candidates = transcript.querySelectorAll(
+         '.thinking-block.completed:not(.reasoning-only)'
+      );
+      let target = null;
+      for (let i = candidates.length - 1; i >= 0; i--) {
+         if (
+            !lastUserEntry ||
+            candidates[i].compareDocumentPosition(lastUserEntry) & Node.DOCUMENT_POSITION_PRECEDING
+         ) {
+            target = candidates[i];
+            break;
+         }
+      }
+      if (target) {
+         const durationEl = target.querySelector('.thinking-duration');
+         if (durationEl) {
+            const match = (durationEl.textContent || '').match(/(\d+(?:\.\d+)?)s/);
+            const durationSec = match ? match[1] : null;
+            durationEl.textContent = formatThinkingStats(durationSec, tokens);
+         }
+         return;
+      }
+
+      // Case 2: no thinking-block — opaque reasoning, create a standalone summary.
       const entry = document.createElement('div');
       entry.className = 'thinking-block collapsed completed reasoning-only';
       entry.setAttribute('role', 'region');
@@ -579,10 +684,10 @@
       <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
         <span class="thinking-icon" aria-hidden="true">🧠</span>
         <span class="thinking-label">OpenAI reasoned</span>
-        <span class="thinking-duration">(${tokens.toLocaleString()} tokens)</span>
+        <span class="thinking-duration">${formatThinkingStats(null, tokens)}</span>
       </div>
-      <div class="thinking-content">
-        <em>Reasoning content is not accessible from OpenAI reasoning models.</em>
+      <div class="thinking-content no-summary">
+        <em>No reasoning summary available for this turn.</em>
       </div>
     `;
 
@@ -605,9 +710,6 @@
          // Fallback: append if no assistant entry found
          transcript.appendChild(entry);
       }
-
-      // Store reasoning tokens for saving with the message
-      DawnState.streamingState.reasoningTokens = tokens;
 
       transcript.scrollTop = transcript.scrollHeight;
    }

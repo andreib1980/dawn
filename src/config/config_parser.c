@@ -405,6 +405,7 @@ static void parse_llm_cloud(toml_table_t *table, llm_cloud_config_t *config) {
    static const char *const known_keys[] = { "provider",
                                              "endpoint",
                                              "vision_enabled",
+                                             "openai_use_responses_api",
                                              "openai_models",
                                              "openai_default_model_idx",
                                              "claude_models",
@@ -417,6 +418,7 @@ static void parse_llm_cloud(toml_table_t *table, llm_cloud_config_t *config) {
    PARSE_STRING(table, "provider", config->provider);
    PARSE_STRING(table, "endpoint", config->endpoint);
    PARSE_BOOL(table, "vision_enabled", config->vision_enabled);
+   PARSE_STRING(table, "openai_use_responses_api", config->openai_use_responses_api);
 
    /* Parse openai_models array */
    toml_array_t *openai_arr = toml_array_in(table, "openai_models");
@@ -578,8 +580,9 @@ static void parse_llm_thinking(toml_table_t *table, llm_thinking_config_t *confi
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "mode",          "reasoning_effort", "budget_low",
-                                             "budget_medium", "budget_high",      NULL };
+   static const char *const known_keys[] = {
+      "mode", "reasoning_effort", "budget_low", "budget_medium", "budget_high", "budget_xhigh", NULL
+   };
    warn_unknown_keys(table, "llm.thinking", known_keys);
 
    PARSE_STRING(table, "mode", config->mode);
@@ -587,8 +590,10 @@ static void parse_llm_thinking(toml_table_t *table, llm_thinking_config_t *confi
    PARSE_INT(table, "budget_low", config->budget_low);
    PARSE_INT(table, "budget_medium", config->budget_medium);
    PARSE_INT(table, "budget_high", config->budget_high);
+   PARSE_INT(table, "budget_xhigh", config->budget_xhigh);
 
-   /* Validate mode (disabled, auto, enabled) */
+   /* Validate mode. "auto" is accepted for back-compat with legacy DB rows
+    * and pre-cleanup configs; treated identically to "enabled" by all providers. */
    if (config->mode[0] != '\0' && strcmp(config->mode, "disabled") != 0 &&
        strcmp(config->mode, "auto") != 0 && strcmp(config->mode, "enabled") != 0) {
       OLOG_WARNING("llm.thinking.mode invalid '%s', defaulting to 'disabled'", config->mode);
@@ -596,10 +601,15 @@ static void parse_llm_thinking(toml_table_t *table, llm_thinking_config_t *confi
       config->mode[sizeof(config->mode) - 1] = '\0';
    }
 
-   /* Validate reasoning_effort (low, medium, high) */
-   if (config->reasoning_effort[0] != '\0' && strcmp(config->reasoning_effort, "low") != 0 &&
+   /* Validate reasoning_effort. Full set: none/low/medium/high/xhigh.
+    * none and xhigh are gpt-5.4-only at the API level — older OpenAI models
+    * and Gemini OpenAI-compat get clamped at request build time. Claude
+    * maps any of these to a budget via budget_low/medium/high/xhigh. */
+   if (config->reasoning_effort[0] != '\0' && strcmp(config->reasoning_effort, "none") != 0 &&
+       strcmp(config->reasoning_effort, "low") != 0 &&
        strcmp(config->reasoning_effort, "medium") != 0 &&
-       strcmp(config->reasoning_effort, "high") != 0) {
+       strcmp(config->reasoning_effort, "high") != 0 &&
+       strcmp(config->reasoning_effort, "xhigh") != 0) {
       OLOG_WARNING("llm.thinking.reasoning_effort invalid '%s', defaulting to 'medium'",
                    config->reasoning_effort);
       strncpy(config->reasoning_effort, "medium", sizeof(config->reasoning_effort) - 1);
@@ -619,6 +629,11 @@ static void parse_llm_thinking(toml_table_t *table, llm_thinking_config_t *confi
    if (config->budget_high > 0 && config->budget_high < 1024) {
       OLOG_WARNING("llm.thinking.budget_high too low (%d), clamping to 1024", config->budget_high);
       config->budget_high = 1024;
+   }
+   if (config->budget_xhigh > 0 && config->budget_xhigh < 1024) {
+      OLOG_WARNING("llm.thinking.budget_xhigh too low (%d), clamping to 1024",
+                   config->budget_xhigh);
+      config->budget_xhigh = 1024;
    }
 }
 

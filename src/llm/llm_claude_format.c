@@ -232,6 +232,29 @@ bool claude_history_has_tool_use_without_thinking(struct json_object *conversati
    return false;
 }
 
+bool claude_history_has_openai_tool_calls(struct json_object *conversation) {
+   if (!conversation) {
+      return false;
+   }
+   int conv_len = json_object_array_length(conversation);
+   for (int i = 0; i < conv_len; i++) {
+      json_object *msg = json_object_array_get_idx(conversation, i);
+      json_object *role_obj, *tool_calls_obj;
+      if (!json_object_object_get_ex(msg, "role", &role_obj)) {
+         continue;
+      }
+      if (strcmp(json_object_get_string(role_obj), "assistant") != 0) {
+         continue;
+      }
+      if (json_object_object_get_ex(msg, "tool_calls", &tool_calls_obj) &&
+          json_object_is_type(tool_calls_obj, json_type_array) &&
+          json_object_array_length(tool_calls_obj) > 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 bool claude_history_has_thinking_blocks(struct json_object *conversation) {
    if (!conversation) {
       return false;
@@ -589,9 +612,20 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
 
    if (thinking_enabled && claude_history_has_tool_use_without_thinking(openai_conversation)) {
       if (has_existing_thinking) {
-         // History has both thinking blocks AND tool_use without thinking
-         // Keep thinking enabled - disabling would cause "cannot contain thinking" error
-         OLOG_WARNING("Claude: History has mixed thinking state, keeping thinking enabled");
+         // History has both thinking blocks AND tool_use without thinking — keep
+         // thinking enabled (disabling would cause "cannot contain thinking" error).
+         //
+         // Two sub-cases:
+         //   (a) Pure Claude history where a follow-up turn after a tool_result
+         //       legitimately omitted its thinking block. Normal behavior, silent.
+         //   (b) OpenAI-format `tool_calls` field is present (provider switched
+         //       mid-conversation). Real concern worth surfacing — INFO log so
+         //       the operator can spot it without it screaming WARN.
+         if (claude_history_has_openai_tool_calls(openai_conversation)) {
+            OLOG_INFO("Claude: History has OpenAI-format tool_calls mixed with Claude "
+                      "thinking blocks (provider switched mid-conversation); keeping "
+                      "thinking enabled");
+         }
       } else {
          // Safe to disable - no thinking blocks in history
          thinking_enabled = false;

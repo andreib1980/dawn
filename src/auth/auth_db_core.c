@@ -164,6 +164,7 @@ static const char *SCHEMA_SQL =
     "   model TEXT DEFAULT NULL,"
     "   tools_mode TEXT DEFAULT NULL,"
     "   thinking_mode TEXT DEFAULT NULL,"
+    "   reasoning_effort TEXT DEFAULT NULL,"
     "   last_extracted_msg_count INTEGER DEFAULT 0,"
     "   is_private INTEGER DEFAULT 0,"
     "   title_locked INTEGER DEFAULT 0,"
@@ -1682,6 +1683,31 @@ static int create_schema(const char *db_path) {
       }
    }
 
+   /* v36 migration: per-conversation reasoning_effort lock.  Without this column
+    * the locked-settings restore on page refresh forgets the user's chosen
+    * effort and the dropdown snaps back to the global default ("low").
+    *
+    * No lower bound on current_version: a DB at v10 will run the v11 block
+    * above (which adds the conversations LLM-lock columns) AND this v36 block
+    * in the same startup. `current_version` is captured once and not bumped
+    * between migration blocks, so a `>= 11` guard here would incorrectly skip
+    * the column add on v10-or-earlier DBs. ALTER TABLE errors (e.g. if the
+    * column already exists on a concurrent path) are logged and swallowed, so
+    * the migration is idempotent. */
+   if (current_version < 36) {
+      const char *v36_sql =
+          "ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT DEFAULT NULL;";
+      rc = sqlite3_exec(s_db.db, v36_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v36 migration (reasoning_effort) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added reasoning_effort to conversations (v36)");
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -1952,7 +1978,8 @@ static int prepare_statements(void) {
        s_db.db,
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
        "context_tokens, context_max, continued_from, compaction_summary, "
-       "llm_type, cloud_provider, model, tools_mode, thinking_mode, is_private, origin "
+       "llm_type, cloud_provider, model, tools_mode, thinking_mode, is_private, origin, "
+       "reasoning_effort "
        "FROM conversations WHERE id = ?",
        -1, &s_db.stmt_conv_get, NULL);
    if (rc != SQLITE_OK) {

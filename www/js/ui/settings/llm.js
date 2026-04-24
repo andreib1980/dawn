@@ -15,10 +15,89 @@
       gemini_available: false,
    };
 
+   /**
+    * Normalize a thinking_mode value from any source (server config, restored
+    * conversation, legacy storage) to the two values the dropdown supports.
+    * Legacy "auto" was identical to "enabled" in behavior — fold it in so old
+    * conversations still load cleanly without an "auto" option in the markup.
+    */
+   function normalizeThinkingMode(mode) {
+      if (mode === 'disabled') return 'disabled';
+      if (mode === 'auto') return 'enabled';
+      if (mode === 'enabled') return 'enabled';
+      return 'enabled';
+   }
+
+   /**
+    * Return the set of reasoning_effort values the given model accepts.
+    * Mirrors the C-side llm_openai_clamp_effort_for_model() rules.
+    *
+    *   gpt-5 base/-mini/-nano:  low | medium | high                 (no none, no xhigh)
+    *   gpt-5.1:                 none | low | medium | high          (no xhigh)
+    *   gpt-5.2 / gpt-5.4*:      none | low | medium | high | xhigh  (full set)
+    *   o1 / o3 series:          low | medium | high
+    *   Gemini 2.5+/3.x:         low | medium | high
+    *   Claude (any) / local:    low | medium | high  (mapped to budgets server-side)
+    *
+    * Server-side clamping handles wrong values gracefully, but trimming the
+    * dropdown prevents the user from picking something that gets silently
+    * downgraded.
+    */
+   function validEffortsForModel(modelName) {
+      if (!modelName) return ['low', 'medium', 'high']; // safe baseline
+      // gpt-5 family detection — match C llm_openai_is_gpt5_base_family
+      if (modelName.startsWith('gpt-5')) {
+         const next = modelName.charAt(5);
+         if (next === '' || next === '-') {
+            // gpt-5 / gpt-5-mini / gpt-5-nano / gpt-5-2025-08-07
+            return ['low', 'medium', 'high'];
+         }
+         if (next === '.') {
+            const minor = modelName.charAt(6);
+            // gpt-5.1: none added; gpt-5.2+ adds xhigh too
+            if (minor === '1') {
+               return ['none', 'low', 'medium', 'high'];
+            }
+            if (minor >= '2' && minor <= '9') {
+               return ['none', 'low', 'medium', 'high', 'xhigh'];
+            }
+         }
+      }
+      // Everything else: o-series, Claude, Gemini, local — base set
+      return ['low', 'medium', 'high'];
+   }
+
+   /**
+    * Sync the per-conversation Effort dropdown to whatever the current model accepts.
+    * Hides invalid options and snaps the selected value to the closest valid one
+    * (xhigh→high, none→low) when the user switches to a less-capable model.
+    */
+   function syncEffortDropdownToModel(modelName, skipPersist) {
+      const depthSelect = document.getElementById('reasoning-effort-select');
+      if (!depthSelect) return;
+      const valid = new Set(validEffortsForModel(modelName));
+
+      let selected = depthSelect.value;
+      Array.from(depthSelect.options).forEach((opt) => {
+         opt.hidden = !valid.has(opt.value);
+         opt.disabled = !valid.has(opt.value);
+      });
+
+      // Snap to a valid value if the current pick is no longer allowed.
+      if (!valid.has(selected)) {
+         const fallback = selected === 'xhigh' ? 'high' : selected === 'none' ? 'low' : 'medium';
+         depthSelect.value = fallback;
+         conversationLlmState.reasoning_effort = fallback;
+         if (!skipPersist) {
+            setSessionLlm({ reasoning_effort: fallback });
+         }
+      }
+   }
+
    // Per-conversation LLM settings state
    let conversationLlmState = {
       tools_mode: 'native',
-      thinking_mode: 'auto',
+      thinking_mode: 'enabled',
       reasoning_effort: 'medium',
       locked: false,
       is_private: false,
@@ -165,6 +244,7 @@
          modelSelect.addEventListener('change', () => {
             if (modelSelect.value) {
                setSessionLlm({ model: modelSelect.value });
+               syncEffortDropdownToModel(modelSelect.value);
             }
          });
       }
@@ -552,7 +632,17 @@
          llmRuntimeState.model = sessionReset.model;
       }
 
-      // Send reset to session
+      // Trim Effort dropdown to the new model's accepted set.
+      // skipPersist: reset path sends its own from_restore-tagged payload.
+      if (sessionReset.model) {
+         syncEffortDropdownToModel(sessionReset.model, true);
+      }
+
+      // Send reset to session. Mark as from_restore so the server's
+      // active-conversation persistence cascade is skipped — the new-conversation
+      // reset fires BEFORE clear_session, and without the flag it would silently
+      // overwrite the locked settings of the conversation the user just left.
+      sessionReset.from_restore = true;
       setSessionLlm(sessionReset);
    }
 
@@ -568,13 +658,19 @@
 
       if (settings) {
          if (settings.thinking_mode && reasoningSelect) {
-            reasoningSelect.value = settings.thinking_mode;
-            conversationLlmState.thinking_mode = settings.thinking_mode;
+            const tm = normalizeThinkingMode(settings.thinking_mode);
+            reasoningSelect.value = tm;
+            conversationLlmState.thinking_mode = tm;
          }
 
          if (settings.reasoning_effort && depthSelect) {
             depthSelect.value = settings.reasoning_effort;
             conversationLlmState.reasoning_effort = settings.reasoning_effort;
+         }
+         // Trim Effort dropdown to what this model accepts (and snap if needed).
+         // skipPersist: restore path sends its own from_restore-tagged payload.
+         if (settings.model) {
+            syncEffortDropdownToModel(settings.model, true);
          }
          // Update depth enabled state based on thinking mode
          if (depthSelect && reasoningSelect) {
@@ -588,25 +684,39 @@
             conversationLlmState.tools_mode = settings.tools_mode;
          }
 
-         // Apply provider/model settings to sync UI with loaded conversation
-         // The backend has already restored the LLM config - this syncs the frontend UI
-         if (settings.llm_type || settings.cloud_provider || settings.model) {
-            const changes = {};
-            if (settings.llm_type) changes.type = settings.llm_type;
-            if (settings.cloud_provider) changes.provider = settings.cloud_provider;
-            if (settings.model) changes.model = settings.model;
+         // Push restored settings back to the server session. Without this, the
+         // session keeps whichever defaults were sent by applyGlobalDefaultsToControls
+         // at page load — the UI shows the conversation's value but the server
+         // uses the global default for the next request.
+         const sessionPayload = {};
+         if (settings.llm_type) sessionPayload.type = settings.llm_type;
+         if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
+         if (settings.model) sessionPayload.model = settings.model;
+         if (settings.tools_mode) sessionPayload.tool_mode = settings.tools_mode;
+         if (settings.thinking_mode) sessionPayload.thinking_mode = settings.thinking_mode;
+         if (settings.reasoning_effort) sessionPayload.reasoning_effort = settings.reasoning_effort;
 
-            // Show loading state while syncing
-            const llmGrid = document.getElementById('llm-controls-grid');
-            if (llmGrid) {
-               llmGrid.classList.add('llm-syncing');
+         if (Object.keys(sessionPayload).length > 0) {
+            // Show loading state while syncing if provider/model is changing
+            if (sessionPayload.type || sessionPayload.provider || sessionPayload.model) {
+               const llmGrid = document.getElementById('llm-controls-grid');
+               if (llmGrid) {
+                  llmGrid.classList.add('llm-syncing');
+               }
             }
 
-            // Request backend to confirm settings - response will update UI via updateLlmControls
+            // from_restore tells the server "apply these to the session, but
+            // DON'T cascade them into the active conversation's DB row." Rapid
+            // conversation clicks would otherwise race: a restore for conv Y
+            // can arrive after the active pointer has moved to conv Z, and the
+            // unguarded cascade would silently overwrite Z's locked settings
+            // with Y's values.
+            sessionPayload.from_restore = true;
+
             if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
                DawnWS.send({
                   type: 'set_session_llm',
-                  payload: changes,
+                  payload: sessionPayload,
                });
             }
          }
@@ -733,10 +843,13 @@
          modelSelect.disabled = true;
          modelSelect.title = 'Model switching not supported with llama.cpp';
          setControlHint('model-hint', 'Set by llama.cpp');
-         // Update session with the loaded model (only if changed to avoid feedback loop)
+         // Update session with the loaded model (only if changed to avoid feedback loop).
+         // from_restore: server-side cascade must NOT persist this auto-detected model
+         // onto the active conversation's DB row — the user didn't choose this; the
+         // local provider just told us what's loaded.
          if (payload.current_model && llmRuntimeState.model !== payload.current_model) {
             llmRuntimeState.model = payload.current_model;
-            setSessionLlm({ model: payload.current_model });
+            setSessionLlm({ model: payload.current_model, from_restore: true });
          }
          // Update collapsed mini bar summary
          if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
@@ -764,12 +877,14 @@
          modelSelect.appendChild(opt);
       });
 
-      // Select current model and update session (only if changed to avoid feedback loop)
+      // Select current model and update session (only if changed to avoid feedback loop).
+      // from_restore: same rationale as the llama.cpp branch above — auto-detection
+      // sync, not a user-initiated change, must not cascade to the conv DB row.
       if (payload.current_model) {
          modelSelect.value = payload.current_model;
          if (llmRuntimeState.model !== payload.current_model) {
             llmRuntimeState.model = payload.current_model;
-            setSessionLlm({ model: payload.current_model });
+            setSessionLlm({ model: payload.current_model, from_restore: true });
          }
       }
       modelSelect.disabled = false;
@@ -903,9 +1018,9 @@
          globalDefaults.tools_mode = config.llm.tools.mode;
       }
 
-      // Thinking mode (Claude/local)
+      // Thinking mode (Claude/local) — normalize legacy "auto" to "enabled"
       if (config.llm?.thinking?.mode) {
-         globalDefaults.thinking_mode = config.llm.thinking.mode;
+         globalDefaults.thinking_mode = normalizeThinkingMode(config.llm.thinking.mode);
       }
 
       // Reasoning effort (OpenAI o-series/GPT-5)
@@ -943,11 +1058,14 @@
          conversationLlmState.tools_mode = globalDefaults.tools_mode;
       }
 
-      // Send initial defaults to session
+      // Send initial defaults to session. from_restore: this fires at config-load
+      // time, which on a page reload may happen WHILE a conversation is already
+      // active server-side — defaults must not cascade onto that conv's row.
       setSessionLlm({
          tool_mode: globalDefaults.tools_mode,
          thinking_mode: globalDefaults.thinking_mode,
          reasoning_effort: globalDefaults.reasoning_effort,
+         from_restore: true,
       });
    }
 
@@ -1038,6 +1156,13 @@
       } else {
          // Populate cloud models dropdown
          updateModelDropdownForCloud();
+      }
+
+      // Effort dropdown's valid set depends on the model. Re-sync whenever the
+      // server confirms a new runtime model so user can't pick xhigh on a model
+      // that doesn't accept it.  skipPersist: config-load path, not user action.
+      if (runtime.model) {
+         syncEffortDropdownToModel(runtime.model, true);
       }
 
       // Update collapsed mini bar summary if available

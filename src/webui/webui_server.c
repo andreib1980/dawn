@@ -2703,14 +2703,16 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
             }
          }
 
-         /* Parse reasoning_effort (low/medium/high) */
+         /* Parse reasoning_effort. The allowlist mirrors the gpt-5.4 Responses API
+          * (none/low/medium/high/xhigh); Claude maps low/medium/high to budget
+          * tokens via llm_get_effective_budget_tokens. */
          struct json_object *reasoning_effort_obj;
          if (json_object_object_get_ex(payload, "reasoning_effort", &reasoning_effort_obj)) {
             const char *new_effort = json_object_get_string(reasoning_effort_obj);
             if (new_effort) {
-               /* Validate reasoning effort value */
-               if (strcmp(new_effort, "low") == 0 || strcmp(new_effort, "medium") == 0 ||
-                   strcmp(new_effort, "high") == 0) {
+               if (strcmp(new_effort, "none") == 0 || strcmp(new_effort, "low") == 0 ||
+                   strcmp(new_effort, "medium") == 0 || strcmp(new_effort, "high") == 0 ||
+                   strcmp(new_effort, "xhigh") == 0) {
                   has_changes = true;
                   strncpy(config.reasoning_effort, new_effort, sizeof(config.reasoning_effort) - 1);
                   config.reasoning_effort[sizeof(config.reasoning_effort) - 1] = '\0';
@@ -2751,13 +2753,26 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                }
 
                /* Persist LLM settings to the active conversation DB so that
-                * session recreation (after timeout) restores the latest config */
-               if (conn->active_conversation_id > 0) {
+                * session recreation (after timeout) restores the latest config.
+                *
+                * Skip when the client tagged this as a restore-push: those carry
+                * the loaded conversation's own settings, but rapid clicks can race
+                * such that `active_conversation_id` has already advanced to the
+                * NEXT conversation by the time we process this message — the
+                * cascade would then silently overwrite that conv with the
+                * previous conv's values. */
+               bool from_restore = false;
+               struct json_object *restore_obj;
+               if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
+                  from_restore = json_object_get_boolean(restore_obj);
+               }
+               if (!from_restore && conn->active_conversation_id > 0) {
                   const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
                   conv_db_update_llm_settings(conn->active_conversation_id, conn->auth_user_id,
                                               type_str,
                                               cloud_provider_to_string(config.cloud_provider),
-                                              config.model, config.tool_mode, config.thinking_mode);
+                                              config.model, config.tool_mode, config.thinking_mode,
+                                              config.reasoning_effort);
                }
             }
          }

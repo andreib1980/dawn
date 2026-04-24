@@ -101,6 +101,16 @@ static void append_openai_tool_history(struct json_object *history,
       json_object_array_add(tc_array, tc);
    }
    json_object_object_add(assistant_msg, "tool_calls", tc_array);
+
+   /* OpenAI Responses API round-trip: attach opaque per-provider state
+    * (reasoning items + response_id) so the next iteration can echo it. */
+   if (response->provider_state_json && *response->provider_state_json) {
+      json_object *prov = json_tokener_parse(response->provider_state_json);
+      if (prov) {
+         json_object_object_add(assistant_msg, "_provider_state", prov);
+      }
+   }
+
    json_object_array_add(history, assistant_msg);
 
    /* Add tool results */

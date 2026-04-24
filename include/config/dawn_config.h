@@ -190,7 +190,7 @@ typedef struct {
 
 /* Default fallback models when no models are configured
  * Updated: 2026-02 - Update these when new model generations are released */
-#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.2"
+#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.4"
 #define LLM_DEFAULT_CLAUDE_MODEL "claude-sonnet-4-6"
 #define LLM_DEFAULT_GEMINI_MODEL "gemini-2.5-flash"
 
@@ -198,6 +198,11 @@ typedef struct {
    char provider[16];              /* "openai", "claude", or "gemini" */
    char endpoint[CONFIG_PATH_MAX]; /* Empty = default, or custom endpoint */
    bool vision_enabled;            /* Model supports vision/image analysis */
+
+   /* OpenAI endpoint selection: "auto" (route gpt-5.4* to /v1/responses),
+    * "always" (force /v1/responses for all OpenAI cloud calls),
+    * "never" (legacy chat-completions only — gpt-5.4 will be broken). */
+   char openai_use_responses_api[16];
 
    /* Configurable model lists for quick controls dropdown */
    char openai_models[LLM_CLOUD_MAX_MODELS][LLM_CLOUD_MODEL_NAME_MAX];
@@ -239,17 +244,20 @@ typedef struct {
 #define LLM_THINKING_BUDGET_LOW_DEFAULT 1024
 #define LLM_THINKING_BUDGET_MEDIUM_DEFAULT 8192
 #define LLM_THINKING_BUDGET_HIGH_DEFAULT 16384
+#define LLM_THINKING_BUDGET_XHIGH_DEFAULT 32768
 
 typedef struct {
-   char mode[16];            /* "disabled", "enabled", "auto" */
-   char reasoning_effort[8]; /* "low", "medium", "high" for reasoning models
-                              * Controls token budget via dropdown.
-                              * OpenAI o-series/GPT-5: also maps to reasoning_effort param
-                              * Gemini 2.5+/3.x: maps to reasoning_effort; NOTE: Gemini cannot
-                              *   fully disable reasoning - "disabled" mode uses "low" effort */
-   int budget_low;           /* Token budget for "low" effort (default: 1024) */
-   int budget_medium;        /* Token budget for "medium" effort (default: 8192) */
-   int budget_high;          /* Token budget for "high" effort (default: 16384) */
+   char mode[16];            /* "disabled", "enabled" (legacy "auto" also accepted) */
+   char reasoning_effort[8]; /* "none"/"low"/"medium"/"high"/"xhigh" for reasoning models
+                              * OpenAI gpt-5.4+ and gpt-5.2: full range incl. none/xhigh.
+                              * OpenAI gpt-5/5.1 + Gemini OpenAI-compat: clamps xhigh→high
+                              *   and (for non-5.1+) none→low at request-build time.
+                              * Claude: maps to budget_low/medium/high/xhigh via budget switch
+                              *   (see llm_get_effective_budget_tokens). */
+   int budget_low;           /* Token budget for "low"   effort (default: 1024)  */
+   int budget_medium;        /* Token budget for "medium" effort (default: 8192)  */
+   int budget_high;          /* Token budget for "high"  effort (default: 16384) */
+   int budget_xhigh;         /* Token budget for "xhigh" effort (default: 32768) */
 } llm_thinking_config_t;
 
 typedef struct {

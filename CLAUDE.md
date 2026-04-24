@@ -29,8 +29,9 @@ make -C build-debug -j8
 LD_LIBRARY_PATH=/usr/local/lib ./build-debug/dawn
 
 # Format
-./format_code.sh                 # fix
-./format_code.sh --check         # CI mode
+./format_code.sh --changed       # fast: only uncommitted/staged files (use during dev)
+./format_code.sh                 # fix all files
+./format_code.sh --check         # CI mode (final pre-commit verification)
 
 # Unit test (standalone binaries in tests/)
 make -C build-debug test_<name>

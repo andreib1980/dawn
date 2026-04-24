@@ -154,6 +154,16 @@ int config_validate(const dawn_config_t *config,
       }
    }
 
+   /* ===== OpenAI Responses API mode (enum) ===== */
+   if (config->llm.cloud.openai_use_responses_api[0] != '\0') {
+      const char *valid_modes[] = { "auto", "always", "never" };
+      if (!string_in_list(config->llm.cloud.openai_use_responses_api, valid_modes, 3)) {
+         ADD_ERROR("llm.cloud.openai_use_responses_api",
+                   "must be 'auto', 'always', or 'never' (got '%s')",
+                   config->llm.cloud.openai_use_responses_api);
+      }
+   }
+
    /* ===== LLM Local Provider (enum) ===== */
    if (config->llm.local.provider[0] != '\0') {
       const char *valid_local_providers[] = { "auto", "ollama", "llama_cpp", "generic" };

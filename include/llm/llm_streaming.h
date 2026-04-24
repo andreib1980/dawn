@@ -220,6 +220,21 @@ void llm_stream_free(llm_stream_context_t *ctx);
 void llm_stream_handle_event(llm_stream_context_t *ctx, const char *event_data);
 
 /**
+ * @brief Append text to a stream context's accumulated response buffer.
+ *
+ * Public wrapper around the internal accumulator. Used by provider-specific
+ * SSE handlers (e.g. the OpenAI Responses path) that emit text outside of the
+ * built-in chat-completions/Claude dispatchers but still want their output to
+ * surface through llm_stream_get_response().
+ */
+void llm_stream_append_text(llm_stream_context_t *ctx, const char *text);
+
+/**
+ * @brief Append text to a stream context's accumulated thinking buffer.
+ */
+void llm_stream_append_thinking(llm_stream_context_t *ctx, const char *text);
+
+/**
  * @brief Get the complete accumulated response
  *
  * Returns the full text response accumulated from all chunks.

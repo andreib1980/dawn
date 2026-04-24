@@ -35,6 +35,7 @@
 #include "config/dawn_config.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
 #include "tools/time_utils.h"
@@ -1018,15 +1019,22 @@ void session_destroy(uint32_t session_id) {
          char session_id_str[32];
          snprintf(session_id_str, sizeof(session_id_str), "ws_%u", session->session_id);
 
-         /* Trigger extraction (copies history internally)
-          * Pass 0 for conversation_id - session doesn't track which DB conversation
-          * it's associated with. Incremental extraction works when triggered from
-          * WebUI with known conversation_id. */
-         memory_extraction_fallback_t fb;
-         memory_extraction_build_fallback(session, &fb);
+         /* Strip _provider_state (OpenAI Responses encrypted reasoning blobs) before
+          * forwarding to the extraction LLM, which may be a different provider.
+          * See llm_history_strip_provider_state docs. */
+         struct json_object *clean = llm_history_strip_provider_state(history);
+         if (clean) {
+            /* Trigger extraction (copies history internally)
+             * Pass 0 for conversation_id - session doesn't track which DB conversation
+             * it's associated with. Incremental extraction works when triggered from
+             * WebUI with known conversation_id. */
+            memory_extraction_fallback_t fb;
+            memory_extraction_build_fallback(session, &fb);
 
-         memory_trigger_extraction(session->metrics.user_id, 0, session_id_str, history,
-                                   message_count, duration_seconds, &fb);
+            memory_trigger_extraction(session->metrics.user_id, 0, session_id_str, clean,
+                                      message_count, duration_seconds, &fb);
+            json_object_put(clean);
+         }
       }
       pthread_mutex_unlock(&session->history_mutex);
    }
@@ -1416,12 +1424,12 @@ int64_t session_save_voice_conversation(session_t *session) {
       char session_id_str[32];
       snprintf(session_id_str, sizeof(session_id_str), "voice_%u", session->session_id);
 
-      /* Make a copy of history for extraction (it will be freed when we clear) */
-      struct json_object *history_copy = NULL;
-      const char *history_str = json_object_to_json_string(session->conversation_history);
-      if (history_str) {
-         history_copy = json_tokener_parse(history_str);
-      }
+      /* Deep-copy history with provider-private fields stripped. The OpenAI
+       * Responses path stashes encrypted reasoning blobs under _provider_state
+       * which are session-bound to OpenAI and must not be forwarded to the
+       * memory-extraction LLM (which may be Claude/Gemini/local). */
+      struct json_object *history_copy = llm_history_strip_provider_state(
+          session->conversation_history);
 
       if (history_copy) {
          memory_extraction_fallback_t fb;

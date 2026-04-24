@@ -154,9 +154,17 @@
 # vision_enabled = true           # Cloud models typically support vision/images
                                   # Env: DAWN_LLM_CLOUD_VISION_ENABLED
 
+# OpenAI endpoint selection. "auto" routes gpt-5.4* to /v1/responses (where
+# function tools + reasoning are supported); other models continue to use
+# /v1/chat/completions. "always" forces every OpenAI cloud call onto
+# /v1/responses. "never" stays on /v1/chat/completions for everything (gpt-5.4
+# will then fail with HTTP 400 if reasoning + tools are both active).
+# openai_use_responses_api = "auto"  # "auto", "always", or "never"
+                                  # Env: DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API
+
 # Model lists for quick switching via WebUI or voice
 # First model in list is used when switching to that provider
-# openai_models = ["gpt-5-mini", "gpt-5.2", "gpt-5-nano", "gpt-5"]
+# openai_models = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"]
 # openai_default_model_idx = 0
 # claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
 # claude_default_model_idx = 0
@@ -202,6 +210,10 @@
                                   # Env: DAWN_LLM_THINKING_BUDGET_MEDIUM
 # budget_high = 16384             # Token budget for "high" reasoning effort
                                   # Env: DAWN_LLM_THINKING_BUDGET_HIGH
+# budget_xhigh = 32768            # Token budget for "xhigh" reasoning effort (Claude only)
+                                  # gpt-5.2/gpt-5.4 send xhigh natively to the API; older
+                                  # OpenAI families and Gemini are clamped to "high".
+                                  # Env: DAWN_LLM_THINKING_BUDGET_XHIGH
                                   # NOTE: Budgets are clamped to 50% of model context size
 
 # =============================================================================

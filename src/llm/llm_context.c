@@ -782,18 +782,29 @@ int llm_context_save_conversation(uint32_t session_id,
       OLOG_WARNING("llm_context: Could not create logs directory");
    }
 
+   /* Strip provider-private fields (encrypted reasoning blobs etc.) before
+    * writing to disk — they're session-bound and must not be persisted. */
+   struct json_object *sanitized = llm_history_strip_provider_state(history);
+   if (!sanitized) {
+      OLOG_ERROR("llm_context: Failed to strip provider state — skipping save to avoid "
+                 "persisting session-bound fields");
+      return -1;
+   }
+
    /* Write JSON to file */
    const char *json_str = json_object_to_json_string_ext(
-       history, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
+       sanitized, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
 
    FILE *fp = fopen(filename, "w");
    if (!fp) {
       OLOG_ERROR("llm_context: Failed to open %s for writing", filename);
+      json_object_put(sanitized);
       return -1;
    }
 
    fprintf(fp, "%s\n", json_str);
    fclose(fp);
+   json_object_put(sanitized);
 
    OLOG_INFO("llm_context: Conversation saved to %s", filename);
 

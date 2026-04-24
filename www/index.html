@@ -989,7 +989,6 @@ Format rules:
                >
                   <option value="disabled" selected>Disabled</option>
                   <option value="enabled">Enabled</option>
-                  <option value="auto">Auto</option>
                </select>
 
                <label for="reasoning-effort-select" class="llm-label" id="effort-label"
@@ -997,12 +996,14 @@ Format rules:
                >
                <select
                   id="reasoning-effort-select"
-                  title="Reasoning depth: Low (quick), Medium (balanced), High (thorough)"
+                  title="Reasoning depth: None (off, gpt-5.4 only), Low, Medium, High, XHigh (gpt-5.4 only)"
                   disabled
                >
+                  <option value="none">None</option>
                   <option value="low">Low</option>
                   <option value="medium" selected>Medium</option>
                   <option value="high">High</option>
+                  <option value="xhigh">XHigh</option>
                </select>
                <span class="control-hint hidden" id="effort-hint"></span>
 

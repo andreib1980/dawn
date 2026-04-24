@@ -390,6 +390,18 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          }
          JSON_TO_CONFIG_STR(cloud, "endpoint", config->llm.cloud.endpoint);
          JSON_TO_CONFIG_BOOL(cloud, "vision_enabled", config->llm.cloud.vision_enabled);
+         JSON_TO_CONFIG_STR(cloud, "openai_use_responses_api",
+                            config->llm.cloud.openai_use_responses_api);
+         /* Validate openai_use_responses_api */
+         if (config->llm.cloud.openai_use_responses_api[0] != '\0' &&
+             strcmp(config->llm.cloud.openai_use_responses_api, "auto") != 0 &&
+             strcmp(config->llm.cloud.openai_use_responses_api, "always") != 0 &&
+             strcmp(config->llm.cloud.openai_use_responses_api, "never") != 0) {
+            OLOG_WARNING("WebUI: Invalid openai_use_responses_api '%s', using 'auto'",
+                         config->llm.cloud.openai_use_responses_api);
+            strncpy(config->llm.cloud.openai_use_responses_api, "auto",
+                    sizeof(config->llm.cloud.openai_use_responses_api) - 1);
+         }
 
          /* Parse model lists from settings UI */
          struct json_object *openai_models_arr;
@@ -509,6 +521,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_INT(thinking, "budget_low", config->llm.thinking.budget_low);
          JSON_TO_CONFIG_INT(thinking, "budget_medium", config->llm.thinking.budget_medium);
          JSON_TO_CONFIG_INT(thinking, "budget_high", config->llm.thinking.budget_high);
+         JSON_TO_CONFIG_INT(thinking, "budget_xhigh", config->llm.thinking.budget_xhigh);
       }
 
       /* Context management settings */

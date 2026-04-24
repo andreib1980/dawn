@@ -990,13 +990,14 @@ typedef struct {
    int64_t continued_from;   /**< Parent conversation ID (0 = none) */
    char *compaction_summary; /**< Summary from parent (NULL if not a continuation) */
    /* Per-conversation LLM settings (v11) - empty string means use defaults */
-   char llm_type[16];       /**< "local" or "cloud" */
-   char cloud_provider[16]; /**< "openai" or "claude" */
-   char model[64];          /**< Model name */
-   char tools_mode[16];     /**< "native", "command_tags", or "disabled" */
-   char thinking_mode[16];  /**< "disabled"/"auto"/"enabled" or "low"/"medium"/"high" */
-   bool is_private;         /**< If true, no memory extraction for this conversation (v16) */
-   char origin[16];         /**< "webui" or "voice" (v17) */
+   char llm_type[16];         /**< "local" or "cloud" */
+   char cloud_provider[16];   /**< "openai" or "claude" */
+   char model[64];            /**< Model name */
+   char tools_mode[16];       /**< "native", "command_tags", or "disabled" */
+   char thinking_mode[16];    /**< "disabled"/"auto"/"enabled" or "low"/"medium"/"high" */
+   char reasoning_effort[16]; /**< "none"/"minimal"/"low"/"medium"/"high"/"xhigh" (v36) */
+   bool is_private;           /**< If true, no memory extraction for this conversation (v16) */
+   char origin[16];           /**< "webui" or "voice" (v17) */
 } conversation_t;
 
 /**
@@ -1249,7 +1250,8 @@ int conv_db_lock_llm_settings(int64_t conv_id,
                               const char *cloud_provider,
                               const char *model,
                               const char *tools_mode,
-                              const char *thinking_mode);
+                              const char *thinking_mode,
+                              const char *reasoning_effort);
 
 /**
  * @brief Update LLM settings on an existing conversation (any message count).
@@ -1264,7 +1266,8 @@ int conv_db_update_llm_settings(int64_t conv_id,
                                 const char *cloud_provider,
                                 const char *model,
                                 const char *tools_mode,
-                                const char *thinking_mode);
+                                const char *thinking_mode,
+                                const char *reasoning_effort);
 
 /**
  * @brief Delete a conversation and all its messages

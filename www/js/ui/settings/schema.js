@@ -407,6 +407,13 @@
                      sourceKey: 'llm.cloud.openai_models',
                      hint: 'Default model for new conversations',
                   },
+                  openai_use_responses_api: {
+                     type: 'select',
+                     label: 'OpenAI Responses API',
+                     options: ['auto', 'always', 'never'],
+                     hint: 'Route reasoning-capable OpenAI models to /v1/responses. "auto" is recommended.',
+                     showWhen: { key: 'llm.cloud.provider', value: 'openai' },
+                  },
                   claude_models: {
                      type: 'model_list',
                      label: 'Claude Models',
@@ -465,14 +472,14 @@
                   mode: {
                      type: 'select',
                      label: 'Mode',
-                     options: ['disabled', 'enabled', 'auto'],
-                     hint: 'Enable extended thinking for complex queries (auto: provider decides)',
+                     options: ['disabled', 'enabled'],
+                     hint: 'Enable extended thinking for complex queries',
                   },
                   reasoning_effort: {
                      type: 'select',
                      label: 'Reasoning Effort',
-                     options: ['low', 'medium', 'high'],
-                     hint: 'Controls which budget level is used (see below)',
+                     options: ['none', 'low', 'medium', 'high', 'xhigh'],
+                     hint: 'Effort level (gpt-5.4: none/low/medium/high/xhigh; Claude maps low/medium/high to budgets below)',
                   },
                   budget_low: {
                      type: 'number',
@@ -494,6 +501,13 @@
                      min: 1024,
                      step: 1024,
                      hint: 'Token budget for "high" reasoning effort (default: 16384)',
+                  },
+                  budget_xhigh: {
+                     type: 'number',
+                     label: 'Budget XHigh',
+                     min: 1024,
+                     step: 1024,
+                     hint: 'Token budget for "xhigh" reasoning effort (Claude only — gpt-5.2/gpt-5.4 use the API\'s xhigh natively; older OpenAI/Gemini get clamped to high). Default: 32768.',
                   },
                },
             },

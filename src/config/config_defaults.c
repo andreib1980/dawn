@@ -113,13 +113,19 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.cloud.provider[0] = '\0'; /* Empty = auto-detect from available API keys */
    config->llm.cloud.endpoint[0] = '\0'; /* Empty = use default */
    config->llm.cloud.vision_enabled = true;
+   /* OpenAI endpoint selection: auto routes gpt-5.4* to /v1/responses */
+   SAFE_COPY(config->llm.cloud.openai_use_responses_api, "auto");
 
-   /* Default OpenAI model list (first entry is default) */
-   config->llm.cloud.openai_models_count = 4;
-   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL);
-   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5-mini");
-   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5-nano");
-   SAFE_COPY(config->llm.cloud.openai_models[3], "o4-mini");
+   /* Default OpenAI model list (first entry is default).
+    * gpt-5.4 family routes through /v1/responses; older entries use chat completions. */
+   config->llm.cloud.openai_models_count = 7;
+   SAFE_COPY(config->llm.cloud.openai_models[0], LLM_DEFAULT_OPENAI_MODEL); /* gpt-5.4 */
+   SAFE_COPY(config->llm.cloud.openai_models[1], "gpt-5.4-mini");
+   SAFE_COPY(config->llm.cloud.openai_models[2], "gpt-5.4-nano");
+   SAFE_COPY(config->llm.cloud.openai_models[3], "gpt-5.2");
+   SAFE_COPY(config->llm.cloud.openai_models[4], "gpt-5-mini");
+   SAFE_COPY(config->llm.cloud.openai_models[5], "gpt-5-nano");
+   SAFE_COPY(config->llm.cloud.openai_models[6], "o4-mini");
    config->llm.cloud.openai_default_model_idx = 0;
 
    /* Default Claude model list (first entry is default) */
@@ -153,6 +159,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.thinking.budget_low = LLM_THINKING_BUDGET_LOW_DEFAULT;
    config->llm.thinking.budget_medium = LLM_THINKING_BUDGET_MEDIUM_DEFAULT;
    config->llm.thinking.budget_high = LLM_THINKING_BUDGET_HIGH_DEFAULT;
+   config->llm.thinking.budget_xhigh = LLM_THINKING_BUDGET_XHIGH_DEFAULT;
 
    /* LLM Context Management */
    config->llm.summarize_threshold = 0.80f;  /* Compact at 80% of context limit */

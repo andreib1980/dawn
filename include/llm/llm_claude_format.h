@@ -56,6 +56,22 @@ bool claude_history_has_tool_use_without_thinking(struct json_object *conversati
 bool claude_history_has_thinking_blocks(struct json_object *conversation);
 
 /**
+ * @brief Check if conversation history contains OpenAI-format tool_calls.
+ *
+ * These appear when the user switched providers mid-conversation (gpt-5.x or
+ * gemini turn produced an OpenAI-shaped `tool_calls` field rather than a Claude
+ * `tool_use` content block). Distinct from the catch-all
+ * claude_history_has_tool_use_without_thinking() — useful for log severity:
+ * Claude follow-ups after a tool_result legitimately omit thinking, so that
+ * shape isn't a real concern; OpenAI tool_calls in a Claude conversation
+ * usually are.
+ *
+ * @param conversation OpenAI-format conversation history
+ * @return true if any assistant message carries a non-empty `tool_calls` array
+ */
+bool claude_history_has_openai_tool_calls(struct json_object *conversation);
+
+/**
  * @brief Convert OpenAI-format conversation to Claude's native format
  *
  * Transforms conversation history from OpenAI's message format to Claude's format:
