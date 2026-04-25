@@ -582,6 +582,11 @@ static void process_extraction_response(int user_id,
          if (!type_valid)
             ent_type = "thing";
 
+         if (memory_filter_check(ent_name)) {
+            OLOG_WARNING("memory_extraction: blocked injection in entity name: %.64s", ent_name);
+            continue;
+         }
+
          char canonical[MEMORY_ENTITY_NAME_MAX];
          memory_make_canonical_name(ent_name, canonical, sizeof(canonical));
 
@@ -632,6 +637,13 @@ static void process_extraction_response(int user_id,
          const char *obj_name = json_object_get_string(obj_obj);
          if (!subj_name || !rel_type || !obj_name)
             continue;
+
+         if (memory_filter_check(subj_name) || memory_filter_check(rel_type) ||
+             memory_filter_check(obj_name)) {
+            OLOG_WARNING("memory_extraction: blocked injection in relation: %.64s -> %.64s",
+                         subj_name, obj_name);
+            continue;
+         }
 
          /* Resolve subject entity from local map, fallback to upsert */
          char subj_canonical[MEMORY_ENTITY_NAME_MAX];
@@ -723,7 +735,7 @@ static void process_extraction_response(int user_id,
          size_t trem = MEMORY_TOPICS_MAX;
          for (int i = 0; i < count && trem > 1; i++) {
             const char *topic = json_object_get_string(json_object_array_get_idx(topics_arr, i));
-            if (topic) {
+            if (topic && !memory_filter_check(topic)) {
                if (toff > 0) {
                   BUF_PRINTF(topics, toff, trem, ", ");
                }
@@ -732,9 +744,13 @@ static void process_extraction_response(int user_id,
          }
       }
 
-      memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
-                               duration_seconds);
-      OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
+      if (memory_filter_check(summary)) {
+         OLOG_WARNING("memory_extraction: blocked injection in summary: %.80s", summary);
+      } else {
+         memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
+                                  duration_seconds);
+         OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
+      }
    }
 
    /* Process title — auto-rename conversation if not locked (atomic check-and-set) */

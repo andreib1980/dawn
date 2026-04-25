@@ -86,10 +86,90 @@ static const struct {
                    { "\xd1\x81", 'c' }, /* Cyrillic с */
                    { "\xd1\x85", 'x' }, /* Cyrillic х */
                    { "\xd1\x83", 'y' }, /* Cyrillic у */
+                   { "\xd1\x96", 'i' }, /* Cyrillic і */
+                   { "\xd1\x95", 's' }, /* Cyrillic ѕ */
                    { "\xce\xb1", 'a' }, /* Greek α */
                    { "\xce\xb5", 'e' }, /* Greek ε */
+                   { "\xce\xb9", 'i' }, /* Greek ι (iota) */
+                   { "\xce\xba", 'k' }, /* Greek κ (kappa) */
+                   { "\xce\xbd", 'n' }, /* Greek ν (nu) */
                    { "\xce\xbf", 'o' }, /* Greek ο */
+                   { "\xcf\x81", 'p' }, /* Greek ρ (rho) */
+                   { "\xcf\x84", 't' }, /* Greek τ (tau) */
                    { NULL, 0 } };
+
+/* Latin-1 Supplement accent → base letter (U+00C0-U+00FF, encoded as \xc3\x80-\xc3\xbf).
+ * Maps accented characters to their ASCII base so "systèm" → "system". */
+static const char LATIN1_BASE[] = {
+   /* U+00C0-U+00CF: À Á Â Ã Ä Å Æ Ç È É Ê Ë Ì Í Î Ï */
+   'a',
+   'a',
+   'a',
+   'a',
+   'a',
+   'a',
+   0,
+   'c',
+   'e',
+   'e',
+   'e',
+   'e',
+   'i',
+   'i',
+   'i',
+   'i',
+   /* U+00D0-U+00DF: Ð Ñ Ò Ó Ô Õ Ö × Ø Ù Ú Û Ü Ý Þ ß */
+   'd',
+   'n',
+   'o',
+   'o',
+   'o',
+   'o',
+   'o',
+   0,
+   'o',
+   'u',
+   'u',
+   'u',
+   'u',
+   'y',
+   0,
+   's',
+   /* U+00E0-U+00EF: à á â ã ä å æ ç è é ê ë ì í î ï */
+   'a',
+   'a',
+   'a',
+   'a',
+   'a',
+   'a',
+   0,
+   'c',
+   'e',
+   'e',
+   'e',
+   'e',
+   'i',
+   'i',
+   'i',
+   'i',
+   /* U+00F0-U+00FF: ð ñ ò ó ô õ ö ÷ ø ù ú û ü ý þ ÿ */
+   'd',
+   'n',
+   'o',
+   'o',
+   'o',
+   'o',
+   'o',
+   0,
+   'o',
+   'u',
+   'u',
+   'u',
+   'u',
+   'y',
+   0,
+   'y',
+};
 
 /* Zero-width and invisible characters to strip */
 static const char *INVISIBLE_CHARS[] = {
@@ -198,9 +278,34 @@ char *memory_filter_normalize(const char *text) {
             in += 4;
          } else if ((c & 0xF0) == 0xE0 && in + 2 < len &&
                     ((unsigned char)text[in + 1] & 0xC0) == 0x80) {
+            unsigned char b1 = (unsigned char)text[in + 1];
+            unsigned char b2 = (unsigned char)text[in + 2];
+            /* Fullwidth ASCII U+FF01-U+FF5E → ASCII 0x21-0x7E.
+             * Encoded as \xef\xbc\x81 through \xef\xbd\x9e. */
+            if (c == 0xEF && b1 >= 0xBC && b1 <= 0xBD) {
+               int cp = ((c & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+               if (cp >= 0xFF01 && cp <= 0xFF5E) {
+                  result[out++] = (char)tolower(cp - 0xFEE0);
+                  last_space = false;
+                  in += 3;
+                  continue;
+               }
+            }
             in += 3;
          } else if ((c & 0xE0) == 0xC0 && in + 1 < len &&
                     ((unsigned char)text[in + 1] & 0xC0) == 0x80) {
+            /* Latin-1 Supplement U+00C0-U+00FF → base ASCII letter.
+             * Encoded as \xc3\x80 through \xc3\xbf. */
+            if (c == 0xC3) {
+               int idx = (int)((unsigned char)text[in + 1] & 0x3F); /* 0x80→0, 0xBF→63 */
+               char base = LATIN1_BASE[idx];
+               if (base != 0) {
+                  result[out++] = base;
+                  last_space = false;
+                  in += 2;
+                  continue;
+               }
+            }
             in += 2;
          } else {
             in++;
