@@ -39,198 +39,12 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_filter.h"
 #include "memory/memory_similarity.h"
 #include "memory/memory_types.h"
 #include "mosquitto_comms.h"
 #include "tools/time_utils.h"
 #include "tools/tool_registry.h"
-
-/* =============================================================================
- * Guardrails: Blocked Patterns
- *
- * Patterns that should not be stored as facts to prevent prompt injection
- * and system manipulation attempts.
- *
- * Security note: These patterns are checked after unicode normalization and
- * whitespace collapsing to prevent bypass via obfuscation.
- * ============================================================================= */
-
-static const char *MEMORY_BLOCKED_PATTERNS[] = {
-   /* Imperative patterns addressing the AI */
-   "you should", "you must", "you need to", "you shall", "you have to", "you will", "you are to",
-   "make sure", "ensure that", "be sure to", "don't forget",
-   /* "always/never/whenever" + imperative verb — blocks instructions, allows descriptions
-    * like "user always prefers dark mode" or "never eats gluten" */
-   "always respond", "always answer", "always say", "always reply", "always act", "always include",
-   "always add", "always use", "always be ", "never refuse", "never deny", "never reject",
-   "never decline", "never say", "never mention", "never reveal", "never tell", "whenever you",
-   "whenever asked", "whenever i ",
-   /* Negation/override — multi-word to allow "user ignores notifications" etc. */
-   "ignore your", "ignore previous", "ignore above", "ignore all ", "ignore the ", "forget your",
-   "forget previous", "forget above", "forget all ", "forget everything", "disregard", "pretend",
-   "act as if", "override", "bypass", "disable safe", "disable filter", "disable guard",
-   "disable content", "disable check", "skip check", "skip verif", "skip valid", "skip safe",
-   /* System manipulation — "your X" catches injection; bare words blocked legitimate facts
-    * like "dietary constraints" or "assembly instructions" */
-   "system prompt", "your instructions", "your guidelines", "your rules", "your constraints",
-   "from now on", "going forward", "henceforth",
-   /* Credential patterns — multi-word to avoid blocking "token consumption" etc. */
-   "password", "api key", "apikey", "api token", "access token", "auth token", "session token",
-   "secret key", "credential", "private key", "bearer",
-   /* Role/persona manipulation */
-   "you are", "your role", "your purpose", "your job", "your task", "act like", "behave as",
-   "respond as", NULL
-};
-
-/* Common unicode lookalikes to normalize (Cyrillic, Greek, etc.) */
-static const struct {
-   const char *lookalike;
-   char replacement;
-} UNICODE_NORMALIZATIONS[] = { { "\xd0\xb0", 'a' }, /* Cyrillic а -> a */
-                               { "\xd0\xb5", 'e' }, /* Cyrillic е -> e */
-                               { "\xd0\xbe", 'o' }, /* Cyrillic о -> o */
-                               { "\xd1\x80", 'p' }, /* Cyrillic р -> p */
-                               { "\xd1\x81", 'c' }, /* Cyrillic с -> c */
-                               { "\xd1\x85", 'x' }, /* Cyrillic х -> x */
-                               { "\xd1\x83", 'y' }, /* Cyrillic у -> y */
-                               { "\xce\xb1", 'a' }, /* Greek α -> a */
-                               { "\xce\xb5", 'e' }, /* Greek ε -> e */
-                               { "\xce\xbf", 'o' }, /* Greek ο -> o */
-                               { NULL, 0 } };
-
-/* Zero-width and invisible characters to strip */
-static const char *ZERO_WIDTH_CHARS[] = { "\xe2\x80\x8b", /* Zero-width space U+200B */
-                                          "\xe2\x80\x8c", /* Zero-width non-joiner U+200C */
-                                          "\xe2\x80\x8d", /* Zero-width joiner U+200D */
-                                          "\xef\xbb\xbf", /* BOM U+FEFF */
-                                          "\xc2\xad",     /* Soft hyphen U+00AD */
-                                          NULL };
-
-/* =============================================================================
- * Helper: Normalize text for pattern matching
- *
- * Removes zero-width characters, normalizes unicode lookalikes to ASCII,
- * collapses multiple whitespace, and converts to lowercase.
- * ============================================================================= */
-
-static char *normalize_for_matching(const char *text) {
-   if (!text) {
-      return NULL;
-   }
-
-   size_t len = strlen(text);
-   /* Allocate enough for worst case (all single-byte after normalization) */
-   char *result = malloc(len + 1);
-   if (!result) {
-      return NULL;
-   }
-
-   size_t out_idx = 0;
-   size_t in_idx = 0;
-   bool last_was_space = false;
-
-   while (in_idx < len) {
-      bool handled = false;
-
-      /* Check for zero-width characters to strip */
-      for (int i = 0; ZERO_WIDTH_CHARS[i] != NULL; i++) {
-         size_t zw_len = strlen(ZERO_WIDTH_CHARS[i]);
-         if (in_idx + zw_len <= len && memcmp(text + in_idx, ZERO_WIDTH_CHARS[i], zw_len) == 0) {
-            in_idx += zw_len;
-            handled = true;
-            break;
-         }
-      }
-      if (handled)
-         continue;
-
-      /* Check for unicode lookalikes to normalize */
-      for (int i = 0; UNICODE_NORMALIZATIONS[i].lookalike != NULL; i++) {
-         size_t ul_len = strlen(UNICODE_NORMALIZATIONS[i].lookalike);
-         if (in_idx + ul_len <= len &&
-             memcmp(text + in_idx, UNICODE_NORMALIZATIONS[i].lookalike, ul_len) == 0) {
-            result[out_idx++] = UNICODE_NORMALIZATIONS[i].replacement;
-            in_idx += ul_len;
-            last_was_space = false;
-            handled = true;
-            break;
-         }
-      }
-      if (handled)
-         continue;
-
-      /* Regular character processing */
-      unsigned char c = (unsigned char)text[in_idx];
-
-      /* Skip non-ASCII bytes we don't recognize (multi-byte UTF-8 start) */
-      if (c >= 0x80) {
-         /* Skip this UTF-8 sequence */
-         if ((c & 0xE0) == 0xC0)
-            in_idx += 2; /* 2-byte */
-         else if ((c & 0xF0) == 0xE0)
-            in_idx += 3; /* 3-byte */
-         else if ((c & 0xF8) == 0xF0)
-            in_idx += 4; /* 4-byte */
-         else
-            in_idx++; /* Invalid, skip one byte */
-         continue;
-      }
-
-      /* Collapse whitespace */
-      if (isspace(c)) {
-         if (!last_was_space && out_idx > 0) {
-            result[out_idx++] = ' ';
-            last_was_space = true;
-         }
-         in_idx++;
-         continue;
-      }
-
-      /* Convert to lowercase */
-      result[out_idx++] = tolower(c);
-      last_was_space = false;
-      in_idx++;
-   }
-
-   /* Trim trailing space */
-   if (out_idx > 0 && result[out_idx - 1] == ' ') {
-      out_idx--;
-   }
-
-   result[out_idx] = '\0';
-   return result;
-}
-
-/* =============================================================================
- * Helper: Check for blocked patterns
- * ============================================================================= */
-
-static bool contains_blocked_pattern(const char *text) {
-   if (!text) {
-      return false;
-   }
-
-   /* Normalize text: remove zero-width chars, normalize lookalikes, collapse whitespace */
-   char *normalized = normalize_for_matching(text);
-   if (!normalized) {
-      /* If normalization fails, be conservative and block */
-      OLOG_WARNING("memory_callback: normalization failed, blocking for safety");
-      return true;
-   }
-
-   bool found = false;
-   for (int i = 0; MEMORY_BLOCKED_PATTERNS[i] != NULL; i++) {
-      if (strstr(normalized, MEMORY_BLOCKED_PATTERNS[i]) != NULL) {
-         OLOG_WARNING("memory_callback: blocked pattern detected: '%s'",
-                      MEMORY_BLOCKED_PATTERNS[i]);
-         found = true;
-         break;
-      }
-   }
-
-   free(normalized);
-   return found;
-}
 
 /* =============================================================================
  * Helper: Get user ID from current session
@@ -716,8 +530,8 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
       return strdup("The fact is too long. Please keep it under 500 characters.");
    }
 
-   /* Check for blocked patterns */
-   if (contains_blocked_pattern(fact_text)) {
+   /* Check for injection patterns */
+   if (memory_filter_check(fact_text)) {
       return strdup("I cannot store that as a fact. It contains patterns that could affect my "
                     "behavior in unintended ways.");
    }

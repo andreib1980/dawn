@@ -354,6 +354,15 @@ target_link_libraries(test_missed_notifications_db
                       sqlite3
                       pthread)
 
+# Test: Memory Injection Filter
+# Pure module: blocked pattern detection, normalization, ReAct co-occurrence.
+add_executable(test_memory_filter
+               test_memory_filter.c
+               ${SRC_ROOT}/src/memory/memory_filter.c)
+
+target_link_libraries(test_memory_filter
+                      dawn_common)
+
 # =============================================================================
 # Aggregate "tests" target
 # =============================================================================
@@ -366,6 +375,7 @@ add_custom_target(tests-ci
                           test_document_db
                           test_embedding_engine
                           test_memory_embeddings
+                          test_memory_filter
                           test_plan_executor
                           test_sse_parser
                           test_sentence_buffer
@@ -393,6 +403,7 @@ add_custom_target(tests
                           test_scheduler
                           test_music_db
                           test_memory_embeddings
+                          test_memory_filter
                           test_document_extract
                           test_document_chunker
                           test_document_db

@@ -31,6 +31,7 @@
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
+#include "memory/memory_filter.h"
 #include "memory/memory_similarity.h"
 #include "webui/webui_internal.h"
 
@@ -1147,6 +1148,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
    int imported_prefs = 0;
    int skipped_dupes = 0;
    int skipped_empty = 0;
+   int skipped_blocked = 0;
    json_object *preview_arr = json_object_new_array();
 
    if (strcmp(format, "json") == 0) {
@@ -1186,6 +1188,11 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             char truncated[MEMORY_FACT_TEXT_MAX];
             strncpy(truncated, text, sizeof(truncated) - 1);
             truncated[sizeof(truncated) - 1] = '\0';
+
+            if (memory_filter_check(truncated)) {
+               skipped_blocked++;
+               continue;
+            }
 
             if (is_fact_duplicate(conn->auth_user_id, truncated)) {
                skipped_dupes++;
@@ -1228,6 +1235,11 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             float confidence = 0.8f;
             if (json_object_object_get_ex(p, "confidence", &conf_obj))
                confidence = (float)json_object_get_double(conf_obj);
+
+            if (memory_filter_check(value) || memory_filter_check(category)) {
+               skipped_blocked++;
+               continue;
+            }
 
             json_object *preview_item = json_object_new_object();
             json_object_object_add(preview_item, "type", json_object_new_string("preference"));
@@ -1324,6 +1336,12 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          strncpy(truncated, fact_text, sizeof(truncated) - 1);
          truncated[sizeof(truncated) - 1] = '\0';
 
+         if (memory_filter_check(truncated)) {
+            skipped_blocked++;
+            line = strtok_r(NULL, "\n", &saveptr);
+            continue;
+         }
+
          if (is_fact_duplicate(conn->auth_user_id, truncated)) {
             skipped_dupes++;
             line = strtok_r(NULL, "\n", &saveptr);
@@ -1353,6 +1371,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
    json_object_object_add(resp_payload, "imported_prefs", json_object_new_int(imported_prefs));
    json_object_object_add(resp_payload, "skipped_dupes", json_object_new_int(skipped_dupes));
    json_object_object_add(resp_payload, "skipped_empty", json_object_new_int(skipped_empty));
+   json_object_object_add(resp_payload, "skipped_blocked", json_object_new_int(skipped_blocked));
    if (!commit) {
       json_object_object_add(resp_payload, "preview", preview_arr);
    } else {
@@ -1364,7 +1383,9 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
    json_object_put(response);
 
    if (commit) {
-      OLOG_INFO("WebUI: User %d imported memories (format=%s, facts=%d, prefs=%d, dupes=%d)",
-                conn->auth_user_id, format, imported_facts, imported_prefs, skipped_dupes);
+      OLOG_INFO(
+          "WebUI: User %d imported memories (format=%s, facts=%d, prefs=%d, dupes=%d, blocked=%d)",
+          conn->auth_user_id, format, imported_facts, imported_prefs, skipped_dupes,
+          skipped_blocked);
    }
 }

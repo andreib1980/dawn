@@ -41,6 +41,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_filter.h"
 #include "memory/memory_types.h"
 
 /* =============================================================================
@@ -449,6 +450,12 @@ static void process_extraction_response(int user_id,
                category = validate_fact_category(json_object_get_string(cat_obj));
             }
 
+            /* Check for injection patterns before storing */
+            if (memory_filter_check(text)) {
+               OLOG_WARNING("memory_extraction: blocked injection in fact: %.80s", text);
+               continue;
+            }
+
             /* Check for duplicates before storing */
             memory_fact_t similar[3];
             int similar_count = memory_db_fact_find_similar(user_id, text, similar, 3);
@@ -489,6 +496,12 @@ static void process_extraction_response(int user_id,
                confidence = (float)json_object_get_double(conf_obj);
             }
 
+            if (memory_filter_check(value) || memory_filter_check(category)) {
+               OLOG_WARNING("memory_extraction: blocked injection in preference: %.32s=%.80s",
+                            category, value);
+               continue;
+            }
+
             memory_db_pref_upsert(user_id, category, value, confidence, "inferred");
             OLOG_INFO("memory_extraction: stored preference: %s=%s", category, value);
          }
@@ -507,6 +520,11 @@ static void process_extraction_response(int user_id,
              json_object_object_get_ex(corr, "new_fact", &new_obj)) {
             const char *old_fact = json_object_get_string(old_obj);
             const char *new_fact = json_object_get_string(new_obj);
+
+            if (memory_filter_check(new_fact)) {
+               OLOG_WARNING("memory_extraction: blocked injection in correction: %.80s", new_fact);
+               continue;
+            }
 
             /* Find and supersede old fact */
             memory_fact_t similar[3];
