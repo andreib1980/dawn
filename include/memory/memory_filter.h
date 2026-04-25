@@ -32,10 +32,15 @@ extern "C" {
 /**
  * @brief Normalize text for injection pattern matching.
  *
- * Strips zero-width/invisible Unicode characters, maps Cyrillic/Greek
- * homoglyphs to ASCII equivalents, collapses whitespace, and lowercases.
- * Non-ASCII characters not in the homoglyph table are dropped (the output
- * is ASCII-only). Caller must free() the returned string.
+ * Produces an ASCII-only normalized form for pattern matching:
+ * - Strips zero-width/invisible chars and Unicode tag characters
+ * - Replaces line/paragraph separators (U+2028/2029) with space
+ * - Maps Cyrillic/Greek homoglyphs to ASCII equivalents
+ * - Strips Latin-1 accents (U+00C0-U+00FF) to base letters
+ * - Maps fullwidth ASCII (U+FF01-FF5E) to normal ASCII
+ * - Collapses whitespace and lowercases
+ * - Drops remaining non-ASCII characters
+ * Caller must free() the returned string.
  *
  * @param text  Input text (UTF-8).
  * @return Heap-allocated normalized string, or NULL on error/NULL input.

@@ -452,7 +452,7 @@ static void process_extraction_response(int user_id,
 
             /* Check for injection patterns before storing */
             if (memory_filter_check(text)) {
-               OLOG_WARNING("memory_extraction: blocked injection in fact: %.80s", text);
+               OLOG_WARNING("memory_extraction: blocked injection in extracted fact");
                continue;
             }
 
@@ -497,8 +497,7 @@ static void process_extraction_response(int user_id,
             }
 
             if (memory_filter_check(value) || memory_filter_check(category)) {
-               OLOG_WARNING("memory_extraction: blocked injection in preference: %.32s=%.80s",
-                            category, value);
+               OLOG_WARNING("memory_extraction: blocked injection in extracted preference");
                continue;
             }
 
@@ -522,7 +521,7 @@ static void process_extraction_response(int user_id,
             const char *new_fact = json_object_get_string(new_obj);
 
             if (memory_filter_check(new_fact)) {
-               OLOG_WARNING("memory_extraction: blocked injection in correction: %.80s", new_fact);
+               OLOG_WARNING("memory_extraction: blocked injection in extracted correction");
                continue;
             }
 
@@ -583,7 +582,7 @@ static void process_extraction_response(int user_id,
             ent_type = "thing";
 
          if (memory_filter_check(ent_name)) {
-            OLOG_WARNING("memory_extraction: blocked injection in entity name: %.64s", ent_name);
+            OLOG_WARNING("memory_extraction: blocked injection in entity name");
             continue;
          }
 
@@ -640,8 +639,7 @@ static void process_extraction_response(int user_id,
 
          if (memory_filter_check(subj_name) || memory_filter_check(rel_type) ||
              memory_filter_check(obj_name)) {
-            OLOG_WARNING("memory_extraction: blocked injection in relation: %.64s -> %.64s",
-                         subj_name, obj_name);
+            OLOG_WARNING("memory_extraction: blocked injection in relation");
             continue;
          }
 
@@ -745,7 +743,7 @@ static void process_extraction_response(int user_id,
       }
 
       if (memory_filter_check(summary)) {
-         OLOG_WARNING("memory_extraction: blocked injection in summary: %.80s", summary);
+         OLOG_WARNING("memory_extraction: blocked injection in summary");
       } else {
          memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
                                   duration_seconds);

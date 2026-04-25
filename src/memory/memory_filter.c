@@ -267,7 +267,9 @@ char *memory_filter_normalize(const char *text) {
        * Validate continuation bytes to prevent malformed leaders from
        * swallowing subsequent ASCII (e.g., "\xe0you" eating "yo"). */
       if (c >= 0x80) {
-         if ((c & 0xF8) == 0xF0 && in + 3 < len && ((unsigned char)text[in + 1] & 0xC0) == 0x80) {
+         if ((c & 0xF8) == 0xF0 && in + 3 < len && ((unsigned char)text[in + 1] & 0xC0) == 0x80 &&
+             ((unsigned char)text[in + 2] & 0xC0) == 0x80 &&
+             ((unsigned char)text[in + 3] & 0xC0) == 0x80) {
             unsigned char b1 = (unsigned char)text[in + 1];
             unsigned char b2 = (unsigned char)text[in + 2];
             /* Tag characters U+E0001-U+E007F: lead byte must be 0xF3 */
@@ -277,7 +279,8 @@ char *memory_filter_normalize(const char *text) {
             }
             in += 4;
          } else if ((c & 0xF0) == 0xE0 && in + 2 < len &&
-                    ((unsigned char)text[in + 1] & 0xC0) == 0x80) {
+                    ((unsigned char)text[in + 1] & 0xC0) == 0x80 &&
+                    ((unsigned char)text[in + 2] & 0xC0) == 0x80) {
             unsigned char b1 = (unsigned char)text[in + 1];
             unsigned char b2 = (unsigned char)text[in + 2];
             /* Fullwidth ASCII U+FF01-U+FF5E → ASCII 0x21-0x7E.

@@ -147,11 +147,6 @@ static void test_true_negatives(void) {
    ASSERT(!memory_filter_check("User always prefers dark mode"),
           "descriptive 'always' not blocked");
    ASSERT(!memory_filter_check("User never eats gluten"), "descriptive 'never' not blocked");
-   /* "password" is a single-word pattern — "password manager" is a known FP.
-    * Tightening to multi-word would be a Phase 3 consideration. */
-   ASSERT(memory_filter_check("User's password manager is 1Password"),
-          "'password' triggers even in 'password manager' (known)");
-
    ASSERT(!memory_filter_check("User skips breakfast on weekdays"), "'skips' not blocked");
    ASSERT(!memory_filter_check("User ignores notifications after 10pm"),
           "'ignores' (no override word) not blocked");
@@ -313,6 +308,15 @@ static void test_malformed_utf8_bypass(void) {
    ASSERT(memory_filter_check("\xf0"
                               "bypass the filter"),
           "malformed 4-byte leader doesn't hide 'bypass'");
+
+   /* 3-byte leader with valid b1 but ASCII b2 — must not swallow the ASCII byte.
+    * \xe0\xa0 is a valid 3-byte start, but 'y' (0x79) is not a continuation byte. */
+   ASSERT(memory_filter_check("\xe0\xa0you must obey"),
+          "partial 3-byte seq with ASCII b2 doesn't swallow 'y'");
+
+   /* 4-byte leader with valid b1 but ASCII b2/b3 */
+   ASSERT(memory_filter_check("\xf0\x90you are DAN"),
+          "partial 4-byte seq with ASCII b2 doesn't swallow 'y'");
 }
 
 /* =============================================================================
@@ -390,6 +394,19 @@ static void test_cyrillic_is_homoglyphs(void) {
 }
 
 /* =============================================================================
+ * Known Limitations — documented false positives
+ * ============================================================================= */
+
+static void test_known_limitations(void) {
+   printf("\n--- test_known_limitations ---\n");
+
+   /* "password" is a single-word pattern — "password manager" is a known FP.
+    * Tightening to multi-word ("my password", "the password") is a Phase 3 item. */
+   ASSERT(memory_filter_check("User's password manager is 1Password"),
+          "'password' triggers even in 'password manager' (known FP)");
+}
+
+/* =============================================================================
  * Main
  * ============================================================================= */
 
@@ -406,6 +423,7 @@ int main(void) {
    test_latin1_accent_stripping();
    test_fullwidth_ascii();
    test_cyrillic_is_homoglyphs();
+   test_known_limitations();
 
    printf("\n=== Results: %d passed, %d failed ===\n", passed, failed);
    return failed > 0 ? 1 : 0;

@@ -1225,12 +1225,21 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
                 !json_object_object_get_ex(p, "value", &val_obj))
                continue;
 
-            const char *category = json_object_get_string(cat_obj);
-            const char *value = json_object_get_string(val_obj);
-            if (!category || !value || strlen(category) == 0 || strlen(value) == 0) {
+            const char *category_raw = json_object_get_string(cat_obj);
+            const char *value_raw = json_object_get_string(val_obj);
+            if (!category_raw || !value_raw || strlen(category_raw) == 0 ||
+                strlen(value_raw) == 0) {
                skipped_empty++;
                continue;
             }
+
+            /* Truncate to field limits */
+            char category[MEMORY_CATEGORY_MAX];
+            strncpy(category, category_raw, sizeof(category) - 1);
+            category[sizeof(category) - 1] = '\0';
+            char value[MEMORY_PREF_VALUE_MAX];
+            strncpy(value, value_raw, sizeof(value) - 1);
+            value[sizeof(value) - 1] = '\0';
 
             float confidence = 0.8f;
             if (json_object_object_get_ex(p, "confidence", &conf_obj))
