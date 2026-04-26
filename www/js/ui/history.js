@@ -757,7 +757,12 @@
         </div>
       </div>
     `;
-      transcript.insertAdjacentHTML('beforeend', bannerHtml);
+      const lastEntry = transcript.querySelector('.transcript-entry:last-child');
+      if (lastEntry) {
+         lastEntry.insertAdjacentHTML('beforebegin', bannerHtml);
+      } else {
+         transcript.insertAdjacentHTML('beforeend', bannerHtml);
+      }
    }
 
    function generateTitleFromMessage(content) {

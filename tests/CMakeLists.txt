@@ -193,6 +193,15 @@ target_link_libraries(test_memory_embeddings
                       pthread
                       m)
 
+# Test: Context Compaction (LCM Phase 1)
+# Tests deterministic compaction, target calculation, and token range estimation.
+# Uses standalone impl file — no dependency on full llm_context.c.
+add_executable(test_context_compaction
+               test_context_compaction.c
+               test_context_compaction_impl.c)
+
+target_link_libraries(test_context_compaction ${JSONC_LIBRARIES})
+
 # Test: Time Query Parser (#3-A)
 # Pure module: parses natural-language temporal expressions in queries.
 add_executable(test_time_query_parser

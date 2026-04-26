@@ -248,6 +248,7 @@ typedef struct {
          int tokens_before;
          int tokens_after;
          int messages_summarized;
+         int level;
          char *summary;
       } compaction;
       struct {
