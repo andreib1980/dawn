@@ -132,7 +132,8 @@ static int prepare_statements(void) {
                            "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
                            "  AND valid_to IS NULL "
                            "  AND (COALESCE(object_entity_id, 0) != COALESCE(?, 0) "
-                           "    OR COALESCE(object_value, '') != COALESCE(?, ''))",
+                           "    OR COALESCE(object_value, '') != COALESCE(?, '')) "
+                           "RETURNING fact_id",
                            -1, &s_db.stmt_memory_relation_close_open, NULL);
    if (rc != SQLITE_OK)
       return -1;
@@ -207,12 +208,12 @@ static void test_supersede_exclusive(void) {
    printf("\n--- test_supersede_exclusive (works_at) ---\n");
 
    /* Insert: Alice works_at Google */
-   int rc = memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, 0, 0);
+   int rc = memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, 0, 0, NULL);
    TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "supersede insert #1 ok");
    TEST_ASSERT(count_open_relations(10, "works_at") == 1, "one open works_at after first insert");
 
    /* Now: Alice works_at Microsoft → must auto-close Google */
-   rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0);
+   rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
    TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "supersede insert #2 ok");
    TEST_ASSERT(count_open_relations(10, "works_at") == 1,
                "still one open works_at (prior auto-closed)");
@@ -223,7 +224,7 @@ static void test_supersede_idempotent_same_object(void) {
 
    /* Re-insert: Alice works_at Microsoft (same target as prior test) */
    int prior = count_open_relations(10, "works_at");
-   int rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0);
+   int rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
    TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "re-insert same object ok");
    /* Expectation: a NEW row is added, but the prior open Microsoft row is NOT
     * closed because object matches.  So open count goes prior + 1.
@@ -237,9 +238,9 @@ static void test_non_exclusive_does_not_close(void) {
    printf("\n--- test_non_exclusive_does_not_close ---\n");
 
    /* "likes" is not in EXCLUSIVE_RELATIONS — multiple open rows valid. */
-   memory_db_relation_supersede(1, 10, "likes", 20, NULL, 0, 0.7f, 0, 0);
-   memory_db_relation_supersede(1, 10, "likes", 21, NULL, 0, 0.7f, 0, 0);
-   memory_db_relation_supersede(1, 10, "likes", 22, NULL, 0, 0.7f, 0, 0);
+   memory_db_relation_supersede(1, 10, "likes", 20, NULL, 0, 0.7f, 0, 0, NULL);
+   memory_db_relation_supersede(1, 10, "likes", 21, NULL, 0, 0.7f, 0, 0, NULL);
+   memory_db_relation_supersede(1, 10, "likes", 22, NULL, 0, 0.7f, 0, 0, NULL);
    int n = count_open_relations(10, "likes");
    TEST_ASSERT(n == 3, "all three 'likes' relations remain open");
 }
@@ -295,8 +296,8 @@ static void test_supersede_closes_at_new_valid_from(void) {
                 "AND relation = 'works_at'",
                 NULL, NULL, NULL);
 
-   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0);
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0);
+   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0, NULL);
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0, NULL);
 
    /* As-of 2019: only Google should be valid */
    memory_relation_t out[10];
@@ -320,14 +321,14 @@ static void test_supersede_skips_close_for_historical_insert(void) {
                 NULL, NULL, NULL);
 
    /* Establish current reality: Alice works_at Microsoft, ongoing */
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0);
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
 
    /* Ingest a HISTORICAL fact discovered later: Alice worked at Google 2018-2020.
     * This must NOT close the current Microsoft row — it's adding a bounded
     * historical slice, not superseding the present. */
    int64_t t2018 = 1514764800;
    int64_t t2020 = 1577836800;
-   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020);
+   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020, NULL);
 
    /* Microsoft row should still be open (valid_to NULL). */
    sqlite3_stmt *stmt = NULL;

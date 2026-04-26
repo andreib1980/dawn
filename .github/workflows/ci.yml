@@ -69,7 +69,8 @@ jobs:
             test_document_db test_embedding_engine test_memory_embeddings \
             test_plan_executor test_sse_parser test_sentence_buffer \
             test_session_commands test_wake_word test_instruction_loader \
-            test_document_extract test_phone_db test_missed_notifications_db; do
+            test_document_extract test_phone_db test_missed_notifications_db \
+            test_memory_filter test_temporal_relations test_relation_supersede; do
             echo "::group::${test}"
             if ./"${test}"; then
               echo "::endgroup::"

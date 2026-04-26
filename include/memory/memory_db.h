@@ -692,8 +692,8 @@ int memory_db_relation_create(int user_id,
  * under a single BEGIN IMMEDIATE so other workers cannot observe an inconsistent
  * state.  Non-exclusive relations skip the close branch (multiple open rows valid).
  *
- * Exclusive list (compile-time): works_at, lives_in, married_to, attends_school,
- * owns_vehicle.  See EXCLUSIVE_RELATIONS in memory_db.c.
+ * See EXCLUSIVE_RELATIONS[] and CONTRADICTORY_PAIRS[] in memory_db.c for the
+ * full compile-time lists of auto-close relation types.
  *
  * Use this from extraction instead of memory_db_relation_create directly.
  *
@@ -706,6 +706,9 @@ int memory_db_relation_create(int user_id,
  * @param confidence Confidence (0.0-1.0)
  * @param valid_from Start of validity period (0 = open-ended/NULL)
  * @param valid_to End of validity period (0 = open-ended/NULL = currently true)
+ * @param out_old_fact_id If non-NULL and an existing open relation was closed
+ *        (exclusive supersede or contradictory-pair close), receives that old
+ *        relation's fact_id (0 if none was linked)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_relation_supersede(int user_id,
@@ -716,7 +719,8 @@ int memory_db_relation_supersede(int user_id,
                                  int64_t fact_id,
                                  float confidence,
                                  int64_t valid_from,
-                                 int64_t valid_to);
+                                 int64_t valid_to,
+                                 int64_t *out_old_fact_id);
 
 /**
  * @brief List relations where entity is subject (outgoing).  Returns ALL

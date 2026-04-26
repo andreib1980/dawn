@@ -1639,10 +1639,37 @@ int memory_db_entity_update_embedding(int64_t entity_id,
  * When extraction stores a new such relation with a different object,
  * memory_db_relation_supersede() auto-closes the prior open row.
  * Non-exclusive relations (likes, knows, has_pet) skip the close branch. */
-static const char *EXCLUSIVE_RELATIONS[] = { "works_at", "lives_in", "married_to", "attends_school",
-                                             "owns_vehicle" };
+static const char *EXCLUSIVE_RELATIONS[] = {
+   "works_at",      "lives_in",         "married_to", "attends_school",
+   "owns_vehicle",  "born_in",          "born_on",    "favorite_color",
+   "favorite_food", "primary_language", "email_is",   "phone_number_is",
+};
 static const int EXCLUSIVE_RELATIONS_COUNT = (int)(sizeof(EXCLUSIVE_RELATIONS) /
                                                    sizeof(EXCLUSIVE_RELATIONS[0]));
+
+static const struct {
+   const char *a;
+   const char *b;
+} CONTRADICTORY_PAIRS[] = {
+   { "likes", "dislikes" },
+   { "enjoys", "hates" },
+   { "can", "cannot" },
+   { "is", "is_not" },
+};
+static const int CONTRADICTORY_PAIRS_COUNT = (int)(sizeof(CONTRADICTORY_PAIRS) /
+                                                   sizeof(CONTRADICTORY_PAIRS[0]));
+
+static const char *contradictory_opposite(const char *relation) {
+   if (!relation)
+      return NULL;
+   for (int i = 0; i < CONTRADICTORY_PAIRS_COUNT; i++) {
+      if (strcmp(relation, CONTRADICTORY_PAIRS[i].a) == 0)
+         return CONTRADICTORY_PAIRS[i].b;
+      if (strcmp(relation, CONTRADICTORY_PAIRS[i].b) == 0)
+         return CONTRADICTORY_PAIRS[i].a;
+   }
+   return NULL;
+}
 
 static bool relation_is_exclusive(const char *relation) {
    if (!relation)
@@ -1726,7 +1753,10 @@ int memory_db_relation_supersede(int user_id,
                                  int64_t fact_id,
                                  float confidence,
                                  int64_t valid_from,
-                                 int64_t valid_to) {
+                                 int64_t valid_to,
+                                 int64_t *out_old_fact_id) {
+   if (out_old_fact_id)
+      *out_old_fact_id = 0;
    if (!relation)
       return MEMORY_DB_FAILURE;
 
@@ -1778,7 +1808,15 @@ int memory_db_relation_supersede(int user_id,
       } else {
          sqlite3_bind_null(close_stmt, 6);
       }
+      /* RETURNING fact_id yields SQLITE_ROW for each closed row */
+      int64_t old_fact_id_local = 0;
       rc = sqlite3_step(close_stmt);
+      if (rc == SQLITE_ROW) {
+         old_fact_id_local = sqlite3_column_int64(close_stmt, 0);
+         while (sqlite3_step(close_stmt) == SQLITE_ROW) {
+         }
+         rc = SQLITE_DONE;
+      }
       sqlite3_reset(close_stmt);
       if (rc != SQLITE_DONE) {
          OLOG_ERROR("memory_db: relation_supersede close failed: %s", sqlite3_errmsg(s_db.db));
@@ -1790,6 +1828,71 @@ int memory_db_relation_supersede(int user_id,
       if (closed > 0) {
          OLOG_INFO("memory_db: closed %d superseded '%s' relation(s) for subject %ld", closed,
                    relation, (long)subject_entity_id);
+         if (out_old_fact_id && old_fact_id_local > 0)
+            *out_old_fact_id = old_fact_id_local;
+      }
+   }
+
+   /* Close contradictory relation (e.g., likes↔dislikes) on the same
+    * (subject, object) pair.  Only applies to currently-true new relations. */
+   const char *opposite = contradictory_opposite(relation);
+   if (opposite && new_is_current) {
+      sqlite3_stmt *cstmt = NULL;
+      int rc2 = sqlite3_prepare_v2(s_db.db,
+                                   "UPDATE memory_relations SET valid_to = ? "
+                                   "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
+                                   "  AND valid_to IS NULL "
+                                   "  AND COALESCE(object_entity_id, 0) = COALESCE(?, 0) "
+                                   "  AND COALESCE(object_value, '') = COALESCE(?, '') "
+                                   "RETURNING fact_id",
+                                   -1, &cstmt, NULL);
+      if (rc2 != SQLITE_OK) {
+         OLOG_ERROR("memory_db: prepare contradictory close failed: %s", sqlite3_errmsg(s_db.db));
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         AUTH_DB_UNLOCK();
+         return MEMORY_DB_FAILURE;
+      } else {
+         int64_t close_time = (valid_from > 0) ? valid_from : now_ts;
+         sqlite3_bind_int64(cstmt, 1, close_time);
+         sqlite3_bind_int(cstmt, 2, user_id);
+         sqlite3_bind_int64(cstmt, 3, subject_entity_id);
+         sqlite3_bind_text(cstmt, 4, opposite, -1, SQLITE_TRANSIENT);
+         if (object_entity_id > 0)
+            sqlite3_bind_int64(cstmt, 5, object_entity_id);
+         else
+            sqlite3_bind_null(cstmt, 5);
+         if (object_value)
+            sqlite3_bind_text(cstmt, 6, object_value, -1, SQLITE_TRANSIENT);
+         else
+            sqlite3_bind_null(cstmt, 6);
+
+         rc2 = sqlite3_step(cstmt);
+         if (rc2 == SQLITE_ROW) {
+            int64_t contra_fact_id = sqlite3_column_int64(cstmt, 0);
+            do {
+               rc2 = sqlite3_step(cstmt);
+            } while (rc2 == SQLITE_ROW);
+            if (rc2 != SQLITE_DONE) {
+               OLOG_ERROR("memory_db: contradictory close step failed: %s",
+                          sqlite3_errmsg(s_db.db));
+               sqlite3_finalize(cstmt);
+               sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+               AUTH_DB_UNLOCK();
+               return MEMORY_DB_FAILURE;
+            }
+            if (out_old_fact_id && *out_old_fact_id == 0 && contra_fact_id > 0)
+               *out_old_fact_id = contra_fact_id;
+            OLOG_INFO("memory_db: closed contradictory '%s' (opposite of '%s') "
+                      "for subject %ld",
+                      opposite, relation, (long)subject_entity_id);
+         } else if (rc2 != SQLITE_DONE) {
+            OLOG_ERROR("memory_db: contradictory close step failed: %s", sqlite3_errmsg(s_db.db));
+            sqlite3_finalize(cstmt);
+            sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+            AUTH_DB_UNLOCK();
+            return MEMORY_DB_FAILURE;
+         }
+         sqlite3_finalize(cstmt);
       }
    }
 

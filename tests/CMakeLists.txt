@@ -332,6 +332,41 @@ target_link_libraries(bench_retrieval
                       ${CURL_LIBRARIES}
                       ${JSONC_LIBRARIES})
 
+# Contradiction detection experiment.  Tests whether cosine similarity +
+# Jaccard divergence can separate contradictory facts from paraphrases.
+add_executable(bench_contradiction
+               ${SRC_ROOT}/benchmarks/bench_contradiction.c
+               ${SRC_ROOT}/benchmarks/bench_contradiction_stub.c
+               ${SRC_ROOT}/src/core/embedding_engine.c
+               ${SRC_ROOT}/src/memory/memory_embed_onnx.c
+               ${SRC_ROOT}/src/memory/memory_embed_ollama.c
+               ${SRC_ROOT}/src/memory/memory_embed_openai.c
+               ${SRC_ROOT}/src/memory/memory_similarity.c)
+
+target_include_directories(bench_contradiction PRIVATE
+                           /usr/local/include/onnxruntime)
+
+target_link_libraries(bench_contradiction
+                      dawn_common
+                      pthread
+                      m
+                      onnxruntime
+                      ${CURL_LIBRARIES}
+                      ${JSONC_LIBRARIES})
+
+# Test: Relation-driven fact supersede
+add_executable(test_relation_supersede
+               test_relation_supersede.c
+               test_relation_supersede_stub.c
+               ${SRC_ROOT}/src/memory/memory_db.c
+               ${SRC_ROOT}/src/memory/memory_similarity.c)
+
+target_link_libraries(test_relation_supersede
+                      dawn_common
+                      sqlite3
+                      pthread
+                      m)
+
 # Test: Phone DB Unit Test
 add_executable(test_phone_db
                test_phone_db.c
@@ -385,6 +420,8 @@ add_custom_target(tests-ci
                           test_document_extract
                           test_phone_db
                           test_missed_notifications_db
+                          test_temporal_relations
+                          test_relation_supersede
                   COMMENT "Building CI-safe unit tests")
 
 add_custom_target(tests

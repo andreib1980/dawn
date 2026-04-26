@@ -72,7 +72,10 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "\"attributes\": {\"key\": \"value\"}}\n"
     "  ],\n"
     "  \"relations\": [\n"
-    "    {\"subject\": \"entity name\", \"relation\": \"has_pet|lives_in|works_at|likes|is_a\", "
+    "    {\"subject\": \"entity name\", \"relation\": \"has_pet|lives_in|works_at|born_in|"
+    "born_on|married_to|attends_school|owns_vehicle|"
+    "likes|dislikes|enjoys|hates|can|cannot|is|is_not|is_a|favorite_color|favorite_food|"
+    "primary_language|email_is|phone_number_is\", "
     "\"object\": \"entity name or value\", "
     "\"valid_from\": \"YYYY-MM-DD or YYYY (optional)\", "
     "\"valid_to\": \"YYYY-MM-DD or YYYY (optional)\"}\n"
@@ -412,6 +415,35 @@ static int64_t parse_iso8601_date(const char *s) {
 }
 
 /* =============================================================================
+ * Fact map — tracks newly created facts for relation linkage
+ * ============================================================================= */
+
+#define FACT_MAP_MAX 32
+
+typedef struct {
+   char text[MEMORY_FACT_TEXT_MAX];
+   int64_t id;
+} extraction_fact_entry_t;
+
+/* TODO: a cleaner long-term approach is to have the extraction LLM emit a
+ * fact_ref index on each relation, directly referencing the facts[] array. */
+static int64_t find_fact_for_relation(const extraction_fact_entry_t *fmap,
+                                      int fcount,
+                                      const char *subject,
+                                      const char *object) {
+   int64_t matched_id = 0;
+   int matches = 0;
+   for (int i = 0; i < fcount; i++) {
+      if (strcasestr(fmap[i].text, subject) && strcasestr(fmap[i].text, object)) {
+         matched_id = fmap[i].id;
+         if (++matches > 1)
+            return 0;
+      }
+   }
+   return matched_id;
+}
+
+/* =============================================================================
  * Helper: Parse extraction response
  * ============================================================================= */
 
@@ -433,6 +465,11 @@ static void process_extraction_response(int user_id,
       OLOG_WARNING("memory_extraction: Response preview: %.200s...", response_text);
       return;
    }
+
+   /* Fact map — tracks (text, id) of newly created facts so relations can
+    * reference them via fact_id for contradiction propagation. */
+   extraction_fact_entry_t fact_map[FACT_MAP_MAX];
+   int fact_map_count = 0;
 
    /* Process facts */
    struct json_object *facts_arr;
@@ -476,12 +513,30 @@ static void process_extraction_response(int user_id,
                if (fact_id > 0 && memory_embeddings_available()) {
                   memory_embeddings_embed_and_store(user_id, fact_id, text);
                }
+               /* Record in fact map for relation linkage */
+               if (fact_id > 0) {
+                  if (fact_map_count < FACT_MAP_MAX) {
+                     snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
+                     fact_map[fact_map_count].id = fact_id;
+                     fact_map_count++;
+                  } else {
+                     OLOG_WARNING("memory_extraction: fact_map full (%d), "
+                                  "relation linkage unavailable for: %s",
+                                  FACT_MAP_MAX, text);
+                  }
+               }
             } else {
                /* Update confidence of existing similar fact */
                float new_conf = similar[0].confidence + 0.1f;
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
                memory_db_fact_update_confidence(similar[0].id, new_conf);
+               /* Record existing fact in map so relations can still link to it */
+               if (fact_map_count < FACT_MAP_MAX) {
+                  snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
+                  fact_map[fact_map_count].id = similar[0].id;
+                  fact_map_count++;
+               }
             }
          }
       }
@@ -711,9 +766,27 @@ static void process_extraction_response(int user_id,
          /* Use supersede so exclusive relations (works_at, lives_in, ...) auto-close
           * any prior open instance with a different object.  Non-exclusive relations
           * skip the close branch internally.  Both writes happen in one transaction. */
-         memory_db_relation_supersede(user_id, subj_id, rel_type, obj_entity_id,
-                                      (obj_entity_id == 0) ? obj_name : NULL, 0, 0.8f, valid_from,
-                                      valid_to);
+         int64_t rel_fact_id = find_fact_for_relation(fact_map, fact_map_count, subj_name,
+                                                      obj_name);
+         if (rel_fact_id == 0) {
+            OLOG_DEBUG("memory_extraction: no fact match for relation (%s, %s, %s)", subj_name,
+                       rel_type, obj_name);
+         }
+         int64_t old_fact_id = 0;
+         int rel_rc = memory_db_relation_supersede(user_id, subj_id, rel_type, obj_entity_id,
+                                                   (obj_entity_id == 0) ? obj_name : NULL,
+                                                   rel_fact_id, 0.8f, valid_from, valid_to,
+                                                   &old_fact_id);
+         if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
+            if (memory_db_fact_supersede(old_fact_id, rel_fact_id) == MEMORY_DB_SUCCESS) {
+               OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
+                         "(relation: %s)",
+                         (long)old_fact_id, (long)rel_fact_id, rel_type);
+            } else {
+               OLOG_WARNING("memory_extraction: fact supersede failed for %ld -> %ld",
+                            (long)old_fact_id, (long)rel_fact_id);
+            }
+         }
          relations_stored++;
          if (valid_from || valid_to) {
             OLOG_INFO("memory_extraction: relation: (%s, %s, %s) valid [%ld..%ld]", subj_name,

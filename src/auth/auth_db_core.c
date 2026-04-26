@@ -2792,7 +2792,8 @@ static int prepare_statements(void) {
                            "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
                            "  AND valid_to IS NULL "
                            "  AND (COALESCE(object_entity_id, 0) != COALESCE(?, 0) "
-                           "    OR COALESCE(object_value, '') != COALESCE(?, ''))",
+                           "    OR COALESCE(object_value, '') != COALESCE(?, '')) "
+                           "RETURNING fact_id",
                            -1, &s_db.stmt_memory_relation_close_open, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare relation_close_open failed: %s", sqlite3_errmsg(s_db.db));
