@@ -1422,6 +1422,57 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                                   message_callback_t callback,
                                   void *ctx);
 
+/* =============================================================================
+ * Summary Nodes (LCM Phase 4 — hierarchical summaries)
+ * ============================================================================= */
+
+typedef struct {
+   int64_t id;
+   int64_t conversation_id;
+   int64_t prior_node_id;
+   int depth;
+   int64_t msg_id_start;
+   int64_t msg_id_end;
+   int level;
+   char *summary_text;
+   int token_count;
+   time_t created_at;
+} summary_node_t;
+
+/**
+ * @brief Create a summary node after compaction
+ *
+ * @param node Node data (id field is ignored, set on output)
+ * @param node_id_out Output: inserted node ID
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int summary_node_create(const summary_node_t *node, int64_t *node_id_out);
+
+/**
+ * @brief Get a summary node by ID
+ *
+ * @param node_id Node ID
+ * @param node_out Output: node data (summary_text is heap-allocated, caller frees)
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int summary_node_get(int64_t node_id, summary_node_t *node_out);
+
+/**
+ * @brief Get the most recent summary node for a conversation chain
+ *
+ * Searches for the latest node across a conversation and its continuations.
+ *
+ * @param conv_id Conversation ID (any in the chain)
+ * @param node_out Output: latest node (summary_text is heap-allocated, caller frees)
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int summary_node_get_latest(int64_t conv_id, summary_node_t *node_out);
+
+/**
+ * @brief Free heap-allocated fields in a summary_node_t
+ */
+void summary_node_free(summary_node_t *node);
+
 /**
  * @brief Count conversations for a user
  *

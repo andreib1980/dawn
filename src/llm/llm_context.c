@@ -1333,6 +1333,51 @@ int llm_context_compact(uint32_t session_id,
       }
    }
 
+   /* Create summary node (LCM Phase 4 — hierarchical summaries) */
+   int64_t node_id = 0;
+   int node_depth = 0;
+   if (first_msg_id > 0 && last_msg_id > 0 && conv_id > 0) {
+      summary_node_t prior = { 0 };
+      int64_t prior_id = 0;
+      if (summary_node_get_latest(conv_id, &prior) == AUTH_DB_SUCCESS) {
+         prior_id = prior.id;
+         node_depth = prior.depth + 1;
+         summary_node_free(&prior);
+      } else {
+         /* Search parent conversation for prior nodes (continuation chain) */
+         int search_user_id = 0;
+         session_t *ctx_s = session_get_command_context();
+         if (ctx_s)
+            search_user_id = ctx_s->metrics.user_id;
+         if (search_user_id > 0) {
+            conversation_t conv_info = { 0 };
+            if (conv_db_get(conv_id, search_user_id, &conv_info) == AUTH_DB_SUCCESS) {
+               if (conv_info.continued_from > 0) {
+                  memset(&prior, 0, sizeof(prior));
+                  if (summary_node_get_latest(conv_info.continued_from, &prior) ==
+                      AUTH_DB_SUCCESS) {
+                     prior_id = prior.id;
+                     node_depth = prior.depth + 1;
+                     summary_node_free(&prior);
+                  }
+               }
+               conv_free(&conv_info);
+            }
+         }
+      }
+
+      int summary_tokens = (int)(strlen(summary) + 20) / 4;
+      summary_node_t node = { .conversation_id = conv_id,
+                              .prior_node_id = prior_id,
+                              .depth = node_depth,
+                              .msg_id_start = first_msg_id,
+                              .msg_id_end = last_msg_id,
+                              .level = level,
+                              .summary_text = summary,
+                              .token_count = summary_tokens };
+      summary_node_create(&node, &node_id);
+   }
+
    /* Add summary as assistant message with dynamic buffer */
    struct json_object *summary_msg = json_object_new_object();
    json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));
@@ -1340,7 +1385,13 @@ int llm_context_compact(uint32_t session_id,
    size_t note_len = strlen(summary) + 256;
    char *summary_with_note = malloc(note_len);
    if (summary_with_note) {
-      if (first_msg_id > 0 && last_msg_id > 0) {
+      if (first_msg_id > 0 && last_msg_id > 0 && node_id > 0) {
+         snprintf(summary_with_note, note_len,
+                  "[COMPACTED conv=%lld msgs=%lld-%lld node=%lld depth=%d] "
+                  "Previous conversation summary: %s",
+                  (long long)conv_id, (long long)first_msg_id, (long long)last_msg_id,
+                  (long long)node_id, node_depth, summary);
+      } else if (first_msg_id > 0 && last_msg_id > 0) {
          snprintf(summary_with_note, note_len,
                   "[COMPACTED conv=%lld msgs=%lld-%lld] "
                   "Previous conversation summary: %s",

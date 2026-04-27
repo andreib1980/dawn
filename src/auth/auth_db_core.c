@@ -1730,6 +1730,34 @@ static int create_schema(const char *db_path) {
       }
    }
 
+   /* v38 migration: summary_nodes table for LCM Phase 4 (hierarchical summaries).
+    * Each compaction creates a node linking to its predecessor, enabling multi-resolution
+    * drill-down via the context_expand tool. */
+   if (current_version < 38) {
+      const char *v38_sql =
+          "CREATE TABLE IF NOT EXISTS summary_nodes ("
+          "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+          "conversation_id INTEGER NOT NULL, "
+          "prior_node_id INTEGER, "
+          "depth INTEGER NOT NULL DEFAULT 0, "
+          "msg_id_start INTEGER NOT NULL, "
+          "msg_id_end INTEGER NOT NULL, "
+          "level INTEGER NOT NULL DEFAULT 0, "
+          "summary_text TEXT NOT NULL, "
+          "token_count INTEGER, "
+          "created_at INTEGER, "
+          "FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE, "
+          "FOREIGN KEY (prior_node_id) REFERENCES summary_nodes(id) ON DELETE SET NULL)";
+      rc = sqlite3_exec(s_db.db, v38_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v38 migration (summary_nodes) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: created summary_nodes table (v38)");
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -1738,6 +1766,16 @@ static int create_schema(const char *db_path) {
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: could not create continuation index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_summary_nodes_conv "
+                     "ON summary_nodes(conversation_id)",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create summary_nodes index: %s", errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
