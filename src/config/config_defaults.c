@@ -162,10 +162,15 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.thinking.budget_xhigh = LLM_THINKING_BUDGET_XHIGH_DEFAULT;
 
    /* LLM Context Management */
-   config->llm.summarize_threshold = 0.80f;  /* Compact at 80% of context limit */
-   config->llm.conversation_logging = false; /* Disabled: WebUI saves to DB, set true for debug */
-   config->llm.rate_limit_enabled = true;    /* Throttle cloud API calls by default */
-   config->llm.rate_limit_rpm = 40;          /* 20% headroom under typical 50 RPM limit */
+   config->llm.summarize_threshold = 0.85f;    /* Legacy alias — maps to hard threshold */
+   config->llm.compact_soft_threshold = 0.60f; /* Async compaction trigger (background) */
+   config->llm.compact_hard_threshold = 0.85f; /* Blocking compaction trigger (safety net) */
+   config->llm.compact_use_session = true;     /* Use session's provider for compaction */
+   config->llm.compact_provider[0] = '\0';     /* Dedicated provider (empty = none) */
+   config->llm.compact_model[0] = '\0';        /* Dedicated model (empty = none) */
+   config->llm.conversation_logging = false;   /* Disabled: WebUI saves to DB, set true for debug */
+   config->llm.rate_limit_enabled = true;      /* Throttle cloud API calls by default */
+   config->llm.rate_limit_rpm = 40;            /* 20% headroom under typical 50 RPM limit */
 
    /* Search */
    SAFE_COPY(config->search.engine, "searxng");

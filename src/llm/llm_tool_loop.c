@@ -314,7 +314,14 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
    size_t loop_vision_size_arr[1] = { 0 };
 
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
-      /* Step 1: Auto-compact if needed (THE KEY FIX)
+      /* Step 0: Merge any completed async compaction (invisible to user) */
+      session_t *loop_session = session_get(params->session_id);
+      if (loop_session) {
+         llm_context_async_merge(loop_session, params->conversation_history);
+         session_release(loop_session);
+      }
+
+      /* Step 1: Auto-compact if needed (hard threshold — blocking safety net).
        * This runs EVERY iteration, not just once at the top of the entry point.
        * Without this, context can overflow during multi-step tool iterations. */
       llm_context_auto_compact_with_config(params->conversation_history, params->session_id,

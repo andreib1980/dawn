@@ -146,6 +146,42 @@ typedef struct {
 } dap2_capabilities_t;
 
 /**
+ * @brief Async compaction state machine (per-session, embedded in session_t)
+ *
+ * State transitions: IDLE -> RUNNING (trigger) -> READY (bg complete) -> IDLE (merge)
+ * Single-writer discipline: bg thread writes result fields while RUNNING,
+ * main thread reads them when READY. _Atomic state governs transitions.
+ */
+typedef enum {
+   ASYNC_COMPACT_IDLE = 0,
+   ASYNC_COMPACT_RUNNING = 1,
+   ASYNC_COMPACT_READY = 2,
+} async_compact_state_t;
+
+typedef struct {
+   _Atomic int state;
+   pthread_t thread_id;
+   bool thread_active;
+
+   struct json_object *pending_history;
+   int result_tokens_before;
+   int result_tokens_after;
+   int result_messages_summarized;
+   int result_level;
+   char *result_summary;
+
+   struct json_object *snapshot_history;
+   int snapshot_msg_count;
+
+   llm_type_t trigger_llm_type;
+   cloud_provider_t trigger_cloud_provider;
+   char trigger_model[64];
+   uint32_t trigger_session_id;
+
+   time_t last_compacted_at;
+} async_compaction_t;
+
+/**
  * @brief Session structure
  * @ownership Session manager owns all sessions
  * @thread_safety Protected by session_manager_rwlock
@@ -210,6 +246,9 @@ typedef struct session {
    // Visual guideline cache — tracks which modules have been loaded in this conversation
    // Format: ",diagram,chart," (delimiter-bounded for exact substring matching)
    char visual_modules_loaded[512];
+
+   // Async context compaction (LCM Phase 2 — background compaction between turns)
+   async_compaction_t async_compact;
 
    // Reference counting for safe access (two-phase destruction pattern)
    int ref_count;

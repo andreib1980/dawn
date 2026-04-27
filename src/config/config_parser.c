@@ -644,6 +644,11 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
    static const char *const known_keys[] = { "type",
                                              "max_tokens",
                                              "summarize_threshold",
+                                             "compact_soft_threshold",
+                                             "compact_hard_threshold",
+                                             "compact_use_session",
+                                             "compact_provider",
+                                             "compact_model",
                                              "conversation_logging",
                                              "rate_limit_enabled",
                                              "rate_limit_rpm",
@@ -656,7 +661,45 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
 
    PARSE_STRING(table, "type", config->type);
    PARSE_INT(table, "max_tokens", config->max_tokens);
-   PARSE_DOUBLE(table, "summarize_threshold", config->summarize_threshold);
+   bool has_summarize = false;
+   {
+      toml_datum_t st = toml_double_in(table, "summarize_threshold");
+      if (st.ok) {
+         config->summarize_threshold = (float)st.u.d;
+         has_summarize = true;
+      }
+   }
+
+   /* Parse dual compaction thresholds */
+   bool has_soft = false, has_hard = false;
+   toml_datum_t soft_d = toml_double_in(table, "compact_soft_threshold");
+   if (soft_d.ok) {
+      config->compact_soft_threshold = (float)soft_d.u.d;
+      has_soft = true;
+   }
+   toml_datum_t hard_d = toml_double_in(table, "compact_hard_threshold");
+   if (hard_d.ok) {
+      config->compact_hard_threshold = (float)hard_d.u.d;
+      has_hard = true;
+   }
+
+   /* Backward compat: derive dual thresholds from legacy summarize_threshold.
+    * For low test values (e.g. 0.15), set soft just below hard to keep both active. */
+   if (!has_soft && !has_hard && has_summarize) {
+      float legacy = config->summarize_threshold;
+      config->compact_hard_threshold = legacy;
+      float soft = legacy - 0.25f;
+      if (soft < 0.30f)
+         soft = 0.30f;
+      if (soft >= legacy)
+         soft = legacy - 0.05f;
+      config->compact_soft_threshold = soft;
+   }
+
+   PARSE_BOOL(table, "compact_use_session", config->compact_use_session);
+   PARSE_STRING(table, "compact_provider", config->compact_provider);
+   PARSE_STRING(table, "compact_model", config->compact_model);
+
    PARSE_BOOL(table, "conversation_logging", config->conversation_logging);
    PARSE_BOOL(table, "rate_limit_enabled", config->rate_limit_enabled);
    PARSE_INT(table, "rate_limit_rpm", config->rate_limit_rpm);

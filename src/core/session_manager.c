@@ -321,6 +321,14 @@ static void session_free(session_t *session) {
    free(session->pending_visual);
    session->pending_visual = NULL;
 
+   // Free async compaction resources
+   if (session->async_compact.pending_history) {
+      json_object_put(session->async_compact.pending_history);
+      session->async_compact.pending_history = NULL;
+   }
+   free(session->async_compact.result_summary);
+   session->async_compact.result_summary = NULL;
+
    // Clear client_data pointer (don't free - WebSocket sessions use libwebsockets-managed memory)
    session->client_data = NULL;
 
@@ -949,6 +957,17 @@ void session_destroy(uint32_t session_id) {
 #ifdef ENABLE_WEBUI
    webui_detach_session(session);
 #endif
+
+   /* Phase 1.75: Join async compaction thread if running.
+    * The bg thread checks session->disconnected (set in Phase 1) and the
+    * cancel flag aborts any in-flight CURL transfer, so the join returns
+    * promptly. Must happen before Phase 2 to release the thread's ref. */
+   if (session->async_compact.thread_active) {
+      OLOG_INFO("Session %u: joining async compaction thread", session_id);
+      pthread_join(session->async_compact.thread_id, NULL);
+      session->async_compact.thread_active = false;
+      OLOG_INFO("Session %u: async compaction thread joined", session_id);
+   }
 
    // Phase 2: Wait for ref_count to reach 0 (with timeout to prevent shutdown hang)
    pthread_mutex_lock(&session->ref_mutex);

@@ -116,6 +116,26 @@ int config_validate(const dawn_config_t *config,
    /* ===== TTS Length Scale (0.5 - 2.0) ===== */
    VALIDATE_RANGE_FLOAT("tts.length_scale", config->tts.length_scale, 0.5f, 2.0f);
 
+   /* ===== LLM Compaction Thresholds ===== */
+   VALIDATE_RANGE_FLOAT("llm.compact_soft_threshold", config->llm.compact_soft_threshold, 0.05f,
+                        0.90f);
+   VALIDATE_RANGE_FLOAT("llm.compact_hard_threshold", config->llm.compact_hard_threshold, 0.10f,
+                        0.95f);
+   if (config->llm.compact_soft_threshold >= config->llm.compact_hard_threshold) {
+      ADD_ERROR("llm.compact_soft_threshold",
+                "must be less than compact_hard_threshold (%.2f >= %.2f)",
+                (double)config->llm.compact_soft_threshold,
+                (double)config->llm.compact_hard_threshold);
+   }
+   if (config->llm.compact_provider[0]) {
+      const char *valid_providers[] = { "claude", "openai", "gemini", "local" };
+      if (!string_in_list(config->llm.compact_provider, valid_providers, 4)) {
+         ADD_ERROR("llm.compact_provider",
+                   "must be one of: claude, openai, gemini, local (got '%s')",
+                   config->llm.compact_provider);
+      }
+   }
+
    /* ===== Memory Embedding Weights ===== */
    VALIDATE_RANGE_FLOAT("memory.temporal_weight", config->memory.temporal_weight, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.category_threshold", config->memory.category_threshold, 0.05f,

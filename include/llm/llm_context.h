@@ -350,6 +350,45 @@ int llm_context_auto_compact_with_config(struct json_object *history,
                                          const char *model);
 
 /* =============================================================================
+ * Async Compaction (LCM Phase 2 — background compaction between turns)
+ * ============================================================================= */
+
+struct session; /* Forward declaration — avoids circular include */
+
+/**
+ * @brief Trigger async compaction after a turn completes
+ *
+ * Checks soft threshold; if exceeded, deep-copies history and spawns a
+ * background thread to compact it. Result is merged by llm_context_async_merge()
+ * before the next LLM call. Skips for session 0 (local mic) and non-WebUI.
+ *
+ * @param session Session (must be retained by caller)
+ * @param history Current conversation history
+ * @param type LLM type for compaction call
+ * @param provider Cloud provider
+ * @param model Model name
+ * @return 0 on success or skip, 1 on error
+ */
+int llm_context_async_trigger(struct session *session,
+                              struct json_object *history,
+                              llm_type_t type,
+                              cloud_provider_t provider,
+                              const char *model);
+
+/**
+ * @brief Merge a completed async compaction result into live history
+ *
+ * Called before each LLM call. If a background compaction completed (state READY),
+ * validates the snapshot and replaces the compacted portion of history while
+ * preserving any messages added after the snapshot.
+ *
+ * @param session Session to check
+ * @param history Live conversation history (modified in place if merged)
+ * @return 1 if merged, 0 if nothing to merge or result discarded
+ */
+int llm_context_async_merge(struct session *session, struct json_object *history);
+
+/* =============================================================================
  * Utility Functions
  * ============================================================================= */
 

@@ -992,6 +992,17 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       }
    }
 
+   /* Trigger async compaction for next turn (WebUI sessions) */
+   {
+      session_t *trigger_session = session_get(loop_params.session_id);
+      if (trigger_session) {
+         llm_context_async_trigger(trigger_session, loop_params.conversation_history,
+                                   loop_params.llm_type, loop_params.cloud_provider,
+                                   loop_params.model);
+         session_release(trigger_session);
+      }
+   }
+
    /* Record LLM total time */
    if (response != NULL) {
       gettimeofday(&end_time, NULL);
@@ -1415,6 +1426,17 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    };
 
    response = llm_tool_iteration_loop(&loop_params);
+
+   /* Trigger async compaction for next turn (WebUI sessions) */
+   {
+      session_t *trigger_session = session_get(loop_params.session_id);
+      if (trigger_session) {
+         llm_context_async_trigger(trigger_session, loop_params.conversation_history,
+                                   loop_params.llm_type, loop_params.cloud_provider,
+                                   loop_params.model);
+         session_release(trigger_session);
+      }
+   }
 
    // Clear thread-local config
    llm_tools_set_current_config(NULL);

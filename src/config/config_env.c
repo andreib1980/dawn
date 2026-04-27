@@ -1155,6 +1155,20 @@ json_object *config_to_json(const dawn_config_t *config) {
    /* Context management settings */
    json_object_object_add(llm, "summarize_threshold",
                           json_object_new_double(config->llm.summarize_threshold));
+   json_object_object_add(llm, "compact_soft_threshold",
+                          json_object_new_double(config->llm.compact_soft_threshold));
+   json_object_object_add(llm, "compact_hard_threshold",
+                          json_object_new_double(config->llm.compact_hard_threshold));
+   json_object_object_add(llm, "compact_use_session",
+                          json_object_new_boolean(config->llm.compact_use_session));
+   if (config->llm.compact_provider[0]) {
+      json_object_object_add(llm, "compact_provider",
+                             json_object_new_string(config->llm.compact_provider));
+   }
+   if (config->llm.compact_model[0]) {
+      json_object_object_add(llm, "compact_model",
+                             json_object_new_string(config->llm.compact_model));
+   }
    json_object_object_add(llm, "conversation_logging",
                           json_object_new_boolean(config->llm.conversation_logging));
    json_object_object_add(llm, "rate_limit_enabled",
@@ -1642,6 +1656,13 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "type = \"%s\"\n", config->llm.type);
    fprintf(fp, "max_tokens = %d\n", config->llm.max_tokens);
    fprintf(fp, "summarize_threshold = %.2f\n", config->llm.summarize_threshold);
+   fprintf(fp, "compact_soft_threshold = %.2f\n", config->llm.compact_soft_threshold);
+   fprintf(fp, "compact_hard_threshold = %.2f\n", config->llm.compact_hard_threshold);
+   fprintf(fp, "compact_use_session = %s\n", config->llm.compact_use_session ? "true" : "false");
+   if (config->llm.compact_provider[0])
+      fprintf(fp, "compact_provider = \"%s\"\n", config->llm.compact_provider);
+   if (config->llm.compact_model[0])
+      fprintf(fp, "compact_model = \"%s\"\n", config->llm.compact_model);
    fprintf(fp, "conversation_logging = %s\n", config->llm.conversation_logging ? "true" : "false");
 
    fprintf(fp, "\n[llm.cloud]\n");

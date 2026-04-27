@@ -670,44 +670,48 @@ bool llm_context_needs_compaction_for_switch(uint32_t session_id,
    return needs_compaction;
 }
 
-bool llm_context_needs_compaction(uint32_t session_id,
-                                  struct json_object *history,
-                                  llm_type_t type,
-                                  cloud_provider_t provider,
-                                  const char *model) {
+static bool needs_compaction_at_threshold(uint32_t session_id,
+                                          struct json_object *history,
+                                          llm_type_t type,
+                                          cloud_provider_t provider,
+                                          const char *model,
+                                          float threshold) {
    llm_context_usage_t usage;
-   if (llm_context_get_usage(session_id, type, provider, model, &usage) != 0) {
+   if (llm_context_get_usage(session_id, type, provider, model, &usage) != 0)
       return false;
-   }
+
+   if (threshold <= 0 || threshold > 1.0)
+      threshold = 0.85f;
 
    int tracked_tokens = usage.current_tokens;
 
-   /*
-    * Always estimate from current history if available. The tracked token count
-    * (last_prompt_tokens) is from the PREVIOUS call and doesn't account for new
-    * messages added since. Use the maximum of tracked vs estimated to catch cases
-    * where new messages have pushed us over the threshold.
-    */
    if (history) {
       int estimated = llm_context_estimate_tokens(history);
       if (estimated > usage.current_tokens) {
          usage.current_tokens = estimated;
          usage.usage_percent = (float)usage.current_tokens / (float)usage.max_tokens;
-
-         float threshold = g_config.llm.summarize_threshold;
-         if (threshold <= 0 || threshold > 1.0) {
-            threshold = 0.80;
-         }
+         usage.needs_compaction = (usage.usage_percent >= threshold);
+      } else {
          usage.needs_compaction = (usage.usage_percent >= threshold);
       }
    }
 
    OLOG_INFO("llm_context: Compaction check for session %u: tracked=%d, current=%d, max=%d, "
-             "usage=%.1f%%, needs_compaction=%s",
+             "usage=%.1f%%, threshold=%.0f%%, needs_compaction=%s",
              session_id, tracked_tokens, usage.current_tokens, usage.max_tokens,
-             usage.usage_percent * 100.0f, usage.needs_compaction ? "YES" : "NO");
+             usage.usage_percent * 100.0f, threshold * 100.0f,
+             usage.needs_compaction ? "YES" : "NO");
 
    return usage.needs_compaction;
+}
+
+bool llm_context_needs_compaction(uint32_t session_id,
+                                  struct json_object *history,
+                                  llm_type_t type,
+                                  cloud_provider_t provider,
+                                  const char *model) {
+   return needs_compaction_at_threshold(session_id, history, type, provider, model,
+                                        g_config.llm.compact_hard_threshold);
 }
 
 int llm_context_save_conversation(uint32_t session_id,
@@ -897,6 +901,51 @@ static int estimate_tokens_range(struct json_object *history, int start_idx, int
    return (tokens > (size_t)INT_MAX) ? INT_MAX : (int)tokens;
 }
 
+static bool build_compaction_config(llm_resolved_config_t *cfg) {
+   if (g_config.llm.compact_use_session || !g_config.llm.compact_provider[0])
+      return false;
+
+   memset(cfg, 0, sizeof(*cfg));
+
+   const char *p = g_config.llm.compact_provider;
+   if (strcmp(p, "claude") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+      cfg->endpoint = "https://api.anthropic.com";
+      cfg->api_key = g_secrets.claude_api_key;
+   } else if (strcmp(p, "openai") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
+      cfg->endpoint = "https://api.openai.com";
+      cfg->api_key = g_secrets.openai_api_key;
+   } else if (strcmp(p, "gemini") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
+      cfg->endpoint = "https://generativelanguage.googleapis.com/v1beta/openai";
+      cfg->api_key = g_secrets.gemini_api_key;
+   } else if (strcmp(p, "local") == 0) {
+      cfg->type = LLM_LOCAL;
+      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
+      cfg->endpoint = g_config.llm.local.endpoint;
+   } else {
+      return false;
+   }
+
+   cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
+   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
+   cfg->timeout_ms = g_config.network.summarization_timeout_ms;
+
+   if (cfg->type == LLM_CLOUD && (!cfg->api_key || !cfg->api_key[0])) {
+      OLOG_WARNING("llm_context: Dedicated compaction provider '%s' has no API key, "
+                   "falling back to session provider",
+                   p);
+      return false;
+   }
+
+   return true;
+}
+
 static char *compact_with_llm(struct json_object *to_summarize,
                               llm_compaction_level_t level,
                               llm_type_t type,
@@ -941,9 +990,20 @@ static char *compact_with_llm(struct json_object *to_summarize,
    free(prompt);
 
    llm_tools_suppress_push();
-   llm_set_timeout_override(g_config.network.summarization_timeout_ms);
-   char *summary = llm_chat_completion(request, NULL, NULL, NULL, 0, true);
-   llm_set_timeout_override(0);
+
+   llm_resolved_config_t compact_cfg;
+   char *summary = NULL;
+   if (build_compaction_config(&compact_cfg)) {
+      OLOG_INFO("llm_context: Using dedicated compaction provider: %s %s",
+                g_config.llm.compact_provider,
+                compact_cfg.model ? compact_cfg.model : "(default model)");
+      summary = llm_chat_completion_with_config(request, NULL, NULL, NULL, 0, &compact_cfg);
+   } else {
+      llm_set_timeout_override(g_config.network.summarization_timeout_ms);
+      summary = llm_chat_completion(request, NULL, NULL, NULL, 0, true);
+      llm_set_timeout_override(0);
+   }
+
    llm_tools_suppress_pop();
    json_object_put(request);
 
@@ -1154,9 +1214,9 @@ int llm_context_compact(uint32_t session_id,
       json_object_array_add(to_summarize, json_object_get(msg));
    }
 
-   /* Calculate escalation target — well below threshold to avoid re-triggering */
+   /* Calculate escalation target — well below hard threshold to avoid re-triggering */
    int context_size = llm_context_get_size(type, provider, model);
-   float threshold = g_config.llm.summarize_threshold;
+   float threshold = g_config.llm.compact_hard_threshold;
    int target_tokens = calculate_compaction_target(context_size, threshold);
 
    /* Estimate fixed overhead: system prompt + kept messages (constant across levels) */
@@ -1201,6 +1261,8 @@ int llm_context_compact(uint32_t session_id,
             webui_send_error(session, "COMPACTION_FAILED",
                              "Context compaction failed. Response may be truncated.");
          }
+         if (session)
+            session_release(session);
 #endif
          if (system_msg)
             json_object_put(system_msg);
@@ -1321,6 +1383,255 @@ int llm_context_compact_for_switch(uint32_t session_id,
 }
 
 /* =============================================================================
+ * Async Compaction (LCM Phase 2 — background compaction between turns)
+ * ============================================================================= */
+
+#define ASYNC_COMPACT_COOLDOWN_SEC 60
+
+typedef struct {
+   session_t *session;
+   struct json_object *history;
+} async_compact_ctx_t;
+
+static void *async_compact_thread(void *arg) {
+   async_compact_ctx_t *ctx = (async_compact_ctx_t *)arg;
+   session_t *session = ctx->session;
+   struct json_object *copy = ctx->history;
+   uint32_t sid = session->async_compact.trigger_session_id;
+
+   OLOG_INFO("llm_context: Async compaction thread started for session %u", sid);
+
+   llm_set_cancel_flag(&session->disconnected);
+   session_set_command_context(session);
+
+   if (atomic_load(&session->disconnected)) {
+      OLOG_INFO("llm_context: Async compaction: session %u disconnected, aborting", sid);
+      goto cleanup_abort;
+   }
+
+   llm_compaction_result_t result = { 0 };
+   int rc = llm_context_compact(sid, copy, session->async_compact.trigger_llm_type,
+                                session->async_compact.trigger_cloud_provider,
+                                session->async_compact.trigger_model, &result);
+
+   if (atomic_load(&session->disconnected)) {
+      OLOG_INFO("llm_context: Async compaction: session %u disconnected after compact", sid);
+      llm_compaction_result_free(&result);
+      goto cleanup_abort;
+   }
+
+   if (rc != 0 || !result.performed) {
+      OLOG_WARNING("llm_context: Async compaction failed or not needed for session %u (rc=%d)", sid,
+                   rc);
+      llm_compaction_result_free(&result);
+      goto cleanup_abort;
+   }
+
+   session->async_compact.pending_history = copy;
+   copy = NULL;
+   session->async_compact.result_tokens_before = result.tokens_before;
+   session->async_compact.result_tokens_after = result.tokens_after;
+   session->async_compact.result_messages_summarized = result.messages_summarized;
+   session->async_compact.result_level = result.level;
+   session->async_compact.result_summary = result.summary;
+   result.summary = NULL;
+   llm_compaction_result_free(&result);
+
+   atomic_store(&session->async_compact.state, ASYNC_COMPACT_READY);
+   OLOG_INFO("llm_context: Async compaction complete for session %u, awaiting merge "
+             "(%d -> %d tokens, L%d)",
+             sid, session->async_compact.result_tokens_before,
+             session->async_compact.result_tokens_after, session->async_compact.result_level + 1);
+
+   llm_set_cancel_flag(NULL);
+   session_set_command_context(NULL);
+   session_release(session);
+   free(ctx);
+   return NULL;
+
+cleanup_abort:
+   atomic_store(&session->async_compact.state, ASYNC_COMPACT_IDLE);
+   if (copy)
+      json_object_put(copy);
+   llm_set_cancel_flag(NULL);
+   session_set_command_context(NULL);
+   session_release(session);
+   free(ctx);
+   return NULL;
+}
+
+int llm_context_async_trigger(session_t *session,
+                              struct json_object *history,
+                              llm_type_t type,
+                              cloud_provider_t provider,
+                              const char *model) {
+   if (!session || session->session_id == 0)
+      return 0;
+   if (session->type != SESSION_TYPE_WEBUI)
+      return 0;
+   if (atomic_load(&session->async_compact.state) != ASYNC_COMPACT_IDLE)
+      return 0;
+   if (atomic_load(&session->disconnected))
+      return 0;
+
+   time_t now = time(NULL);
+   if (session->async_compact.last_compacted_at > 0 &&
+       (now - session->async_compact.last_compacted_at) < ASYNC_COMPACT_COOLDOWN_SEC)
+      return 0;
+
+   if (!needs_compaction_at_threshold(session->session_id, history, type, provider, model,
+                                      g_config.llm.compact_soft_threshold))
+      return 0;
+
+   session_retain(session);
+
+   struct json_object *copy = NULL;
+   pthread_mutex_lock(&session->history_mutex);
+   int rc = json_object_deep_copy(history, &copy, NULL);
+   session->async_compact.snapshot_history = history;
+   session->async_compact.snapshot_msg_count = json_object_array_length(history);
+   pthread_mutex_unlock(&session->history_mutex);
+
+   if (rc != 0 || !copy) {
+      OLOG_ERROR("llm_context: Failed to deep-copy history for async compaction");
+      session_release(session);
+      return 1;
+   }
+
+   session->async_compact.trigger_llm_type = type;
+   session->async_compact.trigger_cloud_provider = provider;
+   if (model)
+      snprintf(session->async_compact.trigger_model, sizeof(session->async_compact.trigger_model),
+               "%s", model);
+   else
+      session->async_compact.trigger_model[0] = '\0';
+   session->async_compact.trigger_session_id = session->session_id;
+
+   async_compact_ctx_t *ctx = malloc(sizeof(async_compact_ctx_t));
+   if (!ctx) {
+      json_object_put(copy);
+      session_release(session);
+      return 1;
+   }
+   ctx->session = session;
+   ctx->history = copy;
+
+   atomic_store(&session->async_compact.state, ASYNC_COMPACT_RUNNING);
+   session->async_compact.thread_active = true;
+
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setstacksize(&attr, 256 * 1024);
+
+   if (pthread_create(&session->async_compact.thread_id, &attr, async_compact_thread, ctx) != 0) {
+      OLOG_ERROR("llm_context: Failed to create async compaction thread");
+      session->async_compact.thread_active = false;
+      atomic_store(&session->async_compact.state, ASYNC_COMPACT_IDLE);
+      json_object_put(copy);
+      session_release(session);
+      free(ctx);
+      pthread_attr_destroy(&attr);
+      return 1;
+   }
+   pthread_attr_destroy(&attr);
+
+   OLOG_INFO("llm_context: Async compaction triggered for session %u (soft threshold %.0f%%)",
+             session->session_id, g_config.llm.compact_soft_threshold * 100.0f);
+   return 0;
+}
+
+int llm_context_async_merge(session_t *session, struct json_object *history) {
+   if (!session || session->session_id == 0)
+      return 0;
+   if (atomic_load(&session->async_compact.state) != ASYNC_COMPACT_READY)
+      return 0;
+
+   bool valid = false;
+
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (session->async_compact.snapshot_history == history &&
+       json_object_array_length(history) >= session->async_compact.snapshot_msg_count) {
+      int current_len = json_object_array_length(history);
+      int snapshot_len = session->async_compact.snapshot_msg_count;
+      int new_count = current_len - snapshot_len;
+
+      /* Save references to post-snapshot messages */
+      struct json_object **new_msgs = NULL;
+      if (new_count > 0) {
+         new_msgs = malloc(new_count * sizeof(*new_msgs));
+         if (!new_msgs) {
+            OLOG_ERROR("llm_context: Failed to allocate merge buffer (%d msgs)", new_count);
+            pthread_mutex_unlock(&session->history_mutex);
+            goto merge_cleanup;
+         }
+         for (int i = 0; i < new_count; i++)
+            new_msgs[i] = json_object_get(json_object_array_get_idx(history, snapshot_len + i));
+      }
+
+      /* Clear history (delete from end for O(n)) */
+      for (int i = current_len - 1; i >= 0; i--)
+         json_object_array_del_idx(history, i, 1);
+
+      /* Copy compacted history */
+      int compact_len = json_object_array_length(session->async_compact.pending_history);
+      for (int i = 0; i < compact_len; i++) {
+         struct json_object *msg = json_object_array_get_idx(session->async_compact.pending_history,
+                                                             i);
+         json_object_array_add(history, json_object_get(msg));
+      }
+
+      /* Re-append post-snapshot messages */
+      for (int i = 0; i < new_count; i++)
+         json_object_array_add(history, new_msgs[i]);
+      free(new_msgs);
+
+      valid = true;
+   }
+
+   pthread_mutex_unlock(&session->history_mutex);
+
+   if (valid) {
+      OLOG_INFO("llm_context: Async compaction merged for session %u (L%d): %d -> %d tokens",
+                session->session_id, session->async_compact.result_level + 1,
+                session->async_compact.result_tokens_before,
+                session->async_compact.result_tokens_after);
+
+#ifdef ENABLE_WEBUI
+      if (session->type == SESSION_TYPE_WEBUI) {
+         webui_send_compaction_complete(session, session->async_compact.result_tokens_before,
+                                        session->async_compact.result_tokens_after,
+                                        session->async_compact.result_messages_summarized,
+                                        session->async_compact.result_summary,
+                                        session->async_compact.result_level);
+      }
+#endif
+      session->async_compact.last_compacted_at = time(NULL);
+   } else {
+      OLOG_INFO("llm_context: Async compaction result discarded for session %u (stale)",
+                session->session_id);
+   }
+
+merge_cleanup:
+   /* Cleanup regardless of valid/stale */
+   if (session->async_compact.pending_history) {
+      json_object_put(session->async_compact.pending_history);
+      session->async_compact.pending_history = NULL;
+   }
+   free(session->async_compact.result_summary);
+   session->async_compact.result_summary = NULL;
+   atomic_store(&session->async_compact.state, ASYNC_COMPACT_IDLE);
+
+   /* Join the completed thread */
+   if (session->async_compact.thread_active) {
+      pthread_join(session->async_compact.thread_id, NULL);
+      session->async_compact.thread_active = false;
+   }
+
+   return valid ? 1 : 0;
+}
+
+/* =============================================================================
  * Auto-Compaction Function
  * ============================================================================= */
 
@@ -1389,6 +1700,8 @@ int llm_context_auto_compact_with_config(struct json_object *history,
       if (session && session->type == SESSION_TYPE_WEBUI) {
          webui_send_state_with_detail(session, "thinking", "Compacting context...");
       }
+      if (session)
+         session_release(session);
    }
 #endif
 
@@ -1409,6 +1722,8 @@ int llm_context_auto_compact_with_config(struct json_object *history,
                                            result.messages_summarized, result.summary,
                                            result.level);
          }
+         if (session)
+            session_release(session);
       }
 #endif
 
