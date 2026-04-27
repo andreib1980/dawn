@@ -177,6 +177,7 @@ typedef struct {
    cloud_provider_t trigger_cloud_provider;
    char trigger_model[64];
    uint32_t trigger_session_id;
+   int64_t trigger_conv_id;
 
    time_t last_compacted_at;
 } async_compaction_t;

@@ -108,6 +108,9 @@
 #ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
 #include "tools/image_search_tool.h"
 #endif
+#ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
+#include "tools/context_expand_tool.h"
+#endif
 
 #include "tools/plan_executor.h"
 
@@ -293,6 +296,12 @@ int tools_register_all(void) {
 #ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
    if (image_search_tool_register() != 0) {
       OLOG_WARNING("Failed to register image_search tool");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
+   if (context_expand_tool_register() != 0) {
+      OLOG_WARNING("Failed to register context_expand tool");
    }
 #endif
 

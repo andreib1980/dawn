@@ -1388,6 +1388,41 @@ int conv_db_get_messages_paginated(int64_t conv_id,
 int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, void *ctx);
 
 /**
+ * @brief Get message IDs for a conversation (ordered by creation)
+ *
+ * Returns an array of message database IDs. Used by LCM Phase 3 to map
+ * in-memory array indices to DB IDs at compaction time.
+ *
+ * @param conv_id Conversation ID
+ * @param user_id User ID (for ownership check)
+ * @param ids_out Output: heap-allocated array of message IDs (caller frees)
+ * @param count_out Output: number of IDs in the array
+ * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ */
+int conv_db_get_message_ids(int64_t conv_id, int user_id, int64_t **ids_out, int *count_out);
+
+/**
+ * @brief Get messages by ID range (for context expansion)
+ *
+ * Same as conv_db_get_messages but filtered to a specific ID range.
+ * Used by the context_expand tool to retrieve compacted messages.
+ *
+ * @param conv_id Conversation ID
+ * @param user_id User ID (for ownership check)
+ * @param start_id First message ID (inclusive)
+ * @param end_id Last message ID (inclusive)
+ * @param callback Function called for each message
+ * @param ctx User context passed to callback
+ * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ */
+int conv_db_get_messages_by_range(int64_t conv_id,
+                                  int user_id,
+                                  int64_t start_id,
+                                  int64_t end_id,
+                                  message_callback_t callback,
+                                  void *ctx);
+
+/**
  * @brief Count conversations for a user
  *
  * @param user_id User ID

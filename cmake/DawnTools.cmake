@@ -42,6 +42,7 @@ option(DAWN_ENABLE_SFX_TOOL "Enable sound effect playback tool" ON)
 option(DAWN_ENABLE_RENDER_VISUAL_TOOL "Enable visual rendering tool (SVG/HTML diagrams)" ON)
 option(DAWN_ENABLE_PHONE_TOOL "Enable phone call and SMS tool (requires ECHO daemon)" ON)
 option(DAWN_ENABLE_IMAGE_SEARCH_TOOL "Enable image search tool (requires SearXNG + image store)" ON)
+option(DAWN_ENABLE_CONTEXT_EXPAND_TOOL "Enable context expansion tool (LCM Phase 3)" ON)
 
 # =============================================================================
 # Mutual Exclusion: Home Assistant and SmartThings
@@ -252,6 +253,15 @@ if(DAWN_ENABLE_DOCUMENT_SEARCH_TOOL)
     message(STATUS "DAWN: Document Search tool ENABLED")
 else()
     message(STATUS "DAWN: Document Search tool DISABLED")
+endif()
+
+# Context Expand Tool (LCM Phase 3 — retrieve compacted messages)
+if(DAWN_ENABLE_CONTEXT_EXPAND_TOOL)
+    add_definitions(-DDAWN_ENABLE_CONTEXT_EXPAND_TOOL)
+    list(APPEND TOOL_SOURCES src/tools/context_expand_tool.c)
+    message(STATUS "DAWN: Context Expand tool ENABLED")
+else()
+    message(STATUS "DAWN: Context Expand tool DISABLED")
 endif()
 
 # Calendar Tool (CalDAV) — requires libxml2 for XML parsing and libical for iCalendar

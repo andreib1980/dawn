@@ -5217,6 +5217,13 @@ void webui_detach_session(session_t *session) {
  * Plan Progress (session-targeted)
  * ============================================================================= */
 
+int64_t webui_get_active_conversation_id(session_t *session) {
+   if (!session || session->type != SESSION_TYPE_WEBUI || !session->client_data)
+      return 0;
+   ws_connection_t *conn = (ws_connection_t *)session->client_data;
+   return conn->active_conversation_id;
+}
+
 void webui_broadcast_plan_progress(session_t *session, const char *json_str) {
    if (!session || session->type != SESSION_TYPE_WEBUI || !json_str)
       return;

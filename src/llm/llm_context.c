@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
@@ -1085,6 +1086,7 @@ int llm_context_compact(uint32_t session_id,
                         llm_type_t type,
                         cloud_provider_t provider,
                         const char *model,
+                        int64_t conv_id,
                         llm_compaction_result_t *result) {
    if (!history || !result) {
       return 1;
@@ -1309,14 +1311,43 @@ int llm_context_compact(uint32_t session_id,
    if (system_msg)
       json_object_array_add(new_history, system_msg); /* Transfers ownership */
 
+   /* Resolve message IDs for the summarized range (LCM Phase 3) */
+   int64_t first_msg_id = 0, last_msg_id = 0;
+   if (conv_id > 0) {
+      int64_t *msg_ids = NULL;
+      int msg_id_count = 0;
+      int user_id = 0;
+      session_t *ctx_session = session_get_command_context();
+      if (ctx_session)
+         user_id = ctx_session->metrics.user_id;
+      if (user_id > 0 &&
+          conv_db_get_message_ids(conv_id, user_id, &msg_ids, &msg_id_count) == AUTH_DB_SUCCESS) {
+         /* DB messages don't include the system prompt, so adjust indices */
+         int db_start = start_idx - (system_msg ? 1 : 0);
+         int db_end = end_idx - (system_msg ? 1 : 0);
+         if (msg_ids && db_start >= 0 && msg_id_count > db_start)
+            first_msg_id = msg_ids[db_start];
+         if (msg_ids && db_end > 0 && msg_id_count >= db_end)
+            last_msg_id = msg_ids[db_end - 1];
+         free(msg_ids);
+      }
+   }
+
    /* Add summary as assistant message with dynamic buffer */
    struct json_object *summary_msg = json_object_new_object();
    json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));
 
-   size_t note_len = strlen(summary) + 64;
+   size_t note_len = strlen(summary) + 256;
    char *summary_with_note = malloc(note_len);
    if (summary_with_note) {
-      snprintf(summary_with_note, note_len, "[Previous conversation summary: %s]", summary);
+      if (first_msg_id > 0 && last_msg_id > 0) {
+         snprintf(summary_with_note, note_len,
+                  "[COMPACTED conv=%lld msgs=%lld-%lld] "
+                  "Previous conversation summary: %s",
+                  (long long)conv_id, (long long)first_msg_id, (long long)last_msg_id, summary);
+      } else {
+         snprintf(summary_with_note, note_len, "[Previous conversation summary: %s]", summary);
+      }
       json_object_object_add(summary_msg, "content", json_object_new_string(summary_with_note));
       free(summary_with_note);
    } else {
@@ -1378,8 +1409,16 @@ int llm_context_compact_for_switch(uint32_t session_id,
 
    /* Perform compaction using CURRENT provider (has larger context) */
    OLOG_INFO("llm_context: Performing pre-switch compaction using current provider");
+   int64_t switch_conv_id = 0;
+#ifdef ENABLE_WEBUI
+   session_t *switch_session = session_get(session_id);
+   if (switch_session) {
+      switch_conv_id = webui_get_active_conversation_id(switch_session);
+      session_release(switch_session);
+   }
+#endif
    return llm_context_compact(session_id, history, current_type, current_provider, current_model,
-                              result);
+                              switch_conv_id, result);
 }
 
 /* =============================================================================
@@ -1412,7 +1451,8 @@ static void *async_compact_thread(void *arg) {
    llm_compaction_result_t result = { 0 };
    int rc = llm_context_compact(sid, copy, session->async_compact.trigger_llm_type,
                                 session->async_compact.trigger_cloud_provider,
-                                session->async_compact.trigger_model, &result);
+                                session->async_compact.trigger_model,
+                                session->async_compact.trigger_conv_id, &result);
 
    if (atomic_load(&session->disconnected)) {
       OLOG_INFO("llm_context: Async compaction: session %u disconnected after compact", sid);
@@ -1506,6 +1546,11 @@ int llm_context_async_trigger(session_t *session,
    else
       session->async_compact.trigger_model[0] = '\0';
    session->async_compact.trigger_session_id = session->session_id;
+#ifdef ENABLE_WEBUI
+   session->async_compact.trigger_conv_id = webui_get_active_conversation_id(session);
+#else
+   session->async_compact.trigger_conv_id = 0;
+#endif
 
    async_compact_ctx_t *ctx = malloc(sizeof(async_compact_ctx_t));
    if (!ctx) {
@@ -1659,7 +1704,7 @@ int llm_context_auto_compact(struct json_object *history, uint32_t session_id) {
 
    /* Perform compaction */
    llm_compaction_result_t result = { 0 };
-   int rc = llm_context_compact(session_id, history, type, provider, model, &result);
+   int rc = llm_context_compact(session_id, history, type, provider, model, 0, &result);
 
    if (rc == 0 && result.performed) {
       OLOG_INFO("llm_context: Auto-compaction complete (L%d) - %d tokens -> %d tokens",
@@ -1705,9 +1750,21 @@ int llm_context_auto_compact_with_config(struct json_object *history,
    }
 #endif
 
+   /* Resolve conversation ID for message ID tracking */
+   int64_t auto_conv_id = 0;
+#ifdef ENABLE_WEBUI
+   {
+      session_t *conv_session = session_get(session_id);
+      if (conv_session) {
+         auto_conv_id = webui_get_active_conversation_id(conv_session);
+         session_release(conv_session);
+      }
+   }
+#endif
+
    /* Perform compaction */
    llm_compaction_result_t result = { 0 };
-   int rc = llm_context_compact(session_id, history, type, provider, model, &result);
+   int rc = llm_context_compact(session_id, history, type, provider, model, auto_conv_id, &result);
 
    if (rc == 0 && result.performed) {
       OLOG_INFO("llm_context: Auto-compaction complete (L%d) - %d tokens -> %d tokens",

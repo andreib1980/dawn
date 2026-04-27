@@ -555,6 +555,17 @@ void webui_detach_session(struct session *session);
 void webui_broadcast_plan_progress(struct session *session, const char *json_str);
 
 /**
+ * @brief Get the active conversation ID for a WebUI session
+ *
+ * Returns the conversation ID from the session's WebSocket connection.
+ * Returns 0 for non-WebUI sessions or if no conversation is active.
+ *
+ * @param session Session to query
+ * @return Active conversation ID, or 0 if unavailable
+ */
+int64_t webui_get_active_conversation_id(struct session *session);
+
+/**
  * @brief Broadcast a conversation title change to all connections for a given user
  *
  * Thread-safe — can be called from the extraction thread.

@@ -269,6 +269,7 @@ bool llm_context_needs_compaction(uint32_t session_id,
  * @param type Current LLM type (used for summarization call)
  * @param provider Current cloud provider
  * @param model Current model
+ * @param conv_id Database conversation ID (0 = skip message ID tracking)
  * @param result Output: compaction result details
  * @return 0 on success, non-zero on failure
  */
@@ -277,6 +278,7 @@ int llm_context_compact(uint32_t session_id,
                         llm_type_t type,
                         cloud_provider_t provider,
                         const char *model,
+                        int64_t conv_id,
                         llm_compaction_result_t *result);
 
 /**
