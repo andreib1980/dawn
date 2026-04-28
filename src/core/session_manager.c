@@ -962,7 +962,8 @@ void session_destroy(uint32_t session_id) {
     * The bg thread checks session->disconnected (set in Phase 1) and the
     * cancel flag aborts any in-flight CURL transfer, so the join returns
     * promptly. Must happen before Phase 2 to release the thread's ref. */
-   if (session->async_compact.thread_active) {
+   if (atomic_load(&session->async_compact.state) != ASYNC_COMPACT_IDLE &&
+       session->async_compact.thread_active) {
       OLOG_INFO("Session %u: joining async compaction thread", session_id);
       pthread_join(session->async_compact.thread_id, NULL);
       session->async_compact.thread_active = false;

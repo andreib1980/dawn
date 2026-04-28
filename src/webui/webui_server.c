@@ -2845,7 +2845,7 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                ctx_current = ctx_usage.current_tokens;
             }
             webui_send_context(conn->session, ctx_current, ctx_max,
-                               g_config.llm.summarize_threshold);
+                               g_config.llm.compact_hard_threshold);
          }
       }
    } else if (strcmp(type, "reconnect") == 0) {

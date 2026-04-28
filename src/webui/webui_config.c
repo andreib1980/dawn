@@ -525,12 +525,12 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       }
 
       /* Context management settings */
-      JSON_TO_CONFIG_DOUBLE(section, "summarize_threshold", config->llm.summarize_threshold);
       JSON_TO_CONFIG_DOUBLE(section, "compact_soft_threshold", config->llm.compact_soft_threshold);
       JSON_TO_CONFIG_DOUBLE(section, "compact_hard_threshold", config->llm.compact_hard_threshold);
       JSON_TO_CONFIG_BOOL(section, "compact_use_session", config->llm.compact_use_session);
       JSON_TO_CONFIG_STR(section, "compact_provider", config->llm.compact_provider);
       JSON_TO_CONFIG_STR(section, "compact_model", config->llm.compact_model);
+
       JSON_TO_CONFIG_BOOL(section, "conversation_logging", config->llm.conversation_logging);
       JSON_TO_CONFIG_BOOL(section, "rate_limit_enabled", config->llm.rate_limit_enabled);
       JSON_TO_CONFIG_INT(section, "rate_limit_rpm", config->llm.rate_limit_rpm);

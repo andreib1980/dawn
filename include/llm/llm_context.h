@@ -241,7 +241,7 @@ bool llm_context_needs_compaction_for_switch(uint32_t session_id,
 /**
  * @brief Check if compaction is needed based on threshold
  *
- * Uses configured summarize_threshold (default 80%).
+ * Uses configured compact_hard_threshold (default 80%).
  *
  * @param session_id Session to check
  * @param history Current conversation history
@@ -320,7 +320,7 @@ int llm_context_compact_for_switch(uint32_t session_id,
  * @brief Check and perform auto-compaction before LLM call
  *
  * Should be called before making LLM requests. Checks if the conversation
- * history exceeds the summarize_threshold and compacts if needed.
+ * history exceeds the compact_hard_threshold and compacts if needed.
  *
  * Uses global LLM configuration. For session-specific config, use
  * llm_context_auto_compact_with_config() instead.

@@ -267,15 +267,16 @@ typedef struct {
    llm_local_config_t local;
    llm_tools_config_t tools;       /* Native tool/function calling settings */
    llm_thinking_config_t thinking; /* Extended thinking/reasoning settings */
-   float summarize_threshold;      /* Legacy alias — mapped to compact_hard_threshold */
-   float compact_soft_threshold;   /* Async compaction trigger (default: 0.60) */
-   float compact_hard_threshold;   /* Blocking compaction trigger (default: 0.85) */
-   bool compact_use_session;       /* Use session's provider for compaction (default: true) */
-   char compact_provider[32];      /* Dedicated compaction provider: openai/claude/gemini/local */
-   char compact_model[128];        /* Dedicated compaction model name */
-   bool conversation_logging;      /* Save chat history to log files (default: false) */
-   bool rate_limit_enabled;        /* Throttle cloud API calls (default: true) */
-   int rate_limit_rpm;             /* Max cloud API calls per minute (default: 40) */
+   float summarize_threshold; /* PARSER ONLY — legacy TOML key, derives compact_*. Do not read at
+                                 runtime. */
+   float compact_soft_threshold; /* Async compaction trigger (default: 0.60) */
+   float compact_hard_threshold; /* Blocking compaction trigger (default: 0.85) */
+   bool compact_use_session;     /* Use session's provider for compaction (default: true) */
+   char compact_provider[32];    /* Dedicated compaction provider: openai/claude/gemini/local */
+   char compact_model[128];      /* Dedicated compaction model name */
+   bool conversation_logging;    /* Save chat history to log files (default: false) */
+   bool rate_limit_enabled;      /* Throttle cloud API calls (default: true) */
+   int rate_limit_rpm;           /* Max cloud API calls per minute (default: 40) */
 } llm_config_t;
 
 /* =============================================================================

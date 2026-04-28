@@ -535,7 +535,7 @@ void llm_context_update_usage(uint32_t session_id,
    cloud_provider_t provider = llm_get_cloud_provider();
    int context_size = llm_context_get_size(type, provider, llm_get_model_name());
    float usage_pct = (context_size > 0) ? (float)prompt_tokens / (float)context_size * 100.0f : 0;
-   float threshold = g_config.llm.summarize_threshold;
+   float threshold = g_config.llm.compact_hard_threshold;
    float threshold_pct = threshold * 100.0f;
 
    /* Store last values for WebUI retrieval (under mutex for M2 consistency) */
@@ -594,7 +594,7 @@ void llm_context_get_last_usage(int *current_tokens, int *max_tokens, float *thr
    }
    pthread_mutex_unlock(&s_state.mutex);
    if (threshold) {
-      *threshold = g_config.llm.summarize_threshold;
+      *threshold = g_config.llm.compact_hard_threshold;
    }
 }
 
@@ -632,7 +632,7 @@ int llm_context_get_usage(uint32_t session_id,
    }
 
    /* Check against threshold */
-   float threshold = g_config.llm.summarize_threshold;
+   float threshold = g_config.llm.compact_hard_threshold;
    if (threshold <= 0 || threshold > 1.0) {
       threshold = 0.80; /* Default 80% */
    }
@@ -653,7 +653,7 @@ bool llm_context_needs_compaction_for_switch(uint32_t session_id,
    int target_context = llm_context_get_size(target_type, target_provider, target_model);
    int estimated_tokens = llm_context_estimate_tokens(history);
 
-   float threshold = g_config.llm.summarize_threshold;
+   float threshold = g_config.llm.compact_hard_threshold;
    if (threshold <= 0 || threshold > 1.0) {
       threshold = 0.80;
    }

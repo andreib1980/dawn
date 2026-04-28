@@ -201,25 +201,37 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
          return strdup("Error: memory allocation failed.");
       }
 
-      int offset = 0;
-      int remaining = (int)buf_size - 1;
-      offset += snprintf(buf + offset, remaining - offset,
+      size_t offset = 0;
+      size_t cap = buf_size;
+      int written;
+
+      written = snprintf(buf, cap,
                          "Summary node %lld (depth %d, L%d, msgs %lld-%lld, conv %lld):\n\n",
                          (long long)node.id, node.depth, node.level + 1,
                          (long long)node.msg_id_start, (long long)node.msg_id_end,
                          (long long)node.conversation_id);
+      if (written > 0 && (size_t)written < cap)
+         offset = (size_t)written;
 
-      if (has_prior) {
-         offset += snprintf(buf + offset, remaining - offset,
+      if (has_prior && offset < cap - 1) {
+         written = snprintf(buf + offset, cap - offset,
                             "Prior summary (node %lld, depth %d):\n%s\n\n", (long long)prior.id,
                             prior.depth, prior.summary_text ? prior.summary_text : "(empty)");
+         if (written > 0 && offset + (size_t)written < cap)
+            offset += (size_t)written;
+         summary_node_free(&prior);
+      } else if (has_prior) {
          summary_node_free(&prior);
       }
 
-      offset += snprintf(buf + offset, remaining - offset, "This node's summary:\n%s\n",
-                         node.summary_text ? node.summary_text : "(empty)");
+      if (offset < cap - 1) {
+         written = snprintf(buf + offset, cap - offset, "This node's summary:\n%s\n",
+                            node.summary_text ? node.summary_text : "(empty)");
+         if (written > 0 && offset + (size_t)written < cap)
+            offset += (size_t)written;
+      }
 
-      OLOG_INFO("context_expand: returned node %lld (depth %d, %d bytes)", (long long)node_id,
+      OLOG_INFO("context_expand: returned node %lld (depth %d, %zu bytes)", (long long)node_id,
                 node.depth, offset);
       summary_node_free(&node);
       return buf;
@@ -268,6 +280,10 @@ static char *context_expand_callback(const char *action, char *value, int *shoul
    int header_len = snprintf(ec.buf, ec.capacity,
                              "Original messages %lld-%lld from conversation %lld:\n\n",
                              (long long)start_id, (long long)end_id, (long long)conv_id);
+   if (header_len < 0)
+      header_len = 0;
+   if (header_len >= ec.capacity)
+      header_len = ec.capacity - 1;
    ec.offset = header_len;
 
    int rc = conv_db_get_messages_by_range(conv_id, user_id, start_id, end_id, expand_message_cb,

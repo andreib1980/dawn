@@ -1153,8 +1153,6 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(llm, "thinking", thinking);
 
    /* Context management settings */
-   json_object_object_add(llm, "summarize_threshold",
-                          json_object_new_double(config->llm.summarize_threshold));
    json_object_object_add(llm, "compact_soft_threshold",
                           json_object_new_double(config->llm.compact_soft_threshold));
    json_object_object_add(llm, "compact_hard_threshold",
@@ -1655,7 +1653,6 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[llm]\n");
    fprintf(fp, "type = \"%s\"\n", config->llm.type);
    fprintf(fp, "max_tokens = %d\n", config->llm.max_tokens);
-   fprintf(fp, "summarize_threshold = %.2f\n", config->llm.summarize_threshold);
    fprintf(fp, "compact_soft_threshold = %.2f\n", config->llm.compact_soft_threshold);
    fprintf(fp, "compact_hard_threshold = %.2f\n", config->llm.compact_hard_threshold);
    fprintf(fp, "compact_use_session = %s\n", config->llm.compact_use_session ? "true" : "false");
