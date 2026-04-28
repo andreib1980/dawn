@@ -137,8 +137,11 @@
                                   # Env: DAWN_LLM_TYPE
 # max_tokens = 8192               # Maximum response tokens
                                   # Env: DAWN_LLM_MAX_TOKENS
-# summarize_threshold = 0.80      # Compact conversation at this % of context limit
-                                  # Env: DAWN_LLM_SUMMARIZE_THRESHOLD
+# compact_soft_threshold = 0.60   # Async background compaction trigger
+# compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
+# compact_use_session = true      # Use session's LLM for compaction (false = dedicated)
+# compact_provider = ""           # Dedicated compaction provider: claude/openai/gemini/local
+# compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5)
 # conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
                                   # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors

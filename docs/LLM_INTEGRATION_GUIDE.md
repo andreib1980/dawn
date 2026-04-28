@@ -328,7 +328,8 @@ All LLM settings in `dawn.toml`:
 [llm]
 type = "cloud"                  # "cloud" or "local"
 max_tokens = 4096               # Maximum response tokens
-summarize_threshold = 0.80      # Compact conversation at this % of context limit
+compact_soft_threshold = 0.60   # Async background compaction trigger
+compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 conversation_logging = false    # Save chat history to log files
 rate_limit_enabled = true       # Throttle cloud API calls
 rate_limit_rpm = 40             # Max requests per minute
