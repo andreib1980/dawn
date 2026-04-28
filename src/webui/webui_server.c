@@ -1184,7 +1184,7 @@ static void send_compaction_impl(struct lws *wsi,
    json_object_object_add(payload, "tokens_before", json_object_new_int(tokens_before));
    json_object_object_add(payload, "tokens_after", json_object_new_int(tokens_after));
    json_object_object_add(payload, "messages_summarized", json_object_new_int(messages_summarized));
-   json_object_object_add(payload, "level", json_object_new_int(level + 1));
+   json_object_object_add(payload, "level", json_object_new_int(level));
    if (summary) {
       json_object_object_add(payload, "summary", json_object_new_string(summary));
    }

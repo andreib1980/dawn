@@ -1271,7 +1271,9 @@ int llm_context_compact(uint32_t session_id,
          return 1;
       }
 
-      int summary_chars = (int)strlen(summary) + 33; /* "[Previous conversation summary: ]" */
+      /* Estimate includes the wrapper prefix: "[COMPACTED conv=N msgs=X-Y node=Z depth=D] "
+       * (up to ~80 chars) + "Previous conversation summary: " (33 chars) */
+      int summary_chars = (int)strlen(summary) + 120;
       int summary_tokens = (summary_chars + 20) / 4; /* +20 for message overhead, /4 heuristic */
       int estimated_total = kept_tokens + summary_tokens;
 

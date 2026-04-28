@@ -1458,11 +1458,13 @@ int summary_node_create(const summary_node_t *node, int64_t *node_id_out);
 int summary_node_get(int64_t node_id, summary_node_t *node_out);
 
 /**
- * @brief Get the most recent summary node for a conversation chain
+ * @brief Get the most recent summary node for a conversation
  *
- * Searches for the latest node across a conversation and its continuations.
+ * Queries summary_nodes for the given conversation ID only.
+ * The caller (llm_context_compact) handles continuation chain
+ * traversal via continued_from if no node is found.
  *
- * @param conv_id Conversation ID (any in the chain)
+ * @param conv_id Conversation ID to query
  * @param node_out Output: latest node (summary_text is heap-allocated, caller frees)
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
