@@ -31,6 +31,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 
 #define SEPARATOR "\n\n---\n\n"
@@ -70,17 +71,17 @@ static bool is_safe_module_name(const char *name) {
  * @param buf        Output buffer
  * @param buf_size   Total buffer capacity
  * @param offset     Current write position (updated on success)
- * @return 0 on success, -1 on error
+ * @return 0 on success, non-zero on error
  */
 static int read_file_into(const char *path, char *buf, size_t buf_size, size_t *offset) {
    struct stat st;
    if (stat(path, &st) != 0) {
-      return -1; /* File not found — not an error for optional files */
+      return FAILURE; /* File not found — caller may treat as optional */
    }
 
    size_t file_size = (size_t)st.st_size;
    if (file_size == 0) {
-      return 0;
+      return SUCCESS;
    }
 
    /* Check if file fits in remaining buffer space */
@@ -88,19 +89,19 @@ static int read_file_into(const char *path, char *buf, size_t buf_size, size_t *
    if (file_size > remaining) {
       OLOG_WARNING("Instruction file too large: %s (%zu bytes, %zu remaining)", path, file_size,
                    remaining);
-      return -1;
+      return FAILURE;
    }
 
    FILE *f = fopen(path, "r");
    if (!f) {
-      return -1;
+      return FAILURE;
    }
 
    size_t bytes_read = fread(buf + *offset, 1, file_size, f);
    fclose(f);
 
    *offset += bytes_read;
-   return 0;
+   return SUCCESS;
 }
 
 /**

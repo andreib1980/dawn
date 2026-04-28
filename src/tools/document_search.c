@@ -36,6 +36,7 @@
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "core/time_query_parser.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/document_db.h"
 #include "tools/tool_registry.h"
@@ -232,8 +233,10 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       return strdup("Error: memory allocation failed.");
    }
 
-   int chunk_count = document_db_chunk_search_load(user_id, chunks, emb_buf, dims, max_chunks);
-   if (chunk_count <= 0) {
+   int chunk_count = 0;
+   if (document_db_chunk_search_load(user_id, chunks, emb_buf, dims, max_chunks, &chunk_count) !=
+           SUCCESS ||
+       chunk_count <= 0) {
       free(query_vec);
       free(chunks);
       free(emb_buf);

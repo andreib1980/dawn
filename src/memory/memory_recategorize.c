@@ -34,15 +34,13 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_filter.h"
 #include "memory/memory_types.h"
-
-#define SUCCESS 0
-#define FAILURE 1
 
 #define RECAT_BATCH_SIZE 25
 #define RECAT_MAX_LOOPS 500
@@ -271,7 +269,8 @@ static void *recategorize_thread_fn(void *arg) {
    memory_fact_t facts[RECAT_BATCH_SIZE];
 
    for (int loop = 0; loop < RECAT_MAX_LOOPS && !atomic_load(&s_recat_shutdown); loop++) {
-      int count = memory_db_fact_list_general(user_id, cursor_id, facts, RECAT_BATCH_SIZE);
+      int count = 0;
+      memory_db_fact_list_general(user_id, cursor_id, facts, RECAT_BATCH_SIZE, &count);
       if (count <= 0)
          break;
 
@@ -301,12 +300,12 @@ static void *recategorize_thread_fn(void *arg) {
       usleep(RECAT_THROTTLE_US);
    }
 
-   int remaining = memory_db_fact_count_general(user_id);
+   int remaining = 0;
+   memory_db_fact_count_general(user_id, &remaining);
 
    OLOG_INFO("memory_recategorize: complete user=%d touched=%d assigned=%d failed_batches=%d "
              "remaining_general=%d",
-             user_id, total_touched, total_assigned, failed_batches,
-             remaining >= 0 ? remaining : (total_touched - total_assigned));
+             user_id, total_touched, total_assigned, failed_batches, remaining);
 
    atomic_store(&s_recat_running, false);
    return NULL;

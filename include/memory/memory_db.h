@@ -52,13 +52,15 @@ extern "C" {
  * @param confidence Confidence level (0.0-1.0)
  * @param source Source of fact ("explicit" or "inferred")
  * @param category One of MEMORY_FACT_CATEGORIES; NULL or empty defaults to "general" (v34)
- * @return Fact ID on success, -1 on failure
+ * @param id_out Output: fact ID on success (may be NULL if caller doesn't need it)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int64_t memory_db_fact_create(int user_id,
-                              const char *fact_text,
-                              float confidence,
-                              const char *source,
-                              const char *category);
+int memory_db_fact_create(int user_id,
+                          const char *fact_text,
+                          float confidence,
+                          const char *source,
+                          const char *category,
+                          int64_t *id_out);
 
 /**
  * @brief Search facts by keyword, restricted to one category (v34).
@@ -71,13 +73,15 @@ int64_t memory_db_fact_create(int user_id,
  * @param category One of MEMORY_FACT_CATEGORIES (must match exactly)
  * @param out_facts Output array (caller allocates)
  * @param max_facts Maximum facts to return
- * @return Number of facts found, -1 on error
+ * @param count_out Output: number of facts found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_search_by_category(int user_id,
                                       const char *keywords,
                                       const char *category,
                                       memory_fact_t *out_facts,
-                                      int max_facts);
+                                      int max_facts,
+                                      int *count_out);
 
 /**
  * @brief Update a fact's category in place (v34).  Used by the embedding-centroid
@@ -98,20 +102,23 @@ int memory_db_fact_update_category(int64_t fact_id, const char *category);
  * @param cursor_id   Return facts with id > cursor_id (0 for first batch)
  * @param out_facts   Output array (caller allocates)
  * @param max_facts   Size of out_facts array
- * @return Number of facts fetched, or -1 on error
+ * @param count_out   Output: number of facts fetched
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_list_general(int user_id,
                                 int64_t cursor_id,
                                 memory_fact_t *out_facts,
-                                int max_facts);
+                                int max_facts,
+                                int *count_out);
 
 /**
  * @brief Count non-superseded facts with category='general' for a user.
  *
  * @param user_id User ID
- * @return Count of general facts, or -1 on error
+ * @param count_out Output: count of general facts
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_count_general(int user_id);
+int memory_db_fact_count_general(int user_id, int *count_out);
 
 /**
  * @brief Get a fact by ID
@@ -129,9 +136,14 @@ int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact);
  * @param out_facts Output: array of facts (caller allocates)
  * @param max_facts Maximum facts to return
  * @param offset Starting offset for pagination
- * @return Number of facts returned, -1 on error
+ * @param count_out Output: number of facts returned
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_list(int user_id, memory_fact_t *out_facts, int max_facts, int offset);
+int memory_db_fact_list(int user_id,
+                        memory_fact_t *out_facts,
+                        int max_facts,
+                        int offset,
+                        int *count_out);
 
 /**
  * @brief Search facts by keyword
@@ -140,12 +152,14 @@ int memory_db_fact_list(int user_id, memory_fact_t *out_facts, int max_facts, in
  * @param keywords Search terms (will be wrapped in %...%)
  * @param out_facts Output: array of matching facts
  * @param max_facts Maximum facts to return
- * @return Number of facts found, -1 on error
+ * @param count_out Output: number of facts found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_search(int user_id,
                           const char *keywords,
                           memory_fact_t *out_facts,
-                          int max_facts);
+                          int max_facts,
+                          int *count_out);
 
 /**
  * @brief Update fact access time, count, and reinforcement boost
@@ -198,12 +212,14 @@ int memory_db_fact_delete(int64_t fact_id, int user_id);
  * @param fact_text Text to search for
  * @param out_facts Output: array of similar facts
  * @param max_facts Maximum facts to return
- * @return Number of similar facts found, -1 on error
+ * @param count_out Output: number of similar facts found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_find_similar(int user_id,
                                 const char *fact_text,
                                 memory_fact_t *out_facts,
-                                int max_facts);
+                                int max_facts,
+                                int *count_out);
 
 /**
  * @brief Find facts by normalized hash (fast duplicate detection)
@@ -216,12 +232,14 @@ int memory_db_fact_find_similar(int user_id,
  * @param hash Normalized text hash from memory_normalize_and_hash()
  * @param out_facts Output: array of facts with matching hash
  * @param max_facts Maximum facts to return
- * @return Number of facts found, -1 on error
+ * @param count_out Output: number of facts found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_find_by_hash(int user_id,
                                 uint32_t hash,
                                 memory_fact_t *out_facts,
-                                int max_facts);
+                                int max_facts,
+                                int *count_out);
 
 /**
  * @brief Prune old superseded facts
@@ -231,9 +249,10 @@ int memory_db_fact_find_by_hash(int user_id,
  *
  * @param user_id User ID
  * @param retention_days Keep superseded facts for this many days
- * @return Number of facts deleted, -1 on error
+ * @param count_out Output: number of facts deleted
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_prune_superseded(int user_id, int retention_days);
+int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out);
 
 /**
  * @brief Prune stale low-confidence facts
@@ -244,9 +263,10 @@ int memory_db_fact_prune_superseded(int user_id, int retention_days);
  * @param user_id User ID
  * @param stale_days Prune facts not accessed in this many days
  * @param min_confidence Only prune facts with confidence below this
- * @return Number of facts deleted, -1 on error
+ * @param count_out Output: number of facts deleted
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence);
+int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence, int *count_out);
 
 /* =============================================================================
  * Decay and Maintenance Operations (Phase 5)
@@ -263,13 +283,15 @@ int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence
  * @param explicit_rate Weekly decay multiplier for explicit facts
  * @param inferred_floor Minimum confidence for inferred facts
  * @param explicit_floor Minimum confidence for explicit facts
- * @return Number of rows affected, -1 on error
+ * @param count_out Output: number of rows affected
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_apply_fact_decay(int user_id,
                                float inferred_rate,
                                float explicit_rate,
                                float inferred_floor,
-                               float explicit_floor);
+                               float explicit_floor,
+                               int *count_out);
 
 /**
  * @brief Apply confidence decay to all preferences for a user
@@ -277,9 +299,10 @@ int memory_db_apply_fact_decay(int user_id,
  * @param user_id User ID
  * @param pref_rate Weekly decay multiplier for preferences
  * @param pref_floor Minimum confidence for preferences
- * @return Number of rows affected, -1 on error
+ * @param count_out Output: number of rows affected
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor);
+int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor, int *count_out);
 
 /**
  * @brief Delete facts with confidence below threshold
@@ -288,27 +311,30 @@ int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor);
  *
  * @param user_id User ID
  * @param threshold Delete facts below this confidence
- * @return Number of facts deleted, -1 on error
+ * @param count_out Output: number of facts deleted
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_prune_low_confidence(int user_id, float threshold);
+int memory_db_prune_low_confidence(int user_id, float threshold, int *count_out);
 
 /**
  * @brief Delete summaries older than retention period
  *
  * @param user_id User ID
  * @param retention_days Delete summaries older than this
- * @return Number of summaries deleted, -1 on error
+ * @param count_out Output: number of summaries deleted
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_prune_old_summaries(int user_id, int retention_days);
+int memory_db_prune_old_summaries(int user_id, int retention_days, int *count_out);
 
 /**
  * @brief Get all user IDs that have memory data
  *
  * @param out_ids Output: array of user IDs (caller allocates)
  * @param max_ids Maximum IDs to return
- * @return Number of user IDs found, -1 on error
+ * @param count_out Output: number of user IDs found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_get_all_user_ids(int *out_ids, int max_ids);
+int memory_db_get_all_user_ids(int *out_ids, int max_ids, int *count_out);
 
 /* =============================================================================
  * Date-Filtered Queries
@@ -325,13 +351,15 @@ int memory_db_get_all_user_ids(int *out_ids, int max_ids);
  * @param since_ts Only return facts created at or after this timestamp
  * @param out_facts Output: array of matching facts
  * @param max_facts Maximum facts to return
- * @return Number of facts found, -1 on error
+ * @param count_out Output: number of facts found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_search_since(int user_id,
                                 const char *keywords,
                                 time_t since_ts,
                                 memory_fact_t *out_facts,
-                                int max_facts);
+                                int max_facts,
+                                int *count_out);
 
 /**
  * @brief Search summaries by keyword with time filter
@@ -341,13 +369,15 @@ int memory_db_fact_search_since(int user_id,
  * @param since_ts Only return summaries created at or after this timestamp
  * @param out_summaries Output: array of matching summaries
  * @param max_summaries Maximum to return
- * @return Number of matches, -1 on error
+ * @param count_out Output: number of matches
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_summary_search_since(int user_id,
                                    const char *keywords,
                                    time_t since_ts,
                                    memory_summary_t *out_summaries,
-                                   int max_summaries);
+                                   int max_summaries,
+                                   int *count_out);
 
 /**
  * @brief List facts created since a timestamp (ordered by recency)
@@ -356,12 +386,14 @@ int memory_db_summary_search_since(int user_id,
  * @param since_ts Only return facts created at or after this timestamp
  * @param out_facts Output: array of facts
  * @param max_facts Maximum facts to return
- * @return Number of facts returned, -1 on error
+ * @param count_out Output: number of facts returned
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_list_since(int user_id,
                               time_t since_ts,
                               memory_fact_t *out_facts,
-                              int max_facts);
+                              int max_facts,
+                              int *count_out);
 
 /**
  * @brief List summaries created since a timestamp
@@ -370,12 +402,14 @@ int memory_db_fact_list_since(int user_id,
  * @param since_ts Only return summaries created at or after this timestamp
  * @param out_summaries Output: array of summaries
  * @param max_summaries Maximum to return
- * @return Number of summaries, -1 on error
+ * @param count_out Output: number of summaries
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_summary_list_since(int user_id,
                                  time_t since_ts,
                                  memory_summary_t *out_summaries,
-                                 int max_summaries);
+                                 int max_summaries,
+                                 int *count_out);
 
 /* =============================================================================
  * Preference Operations
@@ -418,9 +452,14 @@ int memory_db_pref_get(int user_id, const char *category, memory_preference_t *o
  * @param out_prefs Output: array of preferences
  * @param max_prefs Maximum to return
  * @param offset Starting offset for pagination
- * @return Number of preferences, -1 on error
+ * @param count_out Output: number of preferences
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_pref_list(int user_id, memory_preference_t *out_prefs, int max_prefs, int offset);
+int memory_db_pref_list(int user_id,
+                        memory_preference_t *out_prefs,
+                        int max_prefs,
+                        int offset,
+                        int *count_out);
 
 /**
  * @brief Search preferences by keyword (LIKE on category and value)
@@ -429,12 +468,14 @@ int memory_db_pref_list(int user_id, memory_preference_t *out_prefs, int max_pre
  * @param keywords Search terms (will be wrapped in %...%)
  * @param out_prefs Output: array of matching preferences
  * @param max_prefs Maximum to return
- * @return Number of matches, -1 on error
+ * @param count_out Output: number of matches
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_pref_search(int user_id,
                           const char *keywords,
                           memory_preference_t *out_prefs,
-                          int max_prefs);
+                          int max_prefs,
+                          int *count_out);
 
 /**
  * @brief Delete a preference
@@ -459,15 +500,17 @@ int memory_db_pref_delete(int user_id, const char *category);
  * @param sentiment Overall sentiment
  * @param message_count Number of messages in conversation
  * @param duration_seconds Session duration
- * @return Summary ID on success, -1 on failure
+ * @param id_out Output: summary ID on success (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int64_t memory_db_summary_create(int user_id,
-                                 const char *session_id,
-                                 const char *summary,
-                                 const char *topics,
-                                 const char *sentiment,
-                                 int message_count,
-                                 int duration_seconds);
+int memory_db_summary_create(int user_id,
+                             const char *session_id,
+                             const char *summary,
+                             const char *topics,
+                             const char *sentiment,
+                             int message_count,
+                             int duration_seconds,
+                             int64_t *id_out);
 
 /**
  * @brief List recent summaries for a user
@@ -478,12 +521,14 @@ int64_t memory_db_summary_create(int user_id,
  * @param out_summaries Output: array of summaries
  * @param max_summaries Maximum to return
  * @param offset Starting offset for pagination
- * @return Number of summaries, -1 on error
+ * @param count_out Output: number of summaries
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_summary_list(int user_id,
                            memory_summary_t *out_summaries,
                            int max_summaries,
-                           int offset);
+                           int offset,
+                           int *count_out);
 
 /**
  * @brief Mark a summary as consolidated
@@ -502,12 +547,14 @@ int memory_db_summary_mark_consolidated(int64_t summary_id);
  * @param keywords Search terms
  * @param out_summaries Output: array of matching summaries
  * @param max_summaries Maximum to return
- * @return Number of matches, -1 on error
+ * @param count_out Output: number of matches
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_summary_search(int user_id,
                              const char *keywords,
                              memory_summary_t *out_summaries,
-                             int max_summaries);
+                             int max_summaries,
+                             int *count_out);
 
 /**
  * @brief Delete a summary
@@ -572,7 +619,8 @@ int memory_db_fact_update_embedding(int user_id,
  * @param out_embeddings Output: flat float array (caller allocates, count * dims)
  * @param out_norms Output: array of norms (caller allocates)
  * @param max_count Maximum entries to return
- * @return Number of embeddings loaded, -1 on error
+ * @param count_out Output: number of embeddings loaded
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 /* out_created_ats: optional. Pass NULL when caller doesn't need per-fact
  * timestamps (temporal-query scoring is the only consumer). */
@@ -582,7 +630,8 @@ int memory_db_fact_get_embeddings(int user_id,
                                   float *out_embeddings,
                                   float *out_norms,
                                   int64_t *out_created_ats,
-                                  int max_count);
+                                  int max_count,
+                                  int *count_out);
 
 /**
  * @brief List facts that need embedding (backfill)
@@ -594,13 +643,15 @@ int memory_db_fact_get_embeddings(int user_id,
  * @param out_ids Output: array of fact IDs
  * @param out_texts Output: array of fact text strings (caller allocates char[][512])
  * @param max_count Maximum entries to return
- * @return Number of facts found, -1 on error
+ * @param count_out Output: number of facts found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_list_without_embedding(int user_id,
                                           int expected_dims,
                                           int64_t *out_ids,
                                           char out_texts[][512],
-                                          int max_count);
+                                          int max_count,
+                                          int *count_out);
 
 /* =============================================================================
  * Entity Graph Operations (Phase S4)
@@ -628,13 +679,15 @@ void memory_make_canonical_name(const char *name, char *out, size_t size);
  * @param entity_type Entity type (person, pet, place, org, thing)
  * @param canonical_name Lowercased canonical name
  * @param out_created Output: true if this was a new insert (mention_count == 1)
- * @return Entity ID on success, -1 on failure
+ * @param id_out Output: entity ID on success (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int64_t memory_db_entity_upsert(int user_id,
-                                const char *name,
-                                const char *entity_type,
-                                const char *canonical_name,
-                                bool *out_created);
+int memory_db_entity_upsert(int user_id,
+                            const char *name,
+                            const char *entity_type,
+                            const char *canonical_name,
+                            bool *out_created,
+                            int64_t *id_out);
 
 /**
  * @brief Get an entity by exact canonical name
@@ -726,11 +779,15 @@ int memory_db_relation_supersede(int user_id,
  * @brief List relations where entity is subject (outgoing).  Returns ALL
  * relations regardless of validity period — use _list_by_subject_at for
  * temporal filtering.
+ *
+ * @param count_out Output: number of relations
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_relation_list_by_subject(int user_id,
                                        int64_t subject_entity_id,
                                        memory_relation_t *out,
-                                       int max);
+                                       int max,
+                                       int *count_out);
 
 /**
  * @brief List relations valid at a given timestamp (v33).
@@ -746,13 +803,15 @@ int memory_db_relation_list_by_subject(int user_id,
  * @param as_of_ts Timestamp to evaluate validity at (0 = now)
  * @param out Output array
  * @param max Maximum results
- * @return Number of relations, -1 on error
+ * @param count_out Output: number of relations
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_relation_list_by_subject_at(int user_id,
                                           int64_t subject_entity_id,
                                           int64_t as_of_ts,
                                           memory_relation_t *out,
-                                          int max);
+                                          int max,
+                                          int *count_out);
 
 /**
  * @brief List incoming relations where entity is the object
@@ -764,12 +823,14 @@ int memory_db_relation_list_by_subject_at(int user_id,
  * @param object_entity_id Entity ID to find incoming relations for
  * @param out Output array
  * @param max Maximum results
- * @return Number of relations, or -1 on error
+ * @param count_out Output: number of relations
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_relation_list_by_object(int user_id,
                                       int64_t object_entity_id,
                                       memory_relation_t *out,
-                                      int max);
+                                      int max,
+                                      int *count_out);
 
 /**
  * @brief Bulk-load all relations for a user in a single query
@@ -780,9 +841,13 @@ int memory_db_relation_list_by_object(int user_id,
  * @param user_id User ID
  * @param out Output array of relations
  * @param max Maximum relations to return
- * @return Number of relations, or -1 on error
+ * @param count_out Output: number of relations
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_relation_list_all_by_user(int user_id, memory_relation_t *out, int max);
+int memory_db_relation_list_all_by_user(int user_id,
+                                        memory_relation_t *out,
+                                        int max,
+                                        int *count_out);
 
 /**
  * @brief List all entities for a user, ordered by mention count
@@ -794,9 +859,10 @@ int memory_db_relation_list_all_by_user(int user_id, memory_relation_t *out, int
  * @param out Output array of entities
  * @param max Maximum entities to return
  * @param offset Starting offset for pagination
- * @return Number of entities found, -1 on error
+ * @param count_out Output: number of entities found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset);
+int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset, int *count_out);
 
 /**
  * @brief Search entities by keyword (LIKE on canonical_name)
@@ -805,9 +871,14 @@ int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset
  * @param keywords Search terms
  * @param out Output array of entities
  * @param max Maximum entities to return
- * @return Number of entities found, -1 on error
+ * @param count_out Output: number of entities found
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_entity_search(int user_id, const char *keywords, memory_entity_t *out, int max);
+int memory_db_entity_search(int user_id,
+                            const char *keywords,
+                            memory_entity_t *out,
+                            int max,
+                            int *count_out);
 
 /**
  * @brief Delete an entity and its relations
@@ -868,7 +939,8 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id);
  * @param out_embeddings Output: flat float array
  * @param out_norms Output: norms
  * @param max Maximum entries
- * @return Number loaded, -1 on error
+ * @param count_out Output: number loaded
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_entity_get_embeddings(int user_id,
                                     int expected_dims,
@@ -877,7 +949,8 @@ int memory_db_entity_get_embeddings(int user_id,
                                     char out_types[][MEMORY_ENTITY_TYPE_MAX],
                                     float *out_embeddings,
                                     float *out_norms,
-                                    int max);
+                                    int max,
+                                    int *count_out);
 
 /* =============================================================================
  * Extraction Tracking
@@ -890,9 +963,10 @@ int memory_db_entity_get_embeddings(int user_id,
  * memory extraction, enabling incremental extraction.
  *
  * @param conversation_id Conversation ID
- * @return Last extracted message count, or -1 on error
+ * @param count_out Output: last extracted message count (0 if never extracted)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_get_last_extracted(int64_t conversation_id);
+int memory_db_get_last_extracted(int64_t conversation_id, int *count_out);
 
 /**
  * @brief Set last extracted message count for a conversation

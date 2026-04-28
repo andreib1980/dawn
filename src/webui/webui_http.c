@@ -149,36 +149,36 @@ int webui_add_security_headers(struct lws *wsi, unsigned char **p, unsigned char
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"Content-Security-Policy:",
                                    (const unsigned char *)s_csp_policy, (int)strlen(s_csp_policy),
                                    p, end))
-      return -1;
+      return FAILURE;
 
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"X-Frame-Options:",
                                    (const unsigned char *)"DENY", 4, p, end))
-      return -1;
+      return FAILURE;
 
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"X-Content-Type-Options:",
                                    (const unsigned char *)"nosniff", 7, p, end))
-      return -1;
+      return FAILURE;
 
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"Referrer-Policy:",
                                    (const unsigned char *)"strict-origin-when-cross-origin", 31, p,
                                    end))
-      return -1;
+      return FAILURE;
 
    static const char permissions[] = "camera=(self), geolocation=(), payment=()";
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"Permissions-Policy:",
                                    (const unsigned char *)permissions, (int)strlen(permissions), p,
                                    end))
-      return -1;
+      return FAILURE;
 
    /* HSTS only when HTTPS is enabled (RFC 6797: MUST ignore on non-secure) */
    if (g_config.webui.https) {
       static const char hsts[] = "max-age=31536000; includeSubDomains";
       if (lws_add_http_header_by_name(wsi, (const unsigned char *)"Strict-Transport-Security:",
                                       (const unsigned char *)hsts, (int)strlen(hsts), p, end))
-         return -1;
+         return FAILURE;
    }
 
-   return 0;
+   return SUCCESS;
 }
 
 const char *webui_get_static_security_headers(int *out_len) {
@@ -307,17 +307,17 @@ static int send_304_not_modified(struct lws *wsi, const char *etag) {
    unsigned char *end = &buffer[sizeof(buffer) - 1];
 
    if (lws_add_http_header_status(wsi, HTTP_STATUS_NOT_MODIFIED, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"ETag:", (const unsigned char *)etag,
                                    (int)strlen(etag), &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"Cache-Control:",
                                    (const unsigned char *)"no-cache", 8, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (webui_add_security_headers(wsi, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_finalize_http_header(wsi, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    return lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
 }
@@ -442,7 +442,7 @@ static bool is_service_token_authenticated(struct lws *wsi) {
  * @param json_body JSON string to send
  * @param cookie Cookie value to set (NULL for no cookie, empty string to clear)
  * @param cookie_max_age Max-Age for cookie (0 = session cookie, >0 = persistent)
- * @return 0 on success, -1 on failure
+ * @return 0 on success, LWS_CLOSE_CONNECTION on failure
  */
 static int send_auth_response(struct lws *wsi,
                               int status,
@@ -456,12 +456,12 @@ static int send_auth_response(struct lws *wsi,
    unsigned char *end = &buffer[sizeof(buffer) - 1];
 
    if (lws_add_http_header_status(wsi, (unsigned int)status, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
                                     (unsigned char *)"application/json", 16, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_content_length(wsi, body_len, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    /* Add Set-Cookie header if provided */
    if (cookie) {
@@ -483,23 +483,23 @@ static int send_auth_response(struct lws *wsi,
       if (lws_add_http_header_by_name(wsi, (unsigned char *)"Set-Cookie:",
                                       (unsigned char *)cookie_header, (int)strlen(cookie_header),
                                       &p, end))
-         return -1;
+         return LWS_CLOSE_CONNECTION;
    }
 
    if (webui_add_security_headers(wsi, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_finalize_http_header(wsi, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    /* Write headers first */
    int n = lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
    if (n < 0)
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    /* Write body - use LWS_WRITE_HTTP_FINAL to indicate completion */
    n = lws_write(wsi, (unsigned char *)json_body, body_len, LWS_WRITE_HTTP_FINAL);
    if (n < 0)
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    return 0;
 }
@@ -513,7 +513,7 @@ static int send_auth_response(struct lws *wsi,
  * @param wsi HTTP connection
  * @param status HTTP status code
  * @param json_body JSON string to send
- * @return 0 on success, -1 on failure
+ * @return 0 on success, LWS_CLOSE_CONNECTION on failure
  */
 static int send_nocache_json_response(struct lws *wsi, int status, const char *json_body) {
    size_t body_len = strlen(json_body);
@@ -523,36 +523,36 @@ static int send_nocache_json_response(struct lws *wsi, int status, const char *j
    unsigned char *end = &buffer[sizeof(buffer) - 1];
 
    if (lws_add_http_header_status(wsi, (unsigned int)status, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
                                     (unsigned char *)"application/json", 16, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_content_length(wsi, body_len, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    /* Add no-cache headers to prevent token caching */
    if (lws_add_http_header_by_name(wsi, (unsigned char *)"Cache-Control:",
                                    (unsigned char *)"no-store, no-cache, must-revalidate, private",
                                    44, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_add_http_header_by_name(wsi, (unsigned char *)"Pragma:", (unsigned char *)"no-cache", 8,
                                    &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    if (webui_add_security_headers(wsi, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    if (lws_finalize_http_header(wsi, &p, end))
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    /* Write headers first */
    int n = lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
    if (n < 0)
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    /* Write body - use LWS_WRITE_HTTP_FINAL to indicate completion */
    n = lws_write(wsi, (unsigned char *)json_body, body_len, LWS_WRITE_HTTP_FINAL);
    if (n < 0)
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    return 0;
 }
@@ -596,7 +596,7 @@ static bool csrf_is_nonce_used(const unsigned char *nonce) {
  * @brief Handle POST /api/auth/login
  * @param wsi HTTP connection
  * @param pss Session data containing POST body
- * @return -1 to close connection after response
+ * @return LWS_CLOSE_CONNECTION to close connection after response
  */
 static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    char response[256];
@@ -617,12 +617,13 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Too many attempts. Try again later.\"}");
       send_auth_response(wsi, HTTP_STATUS_TOO_MANY_REQUESTS, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Also check database for persistence across restarts */
    time_t window_start = time(NULL) - RATE_LIMIT_WINDOW_SEC;
-   int recent_failures = auth_db_count_recent_failures(normalized_ip, window_start);
+   int recent_failures = 0;
+   auth_db_count_recent_failures(normalized_ip, window_start, &recent_failures);
    if (recent_failures >= RATE_LIMIT_MAX_ATTEMPTS) {
       OLOG_WARNING("WebUI: Rate limited IP (database): %s (normalized: %s)", client_ip,
                    normalized_ip);
@@ -630,7 +631,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Too many attempts. Try again later.\"}");
       send_auth_response(wsi, HTTP_STATUS_TOO_MANY_REQUESTS, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Parse JSON body */
@@ -638,7 +639,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    if (!req) {
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Invalid JSON\"}");
       send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Extract and validate CSRF token */
@@ -648,7 +649,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       OLOG_WARNING("WebUI: Login attempt without CSRF token from %s", client_ip);
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Missing CSRF token\"}");
       send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    const char *csrf_token = json_object_get_string(csrf_obj);
@@ -660,7 +661,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Invalid or expired token. Please refresh.\"}");
       send_auth_response(wsi, HTTP_STATUS_FORBIDDEN, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Check for CSRF token replay (single-use enforcement) */
@@ -671,7 +672,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Token already used. Please refresh.\"}");
       send_auth_response(wsi, HTTP_STATUS_FORBIDDEN, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Mark CSRF token as used (do this early, even before checking credentials) */
@@ -684,7 +685,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Missing username or password\"}");
       send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    const char *username = json_object_get_string(username_obj);
@@ -708,7 +709,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       auth_db_log_attempt(normalized_ip, username, false);
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Invalid credentials\"}");
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Check if account is locked */
@@ -720,7 +721,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response),
                "{\"success\":false,\"error\":\"Account temporarily locked\"}");
       send_auth_response(wsi, HTTP_STATUS_FORBIDDEN, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    } else if (user.lockout_until > 0 && user.lockout_until <= now) {
       /* Lockout expired - reset failed attempts counter */
       auth_db_reset_failed_attempts(username);
@@ -750,7 +751,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       OLOG_WARNING("WebUI: Login failed - wrong password: %s from %s", username, client_ip);
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Invalid credentials\"}");
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    json_object_put(req);
@@ -761,7 +762,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       OLOG_ERROR("WebUI: Failed to generate session token");
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Server error\"}");
       send_auth_response(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, response, NULL, 0);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Get User-Agent header for session tracking */
@@ -778,7 +779,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Server error\"}");
       send_auth_response(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, response, NULL, 0);
       auth_secure_zero(session_token, sizeof(session_token));
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Reset failed attempts and update last login */
@@ -800,7 +801,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
 
    /* Clear session token from stack after use */
    auth_secure_zero(session_token, sizeof(session_token));
-   return -1;
+   return LWS_CLOSE_CONNECTION;
 }
 
 /**
@@ -855,14 +856,14 @@ static bool is_same_origin_request(struct lws *wsi) {
 /**
  * @brief Handle POST /api/auth/logout
  * @param wsi HTTP connection
- * @return -1 to close connection after response
+ * @return LWS_CLOSE_CONNECTION to close connection after response
  */
 static int handle_auth_logout(struct lws *wsi) {
    /* CSRF protection: verify request is same-origin */
    if (!is_same_origin_request(wsi)) {
       OLOG_WARNING("WebUI: Blocked cross-origin logout attempt");
       lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    char token[AUTH_TOKEN_LEN];
@@ -883,13 +884,13 @@ static int handle_auth_logout(struct lws *wsi) {
    /* Use simple HTTP status - no body needed, avoids lws_write issues.
     * JavaScript redirects regardless of response content. */
    lws_return_http_status(wsi, HTTP_STATUS_OK, NULL);
-   return -1;
+   return LWS_CLOSE_CONNECTION;
 }
 
 /**
  * @brief Handle GET /api/auth/status
  * @param wsi HTTP connection
- * @return -1 to close connection after response
+ * @return LWS_CLOSE_CONNECTION to close connection after response
  */
 static int handle_auth_status(struct lws *wsi) {
    auth_session_t session;
@@ -904,13 +905,13 @@ static int handle_auth_status(struct lws *wsi) {
    }
 
    send_auth_response(wsi, HTTP_STATUS_OK, response, NULL, 0);
-   return -1;
+   return LWS_CLOSE_CONNECTION;
 }
 
 /**
  * @brief Handle GET /api/auth/csrf
  * @param wsi HTTP connection
- * @return -1 to close connection after response
+ * @return LWS_CLOSE_CONNECTION to close connection after response
  *
  * Returns a CSRF token for use in login and other state-changing requests.
  * Token is HMAC-signed and valid for AUTH_CSRF_TIMEOUT_SEC seconds.
@@ -927,7 +928,7 @@ static int handle_auth_csrf(struct lws *wsi) {
       OLOG_WARNING("WebUI: CSRF rate limited: %s", normalized_ip);
       send_nocache_json_response(wsi, HTTP_STATUS_TOO_MANY_REQUESTS,
                                  "{\"error\":\"Too many requests\"}");
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    char csrf_token[AUTH_CSRF_TOKEN_LEN];
@@ -936,7 +937,7 @@ static int handle_auth_csrf(struct lws *wsi) {
       OLOG_ERROR("WebUI: Failed to generate CSRF token");
       send_nocache_json_response(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR,
                                  "{\"error\":\"Failed to generate token\"}");
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    char response[256];
@@ -947,7 +948,7 @@ static int handle_auth_csrf(struct lws *wsi) {
 
    /* Use no-cache response to prevent browser/proxy caching */
    send_nocache_json_response(wsi, HTTP_STATUS_OK, response);
-   return -1;
+   return LWS_CLOSE_CONNECTION;
 }
 
 #endif /* ENABLE_AUTH */
@@ -978,7 +979,7 @@ int callback_http(struct lws *wsi,
 
          if (len < 1) {
             lws_return_http_status(wsi, HTTP_STATUS_BAD_REQUEST, NULL);
-            return -1;
+            return LWS_CLOSE_CONNECTION;
          }
 
          /* Get requested path */
@@ -1026,7 +1027,7 @@ int callback_http(struct lws *wsi,
             lws_write(wsi, (unsigned char *)OAUTH_CALLBACK_HTML, strlen(OAUTH_CALLBACK_HTML),
                       LWS_WRITE_HTTP_FINAL);
             if (lws_http_transaction_completed(wsi))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             return 0;
          }
 
@@ -1075,7 +1076,7 @@ int callback_http(struct lws *wsi,
                   if (rate_limiter_check(&s_service_rate, norm_ip)) {
                      OLOG_WARNING("webui_http: Bearer rate limit exceeded from %s", peer_ip);
                      lws_return_http_status(wsi, HTTP_STATUS_TOO_MANY_REQUESTS, NULL);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
                   if (is_service_token_authenticated(wsi)) {
                      if (!lws_is_ssl(wsi)) {
@@ -1116,7 +1117,7 @@ int callback_http(struct lws *wsi,
                pss->large_body = malloc(32 * 1024); /* Start with 32KB */
                if (!pss->large_body) {
                   lws_return_http_status(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
-                  return -1;
+                  return LWS_CLOSE_CONNECTION;
                }
                pss->large_body_len = 0;
                pss->large_body_cap = 32 * 1024;
@@ -1160,22 +1161,22 @@ int callback_http(struct lws *wsi,
             unsigned char *end = &buffer[sizeof(buffer) - 1];
 
             if (lws_add_http_header_status(wsi, HTTP_STATUS_FOUND, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_add_http_header_by_name(wsi, (unsigned char *)"Location:",
                                             (unsigned char *)"/login.html", 11, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_add_http_header_content_length(wsi, 0, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (webui_add_security_headers(wsi, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_finalize_http_header(wsi, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
             n = lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
             if (n < 0)
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
-            return -1; /* Close connection */
+            return LWS_CLOSE_CONNECTION; /* Close connection */
          }
 #endif /* ENABLE_AUTH */
 
@@ -1209,27 +1210,27 @@ int callback_http(struct lws *wsi,
             unsigned char *end = &buffer[sizeof(buffer) - 1];
 
             if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
                                              (unsigned char *)"text/html", 9, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_add_http_header_content_length(wsi, sizeof(oauth_callback_html) - 1, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (webui_add_security_headers(wsi, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_finalize_http_header(wsi, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
             n = lws_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
             if (n < 0)
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
             n = lws_write(wsi, (unsigned char *)oauth_callback_html,
                           sizeof(oauth_callback_html) - 1, LWS_WRITE_HTTP);
             if (n < 0)
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
-            return -1; /* Close connection after response */
+            return LWS_CLOSE_CONNECTION; /* Close connection after response */
          }
 
          /* Health check endpoint - returns JSON status */
@@ -1254,26 +1255,26 @@ int callback_http(struct lws *wsi,
             unsigned char *end = &buffer[sizeof(buffer) - 1];
 
             if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
                                              (unsigned char *)"application/json", 16, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_add_http_header_content_length(wsi, body_len, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (webui_add_security_headers(wsi, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             if (lws_finalize_http_header(wsi, &p, end))
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
             n = lws_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
             if (n < 0)
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
             n = lws_write(wsi, (unsigned char *)json_body, body_len, LWS_WRITE_HTTP);
             if (n < 0)
-               return -1;
+               return LWS_CLOSE_CONNECTION;
 
-            return -1; /* Close connection after response */
+            return LWS_CLOSE_CONNECTION; /* Close connection after response */
          }
 
          /* Default to index.html for root */
@@ -1285,7 +1286,7 @@ int callback_http(struct lws *wsi,
          if (contains_path_traversal(path)) {
             OLOG_WARNING("WebUI: Directory traversal attempt blocked: %s", path);
             lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
-            return -1;
+            return LWS_CLOSE_CONNECTION;
          }
 
          /* Build full filesystem path */
@@ -1295,7 +1296,7 @@ int callback_http(struct lws *wsi,
          if (!is_path_within_www(filepath, s_www_path)) {
             OLOG_WARNING("WebUI: Path escape attempt blocked: %s", filepath);
             lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
-            return -1;
+            return LWS_CLOSE_CONNECTION;
          }
 
          /* Get MIME type */
@@ -1332,7 +1333,7 @@ int callback_http(struct lws *wsi,
                   *tok_end = '\0';
                   if (strcmp(tok, "*") == 0 || strcmp(tok, etag) == 0) {
                      send_304_not_modified(wsi, etag);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
                   tok = strtok_r(NULL, ",", &saveptr);
                }
@@ -1359,7 +1360,7 @@ int callback_http(struct lws *wsi,
             /* File not found or error */
             OLOG_WARNING("WebUI: File not found: %s", filepath);
             lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);
-            return -1;
+            return LWS_CLOSE_CONNECTION;
          }
          if (n > 0) {
             /* File is being sent, connection will close after */
@@ -1370,13 +1371,13 @@ int callback_http(struct lws *wsi,
 
       case LWS_CALLBACK_HTTP_FILE_COMPLETION:
          /* File transfer complete */
-         return -1; /* Close connection */
+         return LWS_CLOSE_CONNECTION;
 
 #ifdef ENABLE_AUTH
       case LWS_CALLBACK_HTTP_BODY: {
          /* Accumulate POST body */
          if (!pss)
-            return -1;
+            return LWS_CLOSE_CONNECTION;
 
          /* Image upload - route to image handler */
          if (pss->image_session) {
@@ -1394,7 +1395,7 @@ int callback_http(struct lws *wsi,
             if (pss->large_body_len + len > max_body) {
                OLOG_WARNING("webui_http: large POST body exceeds limit (%zu + %zu > %zu)",
                             pss->large_body_len, len, max_body);
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             }
             /* Grow buffer if needed */
             if (pss->large_body_len + len >= pss->large_body_cap) {
@@ -1406,7 +1407,7 @@ int callback_http(struct lws *wsi,
                char *new_buf = realloc(pss->large_body, new_cap);
                if (!new_buf) {
                   OLOG_ERROR("webui_http: failed to grow large POST body buffer");
-                  return -1;
+                  return LWS_CLOSE_CONNECTION;
                }
                pss->large_body = new_buf;
                pss->large_body_cap = new_cap;
@@ -1432,7 +1433,7 @@ int callback_http(struct lws *wsi,
       case LWS_CALLBACK_HTTP_BODY_COMPLETION: {
          /* POST body complete - process it */
          if (!pss)
-            return -1;
+            return LWS_CLOSE_CONNECTION;
 
          /* Image upload complete */
          if (pss->image_session) {
@@ -1465,7 +1466,7 @@ int callback_http(struct lws *wsi,
 
          /* Unknown POST endpoint */
          lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);
-         return -1;
+         return LWS_CLOSE_CONNECTION;
       }
 
       case LWS_CALLBACK_CLOSED_HTTP:

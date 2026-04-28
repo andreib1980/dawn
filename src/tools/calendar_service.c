@@ -247,7 +247,8 @@ int calendar_service_add_account(int user_id,
 
    /* Duplicate check: same user + (OAuth key or username+URL) */
    calendar_account_t existing[16];
-   int count = calendar_db_account_list(user_id, existing, 16);
+   int count = 0;
+   calendar_db_account_list(user_id, existing, 16, &count);
    for (int i = 0; i < count; i++) {
       if (is_oauth && oauth_account_key && oauth_account_key[0] &&
           strcmp(existing[i].oauth_account_key, oauth_account_key) == 0) {
@@ -283,8 +284,8 @@ int calendar_service_add_account(int user_id,
       }
    }
 
-   int64_t id = calendar_db_account_create(&acct);
-   if (id < 0) {
+   int64_t id = 0;
+   if (calendar_db_account_create(&acct, &id) != 0) {
       OLOG_ERROR("calendar: failed to create account '%s'", name);
       return 1;
    }
@@ -312,7 +313,8 @@ int calendar_service_remove_account(int64_t account_id) {
       /* Check if email service still uses this OAuth account before revoking */
       bool email_uses_account = false;
       email_account_t email_accts[EMAIL_MAX_ACCOUNTS];
-      int email_count = email_db_account_list(acct.user_id, email_accts, EMAIL_MAX_ACCOUNTS);
+      int email_count = 0;
+      email_db_account_list(acct.user_id, email_accts, EMAIL_MAX_ACCOUNTS, &email_count);
       for (int i = 0; i < email_count; i++) {
          if (strcmp(email_accts[i].auth_type, "oauth") == 0 &&
              strcmp(email_accts[i].oauth_account_key, acct.oauth_account_key) == 0) {
@@ -445,7 +447,8 @@ int calendar_service_test_connection(int64_t account_id) {
 
    /* Upsert discovered calendars (skip existing by caldav_path) */
    calendar_calendar_t existing_cals[32];
-   int existing_count = calendar_db_calendar_list(account_id, existing_cals, 32);
+   int existing_count = 0;
+   calendar_db_calendar_list(account_id, existing_cals, 32, &existing_count);
    time_t now = time(NULL);
 
    for (int i = 0; i < disc.calendar_count; i++) {
@@ -473,8 +476,8 @@ int calendar_service_test_connection(int64_t account_id) {
       cal.is_active = !ci->read_only;
       cal.created_at = now;
 
-      int64_t cal_id = calendar_db_calendar_create(&cal);
-      if (cal_id < 0)
+      int64_t cal_id = 0;
+      if (calendar_db_calendar_create(&cal, &cal_id) != 0)
          OLOG_WARNING("calendar: failed to create calendar '%s'", ci->display_name);
       else
          OLOG_INFO("calendar: discovered calendar '%s' (id=%lld)", ci->display_name,
@@ -502,7 +505,7 @@ static void insert_base_occurrence(int64_t event_id, const caldav_event_t *ce) {
    snprintf(occ.dtend_date, sizeof(occ.dtend_date), "%s", ce->dtend_date);
    snprintf(occ.summary, sizeof(occ.summary), "%s", ce->summary);
    snprintf(occ.location, sizeof(occ.location), "%s", ce->location);
-   calendar_db_occurrence_insert(&occ);
+   calendar_db_occurrence_insert(&occ, NULL);
 }
 
 #ifdef HAVE_LIBICAL
@@ -582,7 +585,7 @@ static void expand_rrule(int64_t event_id,
                   end_tm.tm_mon + 1, end_tm.tm_mday);
       }
 
-      calendar_db_occurrence_insert(&occ);
+      calendar_db_occurrence_insert(&occ, NULL);
       count++;
    }
 
@@ -604,7 +607,8 @@ int calendar_service_sync_now(int64_t account_id) {
 
    /* Get calendars for this account */
    calendar_calendar_t cals[32];
-   int cal_count = calendar_db_calendar_list(account_id, cals, 32);
+   int cal_count = 0;
+   calendar_db_calendar_list(account_id, cals, 32, &cal_count);
    if (cal_count <= 0) {
       OLOG_WARNING("calendar: no calendars for account '%s'", acct.name);
       sodium_memzero(password, sizeof(password));
@@ -663,8 +667,8 @@ int calendar_service_sync_now(int64_t account_id) {
          evt.raw_ical = ce->raw_ical;
          evt.last_synced = now;
 
-         int64_t event_id = calendar_db_event_upsert(&evt);
-         if (event_id < 0)
+         int64_t event_id = 0;
+         if (calendar_db_event_upsert(&evt, &event_id) != 0)
             continue;
 
          /* Delete old occurrences and re-expand */
@@ -709,8 +713,8 @@ static int get_user_calendar_ids(int user_id,
                                  int64_t *ids,
                                  int max_count) {
    calendar_calendar_t cals[32];
-   int count = calendar_db_active_calendars_for_user(user_id, cals,
-                                                     max_count < 32 ? max_count : 32);
+   int count = 0;
+   calendar_db_active_calendars_for_user(user_id, cals, max_count < 32 ? max_count : 32, &count);
    if (!calendar_name) {
       for (int i = 0; i < count; i++)
          ids[i] = cals[i].id;
@@ -757,8 +761,8 @@ int calendar_service_today(int user_id,
    /* Query timed events */
    OLOG_INFO("calendar: today query user=%d cal_count=%d day_start=%lld day_end=%lld", user_id,
              cal_count, (long long)day_start, (long long)day_end);
-   int count = calendar_db_occurrences_in_range(cal_ids, cal_count, day_start, day_end, out,
-                                                max_count);
+   int count = 0;
+   calendar_db_occurrences_in_range(cal_ids, cal_count, day_start, day_end, out, max_count, &count);
    OLOG_INFO("calendar: today timed results=%d", count);
 
    /* Query all-day events for today's date */
@@ -774,14 +778,15 @@ int calendar_service_today(int user_id,
    snprintf(next_date, sizeof(next_date), "%04d-%02d-%02d", next_tm.tm_year + 1900,
             next_tm.tm_mon + 1, next_tm.tm_mday);
 
-   if (count >= 0 && count < max_count) {
-      int allday = calendar_db_allday_occurrences_in_range(cal_ids, cal_count, date_str, next_date,
-                                                           out + count, max_count - count);
+   if (count < max_count) {
+      int allday = 0;
+      calendar_db_allday_occurrences_in_range(cal_ids, cal_count, date_str, next_date, out + count,
+                                              max_count - count, &allday);
       if (allday > 0)
          count += allday;
    }
 
-   return count >= 0 ? count : 0;
+   return count;
 }
 
 int calendar_service_range(int user_id,
@@ -795,7 +800,9 @@ int calendar_service_range(int user_id,
    if (cal_count <= 0)
       return 0;
 
-   return calendar_db_occurrences_in_range(cal_ids, cal_count, start, end, out, max_count);
+   int count = 0;
+   calendar_db_occurrences_in_range(cal_ids, cal_count, start, end, out, max_count, &count);
+   return count;
 }
 
 int calendar_service_next(int user_id, const char *calendar_name, calendar_occurrence_t *out) {
@@ -817,7 +824,9 @@ int calendar_service_search(int user_id,
    if (cal_count <= 0)
       return 0;
 
-   return calendar_db_occurrences_search(cal_ids, cal_count, query, out, max_count);
+   int count = 0;
+   calendar_db_occurrences_search(cal_ids, cal_count, query, out, max_count, &count);
+   return count;
 }
 
 /* =============================================================================
@@ -891,7 +900,8 @@ int calendar_service_add(int user_id,
                          size_t uid_out_len) {
    /* Find target calendar */
    calendar_calendar_t cals[32];
-   int cal_count = calendar_db_active_calendars_for_user(user_id, cals, 32);
+   int cal_count = 0;
+   calendar_db_active_calendars_for_user(user_id, cals, 32, &cal_count);
    if (cal_count <= 0) {
       OLOG_ERROR("calendar: no active calendars for user %d", user_id);
       return 1;
@@ -1041,8 +1051,8 @@ int calendar_service_add(int user_id,
    evt.raw_ical = (char *)ical; /* temp pointer, copied by upsert */
    evt.last_synced = now;
 
-   int64_t event_id = calendar_db_event_upsert(&evt);
-   if (event_id > 0) {
+   int64_t event_id = 0;
+   if (calendar_db_event_upsert(&evt, &event_id) == 0) {
       calendar_occurrence_t occ = { 0 };
       occ.event_id = event_id;
       occ.dtstart = start;
@@ -1053,7 +1063,8 @@ int calendar_service_add(int user_id,
       snprintf(occ.summary, sizeof(occ.summary), "%s", summary);
       if (location)
          snprintf(occ.location, sizeof(occ.location), "%s", location);
-      int64_t occ_id = calendar_db_occurrence_insert(&occ);
+      int64_t occ_id = 0;
+      calendar_db_occurrence_insert(&occ, &occ_id);
       OLOG_INFO("calendar: cached event_id=%lld occ_id=%lld cal_id=%lld all_day=%d "
                 "dtstart=%lld dtend=%lld dtstart_date='%s' dtend_date='%s'",
                 (long long)event_id, (long long)occ_id, (long long)evt.calendar_id, all_day,
@@ -1207,10 +1218,11 @@ int calendar_service_update(int user_id,
    free(evt.raw_ical);
    evt.raw_ical = (char *)ical; /* temp pointer, copied by upsert */
    evt.last_synced = now;
-   int64_t event_id = calendar_db_event_upsert(&evt);
+   int64_t event_id = 0;
+   int upsert_rc = calendar_db_event_upsert(&evt, &event_id);
    evt.raw_ical = NULL; /* stack buffer, do not free */
 
-   if (event_id > 0) {
+   if (upsert_rc == 0) {
       calendar_db_occurrence_delete_for_event(event_id);
       calendar_occurrence_t occ = { 0 };
       occ.event_id = event_id;
@@ -1221,7 +1233,7 @@ int calendar_service_update(int user_id,
       snprintf(occ.dtend_date, sizeof(occ.dtend_date), "%s", evt.dtend_date);
       snprintf(occ.summary, sizeof(occ.summary), "%s", evt.summary);
       snprintf(occ.location, sizeof(occ.location), "%s", evt.location);
-      calendar_db_occurrence_insert(&occ);
+      calendar_db_occurrence_insert(&occ, NULL);
    }
 
    OLOG_INFO("calendar: updated event '%s'", evt.summary);
@@ -1294,7 +1306,8 @@ int calendar_service_get_access_summary(int user_id,
                                         char *read_only_out,
                                         size_t r_len) {
    calendar_calendar_t cals[32];
-   int count = calendar_db_active_calendars_for_user(user_id, cals, 32);
+   int count = 0;
+   calendar_db_active_calendars_for_user(user_id, cals, 32, &count);
    if (count <= 0)
       return 0;
 
@@ -1342,7 +1355,8 @@ static void *sync_thread_func(void *arg) {
 
       /* Sync all enabled accounts that are due */
       calendar_account_t accounts[CALENDAR_MAX_ACCOUNTS];
-      int acct_count = calendar_db_account_list_enabled(accounts, CALENDAR_MAX_ACCOUNTS);
+      int acct_count = 0;
+      calendar_db_account_list_enabled(accounts, CALENDAR_MAX_ACCOUNTS, &acct_count);
 
       time_t now = time(NULL);
       int synced = 0;

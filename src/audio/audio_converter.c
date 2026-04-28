@@ -211,19 +211,23 @@ size_t audio_converter_max_output_frames(audio_converter_t *conv, size_t input_f
    return (size_t)((double)input_frames * conv->ratio * 1.1) + 16;
 }
 
-ssize_t audio_converter_process(audio_converter_t *conv,
-                                const int16_t *input,
-                                size_t input_frames,
-                                int16_t *output,
-                                size_t output_max_frames) {
-   if (!conv || !input || !output || input_frames == 0) {
-      return -1;
+int audio_converter_process(audio_converter_t *conv,
+                            const int16_t *input,
+                            size_t input_frames,
+                            int16_t *output,
+                            size_t output_max_frames,
+                            size_t *frames_out) {
+   if (frames_out)
+      *frames_out = 0;
+
+   if (!conv || !input || !output || input_frames == 0 || !frames_out) {
+      return 1;
    }
 
    if (input_frames > AUDIO_CONV_MAX_INPUT_FRAMES) {
       OLOG_ERROR("audio_converter: input too large (%zu > %d)", input_frames,
                  AUDIO_CONV_MAX_INPUT_FRAMES);
-      return -1;
+      return 1;
    }
 
    size_t output_frames = 0;
@@ -248,7 +252,7 @@ ssize_t audio_converter_process(audio_converter_t *conv,
       int error = src_process(conv->resampler, &src_data);
       if (error) {
          OLOG_ERROR("audio_converter: resample error: %s", src_strerror(error));
-         return -1;
+         return 1;
       }
 
       resampled = conv->float_out;
@@ -262,7 +266,7 @@ ssize_t audio_converter_process(audio_converter_t *conv,
    if (output_max_frames < resampled_frames) {
       OLOG_ERROR("audio_converter: output buffer too small (%zu < %zu)", output_max_frames,
                  resampled_frames);
-      return -1;
+      return 1;
    }
 
    if (conv->input_channels == 1 && output_channels == 2) {
@@ -296,10 +300,11 @@ ssize_t audio_converter_process(audio_converter_t *conv,
       /* Unsupported channel configuration */
       OLOG_ERROR("audio_converter: unsupported channel config %u->%u", conv->input_channels,
                  output_channels);
-      return -1;
+      return 1;
    }
 
-   return (ssize_t)output_frames;
+   *frames_out = output_frames;
+   return 0;
 }
 
 void audio_converter_reset(audio_converter_t *conv) {

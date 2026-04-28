@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
+#include "dawn_error.h"
 #include "tools/document_db.h"
 
 /* ============================================================================
@@ -257,11 +258,12 @@ static void teardown_db(void) {
 static void test_create_and_get(void) {
    printf("\n--- test_create_and_get ---\n");
 
-   int64_t id = document_db_create(1, "report.pdf", "/docs/report.pdf", "pdf",
-                                   "aabbccdd11223344aabbccdd11223344"
-                                   "aabbccdd11223344aabbccdd11223344",
-                                   5, false);
-   TEST_ASSERT(id > 0, "create returns positive ID");
+   int64_t id = 0;
+   int create_rc = document_db_create(1, "report.pdf", "/docs/report.pdf", "pdf",
+                                      "aabbccdd11223344aabbccdd11223344"
+                                      "aabbccdd11223344aabbccdd11223344",
+                                      5, false, &id);
+   TEST_ASSERT(create_rc == SUCCESS && id > 0, "create returns SUCCESS with positive ID");
 
    document_t doc;
    int rc = document_db_get(id, &doc);
@@ -284,7 +286,7 @@ static void test_get_nonexistent(void) {
 
    document_t doc;
    int rc = document_db_get(99999, &doc);
-   TEST_ASSERT(rc == -1, "get non-existent returns -1");
+   TEST_ASSERT(rc == FAILURE, "get non-existent returns FAILURE");
 }
 
 /* ============================================================================
@@ -294,9 +296,10 @@ static void test_get_nonexistent(void) {
 static void test_delete(void) {
    printf("\n--- test_delete ---\n");
 
-   int64_t id = document_db_create(
-       1, "temp.txt", "/docs/temp.txt", "txt",
-       "1111111111111111111111111111111111111111111111111111111111111111", 1, false);
+   int64_t id = 0;
+   document_db_create(1, "temp.txt", "/docs/temp.txt", "txt",
+                      "1111111111111111111111111111111111111111111111111111111111111111", 1, false,
+                      &id);
    TEST_ASSERT(id > 0, "create for delete test");
 
    int rc = document_db_delete(id);
@@ -304,7 +307,7 @@ static void test_delete(void) {
 
    document_t doc;
    rc = document_db_get(id, &doc);
-   TEST_ASSERT(rc == -1, "get after delete returns -1");
+   TEST_ASSERT(rc == FAILURE, "get after delete returns FAILURE");
 }
 
 /* ============================================================================
@@ -315,16 +318,20 @@ static void test_count_user(void) {
    printf("\n--- test_count_user ---\n");
 
    /* User 2 starts with 0 docs */
-   int count = document_db_count_user(2);
+   int count = 0;
+   document_db_count_user(2, &count);
    TEST_ASSERT(count == 0, "user 2 starts with 0 docs");
 
    /* Create two docs for user 2 */
+   int64_t tmp_id = 0;
    document_db_create(2, "a.txt", "a.txt", "txt",
-                      "2222222222222222222222222222222222222222222222222222222222222222", 1, false);
+                      "2222222222222222222222222222222222222222222222222222222222222222", 1, false,
+                      &tmp_id);
    document_db_create(2, "b.txt", "b.txt", "txt",
-                      "3333333333333333333333333333333333333333333333333333333333333333", 2, false);
+                      "3333333333333333333333333333333333333333333333333333333333333333", 2, false,
+                      &tmp_id);
 
-   count = document_db_count_user(2);
+   document_db_count_user(2, &count);
    TEST_ASSERT(count == 2, "user 2 has 2 docs after creating two");
 }
 
@@ -336,15 +343,18 @@ static void test_find_by_hash(void) {
    printf("\n--- test_find_by_hash ---\n");
 
    const char *hash = "4444444444444444444444444444444444444444444444444444444444444444";
-   int64_t id = document_db_create(1, "hashed.md", "hashed.md", "md", hash, 3, false);
+   int64_t id = 0;
+   document_db_create(1, "hashed.md", "hashed.md", "md", hash, 3, false, &id);
    TEST_ASSERT(id > 0, "create doc with known hash");
 
-   int64_t found = document_db_find_by_hash(hash, 1);
+   int64_t found = 0;
+   document_db_find_by_hash(hash, 1, &found);
    TEST_ASSERT(found == id, "find_by_hash returns correct ID");
 
-   int64_t not_found = document_db_find_by_hash("0000000000000000000000000000000000000000000"
-                                                "000000000000000000000000",
-                                                1);
+   int64_t not_found = 0;
+   document_db_find_by_hash("0000000000000000000000000000000000000000000"
+                            "000000000000000000000000",
+                            1, &not_found);
    TEST_ASSERT(not_found == 0, "find_by_hash returns 0 for unknown hash");
 }
 
@@ -356,8 +366,9 @@ static void test_list(void) {
    printf("\n--- test_list ---\n");
 
    document_t docs[10];
-   int count = document_db_list(1, docs, 10, 0);
-   TEST_ASSERT(count >= 0, "list returns non-negative count");
+   int count = 0;
+   int list_rc = document_db_list(1, docs, 10, 0, &count);
+   TEST_ASSERT(list_rc == SUCCESS && count >= 0, "list returns SUCCESS with non-negative count");
 
    /* All returned docs should belong to user 1 or be global */
    int all_accessible = 1;
@@ -376,8 +387,10 @@ static void test_list_all(void) {
    printf("\n--- test_list_all ---\n");
 
    document_t docs[20];
-   int count = document_db_list_all(docs, 20, 0);
-   TEST_ASSERT(count >= 0, "list_all returns non-negative count");
+   int count = 0;
+   int list_rc = document_db_list_all(docs, 20, 0, &count);
+   TEST_ASSERT(list_rc == SUCCESS && count >= 0,
+               "list_all returns SUCCESS with non-negative count");
 
    /* Should include docs from both users */
    int has_user1 = 0, has_user2 = 0;
@@ -409,15 +422,18 @@ static void test_list_pagination(void) {
    document_t docs[5];
 
    /* Get first page (limit 2) */
-   int page1 = document_db_list_all(docs, 2, 0);
+   int page1 = 0;
+   document_db_list_all(docs, 2, 0, &page1);
    TEST_ASSERT(page1 >= 0, "page 1 returns non-negative count");
 
    /* Get second page */
-   int page2 = document_db_list_all(docs, 2, 2);
+   int page2 = 0;
+   document_db_list_all(docs, 2, 2, &page2);
    TEST_ASSERT(page2 >= 0, "page 2 returns non-negative count");
 
    /* Total should equal list_all with high limit */
-   int total = document_db_list_all(docs, 20, 0);
+   int total = 0;
+   document_db_list_all(docs, 20, 0, &total);
    TEST_ASSERT(page1 + page2 <= total, "pages don't exceed total");
 }
 
@@ -428,9 +444,10 @@ static void test_list_pagination(void) {
 static void test_update_global(void) {
    printf("\n--- test_update_global ---\n");
 
-   int64_t id = document_db_create(
-       1, "private.txt", "private.txt", "txt",
-       "5555555555555555555555555555555555555555555555555555555555555555", 1, false);
+   int64_t id = 0;
+   document_db_create(1, "private.txt", "private.txt", "txt",
+                      "5555555555555555555555555555555555555555555555555555555555555555", 1, false,
+                      &id);
    TEST_ASSERT(id > 0, "create private doc");
 
    document_t doc;
@@ -457,14 +474,16 @@ static void test_update_global(void) {
 static void test_global_visibility(void) {
    printf("\n--- test_global_visibility ---\n");
 
-   int64_t id = document_db_create(
-       1, "shared.pdf", "shared.pdf", "pdf",
-       "6666666666666666666666666666666666666666666666666666666666666666", 2, true);
+   int64_t id = 0;
+   document_db_create(1, "shared.pdf", "shared.pdf", "pdf",
+                      "6666666666666666666666666666666666666666666666666666666666666666", 2, true,
+                      &id);
    TEST_ASSERT(id > 0, "create global doc owned by user 1");
 
    /* User 2 should see it in their list */
    document_t docs[10];
-   int count = document_db_list(2, docs, 10, 0);
+   int count = 0;
+   document_db_list(2, docs, 10, 0, &count);
    int found = 0;
    for (int i = 0; i < count; i++) {
       if (docs[i].id == id)
@@ -480,9 +499,10 @@ static void test_global_visibility(void) {
 static void test_find_by_name(void) {
    printf("\n--- test_find_by_name ---\n");
 
-   int64_t id = document_db_create(
-       1, "MyReport2024.pdf", "MyReport2024.pdf", "pdf",
-       "7777777777777777777777777777777777777777777777777777777777777777", 4, false);
+   int64_t id = 0;
+   document_db_create(1, "MyReport2024.pdf", "MyReport2024.pdf", "pdf",
+                      "7777777777777777777777777777777777777777777777777777777777777777", 4, false,
+                      &id);
    TEST_ASSERT(id > 0, "create doc for name search");
 
    document_t doc;
@@ -495,11 +515,11 @@ static void test_find_by_name(void) {
    TEST_ASSERT(doc.id == id, "partial match returns correct doc");
 
    rc = document_db_find_by_name(1, "nonexistent_document", &doc);
-   TEST_ASSERT(rc == -1, "non-existent name returns -1");
+   TEST_ASSERT(rc == FAILURE, "non-existent name returns FAILURE");
 
    /* User 2 should NOT find user 1's private doc */
    rc = document_db_find_by_name(2, "MyReport2024.pdf", &doc);
-   TEST_ASSERT(rc == -1, "other user cannot find private doc by name");
+   TEST_ASSERT(rc == FAILURE, "other user cannot find private doc by name");
 }
 
 /* ============================================================================
@@ -509,24 +529,27 @@ static void test_find_by_name(void) {
 static void test_chunk_create_and_read(void) {
    printf("\n--- test_chunk_create_and_read ---\n");
 
-   int64_t doc_id = document_db_create(1, "chunked.txt", "chunked.txt", "txt",
-                                       "888888888888888888888888888888888888888888888888888888"
-                                       "8888888888",
-                                       3, false);
+   int64_t doc_id = 0;
+   document_db_create(1, "chunked.txt", "chunked.txt", "txt",
+                      "888888888888888888888888888888888888888888888888888888"
+                      "8888888888",
+                      3, false, &doc_id);
    TEST_ASSERT(doc_id > 0, "create doc for chunk test");
 
    /* Create 3 chunks with dummy embeddings */
    float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-   int64_t c0 = document_db_chunk_create(doc_id, 0, "First chunk text.", emb, 4, 1.0f, 0);
-   int64_t c1 = document_db_chunk_create(doc_id, 1, "Second chunk text.", emb, 4, 1.0f, 0);
-   int64_t c2 = document_db_chunk_create(doc_id, 2, "Third chunk text.", emb, 4, 1.0f, 0);
+   int64_t c0 = 0, c1 = 0, c2 = 0;
+   document_db_chunk_create(doc_id, 0, "First chunk text.", emb, 4, 1.0f, 0, &c0);
+   document_db_chunk_create(doc_id, 1, "Second chunk text.", emb, 4, 1.0f, 0, &c1);
+   document_db_chunk_create(doc_id, 2, "Third chunk text.", emb, 4, 1.0f, 0, &c2);
    TEST_ASSERT(c0 > 0, "chunk 0 created");
    TEST_ASSERT(c1 > 0, "chunk 1 created");
    TEST_ASSERT(c2 > 0, "chunk 2 created");
 
    /* Read all chunks */
    document_chunk_t chunks[5];
-   int count = document_db_chunk_read(doc_id, chunks, 5, 0);
+   int count = 0;
+   document_db_chunk_read(doc_id, chunks, 5, 0, &count);
    TEST_ASSERT(count == 3, "read returns 3 chunks");
    TEST_ASSERT(chunks[0].chunk_index == 0, "chunk 0 index correct");
    TEST_ASSERT(chunks[1].chunk_index == 1, "chunk 1 index correct");
@@ -535,7 +558,7 @@ static void test_chunk_create_and_read(void) {
    TEST_ASSERT(strcmp(chunks[2].text, "Third chunk text.") == 0, "chunk 2 text matches");
 
    /* Paginated read: start at chunk 1, limit 2 */
-   count = document_db_chunk_read(doc_id, chunks, 2, 1);
+   document_db_chunk_read(doc_id, chunks, 2, 1, &count);
    TEST_ASSERT(count == 2, "paginated read returns 2 chunks");
    TEST_ASSERT(chunks[0].chunk_index == 1, "first paginated chunk is index 1");
    TEST_ASSERT(chunks[1].chunk_index == 2, "second paginated chunk is index 2");
@@ -548,21 +571,26 @@ static void test_chunk_create_and_read(void) {
 static void test_invalid_params(void) {
    printf("\n--- test_invalid_params ---\n");
 
-   /* NULL output */
-   TEST_ASSERT(document_db_list(1, NULL, 10, 0) == -1, "list with NULL out returns -1");
-   TEST_ASSERT(document_db_list_all(NULL, 10, 0) == -1, "list_all with NULL out returns -1");
+   /* NULL output params */
+   int dummy_count = 0;
+   TEST_ASSERT(document_db_list(1, NULL, 10, 0, &dummy_count) == FAILURE,
+               "list with NULL out returns FAILURE");
+   TEST_ASSERT(document_db_list_all(NULL, 10, 0, &dummy_count) == FAILURE,
+               "list_all with NULL out returns FAILURE");
 
    /* Zero/negative limit */
    document_t docs[5];
-   TEST_ASSERT(document_db_list(1, docs, 0, 0) == -1, "list with limit 0 returns -1");
-   TEST_ASSERT(document_db_list(1, docs, -1, 0) == -1, "list with negative limit returns -1");
+   TEST_ASSERT(document_db_list(1, docs, 0, 0, &dummy_count) == FAILURE,
+               "list with limit 0 returns FAILURE");
+   TEST_ASSERT(document_db_list(1, docs, -1, 0, &dummy_count) == FAILURE,
+               "list with negative limit returns FAILURE");
 
    /* Delete non-existent */
-   TEST_ASSERT(document_db_delete(99999) == -1, "delete non-existent returns -1");
+   TEST_ASSERT(document_db_delete(99999) == FAILURE, "delete non-existent returns FAILURE");
 
    /* Update global non-existent */
-   TEST_ASSERT(document_db_update_global(99999, true) == -1,
-               "update_global non-existent returns -1");
+   TEST_ASSERT(document_db_update_global(99999, true) == FAILURE,
+               "update_global non-existent returns FAILURE");
 }
 
 /* ============================================================================
@@ -572,26 +600,29 @@ static void test_invalid_params(void) {
 static void test_cascade_delete(void) {
    printf("\n--- test_cascade_delete ---\n");
 
-   int64_t doc_id = document_db_create(1, "cascade.txt", "cascade.txt", "txt",
-                                       "999999999999999999999999999999999999999999999999999999"
-                                       "9999999999",
-                                       2, false);
+   int64_t doc_id = 0;
+   document_db_create(1, "cascade.txt", "cascade.txt", "txt",
+                      "999999999999999999999999999999999999999999999999999999"
+                      "9999999999",
+                      2, false, &doc_id);
    TEST_ASSERT(doc_id > 0, "create doc for cascade test");
 
    float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
-   document_db_chunk_create(doc_id, 0, "Chunk A", emb, 4, 1.0f, 0);
-   document_db_chunk_create(doc_id, 1, "Chunk B", emb, 4, 1.0f, 0);
+   int64_t tmp_chunk = 0;
+   document_db_chunk_create(doc_id, 0, "Chunk A", emb, 4, 1.0f, 0, &tmp_chunk);
+   document_db_chunk_create(doc_id, 1, "Chunk B", emb, 4, 1.0f, 0, &tmp_chunk);
 
    /* Verify chunks exist */
    document_chunk_t chunks[5];
-   int count = document_db_chunk_read(doc_id, chunks, 5, 0);
+   int count = 0;
+   document_db_chunk_read(doc_id, chunks, 5, 0, &count);
    TEST_ASSERT(count == 2, "chunks exist before delete");
 
    /* Delete document — chunks should cascade */
    int rc = document_db_delete(doc_id);
    TEST_ASSERT(rc == 0, "delete returns success");
 
-   count = document_db_chunk_read(doc_id, chunks, 5, 0);
+   document_db_chunk_read(doc_id, chunks, 5, 0, &count);
    TEST_ASSERT(count == 0, "chunks removed after cascade delete");
 }
 

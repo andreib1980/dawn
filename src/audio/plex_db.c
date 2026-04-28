@@ -44,6 +44,7 @@
 #include "audio/music_source.h"
 #include "audio/plex_client.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -119,15 +120,20 @@ static int json_int(json_object *obj, const char *key) {
 
 /**
  * Extract tracks from one page of Plex API response into the track array.
- * Returns number of tracks extracted, or -1 on error.
+ * @param count_out  Output: number of tracks extracted
+ * @return 0 on success, 1 on error
  */
 static int extract_tracks_from_page(json_object *root,
                                     plex_track_t *tracks,
                                     int max_tracks,
-                                    int current_count) {
+                                    int current_count,
+                                    int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
    json_object *container;
    if (!json_object_object_get_ex(root, "MediaContainer", &container))
-      return -1;
+      return 1;
 
    json_object *metadata;
    if (!json_object_object_get_ex(container, "Metadata", &metadata) ||
@@ -199,19 +205,24 @@ static int extract_tracks_from_page(json_object *root,
       extracted++;
    }
 
-   return extracted;
+   if (count_out)
+      *count_out = extracted;
+   return 0;
 }
 
 /* =============================================================================
  * Phase 2: Bulk insert into music_metadata
  * ============================================================================= */
 
-static int bulk_insert_tracks(plex_track_t *tracks, int count) {
+static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out) {
+   if (inserted_out)
+      *inserted_out = 0;
+
    pthread_mutex_lock(&g_plex_db_mutex);
 
    if (!g_plex_db) {
       pthread_mutex_unlock(&g_plex_db_mutex);
-      return -1;
+      return 1;
    }
 
    g_sync_gen++;
@@ -227,7 +238,7 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("Plex sync: failed to prepare insert: %s", sqlite3_errmsg(g_plex_db));
       pthread_mutex_unlock(&g_plex_db_mutex);
-      return -1;
+      return 1;
    }
 
    char *err_msg = NULL;
@@ -283,7 +294,9 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count) {
    }
 
    pthread_mutex_unlock(&g_plex_db_mutex);
-   return inserted;
+   if (inserted_out)
+      *inserted_out = inserted;
+   return 0;
 }
 
 /* =============================================================================
@@ -295,7 +308,7 @@ static int plex_init(const char *db_path) {
     * plex_client_init() is idempotent — safe if webui_music_init() calls it later. */
    if (plex_client_init() != 0) {
       OLOG_ERROR("Plex sync: failed to initialize Plex API client");
-      return -1;
+      return FAILURE;
    }
 
    pthread_mutex_lock(&g_plex_db_mutex);
@@ -310,7 +323,7 @@ static int plex_init(const char *db_path) {
    if (!path_expand_tilde(db_path, expanded_path, sizeof(expanded_path))) {
       OLOG_ERROR("Plex sync: failed to expand database path: %s", db_path);
       pthread_mutex_unlock(&g_plex_db_mutex);
-      return -1;
+      return FAILURE;
    }
 
    int rc = sqlite3_open(expanded_path, &g_plex_db);
@@ -320,7 +333,7 @@ static int plex_init(const char *db_path) {
       sqlite3_close(g_plex_db);
       g_plex_db = NULL;
       pthread_mutex_unlock(&g_plex_db_mutex);
-      return -1;
+      return FAILURE;
    }
 
    /* WAL mode for concurrent access with music_db.c's handle */
@@ -371,7 +384,7 @@ static int plex_sync(void) {
    plex_track_t *tracks = malloc(capacity * sizeof(plex_track_t));
    if (!tracks) {
       OLOG_ERROR("Plex sync: failed to allocate track array");
-      return -1;
+      return FAILURE;
    }
 
    int offset = 0;
@@ -453,17 +466,17 @@ static int plex_sync(void) {
    if (total_tracks == 0) {
       OLOG_WARNING("Plex sync: no tracks fetched from Plex API");
       free(tracks);
-      return -1;
+      return FAILURE;
    }
 
    /* Phase 2: Bulk insert into database */
-   int inserted = bulk_insert_tracks(tracks, total_tracks);
-   free(tracks);
-
-   if (inserted < 0) {
+   int inserted = 0;
+   if (bulk_insert_tracks(tracks, total_tracks, &inserted) != 0) {
       OLOG_ERROR("Plex sync: bulk insert failed");
-      return -1;
+      free(tracks);
+      return FAILURE;
    }
+   free(tracks);
 
    g_last_scanned_at = scanned_at;
    g_initial_sync_complete = true;

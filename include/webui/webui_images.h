@@ -68,12 +68,12 @@ typedef struct http_image_session {
  * @brief Handle image upload request start (POST /api/images)
  *
  * Validates authentication, allocates upload buffer.
- * Returns 0 to continue to body callbacks, -1 on error.
+ * Returns 0 to continue to body callbacks, LWS_CLOSE_CONNECTION on error.
  *
  * @param wsi WebSocket/HTTP connection
  * @param session Output: allocated image session (caller must free)
  * @param user_id Authenticated user ID
- * @return 0 on success, -1 on error
+ * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
 int webui_images_handle_upload_start(struct lws *wsi, http_image_session_t **session, int user_id);
 
@@ -86,7 +86,7 @@ int webui_images_handle_upload_start(struct lws *wsi, http_image_session_t **ses
  * @param session Image session
  * @param data Incoming data chunk
  * @param len Length of data chunk
- * @return 0 on success, -1 on error
+ * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
 int webui_images_handle_upload_body(struct lws *wsi,
                                     http_image_session_t *session,
@@ -101,7 +101,7 @@ int webui_images_handle_upload_body(struct lws *wsi,
  *
  * @param wsi WebSocket/HTTP connection
  * @param session Image session (will be freed)
- * @return -1 to close connection (response sent)
+ * @return LWS_CLOSE_CONNECTION to close connection (response sent)
  */
 int webui_images_handle_upload_complete(struct lws *wsi, http_image_session_t *session);
 
@@ -113,7 +113,7 @@ int webui_images_handle_upload_complete(struct lws *wsi, http_image_session_t *s
  * @param wsi WebSocket/HTTP connection
  * @param image_id Image ID from URL path
  * @param user_id Authenticated user ID (0 for admin bypass)
- * @return -1 to close connection (response sent)
+ * @return LWS_CLOSE_CONNECTION to close connection (response sent)
  */
 int webui_images_handle_download(struct lws *wsi, const char *image_id, int user_id);
 

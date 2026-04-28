@@ -189,9 +189,11 @@ void handle_contacts_list(ws_connection_t *conn, json_object *payload) {
    contact_result_t results[fetch_count];
    memset(results, 0, sizeof(contact_result_t) * fetch_count);
 
-   int count = contacts_list(conn->auth_user_id, field_type, results, fetch_count, offset);
+   int count = 0;
+   int list_rc = contacts_list(conn->auth_user_id, field_type, results, fetch_count, offset,
+                               &count);
 
-   if (count < 0) {
+   if (list_rc != 0) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to list contacts"));
@@ -248,9 +250,10 @@ void handle_contacts_search(ws_connection_t *conn, json_object *payload) {
       field_type = json_object_get_string(ft_obj);
 
    contact_result_t results[20];
-   int count = contacts_find(conn->auth_user_id, name, field_type, results, 20);
+   int count = 0;
+   int find_rc = contacts_find(conn->auth_user_id, name, field_type, results, 20, &count);
 
-   if (count < 0) {
+   if (find_rc != 0) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Search failed"));
    } else {
@@ -373,7 +376,8 @@ void handle_contacts_add(ws_connection_t *conn, json_object *payload) {
       } else if (!force_create) {
          /* No exact match — search for similar person entities */
          memory_entity_t similar[10];
-         int sim_count = memory_db_entity_search(conn->auth_user_id, entity_name, similar, 10);
+         int sim_count = 0;
+         memory_db_entity_search(conn->auth_user_id, entity_name, similar, 10, &sim_count);
 
          /* Filter to person entities only */
          int person_count = 0;
@@ -404,16 +408,16 @@ void handle_contacts_add(ws_connection_t *conn, json_object *payload) {
          }
 
          /* No similar people — create new entity */
-         entity_id = memory_db_entity_upsert(conn->auth_user_id, entity_name, "person", canonical,
-                                             &created);
+         memory_db_entity_upsert(conn->auth_user_id, entity_name, "person", canonical, &created,
+                                 &entity_id);
       } else {
          /* force_create — skip disambiguation, create new entity directly */
-         entity_id = memory_db_entity_upsert(conn->auth_user_id, entity_name, "person", canonical,
-                                             &created);
+         memory_db_entity_upsert(conn->auth_user_id, entity_name, "person", canonical, &created,
+                                 &entity_id);
       }
    }
 
-   if (entity_id < 0) {
+   if (entity_id <= 0) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to find or create entity"));
@@ -599,7 +603,8 @@ void handle_contacts_search_entities(ws_connection_t *conn, json_object *payload
    }
 
    memory_entity_t entities[10];
-   int count = memory_db_entity_search(conn->auth_user_id, query, entities, 10);
+   int count = 0;
+   memory_db_entity_search(conn->auth_user_id, query, entities, 10, &count);
 
    json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    json_object *arr = json_object_new_array();
@@ -744,9 +749,10 @@ void handle_entity_ensure(ws_connection_t *conn, json_object *payload) {
    memory_make_canonical_name(name, canonical, sizeof(canonical));
 
    bool created = false;
-   int64_t entity_id = memory_db_entity_upsert(conn->auth_user_id, name, "person", canonical,
-                                               &created);
-   if (entity_id < 0) {
+   int64_t entity_id = 0;
+   int upsert_rc = memory_db_entity_upsert(conn->auth_user_id, name, "person", canonical, &created,
+                                           &entity_id);
+   if (upsert_rc != MEMORY_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to create entity"));

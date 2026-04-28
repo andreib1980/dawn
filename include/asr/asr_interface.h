@@ -59,6 +59,7 @@ extern "C" {
  * @brief ASR engine types
  */
 typedef enum {
+   ASR_ENGINE_NONE = -1,  /**< Invalid/unknown engine (returned on NULL context) */
    ASR_ENGINE_VOSK = 0,   /**< Vosk ASR engine (Kaldi-based, supports streaming) */
    ASR_ENGINE_WHISPER = 1 /**< Whisper ASR engine (OpenAI, batch processing) */
 } asr_engine_type_t;
@@ -173,7 +174,7 @@ const char *asr_engine_name(asr_engine_type_t engine_type);
  * Useful for conditional logic and validation (e.g., chunking manager Whisper-only check).
  *
  * @param ctx ASR context (must not be NULL)
- * @return Engine type (ASR_ENGINE_VOSK or ASR_ENGINE_WHISPER), or -1 if ctx is NULL
+ * @return Engine type (ASR_ENGINE_VOSK or ASR_ENGINE_WHISPER), or ASR_ENGINE_NONE if ctx is NULL
  */
 asr_engine_type_t asr_get_engine_type(asr_context_t *ctx);
 

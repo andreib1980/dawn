@@ -251,16 +251,15 @@ void *playFlacAudio(void *arg) {
       /* Write to playback device (with conversion if needed) */
       ssize_t frames_written;
       if (converter) {
-         ssize_t converted_frames = audio_converter_process(converter, read_buffer,
-                                                            (size_t)frames_read, output_buffer,
-                                                            output_buffer_frames);
-         if (converted_frames < 0) {
+         size_t converted_frames = 0;
+         if (audio_converter_process(converter, read_buffer, (size_t)frames_read, output_buffer,
+                                     output_buffer_frames, &converted_frames) != 0) {
             OLOG_ERROR("Audio conversion failed");
             break;
          }
 
          frames_written = audio_stream_playback_write(playback_handle, output_buffer,
-                                                      (size_t)converted_frames);
+                                                      converted_frames);
       } else {
          frames_written = audio_stream_playback_write(playback_handle, read_buffer,
                                                       (size_t)frames_read);

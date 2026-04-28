@@ -88,57 +88,77 @@ typedef struct {
  * @param file_hash SHA-256 hex string
  * @param num_chunks Number of chunks
  * @param is_global Whether accessible to all users
- * @return Document ID on success, -1 on failure
+ * @param[out] id_out Created document ID (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
-int64_t document_db_create(int user_id,
-                           const char *filename,
-                           const char *filepath,
-                           const char *filetype,
-                           const char *file_hash,
-                           int num_chunks,
-                           bool is_global);
+int document_db_create(int user_id,
+                       const char *filename,
+                       const char *filepath,
+                       const char *filetype,
+                       const char *file_hash,
+                       int num_chunks,
+                       bool is_global,
+                       int64_t *id_out);
 
 /**
  * @brief Get a document by ID
- * @return 0 on success, -1 on not found/failure
+ * @return SUCCESS (0) on success, FAILURE (1) on not found/error
  */
 int document_db_get(int64_t doc_id, document_t *out);
 
 /**
  * @brief Check if a document with this hash already exists for the user
- * @return Existing document ID if found, 0 if not found, -1 on error
+ *
+ * @param file_hash SHA-256 hex string
+ * @param user_id   User ID
+ * @param[out] id_out Existing document ID if found, 0 if not found (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
-int64_t document_db_find_by_hash(const char *file_hash, int user_id);
+int document_db_find_by_hash(const char *file_hash, int user_id, int64_t *id_out);
 
 /**
  * @brief List documents accessible to a user (own + global), paginated
- * @return Number of documents written to out[], -1 on error
+ *
+ * @param user_id   User ID
+ * @param out       Output array (caller allocates)
+ * @param limit     Maximum documents to return
+ * @param offset    Pagination offset
+ * @param[out] count_out Number of documents written to out[] (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
-int document_db_list(int user_id, document_t *out, int limit, int offset);
+int document_db_list(int user_id, document_t *out, int limit, int offset, int *count_out);
 
 /**
  * @brief List all documents across all users (admin view), paginated
- * @return Number of documents written to out[], -1 on error
+ *
+ * @param out       Output array (caller allocates)
+ * @param limit     Maximum documents to return
+ * @param offset    Pagination offset
+ * @param[out] count_out Number of documents written to out[] (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
-int document_db_list_all(document_t *out, int limit, int offset);
+int document_db_list_all(document_t *out, int limit, int offset, int *count_out);
 
 /**
  * @brief Update a document's global visibility flag
- * @return 0 on success, -1 on failure
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
 int document_db_update_global(int64_t doc_id, bool is_global);
 
 /**
  * @brief Delete a document and all its chunks (cascade)
- * @return 0 on success, -1 on failure
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
 int document_db_delete(int64_t doc_id);
 
 /**
  * @brief Count documents owned by a specific user (excludes global)
- * @return Count, or -1 on error
+ *
+ * @param user_id   User ID
+ * @param[out] count_out Number of documents (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
-int document_db_count_user(int user_id);
+int document_db_count_user(int user_id, int *count_out);
 
 /* =============================================================================
  * Chunk CRUD
@@ -153,15 +173,18 @@ int document_db_count_user(int user_id);
  * @param embedding Float vector (copied as BLOB)
  * @param dims Number of dimensions
  * @param embedding_norm Pre-computed L2 norm
- * @return Chunk ID on success, -1 on failure
+ * @param created_at Chunk origin timestamp (0 = unknown)
+ * @param[out] id_out Created chunk ID (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
-int64_t document_db_chunk_create(int64_t document_id,
-                                 int chunk_index,
-                                 const char *text,
-                                 const float *embedding,
-                                 int dims,
-                                 float embedding_norm,
-                                 int64_t created_at);
+int document_db_chunk_create(int64_t document_id,
+                             int chunk_index,
+                             const char *text,
+                             const float *embedding,
+                             int dims,
+                             float embedding_norm,
+                             int64_t created_at,
+                             int64_t *id_out);
 
 /**
  * @brief Find a document by name (exact match preferred, then partial)
@@ -172,7 +195,7 @@ int64_t document_db_chunk_create(int64_t document_id,
  * @param user_id User ID
  * @param name Document name or partial name to search for
  * @param out Output document struct
- * @return 0 on success, -1 on not found/failure
+ * @return SUCCESS (0) on success, FAILURE (1) on not found/error
  */
 int document_db_find_by_name(int user_id, const char *name, document_t *out);
 
@@ -183,12 +206,14 @@ int document_db_find_by_name(int user_id, const char *name, document_t *out);
  * @param chunks Output array (caller allocates, only chunk_index and text populated)
  * @param max_count Maximum chunks to read
  * @param start_chunk Starting chunk index (offset)
- * @return Number of chunks read, -1 on error
+ * @param[out] count_out Number of chunks read (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
 int document_db_chunk_read(int64_t document_id,
                            document_chunk_t *chunks,
                            int max_count,
-                           int start_chunk);
+                           int start_chunk,
+                           int *count_out);
 
 /**
  * @brief Load all chunks accessible to a user for vector search
@@ -201,13 +226,15 @@ int document_db_chunk_read(int64_t document_id,
  * @param embedding_buf Flat float buffer for embeddings
  * @param dims Expected embedding dimensions
  * @param max_count Maximum chunks to load
- * @return Number of chunks loaded, -1 on error
+ * @param[out] count_out Number of chunks loaded (must not be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on error
  */
 int document_db_chunk_search_load(int user_id,
                                   document_chunk_t *chunks,
                                   float *embedding_buf,
                                   int dims,
-                                  int max_count);
+                                  int max_count,
+                                  int *count_out);
 
 #ifdef __cplusplus
 }

@@ -59,24 +59,27 @@ int memory_build_context(int user_id, char *buffer, size_t buffer_size, int toke
 
    /* Load preferences */
    memory_preference_t prefs[MAX_CONTEXT_PREFS];
-   int pref_count = memory_db_pref_list(user_id, prefs, MAX_CONTEXT_PREFS, 0);
-   if (pref_count < 0) {
+   int pref_count = 0;
+   if (memory_db_pref_list(user_id, prefs, MAX_CONTEXT_PREFS, 0, &pref_count) !=
+       MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_context: failed to load preferences for user %d", user_id);
       pref_count = 0;
    }
 
    /* Load top facts by confidence */
    memory_fact_t facts[MAX_CONTEXT_FACTS];
-   int fact_count = memory_db_fact_list(user_id, facts, MAX_CONTEXT_FACTS, 0);
-   if (fact_count < 0) {
+   int fact_count = 0;
+   if (memory_db_fact_list(user_id, facts, MAX_CONTEXT_FACTS, 0, &fact_count) !=
+       MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_context: failed to load facts for user %d", user_id);
       fact_count = 0;
    }
 
    /* Load recent summaries */
    memory_summary_t summaries[MAX_CONTEXT_SUMMARIES];
-   int summary_count = memory_db_summary_list(user_id, summaries, MAX_CONTEXT_SUMMARIES, 0);
-   if (summary_count < 0) {
+   int summary_count = 0;
+   if (memory_db_summary_list(user_id, summaries, MAX_CONTEXT_SUMMARIES, 0, &summary_count) !=
+       MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_context: failed to load summaries for user %d", user_id);
       summary_count = 0;
    }

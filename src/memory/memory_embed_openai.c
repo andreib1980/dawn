@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "tools/curl_buffer.h"
@@ -48,7 +49,7 @@ static char s_api_key[256];
 static int openai_init(const char *endpoint, const char *model, const char *api_key) {
    if (!api_key || api_key[0] == '\0') {
       OLOG_ERROR("memory_embed_openai: API key required");
-      return -1;
+      return FAILURE;
    }
 
    if (endpoint && endpoint[0]) {
@@ -80,7 +81,7 @@ static void openai_cleanup(void) {
 
 static int openai_embed(const char *text, float *out, int max_dims, int *out_dims) {
    if (!text || !out || !out_dims)
-      return -1;
+      return FAILURE;
 
    *out_dims = 0;
 
@@ -98,7 +99,7 @@ static int openai_embed(const char *text, float *out, int max_dims, int *out_dim
    CURL *curl = curl_easy_init();
    if (!curl) {
       json_object_put(req);
-      return -1;
+      return FAILURE;
    }
 
    curl_buffer_t buf;
@@ -127,7 +128,7 @@ static int openai_embed(const char *text, float *out, int max_dims, int *out_dim
    if (res != CURLE_OK) {
       OLOG_ERROR("memory_embed_openai: HTTP request failed: %s", curl_easy_strerror(res));
       curl_buffer_free(&buf);
-      return -1;
+      return FAILURE;
    }
 
    /* Parse response: {"data": [{"embedding": [0.1, 0.2, ...]}]} */
@@ -136,7 +137,7 @@ static int openai_embed(const char *text, float *out, int max_dims, int *out_dim
 
    if (!resp) {
       OLOG_ERROR("memory_embed_openai: failed to parse response");
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *data_arr;
@@ -150,19 +151,19 @@ static int openai_embed(const char *text, float *out, int max_dims, int *out_dim
          }
       }
       json_object_put(resp);
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *first = json_object_array_get_idx(data_arr, 0);
    if (!first) {
       json_object_put(resp);
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *emb_arr;
    if (!json_object_object_get_ex(first, "embedding", &emb_arr)) {
       json_object_put(resp);
-      return -1;
+      return FAILURE;
    }
 
    int dims = json_object_array_length(emb_arr);

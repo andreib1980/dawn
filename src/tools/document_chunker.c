@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
+
 /* =============================================================================
  * Token Estimation
  * ============================================================================= */
@@ -50,30 +52,30 @@ static int result_init(chunk_result_t *r) {
    r->count = 0;
    r->capacity = 16;
    r->chunks = calloc((size_t)r->capacity, sizeof(char *));
-   return r->chunks ? 0 : -1;
+   return r->chunks ? SUCCESS : FAILURE;
 }
 
 static int result_add(chunk_result_t *r, const char *text, int len) {
    if (len <= 0)
-      return 0;
+      return SUCCESS;
 
    if (r->count >= r->capacity) {
       int new_cap = r->capacity * 2;
       char **new_chunks = realloc(r->chunks, (size_t)new_cap * sizeof(char *));
       if (!new_chunks)
-         return -1;
+         return FAILURE;
       r->chunks = new_chunks;
       r->capacity = new_cap;
    }
 
    char *copy = malloc((size_t)len + 1);
    if (!copy)
-      return -1;
+      return FAILURE;
    memcpy(copy, text, (size_t)len);
    copy[len] = '\0';
 
    r->chunks[r->count++] = copy;
-   return 0;
+   return SUCCESS;
 }
 
 void chunk_result_free(chunk_result_t *result) {
@@ -160,8 +162,8 @@ static int split_by_sentences(const char *text, int len, int max_chars, chunk_re
          while (start < len && isspace((unsigned char)text[start]))
             start++;
          if (start < len) {
-            if (result_add(r, text + start, len - start) != 0)
-               return -1;
+            if (result_add(r, text + start, len - start) != SUCCESS)
+               return FAILURE;
          }
          break;
       }
@@ -183,8 +185,8 @@ static int split_by_sentences(const char *text, int len, int max_chars, chunk_re
          while (end > start && isspace((unsigned char)text[end - 1]))
             end--;
          if (end > start) {
-            if (result_add(r, text + start, end - start) != 0)
-               return -1;
+            if (result_add(r, text + start, end - start) != SUCCESS)
+               return FAILURE;
          }
          start = best;
       } else {
@@ -202,14 +204,14 @@ static int split_by_sentences(const char *text, int len, int max_chars, chunk_re
          while (end > start && isspace((unsigned char)text[end - 1]))
             end--;
          if (end > start) {
-            if (result_add(r, text + start, end - start) != 0)
-               return -1;
+            if (result_add(r, text + start, end - start) != SUCCESS)
+               return FAILURE;
          }
          start = (word_break > start + max_chars / 2) ? word_break : start + max_chars;
       }
    }
 
-   return 0;
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -228,7 +230,7 @@ static int split_paragraphs(const char *text,
    int capacity = 32;
    text_span_t *spans = calloc((size_t)capacity, sizeof(text_span_t));
    if (!spans)
-      return -1;
+      return FAILURE;
 
    int count = 0;
    int pos = 0;
@@ -260,7 +262,7 @@ static int split_paragraphs(const char *text,
             text_span_t *new_spans = realloc(spans, (size_t)capacity * sizeof(text_span_t));
             if (!new_spans) {
                free(spans);
-               return -1;
+               return FAILURE;
             }
             spans = new_spans;
          }
@@ -276,7 +278,7 @@ static int split_paragraphs(const char *text,
 
    *out_spans = spans;
    *out_count = count;
-   return 0;
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -285,7 +287,7 @@ static int split_paragraphs(const char *text,
 
 int document_chunk_text(const char *text, const chunk_config_t *config, chunk_result_t *out) {
    if (!text || !out)
-      return -1;
+      return FAILURE;
 
    chunk_config_t cfg = CHUNK_CONFIG_DEFAULT;
    if (config)
@@ -296,7 +298,7 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
       out->chunks = NULL;
       out->count = 0;
       out->capacity = 0;
-      return 0;
+      return SUCCESS;
    }
 
    /* Convert token limits to approximate char limits */
@@ -307,22 +309,22 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
    /* Step 1: Split into paragraphs */
    text_span_t *paragraphs = NULL;
    int para_count = 0;
-   if (split_paragraphs(text, text_len, &paragraphs, &para_count) != 0)
-      return -1;
+   if (split_paragraphs(text, text_len, &paragraphs, &para_count) != SUCCESS)
+      return FAILURE;
 
    if (para_count == 0) {
       free(paragraphs);
       out->chunks = NULL;
       out->count = 0;
       out->capacity = 0;
-      return 0;
+      return SUCCESS;
    }
 
    /* Step 2: Split oversized paragraphs by sentences, collect all segments */
    chunk_result_t segments;
-   if (result_init(&segments) != 0) {
+   if (result_init(&segments) != SUCCESS) {
       free(paragraphs);
-      return -1;
+      return FAILURE;
    }
 
    for (int i = 0; i < para_count; i++) {
@@ -330,26 +332,26 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
       if (tokens > cfg.max_tokens) {
          /* Split this paragraph by sentences */
          if (split_by_sentences(paragraphs[i].start, paragraphs[i].len, max_chars, &segments) !=
-             0) {
+             SUCCESS) {
             chunk_result_free(&segments);
             free(paragraphs);
-            return -1;
+            return FAILURE;
          }
       } else {
          /* Paragraph fits as a single segment */
-         if (result_add(&segments, paragraphs[i].start, paragraphs[i].len) != 0) {
+         if (result_add(&segments, paragraphs[i].start, paragraphs[i].len) != SUCCESS) {
             chunk_result_free(&segments);
             free(paragraphs);
-            return -1;
+            return FAILURE;
          }
       }
    }
    free(paragraphs);
 
    /* Step 3: Merge small consecutive segments until target size */
-   if (result_init(out) != 0) {
+   if (result_init(out) != SUCCESS) {
       chunk_result_free(&segments);
-      return -1;
+      return FAILURE;
    }
 
    /* Accumulate segments into merged chunks */
@@ -357,7 +359,7 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
    if (!merge_buf) {
       chunk_result_free(&segments);
       chunk_result_free(out);
-      return -1;
+      return FAILURE;
    }
 
    int merge_len = 0;
@@ -369,11 +371,11 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
 
       if (merge_len > 0 && combined_tokens > cfg.target_tokens) {
          /* Flush current merge buffer as a chunk */
-         if (result_add(out, merge_buf, merge_len) != 0) {
+         if (result_add(out, merge_buf, merge_len) != SUCCESS) {
             free(merge_buf);
             chunk_result_free(&segments);
             chunk_result_free(out);
-            return -1;
+            return FAILURE;
          }
          merge_len = 0;
       }
@@ -390,11 +392,11 @@ int document_chunk_text(const char *text, const chunk_config_t *config, chunk_re
 
    /* Flush remaining */
    if (merge_len > 0) {
-      if (result_add(out, merge_buf, merge_len) != 0) {
+      if (result_add(out, merge_buf, merge_len) != SUCCESS) {
          free(merge_buf);
          chunk_result_free(&segments);
          chunk_result_free(out);
-         return -1;
+         return FAILURE;
       }
    }
 

@@ -255,7 +255,9 @@ static void test_list_by_subject_at(void) {
    memory_relation_t out[10];
 
    /* As-of 1500: only CityA row matches */
-   int n = memory_db_relation_list_by_subject_at(1, 50, 1500, out, 10);
+   int n = 0;
+   int rc = memory_db_relation_list_by_subject_at(1, 50, 1500, out, 10, &n);
+   TEST_ASSERT(rc == 0, "relation_list_by_subject_at succeeds");
    bool found_a = false, found_b = false;
    for (int i = 0; i < n; i++) {
       if (out[i].object_entity_id == 60)
@@ -267,7 +269,8 @@ static void test_list_by_subject_at(void) {
    TEST_ASSERT(!found_b, "as-of 1500 excludes CityB row (valid_from = 2000)");
 
    /* As-of 2500: only CityB row matches */
-   n = memory_db_relation_list_by_subject_at(1, 50, 2500, out, 10);
+   rc = memory_db_relation_list_by_subject_at(1, 50, 2500, out, 10, &n);
+   TEST_ASSERT(rc == 0, "relation_list_by_subject_at (2500) succeeds");
    found_a = false;
    found_b = false;
    for (int i = 0; i < n; i++) {
@@ -301,7 +304,9 @@ static void test_supersede_closes_at_new_valid_from(void) {
 
    /* As-of 2019: only Google should be valid */
    memory_relation_t out[10];
-   int n = memory_db_relation_list_by_subject_at(1, 10, 1546300800 /* 2019 */, out, 10);
+   int n = 0;
+   int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800 /* 2019 */, out, 10, &n);
+   TEST_ASSERT(rc == 0, "relation_list_by_subject_at (2019) succeeds");
    int works_at_count = 0;
    for (int i = 0; i < n; i++) {
       if (strcmp(out[i].relation, "works_at") == 0)
@@ -346,7 +351,9 @@ static void test_supersede_skips_close_for_historical_insert(void) {
 
    /* As-of 2019 returns Google only; as-of now returns Microsoft only. */
    memory_relation_t out[10];
-   int n = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10);
+   int n = 0;
+   int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10, &n);
+   TEST_ASSERT(rc == 0, "relation_list_by_subject_at (historical) succeeds");
    bool found_google_2019 = false;
    for (int i = 0; i < n; i++) {
       if (strcmp(out[i].relation, "works_at") == 0 && out[i].object_entity_id == 20)

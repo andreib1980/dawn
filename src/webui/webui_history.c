@@ -276,8 +276,9 @@ void handle_list_conversations(ws_connection_t *conn, struct json_object *payloa
       json_object_object_add(resp_payload, "conversations", conv_array);
 
       /* Include total count for pagination */
-      int total = conv_db_count(conn->auth_user_id);
-      json_object_object_add(resp_payload, "total", json_object_new_int(total >= 0 ? total : 0));
+      int total = 0;
+      conv_db_count(conn->auth_user_id, &total);
+      json_object_object_add(resp_payload, "total", json_object_new_int(total));
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
@@ -320,8 +321,9 @@ static bool should_skip_memory_extraction(ws_connection_t *conn) {
    }
 
    /* Re-verify from database to handle race conditions (e.g., set_private in flight) */
-   int db_private = conv_db_is_private(conn->active_conversation_id, conn->auth_user_id);
-   if (db_private > 0) {
+   bool db_private = false;
+   int priv_rc = conv_db_is_private(conn->active_conversation_id, conn->auth_user_id, &db_private);
+   if (priv_rc == AUTH_DB_SUCCESS && db_private) {
       /* Update cached state to match database */
       conn->active_conversation_private = true;
       OLOG_INFO("WebUI: privacy check found stale cache, conversation %lld is private",
@@ -329,7 +331,7 @@ static bool should_skip_memory_extraction(ws_connection_t *conn) {
       return true;
    }
 
-   /* db_private == 0 means not private, -1 means error/not found - proceed with extraction */
+   /* Not private, error, or not found - proceed with extraction */
    return false;
 }
 

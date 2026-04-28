@@ -559,11 +559,12 @@ void session_update_interaction_complete(session_t *session);
  * saves all messages, triggers memory extraction, then clears session history.
  *
  * @param session Session to save
- * @return Conversation ID on success, -1 on failure
+ * @param conv_id_out Output: conversation ID on success (must not be NULL)
+ * @return 0 on success, 1 on failure
  *
  * @locks session->history_mutex
  */
-int64_t session_save_voice_conversation(session_t *session);
+int session_save_voice_conversation(session_t *session, int64_t *conv_id_out);
 
 /**
  * @brief Initialize session with system prompt

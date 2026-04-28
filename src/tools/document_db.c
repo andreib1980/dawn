@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -72,17 +73,19 @@ static void row_to_document(sqlite3_stmt *stmt, document_t *doc) {
  * Document CRUD
  * ============================================================================= */
 
-int64_t document_db_create(int user_id,
-                           const char *filename,
-                           const char *filepath,
-                           const char *filetype,
-                           const char *file_hash,
-                           int num_chunks,
-                           bool is_global) {
-   if (!filename || !filepath || !filetype || !file_hash)
-      return -1;
+int document_db_create(int user_id,
+                       const char *filename,
+                       const char *filepath,
+                       const char *filetype,
+                       const char *file_hash,
+                       int num_chunks,
+                       bool is_global,
+                       int64_t *id_out) {
+   if (!filename || !filepath || !filetype || !file_hash || !id_out)
+      return FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   *id_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_create;
    sqlite3_reset(stmt);
@@ -100,32 +103,33 @@ int64_t document_db_create(int user_id,
    sqlite3_bind_int64(stmt, 8, (int64_t)time(NULL));
 
    int rc = sqlite3_step(stmt);
-   int64_t doc_id = -1;
+   int result = FAILURE;
    if (rc == SQLITE_DONE) {
-      doc_id = sqlite3_last_insert_rowid(s_db.db);
+      *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("document_db: create failed: %s", sqlite3_errmsg(s_db.db));
    }
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return doc_id;
+   return result;
 }
 
 int document_db_get(int64_t doc_id, document_t *out) {
    if (!out)
-      return -1;
+      return FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_get;
    sqlite3_reset(stmt);
    sqlite3_bind_int64(stmt, 1, doc_id);
 
-   int result = -1;
+   int result = FAILURE;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       row_to_document(stmt, out);
-      result = 0;
+      result = SUCCESS;
    }
 
    sqlite3_reset(stmt);
@@ -133,36 +137,38 @@ int document_db_get(int64_t doc_id, document_t *out) {
    return result;
 }
 
-int64_t document_db_find_by_hash(const char *file_hash, int user_id) {
-   if (!file_hash)
-      return -1;
+int document_db_find_by_hash(const char *file_hash, int user_id, int64_t *id_out) {
+   if (!file_hash || !id_out)
+      return FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   *id_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_get_by_hash;
    sqlite3_reset(stmt);
    sqlite3_bind_text(stmt, 1, file_hash, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int(stmt, 2, user_id);
 
-   int64_t result = 0; /* 0 = not found */
+   /* *id_out remains 0 (not found) unless a row is returned */
    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      result = sqlite3_column_int64(stmt, 0);
+      *id_out = sqlite3_column_int64(stmt, 0);
    }
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return result;
+   return SUCCESS;
 }
 
-int document_db_list(int user_id, document_t *out, int limit, int offset) {
-   if (!out || limit <= 0)
-      return -1;
+int document_db_list(int user_id, document_t *out, int limit, int offset, int *count_out) {
+   if (!out || limit <= 0 || !count_out)
+      return FAILURE;
+   *count_out = 0;
    if (limit > DOC_MAX_RESULTS)
       limit = DOC_MAX_RESULTS;
    if (offset < 0)
       offset = 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_list;
    sqlite3_reset(stmt);
@@ -178,18 +184,20 @@ int document_db_list(int user_id, document_t *out, int limit, int offset) {
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   *count_out = count;
+   return SUCCESS;
 }
 
-int document_db_list_all(document_t *out, int limit, int offset) {
-   if (!out || limit <= 0)
-      return -1;
+int document_db_list_all(document_t *out, int limit, int offset, int *count_out) {
+   if (!out || limit <= 0 || !count_out)
+      return FAILURE;
+   *count_out = 0;
    if (limit > DOC_MAX_RESULTS)
       limit = DOC_MAX_RESULTS;
    if (offset < 0)
       offset = 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_list_all;
    sqlite3_reset(stmt);
@@ -206,20 +214,21 @@ int document_db_list_all(document_t *out, int limit, int offset) {
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   *count_out = count;
+   return SUCCESS;
 }
 
 int document_db_update_global(int64_t doc_id, bool is_global) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_update_global;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, is_global ? 1 : 0);
    sqlite3_bind_int64(stmt, 2, doc_id);
 
-   int result = -1;
+   int result = FAILURE;
    if (sqlite3_step(stmt) == SQLITE_DONE) {
-      result = (sqlite3_changes(s_db.db) > 0) ? 0 : -1;
+      result = (sqlite3_changes(s_db.db) > 0) ? SUCCESS : FAILURE;
    } else {
       OLOG_ERROR("document_db: update_global failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -230,15 +239,15 @@ int document_db_update_global(int64_t doc_id, bool is_global) {
 }
 
 int document_db_delete(int64_t doc_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_delete;
    sqlite3_reset(stmt);
    sqlite3_bind_int64(stmt, 1, doc_id);
 
-   int result = -1;
+   int result = FAILURE;
    if (sqlite3_step(stmt) == SQLITE_DONE) {
-      result = (sqlite3_changes(s_db.db) > 0) ? 0 : -1;
+      result = (sqlite3_changes(s_db.db) > 0) ? SUCCESS : FAILURE;
    } else {
       OLOG_ERROR("document_db: delete failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -248,21 +257,26 @@ int document_db_delete(int64_t doc_id) {
    return result;
 }
 
-int document_db_count_user(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int document_db_count_user(int user_id, int *count_out) {
+   if (!count_out)
+      return FAILURE;
+   *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_count_user;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
 
-   int count = -1;
+   int result = FAILURE;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      count = sqlite3_column_int(stmt, 0);
+      *count_out = sqlite3_column_int(stmt, 0);
+      result = SUCCESS;
    }
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   return result;
 }
 
 /* =============================================================================
@@ -271,7 +285,7 @@ int document_db_count_user(int user_id) {
 
 int document_db_find_by_name(int user_id, const char *name, document_t *out) {
    if (!name || !out)
-      return -1;
+      return FAILURE;
 
    /* If name is all digits, try direct ID lookup first */
    bool all_digits = true;
@@ -283,10 +297,10 @@ int document_db_find_by_name(int user_id, const char *name, document_t *out) {
    }
    if (all_digits && name[0] != '\0') {
       int64_t doc_id = strtoll(name, NULL, 10);
-      if (document_db_get(doc_id, out) == 0) {
+      if (document_db_get(doc_id, out) == SUCCESS) {
          /* Verify user access: must be owner or global */
          if (out->user_id == user_id || out->is_global)
-            return 0;
+            return SUCCESS;
       }
    }
 
@@ -305,13 +319,13 @@ int document_db_find_by_name(int user_id, const char *name, document_t *out) {
    /* Build LIKE pattern: %escaped_name% */
    char pattern[DOC_FILENAME_MAX * 2 + 3];
    if (esc_len + 2 >= sizeof(pattern))
-      return -1;
+      return FAILURE;
    pattern[0] = '%';
    memcpy(pattern + 1, escaped, esc_len);
    pattern[esc_len + 1] = '%';
    pattern[esc_len + 2] = '\0';
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_find_by_name;
    sqlite3_reset(stmt);
@@ -319,10 +333,10 @@ int document_db_find_by_name(int user_id, const char *name, document_t *out) {
    sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 3, name, -1, SQLITE_TRANSIENT);
 
-   int result = -1;
+   int result = FAILURE;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       row_to_document(stmt, out);
-      result = 0;
+      result = SUCCESS;
    }
 
    sqlite3_reset(stmt);
@@ -337,11 +351,13 @@ int document_db_find_by_name(int user_id, const char *name, document_t *out) {
 int document_db_chunk_read(int64_t document_id,
                            document_chunk_t *chunks,
                            int max_count,
-                           int start_chunk) {
-   if (!chunks || max_count <= 0 || start_chunk < 0)
-      return -1;
+                           int start_chunk,
+                           int *count_out) {
+   if (!chunks || max_count <= 0 || start_chunk < 0 || !count_out)
+      return FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_chunk_read;
    sqlite3_reset(stmt);
@@ -361,24 +377,27 @@ int document_db_chunk_read(int64_t document_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   *count_out = count;
+   return SUCCESS;
 }
 
 /* =============================================================================
  * Chunk CRUD
  * ============================================================================= */
 
-int64_t document_db_chunk_create(int64_t document_id,
-                                 int chunk_index,
-                                 const char *text,
-                                 const float *embedding,
-                                 int dims,
-                                 float embedding_norm,
-                                 int64_t created_at) {
-   if (!text || !embedding || dims <= 0)
-      return -1;
+int document_db_chunk_create(int64_t document_id,
+                             int chunk_index,
+                             const char *text,
+                             const float *embedding,
+                             int dims,
+                             float embedding_norm,
+                             int64_t created_at,
+                             int64_t *id_out) {
+   if (!text || !embedding || dims <= 0 || !id_out)
+      return FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   *id_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_chunk_create;
    sqlite3_reset(stmt);
@@ -391,27 +410,30 @@ int64_t document_db_chunk_create(int64_t document_id,
    sqlite3_bind_int64(stmt, 6, created_at); /* 0 = unknown — schema default also 0 */
 
    int rc = sqlite3_step(stmt);
-   int64_t chunk_id = -1;
+   int result = FAILURE;
    if (rc == SQLITE_DONE) {
-      chunk_id = sqlite3_last_insert_rowid(s_db.db);
+      *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("document_db: chunk_create failed: %s", sqlite3_errmsg(s_db.db));
    }
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return chunk_id;
+   return result;
 }
 
 int document_db_chunk_search_load(int user_id,
                                   document_chunk_t *chunks,
                                   float *embedding_buf,
                                   int dims,
-                                  int max_count) {
-   if (!chunks || !embedding_buf || dims <= 0 || max_count <= 0)
-      return -1;
+                                  int max_count,
+                                  int *count_out) {
+   if (!chunks || !embedding_buf || dims <= 0 || max_count <= 0 || !count_out)
+      return FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   *count_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_doc_chunk_search;
    sqlite3_reset(stmt);
@@ -449,5 +471,6 @@ int document_db_chunk_search_load(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   *count_out = count;
+   return SUCCESS;
 }

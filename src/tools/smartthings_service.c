@@ -43,6 +43,7 @@
 
 #include "config/dawn_config.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
@@ -1623,7 +1624,7 @@ const char *smartthings_auth_mode_str(st_auth_mode_t mode) {
 
 int smartthings_device_to_json(const st_device_t *device, char *buf, size_t buf_size) {
    if (!device || !buf || buf_size < 128)
-      return -1;
+      return FAILURE;
 
    json_object *obj = json_object_new_object();
    json_object_object_add(obj, "id", json_object_new_string(device->id));
@@ -1650,7 +1651,7 @@ int smartthings_device_to_json(const st_device_t *device, char *buf, size_t buf_
 
 int smartthings_list_to_json(const st_device_list_t *list, char *buf, size_t buf_size) {
    if (!list || !buf || buf_size < 64)
-      return -1;
+      return FAILURE;
 
    json_object *root = json_object_new_object();
    json_object *devices = json_object_new_array();

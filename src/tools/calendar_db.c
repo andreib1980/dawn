@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -165,8 +166,8 @@ static int build_cal_id_json(const int64_t *ids, int count, char *buf, size_t bu
  * Account CRUD
  * ============================================================================= */
 
-int64_t calendar_db_account_create(const calendar_account_t *acct) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_account_create(const calendar_account_t *acct, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_acct_create;
    sqlite3_reset(st);
@@ -185,9 +186,11 @@ int64_t calendar_db_account_create(const calendar_account_t *acct) {
    sqlite3_bind_int(st, 13, acct->read_only ? 1 : 0);
    sqlite3_bind_text(st, 14, acct->oauth_account_key, -1, SQLITE_STATIC);
 
-   int64_t result = -1;
+   int result = FAILURE;
    if (sqlite3_step(st) == SQLITE_DONE) {
-      result = sqlite3_last_insert_rowid(s_db.db);
+      if (id_out)
+         *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("calendar_db: account create failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -215,8 +218,8 @@ int calendar_db_account_get(int64_t id, calendar_account_t *out) {
    return result;
 }
 
-int calendar_db_account_list(int user_id, calendar_account_t *out, int max_count) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_account_list(int user_id, calendar_account_t *out, int max_count, int *count_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_acct_list;
    sqlite3_reset(st);
@@ -229,12 +232,15 @@ int calendar_db_account_list(int user_id, calendar_account_t *out, int max_count
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
-int calendar_db_account_list_enabled(calendar_account_t *out, int max_count) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_account_list_enabled(calendar_account_t *out, int max_count, int *count_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_acct_list_enabled;
    sqlite3_reset(st);
@@ -246,8 +252,11 @@ int calendar_db_account_list_enabled(calendar_account_t *out, int max_count) {
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 int calendar_db_account_update(const calendar_account_t *acct) {
@@ -358,8 +367,8 @@ int calendar_db_account_set_enabled(int64_t id, bool enabled) {
  * Calendar CRUD
  * ============================================================================= */
 
-int64_t calendar_db_calendar_create(const calendar_calendar_t *cal) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_calendar_create(const calendar_calendar_t *cal, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_cal_create;
    sqlite3_reset(st);
@@ -371,9 +380,11 @@ int64_t calendar_db_calendar_create(const calendar_calendar_t *cal) {
    sqlite3_bind_text(st, 6, cal->ctag, -1, SQLITE_STATIC);
    sqlite3_bind_int64(st, 7, (int64_t)time(NULL));
 
-   int64_t result = -1;
+   int result = FAILURE;
    if (sqlite3_step(st) == SQLITE_DONE) {
-      result = sqlite3_last_insert_rowid(s_db.db);
+      if (id_out)
+         *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("calendar_db: calendar create failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -401,8 +412,11 @@ int calendar_db_calendar_get(int64_t id, calendar_calendar_t *out) {
    return result;
 }
 
-int calendar_db_calendar_list(int64_t account_id, calendar_calendar_t *out, int max_count) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_calendar_list(int64_t account_id,
+                              calendar_calendar_t *out,
+                              int max_count,
+                              int *count_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_cal_list;
    sqlite3_reset(st);
@@ -415,8 +429,11 @@ int calendar_db_calendar_list(int64_t account_id, calendar_calendar_t *out, int 
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 int calendar_db_calendar_update_ctag(int64_t id, const char *ctag) {
@@ -463,8 +480,11 @@ int calendar_db_calendar_delete(int64_t id) {
    return result;
 }
 
-int calendar_db_active_calendars_for_user(int user_id, calendar_calendar_t *out, int max_count) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_active_calendars_for_user(int user_id,
+                                          calendar_calendar_t *out,
+                                          int max_count,
+                                          int *count_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_cal_active_for_user;
    sqlite3_reset(st);
@@ -477,16 +497,19 @@ int calendar_db_active_calendars_for_user(int user_id, calendar_calendar_t *out,
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 /* =============================================================================
  * Event CRUD
  * ============================================================================= */
 
-int64_t calendar_db_event_upsert(const calendar_event_t *event) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_evt_upsert;
    sqlite3_reset(st);
@@ -509,9 +532,11 @@ int64_t calendar_db_event_upsert(const calendar_event_t *event) {
       sqlite3_bind_null(st, 14);
    sqlite3_bind_int64(st, 15, (int64_t)event->last_synced);
 
-   int64_t result = -1;
+   int result = FAILURE;
    if (sqlite3_step(st) == SQLITE_DONE) {
-      result = sqlite3_last_insert_rowid(s_db.db);
+      if (id_out)
+         *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("calendar_db: event upsert failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -576,8 +601,8 @@ int calendar_db_event_delete_by_calendar(int64_t calendar_id) {
  * Occurrence CRUD
  * ============================================================================= */
 
-int64_t calendar_db_occurrence_insert(const calendar_occurrence_t *occ) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_cal_occ_insert;
    sqlite3_reset(st);
@@ -593,9 +618,11 @@ int64_t calendar_db_occurrence_insert(const calendar_occurrence_t *occ) {
    sqlite3_bind_int(st, 10, occ->is_cancelled ? 1 : 0);
    sqlite3_bind_text(st, 11, occ->recurrence_id, -1, SQLITE_STATIC);
 
-   int64_t result = -1;
+   int result = FAILURE;
    if (sqlite3_step(st) == SQLITE_DONE) {
-      result = sqlite3_last_insert_rowid(s_db.db);
+      if (id_out)
+         *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("calendar_db: occurrence insert failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -624,11 +651,15 @@ int calendar_db_occurrences_in_range(const int64_t *calendar_ids,
                                      time_t range_start,
                                      time_t range_end,
                                      calendar_occurrence_t *out,
-                                     int max_count) {
-   if (calendar_count <= 0)
-      return 0;
+                                     int max_count,
+                                     int *count_out) {
+   if (calendar_count <= 0) {
+      if (count_out)
+         *count_out = 0;
+      return SUCCESS;
+   }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    char id_json[768];
    build_cal_id_json(calendar_ids, calendar_count, id_json, sizeof(id_json));
@@ -646,8 +677,11 @@ int calendar_db_occurrences_in_range(const int64_t *calendar_ids,
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 int calendar_db_allday_occurrences_in_range(const int64_t *calendar_ids,
@@ -655,11 +689,15 @@ int calendar_db_allday_occurrences_in_range(const int64_t *calendar_ids,
                                             const char *start_date,
                                             const char *end_date,
                                             calendar_occurrence_t *out,
-                                            int max_count) {
-   if (calendar_count <= 0)
-      return 0;
+                                            int max_count,
+                                            int *count_out) {
+   if (calendar_count <= 0) {
+      if (count_out)
+         *count_out = 0;
+      return SUCCESS;
+   }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    char id_json[768];
    build_cal_id_json(calendar_ids, calendar_count, id_json, sizeof(id_json));
@@ -677,19 +715,26 @@ int calendar_db_allday_occurrences_in_range(const int64_t *calendar_ids,
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 int calendar_db_occurrences_search(const int64_t *calendar_ids,
                                    int calendar_count,
                                    const char *query,
                                    calendar_occurrence_t *out,
-                                   int max_count) {
-   if (calendar_count <= 0 || !query)
-      return 0;
+                                   int max_count,
+                                   int *count_out) {
+   if (calendar_count <= 0 || !query) {
+      if (count_out)
+         *count_out = 0;
+      return SUCCESS;
+   }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    char id_json[768];
    build_cal_id_json(calendar_ids, calendar_count, id_json, sizeof(id_json));
@@ -697,7 +742,9 @@ int calendar_db_occurrences_search(const int64_t *calendar_ids,
    /* Escape LIKE metacharacters (%, _, \) before building pattern */
    if (strlen(query) > 200) {
       AUTH_DB_UNLOCK();
-      return 0;
+      if (count_out)
+         *count_out = 0;
+      return SUCCESS;
    }
    char escaped[512];
    size_t ej = 0;
@@ -725,8 +772,11 @@ int calendar_db_occurrences_search(const int64_t *calendar_ids,
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 int calendar_db_next_occurrence(const int64_t *calendar_ids,

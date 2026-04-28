@@ -23,6 +23,7 @@
  */
 
 #include <sqlite3.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -213,7 +214,8 @@ static void test_search_basic(void) {
    insert_track("/music/c.flac", "Song C", "Artist Two", "Album Y", "Jazz", 0, 240);
 
    music_search_result_t results[10];
-   int count = music_db_search("Artist One", results, 10);
+   int count = 0;
+   music_db_search("Artist One", results, 10, &count);
 
    TEST_ASSERT(count == 2, "Search by artist returns 2 matches");
    if (count >= 1) {
@@ -229,7 +231,8 @@ static void test_search_by_title(void) {
    insert_track("/music/b.flac", "Another Song", "Queen", "News", "Rock", 0, 200);
 
    music_search_result_t results[10];
-   int count = music_db_search("Bohemian", results, 10);
+   int count = 0;
+   music_db_search("Bohemian", results, 10, &count);
 
    TEST_ASSERT(count == 1, "Search by title finds 1 match");
    if (count >= 1) {
@@ -245,7 +248,8 @@ static void test_search_by_album(void) {
    insert_track("/music/b.flac", "Track 2", "Artist", "The Wall", "Rock", 0, 250);
 
    music_search_result_t results[10];
-   int count = music_db_search("Dark Side", results, 10);
+   int count = 0;
+   music_db_search("Dark Side", results, 10, &count);
 
    TEST_ASSERT(count == 1, "Search by album finds 1 match");
    if (count >= 1) {
@@ -261,7 +265,8 @@ static void test_search_by_genre(void) {
    insert_track("/music/b.flac", "Rock Song", "Led Zep", "Led Zep IV", "Rock", 0, 250);
 
    music_search_result_t results[10];
-   int count = music_db_search("Jazz", results, 10);
+   int count = 0;
+   music_db_search("Jazz", results, 10, &count);
 
    /* Should match both the genre "Jazz" AND the title "Jazz Song" — but both belong to same track
     */
@@ -281,7 +286,8 @@ static void test_search_dedup_local_wins(void) {
                 200);
 
    music_search_result_t results[10];
-   int count = music_db_search("Dedup Song", results, 10);
+   int count = 0;
+   music_db_search("Dedup Song", results, 10, &count);
 
    TEST_ASSERT(count == 1, "Dedup returns 1 result (not 2)");
    if (count >= 1) {
@@ -299,7 +305,8 @@ static void test_search_dedup_plex_only(void) {
                 180);
 
    music_search_result_t results[10];
-   int count = music_db_search("Plex Only", results, 10);
+   int count = 0;
+   music_db_search("Plex Only", results, 10, &count);
 
    TEST_ASSERT(count == 1, "Plex-only track returned");
    if (count >= 1) {
@@ -318,7 +325,8 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("plex:/lib/a1.mp3", "Song", "PINK FLOYD", "Album", "Rock", 1, 200);
 
    music_search_result_t results[10];
-   int count = music_db_search("Song", results, 10);
+   int count = 0;
+   music_db_search("Song", results, 10, &count);
    TEST_ASSERT(count == 1, "Case-diff artist deduplicates to 1");
    if (count >= 1) {
       TEST_ASSERT(results[0].source == MUSIC_SOURCE_LOCAL, "Local wins artist case dedup");
@@ -329,7 +337,7 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("/music/b1.flac", "Comfortably Numb", "Artist", "Album", "Rock", 0, 300);
    insert_track("plex:/lib/b1.mp3", "comfortably numb", "Artist", "Album", "Rock", 1, 300);
 
-   count = music_db_search("Artist", results, 10);
+   music_db_search("Artist", results, 10, &count);
    TEST_ASSERT(count == 1, "Case-diff title deduplicates to 1");
 
    /* Album case difference */
@@ -337,7 +345,7 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("/music/c1.flac", "Track", "Art", "The Wall", "Rock", 0, 250);
    insert_track("plex:/lib/c1.mp3", "Track", "Art", "THE WALL", "Rock", 1, 250);
 
-   count = music_db_search("Track", results, 10);
+   music_db_search("Track", results, 10, &count);
    TEST_ASSERT(count == 1, "Case-diff album deduplicates to 1");
 
    /* All three differ in case simultaneously */
@@ -345,7 +353,7 @@ static void test_search_dedup_case_insensitive(void) {
    insert_track("/music/d1.flac", "Time", "Pink Floyd", "Dark Side", "Rock", 0, 400);
    insert_track("plex:/lib/d1.mp3", "TIME", "pink floyd", "DARK SIDE", "Rock", 1, 400);
 
-   count = music_db_search("Pink Floyd", results, 10);
+   music_db_search("Pink Floyd", results, 10, &count);
    TEST_ASSERT(count == 1, "Triple case-diff deduplicates to 1");
    if (count >= 1) {
       TEST_ASSERT(results[0].source == MUSIC_SOURCE_LOCAL, "Local wins triple case dedup");
@@ -366,7 +374,8 @@ static void test_search_dedup_different_titles(void) {
    insert_track("plex:/lib/b.mp3", "Title Beta", "Shared Artist", "Album", "Rock", 1, 210);
 
    music_search_result_t results[10];
-   int count = music_db_search("Shared Artist", results, 10);
+   int count = 0;
+   music_db_search("Shared Artist", results, 10, &count);
 
    TEST_ASSERT(count == 2, "Different titles both returned (no false dedup)");
 }
@@ -380,7 +389,8 @@ static void test_search_like_escaping(void) {
    insert_track("/music/other.flac", "100 reasons", "Test", "Album", "Rock", 0, 180);
 
    music_search_result_t results[10];
-   int count = music_db_search("100% Pure", results, 10);
+   int count = 0;
+   music_db_search("100% Pure", results, 10, &count);
 
    /* Should match "100% Pure" but NOT "100 reasons" (% is escaped, not wildcard) */
    TEST_ASSERT(count == 1, "Escaped %% prevents wildcard match");
@@ -393,7 +403,7 @@ static void test_search_like_escaping(void) {
    insert_track("/music/under.flac", "test_x", "Test", "Album", "Rock", 0, 200);
    insert_track("/music/nope.flac", "testYx", "Test", "Album", "Rock", 0, 180);
 
-   count = music_db_search("test_x", results, 10);
+   music_db_search("test_x", results, 10, &count);
    TEST_ASSERT(count == 1, "Escaped _ prevents single-char wildcard");
    if (count >= 1) {
       TEST_ASSERT(strcmp(results[0].title, "test_x") == 0, "Only literal underscore matches");
@@ -413,7 +423,8 @@ static void test_list_artists_dedup(void) {
    insert_track("plex:/lib/b.mp3", "Song B", "Shared Artist", "Album 2", "Rock", 1, 210);
 
    char artists[10][AUDIO_METADATA_STRING_MAX];
-   int count = music_db_list_artists(artists, 10, 0);
+   int count = 0;
+   music_db_list_artists(artists, 10, 0, &count);
 
    TEST_ASSERT(count == 1, "Artist appears once despite two sources");
    if (count >= 1) {
@@ -430,7 +441,8 @@ static void test_list_albums_dedup(void) {
    insert_track("plex:/lib/b.mp3", "Track 1", "Artist", "Shared Album", "Rock", 1, 200);
 
    char albums[10][AUDIO_METADATA_STRING_MAX];
-   int count = music_db_list_albums(albums, 10, 0);
+   int count = 0;
+   music_db_list_albums(albums, 10, 0, &count);
 
    TEST_ASSERT(count == 1, "Album appears once despite two sources");
    if (count >= 1) {
@@ -449,7 +461,8 @@ static void test_get_by_artist_dedup(void) {
    insert_track("plex:/lib/other.mp3", "Other Song", "The Artist", "The Album", "Rock", 1, 250);
 
    music_search_result_t results[10];
-   int count = music_db_get_by_artist("The Artist", results, 10);
+   int count = 0;
+   music_db_get_by_artist("The Artist", results, 10, &count);
 
    TEST_ASSERT(count == 2, "Dedup: 2 unique tracks (not 3 rows)");
 
@@ -491,9 +504,10 @@ static void test_get_by_path_local(void) {
    insert_track("/music/found.flac", "Found It", "Artist", "Album", "Rock", 0, 200);
 
    music_search_result_t result;
-   int rc = music_db_get_by_path("/music/found.flac", &result);
+   bool found = false;
+   int rc = music_db_get_by_path("/music/found.flac", &result, &found);
 
-   TEST_ASSERT(rc == 0, "get_by_path finds local track");
+   TEST_ASSERT(rc == 0 && found, "get_by_path finds local track");
    TEST_ASSERT(strcmp(result.title, "Found It") == 0, "Title matches");
    TEST_ASSERT(strcmp(result.path, "/music/found.flac") == 0, "Path matches");
 }
@@ -506,9 +520,10 @@ static void test_get_by_path_plex(void) {
                 300);
 
    music_search_result_t result;
-   int rc = music_db_get_by_path("plex:/library/parts/42/file.mp3", &result);
+   bool found = false;
+   int rc = music_db_get_by_path("plex:/library/parts/42/file.mp3", &result, &found);
 
-   TEST_ASSERT(rc == 0, "get_by_path finds plex track");
+   TEST_ASSERT(rc == 0 && found, "get_by_path finds plex track");
    TEST_ASSERT(strcmp(result.title, "Plex Track") == 0, "Plex title matches");
 }
 
@@ -517,9 +532,10 @@ static void test_get_by_path_missing(void) {
    clear_tracks();
 
    music_search_result_t result;
-   int rc = music_db_get_by_path("/nonexistent/path.flac", &result);
+   bool found = false;
+   int rc = music_db_get_by_path("/nonexistent/path.flac", &result, &found);
 
-   TEST_ASSERT(rc == 1, "get_by_path returns 1 for missing track");
+   TEST_ASSERT(rc == 0 && !found, "get_by_path returns not-found for missing track");
 }
 
 /* =============================================================================
@@ -554,16 +570,16 @@ static void test_stale_deletion_scoped(void) {
 
    /* Verify: keep.flac and plex track survive, stale.flac deleted */
    music_search_result_t result;
-   int rc;
+   bool found = false;
 
-   rc = music_db_get_by_path("/music/keep.flac", &result);
-   TEST_ASSERT(rc == 0, "Kept local track survives");
+   music_db_get_by_path("/music/keep.flac", &result, &found);
+   TEST_ASSERT(found, "Kept local track survives");
 
-   rc = music_db_get_by_path("/music/stale.flac", &result);
-   TEST_ASSERT(rc == 1, "Stale local track deleted");
+   music_db_get_by_path("/music/stale.flac", &result, &found);
+   TEST_ASSERT(!found, "Stale local track deleted");
 
-   rc = music_db_get_by_path("plex:/lib/survive.mp3", &result);
-   TEST_ASSERT(rc == 0, "Plex track survives local stale deletion");
+   music_db_get_by_path("plex:/lib/survive.mp3", &result, &found);
+   TEST_ASSERT(found, "Plex track survives local stale deletion");
 }
 
 /* =============================================================================

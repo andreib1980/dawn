@@ -218,12 +218,12 @@ static int validate_backup_path(const char *path) {
 
    if (!path || path[0] != '/') {
       /* Only absolute paths allowed */
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
    /* Check for ".." path traversal */
    if (strstr(path, "..") != NULL) {
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
    /* Get parent directory of the target path */
@@ -234,7 +234,7 @@ static int validate_backup_path(const char *path) {
    char *last_slash = strrchr(parent, '/');
    if (!last_slash || last_slash == parent) {
       /* Root directory or invalid path */
-      return -1;
+      return AUTH_DB_FAILURE;
    }
    *last_slash = '\0';
 
@@ -242,7 +242,7 @@ static int validate_backup_path(const char *path) {
    char resolved[PATH_MAX];
    if (!realpath(parent, resolved)) {
       /* Parent directory doesn't exist or error resolving */
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
    /* Add trailing slash for prefix matching */
@@ -267,7 +267,7 @@ static int validate_backup_path(const char *path) {
       }
    }
 
-   return -1; /* Path not in allowlist */
+   return AUTH_DB_FAILURE; /* Path not in allowlist */
 }
 
 int auth_db_backup(const char *dest_path) {

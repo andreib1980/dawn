@@ -810,7 +810,7 @@ int send_json_message(struct lws *wsi, const char *json) {
       int written = lws_write(wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
       if (written < (int)len) {
          OLOG_ERROR("WebUI: lws_write failed (wrote %d of %zu)", written, len);
-         return -1;
+         return LWS_CLOSE_CONNECTION;
       }
       return 0;
    }
@@ -819,7 +819,7 @@ int send_json_message(struct lws *wsi, const char *json) {
    unsigned char *buf = malloc(LWS_PRE + len);
    if (!buf) {
       OLOG_ERROR("WebUI: Failed to allocate send buffer (%zu bytes)", LWS_PRE + len);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    memcpy(&buf[LWS_PRE], json, len);
@@ -828,7 +828,7 @@ int send_json_message(struct lws *wsi, const char *json) {
 
    if (written < (int)len) {
       OLOG_ERROR("WebUI: lws_write failed (wrote %d of %zu)", written, len);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    return 0;
@@ -837,7 +837,7 @@ int send_json_message(struct lws *wsi, const char *json) {
 int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, size_t len) {
    if (!wsi) {
       OLOG_ERROR("WebUI: send_binary_message called with NULL wsi");
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Allocate buffer with LWS_PRE padding + 1 byte for type + data */
@@ -845,7 +845,7 @@ int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, 
    unsigned char *buf = malloc(LWS_PRE + total_len);
    if (!buf) {
       OLOG_ERROR("WebUI: Failed to allocate binary send buffer (%zu bytes)", LWS_PRE + total_len);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    buf[LWS_PRE] = msg_type;
@@ -858,12 +858,12 @@ int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, 
 
    if (written < 0) {
       OLOG_ERROR("WebUI: lws_write binary failed with error %d", written);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    if (written < (int)total_len) {
       OLOG_ERROR("WebUI: lws_write binary partial write (%d of %zu)", written, total_len);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    return 0;
@@ -3591,7 +3591,7 @@ static int callback_websocket(struct lws *wsi,
                char *json_str = strndup((const char *)in, len);
                if (!json_str) {
                   OLOG_ERROR("WebUI: Failed to allocate init message buffer");
-                  return -1;
+                  return LWS_CLOSE_CONNECTION;
                }
 
                struct json_object *root = json_tokener_parse(json_str);
@@ -3599,7 +3599,7 @@ static int callback_websocket(struct lws *wsi,
 
                if (!root) {
                   OLOG_WARNING("WebUI: Invalid JSON in init message");
-                  return -1;
+                  return LWS_CLOSE_CONNECTION;
                }
 
                struct json_object *type_obj;
@@ -3670,7 +3670,7 @@ static int callback_websocket(struct lws *wsi,
                      send_error_impl(wsi, "MAX_CLIENTS",
                                      "Maximum clients reached. Please try again later.");
                      json_object_put(root);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
                   s_client_count++;
                   pthread_mutex_unlock(&s_mutex);
@@ -3696,7 +3696,7 @@ static int callback_websocket(struct lws *wsi,
                      pthread_mutex_unlock(&s_mutex);
                      conn->counted = false;
                      json_object_put(root);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
                   json_object_put(root);
                   break;
@@ -3712,7 +3712,7 @@ static int callback_websocket(struct lws *wsi,
                      send_error_impl(wsi, "MAX_CLIENTS",
                                      "Maximum WebUI clients reached. Please try again later.");
                      json_object_put(root);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
                   s_client_count++;
                   pthread_mutex_unlock(&s_mutex);
@@ -3727,7 +3727,7 @@ static int callback_websocket(struct lws *wsi,
                      pthread_mutex_unlock(&s_mutex);
                      conn->counted = false;
                      json_object_put(root);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
 
                   /* Set user_id for metrics and memory extraction */
@@ -3758,7 +3758,7 @@ static int callback_websocket(struct lws *wsi,
                      pthread_mutex_unlock(&s_mutex);
                      conn->counted = false;
                      json_object_put(root);
-                     return -1;
+                     return LWS_CLOSE_CONNECTION;
                   }
                   register_token(conn->session_token, conn->session->session_id);
 
@@ -5980,8 +5980,10 @@ static void deliver_missed_notifications(ws_connection_t *conn) {
       return;
 
    missed_notif_t missed[MISSED_NOTIF_DELIVERY_BATCH];
-   int count = missed_notif_get_for_user(conn->auth_user_id, MISSED_NOTIF_DELIVERY_BATCH, missed);
-   if (count <= 0)
+   int count = 0;
+   if (missed_notif_get_for_user(conn->auth_user_id, MISSED_NOTIF_DELIVERY_BATCH, missed, &count) !=
+           AUTH_DB_SUCCESS ||
+       count <= 0)
       return;
 
    for (int i = 0; i < count; i++) {
@@ -6472,7 +6474,7 @@ int webui_restore_conversation_context(ws_connection_t *conn,
                                     all_msgs);
       if (rc != AUTH_DB_SUCCESS) {
          json_object_put(all_msgs);
-         return -1;
+         return LWS_CLOSE_CONNECTION;
       }
    }
 

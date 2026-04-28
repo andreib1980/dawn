@@ -68,7 +68,7 @@ typedef struct {
  * @param text      Input text (null-terminated)
  * @param config    Chunking parameters (NULL for defaults)
  * @param out       Output chunk list (caller must free with chunk_result_free)
- * @return 0 on success, -1 on failure
+ * @return SUCCESS or FAILURE
  */
 int document_chunk_text(const char *text, const chunk_config_t *config, chunk_result_t *out);
 

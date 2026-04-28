@@ -38,27 +38,30 @@
  * Rate Limiting
  * ============================================================================= */
 
-int auth_db_count_recent_failures(const char *ip_address, time_t since) {
-   if (!ip_address) {
-      return -1;
+int auth_db_count_recent_failures(const char *ip_address, time_t since, int *count_out) {
+   if (!ip_address || !count_out) {
+      return AUTH_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_count_recent_failures);
    sqlite3_bind_text(s_db.stmt_count_recent_failures, 1, ip_address, -1, SQLITE_STATIC);
    sqlite3_bind_int64(s_db.stmt_count_recent_failures, 2, (int64_t)since);
 
-   int count = -1;
    int rc = sqlite3_step(s_db.stmt_count_recent_failures);
    if (rc == SQLITE_ROW) {
-      count = sqlite3_column_int(s_db.stmt_count_recent_failures, 0);
+      *count_out = sqlite3_column_int(s_db.stmt_count_recent_failures, 0);
+   } else {
+      sqlite3_reset(s_db.stmt_count_recent_failures);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_reset(s_db.stmt_count_recent_failures);
    AUTH_DB_UNLOCK();
 
-   return count;
+   return AUTH_DB_SUCCESS;
 }
 
 int auth_db_log_attempt(const char *ip_address, const char *username, bool success) {
@@ -88,8 +91,8 @@ int auth_db_log_attempt(const char *ip_address, const char *username, bool succe
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
-int auth_db_clear_login_attempts(const char *ip_address) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int auth_db_clear_login_attempts(const char *ip_address, int *deleted_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    int deleted = 0;
    sqlite3_stmt *stmt = NULL;
@@ -102,7 +105,7 @@ int auth_db_clear_login_attempts(const char *ip_address) {
       if (rc != SQLITE_OK) {
          OLOG_ERROR("auth_db: prepare clear_login_attempts failed: %s", sqlite3_errmsg(s_db.db));
          AUTH_DB_UNLOCK();
-         return -1;
+         return AUTH_DB_FAILURE;
       }
       sqlite3_bind_text(stmt, 1, ip_address, -1, SQLITE_STATIC);
    } else {
@@ -112,7 +115,7 @@ int auth_db_clear_login_attempts(const char *ip_address) {
          OLOG_ERROR("auth_db: prepare clear_all_login_attempts failed: %s",
                     sqlite3_errmsg(s_db.db));
          AUTH_DB_UNLOCK();
-         return -1;
+         return AUTH_DB_FAILURE;
       }
    }
 
@@ -126,7 +129,11 @@ int auth_db_clear_login_attempts(const char *ip_address) {
 
    OLOG_INFO("auth_db: Cleared %d login attempts for IP: %s", deleted,
              ip_address ? ip_address : "all");
-   return deleted;
+
+   if (deleted_out) {
+      *deleted_out = deleted;
+   }
+   return AUTH_DB_SUCCESS;
 }
 
 int auth_db_list_blocked_ips(time_t since, auth_ip_status_callback_t callback, void *ctx) {

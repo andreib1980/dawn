@@ -141,9 +141,10 @@ int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats);
 /**
  * @brief Get the number of tracks in the database
  *
- * @return Number of indexed tracks, or -1 on error
+ * @param count_out Output for track count
+ * @return SUCCESS or FAILURE
  */
-int music_db_get_track_count(void);
+int music_db_get_track_count(int *count_out);
 
 /**
  * @brief Database statistics
@@ -175,18 +176,23 @@ int music_db_get_stats(music_db_stats_t *stats);
  * @param pattern Search pattern (wildcards: % for any chars, _ for single char)
  * @param results Output array for results
  * @param max_results Maximum number of results to return
- * @return Number of results found (0 on error or empty)
+ * @param count_out Output for number of results found
+ * @return SUCCESS or FAILURE
  */
-int music_db_search(const char *pattern, music_search_result_t *results, int max_results);
+int music_db_search(const char *pattern,
+                    music_search_result_t *results,
+                    int max_results,
+                    int *count_out);
 
 /**
  * @brief Get metadata for a specific file from the database
  *
  * @param path Full path to audio file
  * @param result Output for metadata
- * @return 0 on success (found), 1 if not found, -1 on error
+ * @param found_out Output: true if track was found, false if not found
+ * @return SUCCESS or FAILURE
  */
-int music_db_get_by_path(const char *path, music_search_result_t *result);
+int music_db_get_by_path(const char *path, music_search_result_t *result, bool *found_out);
 
 /**
  * @brief List tracks in the database (no search filtering)
@@ -195,9 +201,10 @@ int music_db_get_by_path(const char *path, music_search_result_t *result);
  *
  * @param results Output array for results
  * @param max_results Maximum number of results to return
- * @return Number of results found (0 on error or empty)
+ * @param count_out Output for number of results found
+ * @return SUCCESS or FAILURE
  */
-int music_db_list(music_search_result_t *results, int max_results);
+int music_db_list(music_search_result_t *results, int max_results, int *count_out);
 
 /**
  * @brief List tracks with pagination
@@ -207,9 +214,13 @@ int music_db_list(music_search_result_t *results, int max_results);
  * @param results Output array for results
  * @param max_results Maximum number of results to return
  * @param offset Number of tracks to skip (for pagination, 0 = start)
- * @return Number of results found (0 on error or empty)
+ * @param count_out Output for number of results found
+ * @return SUCCESS or FAILURE
  */
-int music_db_list_paged(music_search_result_t *results, int max_results, int offset);
+int music_db_list_paged(music_search_result_t *results,
+                        int max_results,
+                        int offset,
+                        int *count_out);
 
 /**
  * @brief List unique artists in the database
@@ -219,9 +230,13 @@ int music_db_list_paged(music_search_result_t *results, int max_results, int off
  * @param artists Output array of artist name buffers
  * @param max_artists Maximum number of artists to return
  * @param offset Number of artists to skip (for pagination, 0 = start)
- * @return Number of artists found, or -1 on error
+ * @param count_out Output for number of artists found
+ * @return SUCCESS or FAILURE
  */
-int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_artists, int offset);
+int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX],
+                          int max_artists,
+                          int offset,
+                          int *count_out);
 
 /**
  * @brief List unique albums in the database
@@ -231,9 +246,13 @@ int music_db_list_artists(char (*artists)[AUDIO_METADATA_STRING_MAX], int max_ar
  * @param albums Output array of album name buffers
  * @param max_albums Maximum number of albums to return
  * @param offset Number of albums to skip (for pagination, 0 = start)
- * @return Number of albums found, or -1 on error
+ * @param count_out Output for number of albums found
+ * @return SUCCESS or FAILURE
  */
-int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX], int max_albums, int offset);
+int music_db_list_albums(char (*albums)[AUDIO_METADATA_STRING_MAX],
+                         int max_albums,
+                         int offset,
+                         int *count_out);
 
 /**
  * @brief Artist info with statistics
@@ -259,9 +278,13 @@ typedef struct {
  * @param artists Output array for artist info
  * @param max_artists Maximum number of artists to return
  * @param offset Number of artists to skip (for pagination)
- * @return Number of artists found, or -1 on error
+ * @param count_out Output for number of artists found
+ * @return SUCCESS or FAILURE
  */
-int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artists, int offset);
+int music_db_list_artists_with_stats(music_artist_info_t *artists,
+                                     int max_artists,
+                                     int offset,
+                                     int *count_out);
 
 /**
  * @brief List albums with statistics (track count, artist)
@@ -269,9 +292,13 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists, int max_artis
  * @param albums Output array for album info
  * @param max_albums Maximum number of albums to return
  * @param offset Number of albums to skip (for pagination)
- * @return Number of albums found, or -1 on error
+ * @param count_out Output for number of albums found
+ * @return SUCCESS or FAILURE
  */
-int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums, int offset);
+int music_db_list_albums_with_stats(music_album_info_t *albums,
+                                    int max_albums,
+                                    int offset,
+                                    int *count_out);
 
 /**
  * @brief Get all tracks by a specific artist
@@ -279,9 +306,13 @@ int music_db_list_albums_with_stats(music_album_info_t *albums, int max_albums, 
  * @param artist Artist name (exact match)
  * @param results Output array for results
  * @param max_results Maximum number of results
- * @return Number of tracks found, or -1 on error
+ * @param count_out Output for number of tracks found
+ * @return SUCCESS or FAILURE
  */
-int music_db_get_by_artist(const char *artist, music_search_result_t *results, int max_results);
+int music_db_get_by_artist(const char *artist,
+                           music_search_result_t *results,
+                           int max_results,
+                           int *count_out);
 
 /**
  * @brief Get all tracks in a specific album
@@ -289,9 +320,13 @@ int music_db_get_by_artist(const char *artist, music_search_result_t *results, i
  * @param album Album name (exact match)
  * @param results Output array for results
  * @param max_results Maximum number of results
- * @return Number of tracks found, or -1 on error
+ * @param count_out Output for number of tracks found
+ * @return SUCCESS or FAILURE
  */
-int music_db_get_by_album(const char *album, music_search_result_t *results, int max_results);
+int music_db_get_by_album(const char *album,
+                          music_search_result_t *results,
+                          int max_results,
+                          int *count_out);
 
 #ifdef __cplusplus
 }

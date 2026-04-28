@@ -33,6 +33,7 @@
 
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -92,7 +93,7 @@ static int parse_string_array(struct json_object *array,
                               const char **ptrs,
                               int max_items) {
    if (!json_object_is_type(array, json_type_array)) {
-      return -1;
+      return FAILURE;
    }
 
    int count = (int)json_object_array_length(array);

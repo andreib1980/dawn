@@ -36,6 +36,7 @@
 #endif
 
 #include "config/dawn_config.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -113,7 +114,7 @@ float embedding_engine_cosine(const float *a, const float *b, int dims) {
 int embedding_engine_init(void) {
    /* Idempotent — safe to call multiple times */
    if (s_initialized)
-      return (s_provider != NULL) ? 0 : -1;
+      return (s_provider != NULL) ? SUCCESS : FAILURE;
 
    s_initialized = true;
 
@@ -160,7 +161,7 @@ int embedding_engine_init(void) {
       OLOG_WARNING("embedding_engine: dimension probe failed, disabling");
       s_provider->cleanup();
       s_provider = NULL;
-      return -1;
+      return FAILURE;
    }
 
    s_dims = dims;
@@ -192,7 +193,7 @@ int embedding_engine_dims(void) {
 
 int embedding_engine_embed(const char *text, float *out, int max_dims, int *out_dims) {
    if (!s_provider || !text || !out || !out_dims)
-      return -1;
+      return FAILURE;
 
    pthread_mutex_lock(&s_embed_mutex);
    int rc = s_provider->embed(text, out, max_dims, out_dims);

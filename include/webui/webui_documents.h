@@ -52,11 +52,11 @@ typedef struct document_upload_session document_upload_session_t;
  * @brief Handle document upload request start (POST /api/documents)
  *
  * Validates Content-Type, extracts multipart boundary, allocates session.
- * Returns 0 to continue to body callbacks, -1 on error.
+ * Returns 0 to continue to body callbacks, LWS_CLOSE_CONNECTION on error.
  *
  * @param wsi WebSocket/HTTP connection
  * @param session_out Output: allocated document session (caller must free)
- * @return 0 on success, -1 on error
+ * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
 int webui_documents_handle_upload_start(struct lws *wsi, document_upload_session_t **session_out);
 
@@ -69,7 +69,7 @@ int webui_documents_handle_upload_start(struct lws *wsi, document_upload_session
  * @param session Document session
  * @param data Incoming data chunk
  * @param len Length of data chunk
- * @return 0 on success, -1 on error
+ * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
 int webui_documents_handle_upload_body(struct lws *wsi,
                                        document_upload_session_t *session,
@@ -84,7 +84,7 @@ int webui_documents_handle_upload_body(struct lws *wsi,
  *
  * @param wsi WebSocket/HTTP connection
  * @param session Document session (will be freed)
- * @return -1 to close connection (response sent)
+ * @return LWS_CLOSE_CONNECTION to close connection (response sent)
  */
 int webui_documents_handle_upload_complete(struct lws *wsi, document_upload_session_t *session);
 
@@ -97,7 +97,7 @@ int webui_documents_handle_upload_complete(struct lws *wsi, document_upload_sess
  * @param wsi WebSocket/HTTP connection
  * @param body POST body (JSON)
  * @param body_len Length of POST body
- * @return -1 to close connection (response sent)
+ * @return LWS_CLOSE_CONNECTION to close connection (response sent)
  */
 int webui_documents_handle_summarize(struct lws *wsi, const char *body, size_t body_len);
 

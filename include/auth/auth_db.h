@@ -247,9 +247,10 @@ int auth_db_get_user(const char *username, auth_user_t *user_out);
  *
  * Useful for checking if any users exist (first-run detection).
  *
- * @return Number of users, or -1 on error
+ * @param count_out Output: number of users
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_user_count(void);
+int auth_db_user_count(int *count_out);
 
 /**
  * @brief Validate username format
@@ -309,9 +310,10 @@ int auth_db_list_users(auth_user_summary_callback_t callback, void *ctx);
 /**
  * @brief Count admin users
  *
- * @return Number of admin users, or -1 on error
+ * @param count_out Output: number of admin users
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_count_admins(void);
+int auth_db_count_admins(int *count_out);
 
 /**
  * @brief Delete a user account
@@ -500,9 +502,10 @@ bool auth_db_session_belongs_to_user(const char *prefix, int user_id);
  * Wrapper around auth_db_delete_user_sessions that looks up user by name.
  *
  * @param username Username
- * @return Number of sessions deleted, or -1 on error
+ * @param deleted_out Output: number of sessions deleted (can be NULL)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_delete_sessions_by_username(const char *username);
+int auth_db_delete_sessions_by_username(const char *username, int *deleted_out);
 
 /**
  * @brief Delete all sessions for a user
@@ -510,9 +513,10 @@ int auth_db_delete_sessions_by_username(const char *username);
  * Used for password change or account lockout.
  *
  * @param user_id User ID
- * @return Number of sessions deleted, or -1 on error
+ * @param deleted_out Output: number of sessions deleted (can be NULL)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_delete_user_sessions(int user_id);
+int auth_db_delete_user_sessions(int user_id, int *deleted_out);
 
 /**
  * @brief List all active sessions (callback-based, token prefix only)
@@ -538,9 +542,10 @@ int auth_db_list_user_sessions(int user_id, auth_session_summary_callback_t call
 /**
  * @brief Count active sessions
  *
- * @return Number of active sessions, or -1 on error
+ * @param count_out Output: number of active sessions
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_count_sessions(void);
+int auth_db_count_sessions(int *count_out);
 
 /* ============================================================================
  * Rate Limiting
@@ -551,9 +556,10 @@ int auth_db_count_sessions(void);
  *
  * @param ip_address Client IP address
  * @param since Only count attempts after this timestamp
- * @return Number of failed attempts, or -1 on error
+ * @param count_out Output: number of failed attempts
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_count_recent_failures(const char *ip_address, time_t since);
+int auth_db_count_recent_failures(const char *ip_address, time_t since, int *count_out);
 
 /**
  * @brief Log a login attempt
@@ -572,9 +578,10 @@ int auth_db_log_attempt(const char *ip_address, const char *username, bool succe
  * If ip_address is NULL, clears all login attempts.
  *
  * @param ip_address Client IP address to unblock (NULL for all)
- * @return Number of deleted entries, or -1 on error
+ * @param deleted_out Output: number of deleted entries (can be NULL)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_clear_login_attempts(const char *ip_address);
+int auth_db_clear_login_attempts(const char *ip_address, int *deleted_out);
 
 /**
  * @brief IP rate limit status entry
@@ -1187,9 +1194,10 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private);
  *
  * @param conv_id Conversation ID
  * @param user_id User ID (for authorization check)
- * @return 1 if private, 0 if not private, -1 on error/not found
+ * @param is_private_out Output: true if private, false if not private
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
  */
-int conv_db_is_private(int64_t conv_id, int user_id);
+int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
 
 /**
  * @brief Auto-title a conversation (atomic check-and-set)
@@ -1479,9 +1487,10 @@ void summary_node_free(summary_node_t *node);
  * @brief Count conversations for a user
  *
  * @param user_id User ID
- * @return Number of conversations, or -1 on error
+ * @param count_out Output: number of conversations
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int conv_db_count(int user_id);
+int conv_db_count(int user_id, int *count_out);
 
 /**
  * @brief Find the continuation conversation for an archived conversation
@@ -1671,8 +1680,9 @@ int auth_db_get_metrics_aggregate(const session_metrics_filter_t *filter,
  * Called automatically during auth_db_run_cleanup().
  *
  * @param retention_days Delete metrics older than this many days
- * @return Number of deleted entries, or -1 on error
+ * @param deleted_out Output: number of deleted entries (can be NULL)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
-int auth_db_cleanup_session_metrics(int retention_days);
+int auth_db_cleanup_session_metrics(int retention_days, int *deleted_out);
 
 #endif /* AUTH_DB_H */

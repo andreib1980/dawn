@@ -84,7 +84,11 @@ int contacts_find(int user_id,
                   const char *name,
                   const char *field_type,
                   contact_result_t *out,
-                  int max_results) {
+                  int max_results,
+                  int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
    if (!name || !name[0] || max_results <= 0)
       return 0;
 
@@ -92,7 +96,7 @@ int contacts_find(int user_id,
    if (strlen(name) > 200)
       return 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    /* Escape LIKE metacharacters */
    char escaped[512];
@@ -114,14 +118,23 @@ int contacts_find(int user_id,
    sqlite3_bind_int(st, 4, max_results);
 
    int count = 0;
-   while (count < max_results && sqlite3_step(st) == SQLITE_ROW) {
+   int step_rc;
+   while (count < max_results && (step_rc = sqlite3_step(st)) == SQLITE_ROW) {
       row_to_contact(st, &out[count]);
       count++;
    }
    sqlite3_reset(st);
 
    AUTH_DB_UNLOCK();
-   return count;
+
+   if (step_rc != SQLITE_DONE && step_rc != SQLITE_ROW) {
+      OLOG_ERROR("contacts_find: sqlite3_step error: %s", sqlite3_errmsg(s_db.db));
+      return 1;
+   }
+
+   if (count_out)
+      *count_out = count;
+   return 0;
 }
 
 int contacts_add(int user_id,
@@ -182,8 +195,11 @@ int contacts_delete(int user_id, int64_t contact_id) {
    return 0;
 }
 
-int contacts_count(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int contacts_count(int user_id, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_contacts_count;
    sqlite3_reset(st);
@@ -196,7 +212,10 @@ int contacts_count(int user_id) {
    sqlite3_reset(st);
 
    AUTH_DB_UNLOCK();
-   return count;
+
+   if (count_out)
+      *count_out = count;
+   return 0;
 }
 
 int contacts_update(int user_id,
@@ -235,13 +254,17 @@ int contacts_list(int user_id,
                   const char *field_type,
                   contact_result_t *out,
                   int max_results,
-                  int offset) {
+                  int offset,
+                  int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
    if (max_results <= 0)
       return 0;
    if (offset < 0)
       offset = 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_contacts_list;
    sqlite3_reset(st);
@@ -265,5 +288,8 @@ int contacts_list(int user_id,
    sqlite3_reset(st);
 
    AUTH_DB_UNLOCK();
-   return count;
+
+   if (count_out)
+      *count_out = count;
+   return 0;
 }

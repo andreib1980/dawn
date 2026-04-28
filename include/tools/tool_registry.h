@@ -550,12 +550,14 @@ void tool_registry_foreach_with_capability(tool_capability_t cap,
  * @param size Buffer size
  * @param remote_session true if generating for remote session
  * @param armor_mode true if armor features should be included
- * @return Number of bytes written, or -1 on error
+ * @param bytes_written_out Output: number of bytes written (may be NULL)
+ * @return SUCCESS or FAILURE
  */
 int tool_registry_generate_llm_schema(char *buffer,
                                       size_t size,
                                       bool remote_session,
-                                      bool armor_mode);
+                                      bool armor_mode,
+                                      int *bytes_written_out);
 
 /* =============================================================================
  * Dynamic Parameter Updates

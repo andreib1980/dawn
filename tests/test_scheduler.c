@@ -189,8 +189,10 @@ static void test_insert_and_get(void) {
    printf("\n--- test_insert_and_get ---\n");
 
    sched_event_t ev = make_event();
-   int64_t id = scheduler_db_insert(&ev);
-   TEST_ASSERT(id > 0, "insert returns positive ID");
+   int64_t id = 0;
+   int irc = scheduler_db_insert(&ev, &id);
+   TEST_ASSERT(irc == SCHED_DB_SUCCESS, "insert returns SUCCESS");
+   TEST_ASSERT(id > 0, "insert outputs positive ID");
    TEST_ASSERT(ev.id == id, "event.id set by insert");
    TEST_ASSERT(ev.created_at > 0, "created_at set by insert");
 
@@ -207,7 +209,7 @@ static void test_insert_and_get(void) {
    TEST_ASSERT(got.recurrence == SCHED_RECUR_ONCE, "get: recurrence matches");
 
    rc = scheduler_db_get(99999, &got);
-   TEST_ASSERT(rc == -1, "get nonexistent ID returns -1");
+   TEST_ASSERT(rc != 0, "get nonexistent ID returns failure");
 }
 
 /* ============================================================================
@@ -224,35 +226,39 @@ static void test_insert_checked_limits(void) {
    for (int i = 0; i < max_per_user; i++) {
       sched_event_t ev = make_event();
       snprintf(ev.name, SCHED_NAME_MAX, "User1 Event %d", i);
-      int64_t id = scheduler_db_insert_checked(&ev, max_per_user, max_total);
-      TEST_ASSERT(id > 0, "insert_checked within per-user limit");
+      int64_t id = 0;
+      int irc = scheduler_db_insert_checked(&ev, max_per_user, max_total, &id);
+      TEST_ASSERT(irc == SCHED_DB_SUCCESS && id > 0, "insert_checked within per-user limit");
    }
 
    /* Next insert for user 1 should fail with per-user limit */
    sched_event_t ev_over = make_event();
    strncpy(ev_over.name, "User1 Over Limit", SCHED_NAME_MAX - 1);
-   int64_t rc = scheduler_db_insert_checked(&ev_over, max_per_user, max_total);
-   TEST_ASSERT(rc == -2, "insert_checked returns -2 at per-user limit");
+   int64_t dummy = 0;
+   int rc = scheduler_db_insert_checked(&ev_over, max_per_user, max_total, &dummy);
+   TEST_ASSERT(rc == SCHED_DB_USER_LIMIT, "insert_checked returns USER_LIMIT at per-user limit");
 
    /* Insert for user 2 up to global limit (5 total - 3 already = 2 more) */
    for (int i = 0; i < 2; i++) {
       sched_event_t ev = make_event();
       ev.user_id = 2;
       snprintf(ev.name, SCHED_NAME_MAX, "User2 Event %d", i);
-      int64_t id = scheduler_db_insert_checked(&ev, max_per_user, max_total);
-      TEST_ASSERT(id > 0, "insert_checked within global limit");
+      int64_t id = 0;
+      int irc = scheduler_db_insert_checked(&ev, max_per_user, max_total, &id);
+      TEST_ASSERT(irc == SCHED_DB_SUCCESS && id > 0, "insert_checked within global limit");
    }
 
    /* Next insert for user 2 should fail with global limit */
    sched_event_t ev_global = make_event();
    ev_global.user_id = 2;
    strncpy(ev_global.name, "User2 Over Global", SCHED_NAME_MAX - 1);
-   rc = scheduler_db_insert_checked(&ev_global, max_per_user, max_total);
-   TEST_ASSERT(rc == -3, "insert_checked returns -3 at global limit");
+   rc = scheduler_db_insert_checked(&ev_global, max_per_user, max_total, &dummy);
+   TEST_ASSERT(rc == SCHED_DB_GLOBAL_LIMIT, "insert_checked returns GLOBAL_LIMIT at global limit");
 
    /* Verify counts */
-   int u1_count = scheduler_db_count_user_events(1);
-   int u2_count = scheduler_db_count_user_events(2);
+   int u1_count = 0, u2_count = 0;
+   scheduler_db_count_user_events(1, &u1_count);
+   scheduler_db_count_user_events(2, &u2_count);
    TEST_ASSERT(u1_count == 3, "user 1 has exactly 3 events");
    TEST_ASSERT(u2_count == 2, "user 2 has exactly 2 events");
 }
@@ -265,7 +271,8 @@ static void test_update_status(void) {
    printf("\n--- test_update_status ---\n");
 
    sched_event_t ev = make_event();
-   int64_t id = scheduler_db_insert(&ev);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
 
    int rc = scheduler_db_update_status(id, SCHED_STATUS_RINGING);
    TEST_ASSERT(rc == 0, "update pending -> ringing succeeds");
@@ -289,7 +296,8 @@ static void test_update_status_fired(void) {
    printf("\n--- test_update_status_fired ---\n");
 
    sched_event_t ev = make_event();
-   int64_t id = scheduler_db_insert(&ev);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
 
    time_t now = time(NULL);
    int rc = scheduler_db_update_status_fired(id, SCHED_STATUS_RINGING, now);
@@ -309,7 +317,8 @@ static void test_cancel_optimistic(void) {
    printf("\n--- test_cancel_optimistic ---\n");
 
    sched_event_t ev = make_event();
-   int64_t id = scheduler_db_insert(&ev);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
 
    int rc = scheduler_db_cancel(id);
    TEST_ASSERT(rc == 0, "cancel pending event succeeds");
@@ -320,14 +329,15 @@ static void test_cancel_optimistic(void) {
 
    /* Cancel again should fail — already cancelled */
    rc = scheduler_db_cancel(id);
-   TEST_ASSERT(rc == -1, "cancel already-cancelled returns -1");
+   TEST_ASSERT(rc != 0, "cancel already-cancelled returns failure");
 
    /* Cancel a dismissed event should also fail */
    sched_event_t ev2 = make_event();
-   int64_t id2 = scheduler_db_insert(&ev2);
+   int64_t id2 = 0;
+   scheduler_db_insert(&ev2, &id2);
    scheduler_db_update_status(id2, SCHED_STATUS_DISMISSED);
    rc = scheduler_db_cancel(id2);
-   TEST_ASSERT(rc == -1, "cancel dismissed event returns -1");
+   TEST_ASSERT(rc != 0, "cancel dismissed event returns failure");
 }
 
 /* ============================================================================
@@ -338,11 +348,12 @@ static void test_dismiss_optimistic(void) {
    printf("\n--- test_dismiss_optimistic ---\n");
 
    sched_event_t ev = make_event();
-   int64_t id = scheduler_db_insert(&ev);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
 
    /* Dismiss pending should fail — must be ringing */
    int rc = scheduler_db_dismiss(id);
-   TEST_ASSERT(rc == -1, "dismiss pending returns -1");
+   TEST_ASSERT(rc != 0, "dismiss pending returns failure");
 
    /* Set to ringing, then dismiss */
    scheduler_db_update_status(id, SCHED_STATUS_RINGING);
@@ -356,7 +367,7 @@ static void test_dismiss_optimistic(void) {
 
    /* Dismiss again should fail */
    rc = scheduler_db_dismiss(id);
-   TEST_ASSERT(rc == -1, "dismiss already-dismissed returns -1");
+   TEST_ASSERT(rc != 0, "dismiss already-dismissed returns failure");
 }
 
 /* ============================================================================
@@ -367,7 +378,8 @@ static void test_snooze(void) {
    printf("\n--- test_snooze ---\n");
 
    sched_event_t ev = make_event();
-   int64_t id = scheduler_db_insert(&ev);
+   int64_t id = 0;
+   scheduler_db_insert(&ev, &id);
 
    /* Set to ringing first */
    scheduler_db_update_status(id, SCHED_STATUS_RINGING);
@@ -405,18 +417,18 @@ static void test_due_events(void) {
    sched_event_t ev1 = make_event();
    ev1.fire_at = now - 3600;
    strncpy(ev1.name, "Past Event 1", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev1);
+   scheduler_db_insert(&ev1, NULL);
 
    sched_event_t ev2 = make_event();
    ev2.fire_at = now - 1800;
    strncpy(ev2.name, "Past Event 2", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev2);
+   scheduler_db_insert(&ev2, NULL);
 
    /* 1 event in the future (not due) */
    sched_event_t ev3 = make_event();
    ev3.fire_at = now + 7200;
    strncpy(ev3.name, "Future Event", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev3);
+   scheduler_db_insert(&ev3, NULL);
 
    sched_event_t results[10];
    int count = scheduler_db_get_due_events(results, 10);
@@ -439,18 +451,18 @@ static void test_list_user_events(void) {
    sched_event_t ev1 = make_event();
    ev1.event_type = SCHED_EVENT_ALARM;
    strncpy(ev1.name, "User1 Alarm", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev1);
+   scheduler_db_insert(&ev1, NULL);
 
    sched_event_t ev2 = make_event();
    ev2.event_type = SCHED_EVENT_TIMER;
    strncpy(ev2.name, "User1 Timer", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev2);
+   scheduler_db_insert(&ev2, NULL);
 
    /* Insert event for user 2 */
    sched_event_t ev3 = make_event();
    ev3.user_id = 2;
    strncpy(ev3.name, "User2 Alarm", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev3);
+   scheduler_db_insert(&ev3, NULL);
 
    sched_event_t results[10];
 
@@ -476,7 +488,7 @@ static void test_find_by_name(void) {
 
    sched_event_t ev = make_event();
    strncpy(ev.name, "Morning Alarm", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev);
+   scheduler_db_insert(&ev, NULL);
 
    sched_event_t found;
 
@@ -487,15 +499,15 @@ static void test_find_by_name(void) {
 
    /* No wildcard injection — "%" is literal */
    rc = scheduler_db_find_by_name(1, "morning alarm%", &found);
-   TEST_ASSERT(rc == -1, "find with '%' suffix returns not found");
+   TEST_ASSERT(rc != 0, "find with '%' suffix returns not found");
 
    /* Nonexistent name */
    rc = scheduler_db_find_by_name(1, "nonexistent", &found);
-   TEST_ASSERT(rc == -1, "find nonexistent returns -1");
+   TEST_ASSERT(rc != 0, "find nonexistent returns failure");
 
    /* Wrong user */
    rc = scheduler_db_find_by_name(2, "Morning Alarm", &found);
-   TEST_ASSERT(rc == -1, "find for wrong user_id returns -1");
+   TEST_ASSERT(rc != 0, "find for wrong user_id returns failure");
 }
 
 /* ============================================================================
@@ -509,19 +521,22 @@ static void test_count_events(void) {
    for (int i = 0; i < 3; i++) {
       sched_event_t ev = make_event();
       snprintf(ev.name, SCHED_NAME_MAX, "Count Event %d", i);
-      scheduler_db_insert(&ev);
+      scheduler_db_insert(&ev, NULL);
    }
 
    /* Insert 1 cancelled event (should not be counted) */
    sched_event_t ev_cancel = make_event();
    strncpy(ev_cancel.name, "Cancelled One", SCHED_NAME_MAX - 1);
-   int64_t cancel_id = scheduler_db_insert(&ev_cancel);
+   int64_t cancel_id = 0;
+   scheduler_db_insert(&ev_cancel, &cancel_id);
    scheduler_db_update_status(cancel_id, SCHED_STATUS_CANCELLED);
 
-   int u1_count = scheduler_db_count_user_events(1);
+   int u1_count = 0;
+   scheduler_db_count_user_events(1, &u1_count);
    TEST_ASSERT(u1_count == 3, "count_user_events = 3 (cancelled excluded)");
 
-   int total = scheduler_db_count_total_events();
+   int total = 0;
+   scheduler_db_count_total_events(&total);
    TEST_ASSERT(total == 3, "count_total_events = 3 (cancelled excluded)");
 }
 
@@ -534,11 +549,12 @@ static void test_get_ringing(void) {
 
    sched_event_t ev1 = make_event();
    strncpy(ev1.name, "Ringing One", SCHED_NAME_MAX - 1);
-   int64_t id1 = scheduler_db_insert(&ev1);
+   int64_t id1 = 0;
+   scheduler_db_insert(&ev1, &id1);
 
    sched_event_t ev2 = make_event();
    strncpy(ev2.name, "Still Pending", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev2);
+   scheduler_db_insert(&ev2, NULL);
 
    /* Set only ev1 to ringing */
    scheduler_db_update_status(id1, SCHED_STATUS_RINGING);
@@ -563,28 +579,31 @@ static void test_cleanup_old_events(void) {
    /* Old fired event (fired_at far in the past) */
    sched_event_t ev_old = make_event();
    strncpy(ev_old.name, "Old Fired", SCHED_NAME_MAX - 1);
-   int64_t id_old = scheduler_db_insert(&ev_old);
+   int64_t id_old = 0;
+   scheduler_db_insert(&ev_old, &id_old);
    time_t old_time = now - 86400 * 10; /* 10 days ago */
    scheduler_db_update_status_fired(id_old, SCHED_STATUS_FIRED, old_time);
 
    /* Recent fired event (should not be deleted with retention_days=1) */
    sched_event_t ev_recent = make_event();
    strncpy(ev_recent.name, "Recent Fired", SCHED_NAME_MAX - 1);
-   int64_t id_recent = scheduler_db_insert(&ev_recent);
+   int64_t id_recent = 0;
+   scheduler_db_insert(&ev_recent, &id_recent);
    scheduler_db_update_status_fired(id_recent, SCHED_STATUS_FIRED, now);
 
    /* Pending event with old created_at (should NOT be deleted — still active) */
    sched_event_t ev_pending = make_event();
    strncpy(ev_pending.name, "Old Pending", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev_pending);
+   scheduler_db_insert(&ev_pending, NULL);
 
-   int deleted = scheduler_db_cleanup_old_events(1);
+   int deleted = 0;
+   scheduler_db_cleanup_old_events(1, &deleted);
    TEST_ASSERT(deleted == 1, "cleanup deletes exactly 1 old fired event");
 
    /* Verify old fired event is gone */
    sched_event_t got;
    int rc = scheduler_db_get(id_old, &got);
-   TEST_ASSERT(rc == -1, "old fired event no longer exists");
+   TEST_ASSERT(rc != 0, "old fired event no longer exists");
 
    /* Verify recent fired event still exists */
    rc = scheduler_db_get(id_recent, &got);
@@ -603,17 +622,18 @@ static void test_next_fire_time(void) {
    sched_event_t ev1 = make_event();
    ev1.fire_at = now + 1000;
    strncpy(ev1.name, "Earliest", SCHED_NAME_MAX - 1);
-   int64_t id1 = scheduler_db_insert(&ev1);
+   int64_t id1 = 0;
+   scheduler_db_insert(&ev1, &id1);
 
    sched_event_t ev2 = make_event();
    ev2.fire_at = now + 2000;
    strncpy(ev2.name, "Middle", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev2);
+   scheduler_db_insert(&ev2, NULL);
 
    sched_event_t ev3 = make_event();
    ev3.fire_at = now + 3000;
    strncpy(ev3.name, "Latest", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev3);
+   scheduler_db_insert(&ev3, NULL);
 
    time_t next = scheduler_db_next_fire_time();
    TEST_ASSERT(next == now + 1000, "next_fire_time returns earliest pending");
@@ -635,13 +655,13 @@ static void test_get_active_by_uuid(void) {
    ev1.event_type = SCHED_EVENT_TIMER;
    strncpy(ev1.source_uuid, "sat-001", SCHED_UUID_MAX - 1);
    strncpy(ev1.name, "Timer for sat-001", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev1);
+   scheduler_db_insert(&ev1, NULL);
 
    sched_event_t ev2 = make_event();
    ev2.event_type = SCHED_EVENT_TIMER;
    strncpy(ev2.source_uuid, "sat-001", SCHED_UUID_MAX - 1);
    strncpy(ev2.name, "Timer 2 for sat-001", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev2);
+   scheduler_db_insert(&ev2, NULL);
 
    sched_event_t results[10];
 
@@ -665,13 +685,13 @@ static void test_get_missed_events(void) {
    sched_event_t ev1 = make_event();
    ev1.fire_at = now - 3600;
    strncpy(ev1.name, "Missed One", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev1);
+   scheduler_db_insert(&ev1, NULL);
 
    /* Pending event in the future */
    sched_event_t ev2 = make_event();
    ev2.fire_at = now + 3600;
    strncpy(ev2.name, "Future One", SCHED_NAME_MAX - 1);
-   scheduler_db_insert(&ev2);
+   scheduler_db_insert(&ev2, NULL);
 
    sched_event_t results[10];
    int count = scheduler_db_get_missed_events(results, 10);

@@ -38,6 +38,7 @@
 #include "audio/music_db.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -109,8 +110,9 @@ static void *scanner_thread_func(void *arg) {
       pthread_mutex_lock(&g_scanner_mutex);
 
       g_initial_scan_complete = true;
-      OLOG_INFO("Music scan cycle complete: %d tracks total (%.2fs)", music_db_get_track_count(),
-                scan_secs);
+      int track_count = 0;
+      music_db_get_track_count(&track_count);
+      OLOG_INFO("Music scan cycle complete: %d tracks total (%.2fs)", track_count, scan_secs);
 
       /* Clear any pending rescan request that accumulated during this scan */
       g_rescan_requested = false;
@@ -147,14 +149,14 @@ static void *scanner_thread_func(void *arg) {
 
 int music_scanner_register_source(const music_source_provider_t *provider) {
    if (!provider)
-      return -1;
+      return FAILURE;
    if (g_running) {
       OLOG_ERROR("music_scanner: cannot register provider while scanner is running");
-      return -1;
+      return FAILURE;
    }
    if (g_provider_count >= MAX_PROVIDERS) {
       OLOG_ERROR("music_scanner: max providers (%d) reached", MAX_PROVIDERS);
-      return -1;
+      return FAILURE;
    }
    g_providers[g_provider_count++] = provider;
    OLOG_INFO("music_scanner: registered %s source provider", music_source_name(provider->source));
@@ -167,7 +169,7 @@ int music_scanner_start(const char *music_dir, int scan_interval_min, const char
 
    if (!have_local && !have_providers) {
       OLOG_ERROR("music_scanner_start: No music directory and no providers registered");
-      return -1;
+      return FAILURE;
    }
 
    char canonical_dir[MUSIC_DB_PATH_MAX] = { 0 };
@@ -177,7 +179,7 @@ int music_scanner_start(const char *music_dir, int scan_interval_min, const char
       if (!path_canonicalize(music_dir, canonical_dir, sizeof(canonical_dir))) {
          OLOG_ERROR("music_scanner_start: Cannot canonicalize path '%s' (does it exist?)",
                     music_dir);
-         return -1;
+         return FAILURE;
       }
 
       /* Validate music directory is accessible */
@@ -185,22 +187,22 @@ int music_scanner_start(const char *music_dir, int scan_interval_min, const char
       if (stat(canonical_dir, &st) != 0) {
          OLOG_ERROR("music_scanner_start: Cannot access music directory '%s': %s", canonical_dir,
                     strerror(errno));
-         return -1;
+         return FAILURE;
       }
       if (!S_ISDIR(st.st_mode)) {
          OLOG_ERROR("music_scanner_start: Path is not a directory: %s", canonical_dir);
-         return -1;
+         return FAILURE;
       }
       if (access(canonical_dir, R_OK | X_OK) != 0) {
          OLOG_ERROR("music_scanner_start: No read/execute permission for directory '%s'",
                     canonical_dir);
-         return -1;
+         return FAILURE;
       }
    }
 
    if (!music_db_is_initialized()) {
       OLOG_ERROR("music_scanner_start: Music database not initialized");
-      return -1;
+      return FAILURE;
    }
 
    /* Initialize registered providers */
@@ -248,7 +250,7 @@ int music_scanner_start(const char *music_dir, int scan_interval_min, const char
       OLOG_ERROR("Failed to create scanner thread: %d", result);
       g_running = false;
       pthread_mutex_unlock(&g_scanner_mutex);
-      return -1;
+      return FAILURE;
    }
 
    pthread_mutex_unlock(&g_scanner_mutex);

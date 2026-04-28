@@ -28,6 +28,7 @@
 #include <json-c/json.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "tools/curl_buffer.h"
@@ -70,7 +71,7 @@ static void ollama_cleanup(void) {
 
 static int ollama_embed(const char *text, float *out, int max_dims, int *out_dims) {
    if (!text || !out || !out_dims)
-      return -1;
+      return FAILURE;
 
    *out_dims = 0;
 
@@ -88,7 +89,7 @@ static int ollama_embed(const char *text, float *out, int max_dims, int *out_dim
    CURL *curl = curl_easy_init();
    if (!curl) {
       json_object_put(req);
-      return -1;
+      return FAILURE;
    }
 
    curl_buffer_t buf;
@@ -113,7 +114,7 @@ static int ollama_embed(const char *text, float *out, int max_dims, int *out_dim
    if (res != CURLE_OK) {
       OLOG_ERROR("memory_embed_ollama: HTTP request failed: %s", curl_easy_strerror(res));
       curl_buffer_free(&buf);
-      return -1;
+      return FAILURE;
    }
 
    /* Parse response: {"embeddings": [[0.1, 0.2, ...]]} */
@@ -122,21 +123,21 @@ static int ollama_embed(const char *text, float *out, int max_dims, int *out_dim
 
    if (!resp) {
       OLOG_ERROR("memory_embed_ollama: failed to parse response");
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *embeddings_arr;
    if (!json_object_object_get_ex(resp, "embeddings", &embeddings_arr)) {
       OLOG_ERROR("memory_embed_ollama: no 'embeddings' in response");
       json_object_put(resp);
-      return -1;
+      return FAILURE;
    }
 
    /* Get first embedding vector */
    struct json_object *first = json_object_array_get_idx(embeddings_arr, 0);
    if (!first) {
       json_object_put(resp);
-      return -1;
+      return FAILURE;
    }
 
    int dims = json_object_array_length(first);

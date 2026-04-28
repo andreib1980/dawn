@@ -36,6 +36,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
@@ -727,7 +728,7 @@ int llm_context_save_conversation(uint32_t session_id,
    }
 
    if (!history) {
-      return -1;
+      return FAILURE;
    }
 
    /* Generate timestamped filename */
@@ -752,7 +753,7 @@ int llm_context_save_conversation(uint32_t session_id,
    if (!sanitized) {
       OLOG_ERROR("llm_context: Failed to strip provider state — skipping save to avoid "
                  "persisting session-bound fields");
-      return -1;
+      return FAILURE;
    }
 
    /* Write JSON to file */
@@ -763,7 +764,7 @@ int llm_context_save_conversation(uint32_t session_id,
    if (!fp) {
       OLOG_ERROR("llm_context: Failed to open %s for writing", filename);
       json_object_put(sanitized);
-      return -1;
+      return FAILURE;
    }
 
    fprintf(fp, "%s\n", json_str);

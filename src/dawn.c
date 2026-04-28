@@ -2585,8 +2585,9 @@ mqtt_disabled:
                   if (idle_sec >= timeout_sec) {
                      OLOG_INFO("Session 0: Idle timeout after %d minutes, saving conversation",
                                g_config.memory.conversation_idle_timeout_min);
-                     int64_t conv_id = session_save_voice_conversation(local_session);
-                     if (conv_id > 0) {
+                     int64_t conv_id = 0;
+                     if (session_save_voice_conversation(local_session, &conv_id) == 0 &&
+                         conv_id > 0) {
                         OLOG_INFO("Session 0: Saved as conversation %lld", (long long)conv_id);
                         /* Update global pointer to the new history */
                         conversation_history = local_session->conversation_history;
@@ -3795,8 +3796,8 @@ server_shutdown:
    /* Save any non-empty voice conversation before shutdown */
    if (local_session && session_has_messages(local_session)) {
       OLOG_INFO("Shutdown: saving Session 0 voice conversation");
-      int64_t conv_id = session_save_voice_conversation(local_session);
-      if (conv_id > 0) {
+      int64_t conv_id = 0;
+      if (session_save_voice_conversation(local_session, &conv_id) == 0 && conv_id > 0) {
          OLOG_INFO("Shutdown: saved as conversation %lld", (long long)conv_id);
       }
    }

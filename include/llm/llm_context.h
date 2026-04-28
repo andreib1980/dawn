@@ -417,7 +417,7 @@ char *llm_context_usage_string(const llm_context_usage_t *usage, char *buf, size
  * @param suffix Filename suffix (e.g., "precompact", "shutdown")
  * @param filename_out Output: saved filename (can be NULL)
  * @param filename_len Length of filename buffer
- * @return 0 on success, 1 if logging disabled, -1 on error
+ * @return SUCCESS, 1 if logging disabled, or FAILURE on error
  */
 int llm_context_save_conversation(uint32_t session_id,
                                   struct json_object *history,

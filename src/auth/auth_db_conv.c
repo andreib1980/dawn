@@ -764,12 +764,12 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
-int conv_db_is_private(int64_t conv_id, int user_id) {
-   if (conv_id <= 0) {
-      return -1;
+int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
+   if (conv_id <= 0 || !is_private_out) {
+      return AUTH_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    /* Use a direct query for efficiency (no prepared statement needed for rare calls) */
    const char *sql = "SELECT is_private FROM conversations WHERE id = ? AND user_id = ?";
@@ -777,21 +777,24 @@ int conv_db_is_private(int64_t conv_id, int user_id) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_bind_int64(stmt, 1, conv_id);
    sqlite3_bind_int(stmt, 2, user_id);
 
-   int result = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW) {
-      result = sqlite3_column_int(stmt, 0);
+   rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *is_private_out = (sqlite3_column_int(stmt, 0) != 0);
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_SUCCESS;
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
 
-   return result;
+   return AUTH_DB_NOT_FOUND;
 }
 
 int conv_db_delete(int64_t conv_id, int user_id) {
@@ -1425,25 +1428,28 @@ int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, voi
  * Utility Operations
  * ============================================================================= */
 
-int conv_db_count(int user_id) {
-   if (user_id <= 0) {
-      return -1;
+int conv_db_count(int user_id, int *count_out) {
+   if (user_id <= 0 || !count_out) {
+      return AUTH_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_conv_count);
    sqlite3_bind_int(s_db.stmt_conv_count, 1, user_id);
 
-   int count = -1;
    if (sqlite3_step(s_db.stmt_conv_count) == SQLITE_ROW) {
-      count = sqlite3_column_int(s_db.stmt_conv_count, 0);
+      *count_out = sqlite3_column_int(s_db.stmt_conv_count, 0);
+   } else {
+      sqlite3_reset(s_db.stmt_conv_count);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_reset(s_db.stmt_conv_count);
    AUTH_DB_UNLOCK();
 
-   return count;
+   return AUTH_DB_SUCCESS;
 }
 
 int conv_db_find_continuation(int64_t parent_id, int user_id, int64_t *continuation_id_out) {

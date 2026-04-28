@@ -401,7 +401,8 @@ static char *handle_confirm_sms(int user_id) {
 static char *handle_read_sms(int user_id) {
    /* Capped at 10 resident rows to keep stack frame bounded after body[2048] bump. */
    phone_sms_log_t entries[10];
-   int count = phone_db_sms_get_unread(user_id, entries, 10);
+   int count = 0;
+   phone_db_sms_get_unread(user_id, entries, 10, &count);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
@@ -823,7 +824,8 @@ static char *handle_call_log(struct json_object *details, int user_id) {
    }
 
    phone_call_log_t entries[20];
-   int actual = phone_db_call_log_recent(user_id, entries, count);
+   int actual = 0;
+   phone_db_call_log_recent(user_id, entries, count, &actual);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
@@ -871,7 +873,8 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
    }
 
    phone_sms_log_t entries[10];
-   int actual = phone_db_sms_log_recent(user_id, entries, count);
+   int actual = 0;
+   phone_db_sms_log_recent(user_id, entries, count, &actual);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {

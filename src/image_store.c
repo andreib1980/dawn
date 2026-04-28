@@ -327,8 +327,8 @@ int image_store_save_ex(int user_id,
 
    /* Check user image count (skip for system-wide images) */
    if (user_id > 0) {
-      int count = image_store_count_user(user_id);
-      if (count < 0) {
+      int count = 0;
+      if (image_store_count_user(user_id, &count) != IMAGE_STORE_SUCCESS) {
          return IMAGE_STORE_FAILURE;
       }
       if (count >= s_store.max_per_user) {
@@ -606,13 +606,16 @@ int image_store_delete(const char *id, int user_id) {
    return IMAGE_STORE_SUCCESS;
 }
 
-int image_store_count_user(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int image_store_count_user(int user_id, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_image_count_user);
    sqlite3_bind_int(s_db.stmt_image_count_user, 1, user_id);
 
-   int count = -1;
+   int count = 0;
    if (sqlite3_step(s_db.stmt_image_count_user) == SQLITE_ROW) {
       count = sqlite3_column_int(s_db.stmt_image_count_user, 0);
    }
@@ -620,16 +623,21 @@ int image_store_count_user(int user_id) {
    sqlite3_reset(s_db.stmt_image_count_user);
    AUTH_DB_UNLOCK();
 
-   return count;
+   if (count_out)
+      *count_out = count;
+   return IMAGE_STORE_SUCCESS;
 }
 
 /* =============================================================================
  * Maintenance
  * ============================================================================= */
 
-int image_store_cleanup(void) {
+int image_store_cleanup(int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
+
    if (!s_store.initialized) {
-      return 0;
+      return IMAGE_STORE_SUCCESS;
    }
 
    int total_deleted = 0;
@@ -638,7 +646,7 @@ int image_store_cleanup(void) {
    if (s_store.retention_days > 0) {
       time_t cutoff = time(NULL) - (s_store.retention_days * 86400);
 
-      AUTH_DB_LOCK_OR_RETURN(-1);
+      AUTH_DB_LOCK_OR_FAIL();
 
       /* Collect expired IDs + filenames first */
       sqlite3_reset(s_db.stmt_image_get_expired_ids);
@@ -685,7 +693,7 @@ int image_store_cleanup(void) {
    }
 
    /* Phase 2: CACHE retention — LRU eviction if total exceeds cap */
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_image_cache_total_size);
    int64_t cache_bytes = 0;
@@ -750,7 +758,9 @@ int image_store_cleanup(void) {
       OLOG_INFO("Image store: cleaned up %d images", total_deleted);
    }
 
-   return total_deleted;
+   if (deleted_out)
+      *deleted_out = total_deleted;
+   return IMAGE_STORE_SUCCESS;
 }
 
 int image_store_stats(int *total_count, int64_t *total_bytes) {

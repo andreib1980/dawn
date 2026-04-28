@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 #include "tools/weather_service.h"
@@ -147,8 +148,10 @@ static char *weather_tool_callback(const char *action, char *value, int *should_
 
       char *result = malloc(WEATHER_RESULT_BUFFER_SIZE);
       if (result) {
-         int formatted_len = weather_format_for_llm(response, result, WEATHER_RESULT_BUFFER_SIZE);
-         if (formatted_len < 0 || (size_t)formatted_len >= WEATHER_RESULT_BUFFER_SIZE) {
+         int formatted_len = 0;
+         if (weather_format_for_llm(response, result, WEATHER_RESULT_BUFFER_SIZE, &formatted_len) !=
+                 SUCCESS ||
+             formatted_len <= 0 || (size_t)formatted_len >= WEATHER_RESULT_BUFFER_SIZE) {
             OLOG_ERROR("weather_tool_callback: Weather data truncated (needed %d bytes, have %d)",
                        formatted_len, WEATHER_RESULT_BUFFER_SIZE);
             free(result);

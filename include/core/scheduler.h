@@ -83,14 +83,14 @@ bool scheduler_is_ringing(void);
 /**
  * @brief Get the currently ringing event (if any)
  * @param event Output event struct (filled if ringing)
- * @return 0 if ringing event found, -1 if nothing ringing
+ * @return SUCCESS if ringing event found, FAILURE if nothing ringing
  */
 int scheduler_get_ringing(sched_event_t *event);
 
 /**
  * @brief Dismiss the currently ringing alarm
  * @param event_id Event ID to dismiss (0 = dismiss whatever is ringing)
- * @return 0 on success, -1 if nothing to dismiss
+ * @return SUCCESS or FAILURE if nothing to dismiss
  */
 int scheduler_dismiss(int64_t event_id);
 
@@ -98,7 +98,7 @@ int scheduler_dismiss(int64_t event_id);
  * @brief Snooze the currently ringing alarm
  * @param event_id Event ID to snooze (0 = snooze whatever is ringing)
  * @param snooze_minutes Minutes to snooze (0 = use default from config)
- * @return 0 on success, -1 if nothing to snooze
+ * @return SUCCESS or FAILURE if nothing to snooze
  */
 int scheduler_snooze(int64_t event_id, int snooze_minutes);
 

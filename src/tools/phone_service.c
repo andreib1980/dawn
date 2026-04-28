@@ -177,7 +177,8 @@ static int resolve_number(int user_id,
 
    /* Search contacts by name for phone type */
    contact_result_t results[5];
-   int count = contacts_find(user_id, input, "phone", results, 5);
+   int count = 0;
+   contacts_find(user_id, input, "phone", results, 5, &count);
    if (count <= 0) {
       return 1; /* no contact found */
    }
@@ -215,7 +216,8 @@ static void reverse_lookup(int user_id,
    const int page_size = 50;
    contact_result_t results[50];
    while (1) {
-      int count = contacts_list(user_id, "phone", results, page_size, offset);
+      int count = 0;
+      contacts_list(user_id, "phone", results, page_size, offset, &count);
       if (count <= 0) {
          break;
       }
@@ -517,8 +519,9 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       reverse_lookup(s_config.user_id, number, contact_name, sizeof(contact_name), &entity_id);
 
       /* Insert call log (initially missed — updated on answer/connect) */
-      int64_t log_id = phone_db_call_log_insert(s_config.user_id, PHONE_DIR_INCOMING, number,
-                                                contact_name, 0, time(NULL), PHONE_CALL_MISSED);
+      int64_t log_id = 0;
+      phone_db_call_log_insert(s_config.user_id, PHONE_DIR_INCOMING, number, contact_name, 0,
+                               time(NULL), PHONE_CALL_MISSED, &log_id);
 
       /* Set state + tracking atomically */
       set_state_with_call(PHONE_STATE_RINGING_IN, number, contact_name, log_id, entity_id);
@@ -708,8 +711,9 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       char safe_body[1024];
       snprintf(safe_body, sizeof(safe_body), "[Incoming SMS - external content] %s", body);
 
-      int64_t sms_id = phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender,
-                                               contact_name, safe_body, time(NULL));
+      int64_t sms_id = 0;
+      phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender, contact_name, safe_body,
+                              time(NULL), &sms_id);
 
       /* TTS announce (before SIM delete so notification is immediate) */
       char announce[256];
@@ -867,8 +871,9 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
    }
 
    /* Insert call log with FAILED status (updated to ANSWERED on connect) */
-   int64_t log_id = phone_db_call_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, 0,
-                                             time(NULL), PHONE_CALL_FAILED);
+   int64_t log_id = 0;
+   phone_db_call_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, 0, time(NULL),
+                            PHONE_CALL_FAILED, &log_id);
 
    /* Lookup entity_id for outgoing contact (for photo in HUD) */
    int64_t out_entity_id = -1;
@@ -1106,7 +1111,7 @@ int phone_service_send_sms(int user_id,
    }
 
    /* Log outbound SMS */
-   phone_db_sms_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, body, time(NULL));
+   phone_db_sms_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, body, time(NULL), NULL);
 
    snprintf(result_buf, buf_size, "SMS sent to %s%s%s", name[0] ? name : number,
             name[0] ? " at " : "", name[0] ? number : "");

@@ -35,13 +35,12 @@
 #include <string.h>
 #include <strings.h> /* strncasecmp (portable POSIX; also works via _GNU_SOURCE) */
 
+#include "dawn_error.h"
+
 #define DAY_SEC ((int64_t)86400)
 #define WEEK_SEC ((int64_t)7 * DAY_SEC)
 #define MONTH_SEC ((int64_t)30 * DAY_SEC) /* nominal */
 #define YEAR_SEC ((int64_t)365 * DAY_SEC)
-
-#define SUCCESS 0
-#define FAILURE 1
 
 /* ============================================================================
  * Lower-case scan helpers

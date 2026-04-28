@@ -77,7 +77,7 @@ void text_to_speech(const char *text);
  * @param pcm_data_out Pointer to receive allocated PCM data (caller must free)
  * @param pcm_samples_out Pointer to receive number of samples (not bytes)
  * @param sample_rate_out Pointer to receive sample rate (always 22050)
- * @return 0 on success, -1 on error
+ * @return SUCCESS or FAILURE
  *
  * @note Output is 16-bit signed little-endian mono PCM at 22050Hz
  * @note Thread-safe via tts_mutex
@@ -97,7 +97,7 @@ int text_to_speech_to_pcm(const char *text,
  * @param text The text to be converted to WAV audio
  * @param wav_data_out Pointer to receive allocated WAV data (caller must free)
  * @param wav_size_out Pointer to receive WAV data size in bytes
- * @return 0 on success, -1 on error
+ * @return SUCCESS or FAILURE
  *
  * @note Thread-safe via tts_mutex
  */
@@ -124,7 +124,7 @@ void tts_speak_greeting_with_calibration(const char *greeting);
  * to ensure the greeting completes before enabling barge-in.
  *
  * @param timeout_ms Maximum time to wait in milliseconds (0 = no timeout)
- * @return 0 if TTS completed, -1 if timeout or not initialized
+ * @return SUCCESS if TTS completed, FAILURE if timeout or not initialized
  */
 int tts_wait_for_completion(int timeout_ms);
 

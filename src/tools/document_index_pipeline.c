@@ -34,6 +34,7 @@
 
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/document_chunker.h"
 #include "tools/document_db.h"
@@ -111,8 +112,9 @@ int document_index_text(int user_id,
    }
 
    /* Check user document count limit */
-   int user_doc_count = document_db_count_user(user_id);
-   if (user_doc_count >= 0 && user_doc_count >= g_config.documents.max_indexed_documents) {
+   int user_doc_count = 0;
+   document_db_count_user(user_id, &user_doc_count);
+   if (user_doc_count >= g_config.documents.max_indexed_documents) {
       char msg[128];
       snprintf(msg, sizeof(msg), "Document limit reached (%d max)",
                g_config.documents.max_indexed_documents);
@@ -131,7 +133,8 @@ int document_index_text(int user_id,
    sha256_hex(text, text_len, file_hash);
 
    /* Check for duplicate */
-   int64_t existing = document_db_find_by_hash(file_hash, user_id);
+   int64_t existing = 0;
+   document_db_find_by_hash(file_hash, user_id, &existing);
    if (existing > 0) {
       char msg[128];
       snprintf(msg, sizeof(msg), "Document already indexed (id=%lld)", (long long)existing);
@@ -150,9 +153,9 @@ int document_index_text(int user_id,
    int dims = embedding_engine_dims();
 
    /* Create document record */
-   int64_t doc_id = document_db_create(user_id, filename, filename, filetype, file_hash,
-                                       chunks.count, is_global);
-   if (doc_id < 0) {
+   int64_t doc_id = 0;
+   if (document_db_create(user_id, filename, filename, filetype, file_hash, chunks.count, is_global,
+                          &doc_id) != SUCCESS) {
       set_error(out, DOC_INDEX_ERROR_DB_FAIL, "Failed to create document record");
       chunk_result_free(&chunks);
       return DOC_INDEX_ERROR_DB_FAIL;
@@ -179,9 +182,9 @@ int document_index_text(int user_id,
          }
 
          float norm = embedding_engine_l2_norm(emb_buf, dims);
-         int64_t chunk_id = document_db_chunk_create(doc_id, i, chunks.chunks[i], emb_buf, dims,
-                                                     norm, ingest_ts);
-         if (chunk_id >= 0) {
+         int64_t chunk_id = 0;
+         if (document_db_chunk_create(doc_id, i, chunks.chunks[i], emb_buf, dims, norm, ingest_ts,
+                                      &chunk_id) == SUCCESS) {
             embedded_count++;
          } else {
             failed_count++;

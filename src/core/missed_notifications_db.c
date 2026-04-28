@@ -133,11 +133,14 @@ int missed_notif_insert(int user_id,
    return AUTH_DB_SUCCESS;
 }
 
-int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out) {
-   if (!out || max_count <= 0 || user_id <= 0)
-      return 0;
+int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out, int *count_out) {
+   if (count_out)
+      *count_out = 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   if (!out || max_count <= 0 || user_id <= 0)
+      return AUTH_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
@@ -147,7 +150,7 @@ int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("missed_notif: prepare get failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -160,7 +163,9 @@ int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out) {
    }
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return AUTH_DB_SUCCESS;
 }
 
 int missed_notif_delete_by_user(int64_t id, int user_id) {
@@ -197,32 +202,44 @@ int missed_notif_delete_by_user(int64_t id, int user_id) {
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
-int missed_notif_delete_all_for_user(int user_id) {
-   if (user_id <= 0)
-      return -1;
+int missed_notif_delete_all_for_user(int user_id, int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   if (user_id <= 0)
+      return AUTH_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM missed_notifications WHERE user_id = ?", -1,
                                &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return AUTH_DB_FAILURE;
    }
    sqlite3_bind_int(stmt, 1, user_id);
    rc = sqlite3_step(stmt);
-   int deleted = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : -1;
+   int deleted = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : 0;
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return deleted;
+
+   if (rc != SQLITE_DONE)
+      return AUTH_DB_FAILURE;
+
+   if (deleted_out)
+      *deleted_out = deleted;
+   return AUTH_DB_SUCCESS;
 }
 
-int missed_notif_expire(int max_age_sec) {
-   if (max_age_sec <= 0)
-      return -1;
+int missed_notif_expire(int max_age_sec, int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   if (max_age_sec <= 0)
+      return AUTH_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    time_t cutoff = time(NULL) - (time_t)max_age_sec;
    int total_deleted = 0;
@@ -239,18 +256,18 @@ int missed_notif_expire(int max_age_sec) {
       if (rc != SQLITE_OK) {
          OLOG_ERROR("missed_notif: prepare expire failed: %s", sqlite3_errmsg(s_db.db));
          AUTH_DB_UNLOCK();
-         return -1;
+         return AUTH_DB_FAILURE;
       }
       sqlite3_bind_int64(stmt, 1, (int64_t)cutoff);
       sqlite3_bind_int(stmt, 2, MISSED_NOTIF_EXPIRE_BATCH);
 
       rc = sqlite3_step(stmt);
-      int batch_deleted = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : -1;
+      int batch_deleted = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : 0;
       sqlite3_finalize(stmt);
 
-      if (batch_deleted < 0) {
+      if (rc != SQLITE_DONE) {
          AUTH_DB_UNLOCK();
-         return -1;
+         return AUTH_DB_FAILURE;
       }
       total_deleted += batch_deleted;
       if (batch_deleted < MISSED_NOTIF_EXPIRE_BATCH)
@@ -258,5 +275,7 @@ int missed_notif_expire(int max_age_sec) {
    }
 
    AUTH_DB_UNLOCK();
-   return total_deleted;
+   if (deleted_out)
+      *deleted_out = total_deleted;
+   return AUTH_DB_SUCCESS;
 }

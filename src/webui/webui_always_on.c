@@ -679,7 +679,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
    always_on_consume_wake_result(ctx, conn_ptr);
    always_on_consume_cmd_result(ctx, conn_ptr);
    if (!ctx || !data || len == 0) {
-      return -1;
+      return FAILURE;
    }
 
    always_on_state_t state = always_on_get_state(ctx);
@@ -736,7 +736,7 @@ int always_on_process_audio(always_on_ctx_t *ctx,
       }
       if (pcm_samples == 0) {
          pthread_mutex_unlock(&ctx->mutex);
-         return -1;
+         return FAILURE;
       }
       pcm_data = pcm_buf;
    } else {

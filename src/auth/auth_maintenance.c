@@ -31,6 +31,7 @@
 
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "image_store.h"
 #include "logging.h"
 #include "memory/memory_maintenance.h"
@@ -74,7 +75,8 @@ static void *maintenance_thread_func(void *arg) {
 
       /* Clean up old images past retention period */
       if (image_store_is_ready()) {
-         int deleted = image_store_cleanup();
+         int deleted = 0;
+         image_store_cleanup(&deleted);
          if (deleted > 0) {
             OLOG_INFO("auth_maintenance: cleaned %d old images", deleted);
          }
@@ -117,7 +119,7 @@ int auth_maintenance_start(void) {
       s_running = false;
       pthread_mutex_unlock(&s_mutex);
       OLOG_ERROR("auth_maintenance: failed to create thread: %d", rc);
-      return -1;
+      return FAILURE;
    }
 
    pthread_mutex_unlock(&s_mutex);

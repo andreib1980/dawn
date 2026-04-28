@@ -137,9 +137,11 @@ static int multi_token_fact_search(int user_id,
    for (int t = 0; t < token_count; t++) {
       memory_fact_t token_results[10];
       int limit = per_token_limit > 10 ? 10 : per_token_limit;
-      int n = (since_ts > 0)
-                  ? memory_db_fact_search_since(user_id, tokens[t], since_ts, token_results, limit)
-                  : memory_db_fact_search(user_id, tokens[t], token_results, limit);
+      int n = 0;
+      if (since_ts > 0)
+         memory_db_fact_search_since(user_id, tokens[t], since_ts, token_results, limit, &n);
+      else
+         memory_db_fact_search(user_id, tokens[t], token_results, limit, &n);
       for (int j = 0; j < n; j++) {
          int found = -1;
          for (int k = 0; k < seen_count; k++) {
@@ -249,7 +251,8 @@ static size_t append_graph_context(int user_id,
 
       for (int t = 0; t < token_count && entity_count < 5; t++) {
          memory_entity_t kw_entities[5];
-         int kw_count = memory_db_entity_search(user_id, tokens[t], kw_entities, 5);
+         int kw_count = 0;
+         memory_db_entity_search(user_id, tokens[t], kw_entities, 5, &kw_count);
          for (int i = 0; i < kw_count && entity_count < 5; i++) {
             /* Dedup by entity ID */
             bool dup = false;
@@ -289,16 +292,17 @@ static size_t append_graph_context(int user_id,
       memory_relation_t rels[8];
       int rel_count;
       if (include_historical) {
-         rel_count = memory_db_relation_list_by_subject(user_id, entity_ids[i], rels, 8);
+         memory_db_relation_list_by_subject(user_id, entity_ids[i], rels, 8, &rel_count);
       } else {
-         rel_count = memory_db_relation_list_by_subject_at(user_id, entity_ids[i], as_of_ts, rels,
-                                                           8);
+         memory_db_relation_list_by_subject_at(user_id, entity_ids[i], as_of_ts, rels, 8,
+                                               &rel_count);
       }
       /* Incoming relations: no temporal filter helper today; subject-side filter is
        * the high-value case (e.g., "where does Alice work").  Object-side stays
        * unfiltered for v1 — incoming recall is contextual, less likely to confuse. */
       memory_relation_t in_rels[8];
-      int in_count = memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8);
+      int in_count = 0;
+      memory_db_relation_list_by_object(user_id, entity_ids[i], in_rels, 8, &in_count);
 
       if (rel_count == 0 && in_count == 0)
          continue;
@@ -370,14 +374,15 @@ static char *memory_action_search(int user_id,
    if (category_filter_active) {
       /* Category pre-filter is independent of token count — single SQL per query.
        * Score-vs-time combinability deferred (see decision #7). */
-      fact_count = memory_db_fact_search_by_category(user_id, keywords, category, facts, 10);
+      memory_db_fact_search_by_category(user_id, keywords, category, facts, 10, &fact_count);
       for (int i = 0; i < fact_count; i++)
          kw_scores[i] = 1;
    } else if (token_count <= 1) {
       /* Single word or empty: use original single-call path */
-      fact_count = (since_ts > 0)
-                       ? memory_db_fact_search_since(user_id, keywords, since_ts, facts, 10)
-                       : memory_db_fact_search(user_id, keywords, facts, 10);
+      if (since_ts > 0)
+         memory_db_fact_search_since(user_id, keywords, since_ts, facts, 10, &fact_count);
+      else
+         memory_db_fact_search(user_id, keywords, facts, 10, &fact_count);
       /* Single-token: all scores = 1 */
       for (int i = 0; i < fact_count; i++)
          kw_scores[i] = 1;
@@ -443,7 +448,8 @@ static char *memory_action_search(int user_id,
 
    /* Search preferences — SQL-filtered by LIKE on category and value */
    memory_preference_t prefs[10];
-   int pref_count = memory_db_pref_search(user_id, keywords, prefs, 10);
+   int pref_count = 0;
+   memory_db_pref_search(user_id, keywords, prefs, 10, &pref_count);
 
    if (pref_count > 0) {
       if (offset > 0 && offset < buf_size - 20) {
@@ -461,9 +467,10 @@ static char *memory_action_search(int user_id,
    int summary_count = 0;
 
    if (token_count <= 1) {
-      summary_count = (since_ts > 0) ? memory_db_summary_search_since(user_id, keywords, since_ts,
-                                                                      summaries, 5)
-                                     : memory_db_summary_search(user_id, keywords, summaries, 5);
+      if (since_ts > 0)
+         memory_db_summary_search_since(user_id, keywords, since_ts, summaries, 5, &summary_count);
+      else
+         memory_db_summary_search(user_id, keywords, summaries, 5, &summary_count);
    } else {
       /* Multi-word: search per token, dedup by ID */
       int64_t seen_sum_ids[20];
@@ -471,9 +478,11 @@ static char *memory_action_search(int user_id,
 
       for (int t = 0; t < token_count && summary_count < 5; t++) {
          memory_summary_t token_results[5];
-         int n = (since_ts > 0) ? memory_db_summary_search_since(user_id, tokens[t], since_ts,
-                                                                 token_results, 5)
-                                : memory_db_summary_search(user_id, tokens[t], token_results, 5);
+         int n = 0;
+         if (since_ts > 0)
+            memory_db_summary_search_since(user_id, tokens[t], since_ts, token_results, 5, &n);
+         else
+            memory_db_summary_search(user_id, tokens[t], token_results, 5, &n);
          for (int j = 0; j < n && summary_count < 5; j++) {
             bool dup = false;
             for (int k = 0; k < seen_sum_count; k++) {
@@ -541,7 +550,8 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
 
    if (fact_hash != 0) {
       memory_fact_t hash_matches[5];
-      int hash_count = memory_db_fact_find_by_hash(user_id, fact_hash, hash_matches, 5);
+      int hash_count = 0;
+      memory_db_fact_find_by_hash(user_id, fact_hash, hash_matches, 5, &hash_count);
 
       if (hash_count > 0) {
          /* Verify with Jaccard similarity (handles hash collisions) */
@@ -563,7 +573,8 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
 
    /* Stage 2: SQL LIKE search for potential fuzzy duplicates */
    memory_fact_t similar[5];
-   int similar_count = memory_db_fact_find_similar(user_id, fact_text, similar, 5);
+   int similar_count = 0;
+   memory_db_fact_find_similar(user_id, fact_text, similar, 5, &similar_count);
 
    if (similar_count > 0) {
       /* Check Jaccard similarity on candidates */
@@ -584,9 +595,10 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
    }
 
    /* No duplicates found - store the new fact */
-   int64_t fact_id = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL);
+   int64_t fact_id = 0;
+   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, &fact_id);
 
-   if (fact_id < 0) {
+   if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup("Failed to store the fact. Please try again.");
    }
 
@@ -681,7 +693,8 @@ static char *memory_action_recent(int user_id, const char *period) {
 
    /* Get recent facts — SQL-filtered by created_at, ordered by recency */
    memory_fact_t facts[20];
-   int fact_count = memory_db_fact_list_since(user_id, since, facts, 20);
+   int fact_count = 0;
+   memory_db_fact_list_since(user_id, since, facts, 20, &fact_count);
 
    if (fact_count > 0) {
       offset += snprintf(result + offset, buf_size - offset, "RECENT FACTS:\n");
@@ -695,7 +708,8 @@ static char *memory_action_recent(int user_id, const char *period) {
 
    /* Get recent summaries — SQL-filtered by created_at */
    memory_summary_t summaries[10];
-   int summary_count = memory_db_summary_list_since(user_id, since, summaries, 10);
+   int summary_count = 0;
+   memory_db_summary_list_since(user_id, since, summaries, 10, &summary_count);
 
    if (summary_count > 0 && offset < buf_size - 200) {
       if (offset > 0) {
@@ -867,7 +881,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          } else {
             /* No exact match — search for similar entities */
             memory_entity_t similar[5];
-            int sim_count = memory_db_entity_search(user_id, entity_name, similar, 5);
+            int sim_count = 0;
+            memory_db_entity_search(user_id, entity_name, similar, 5, &sim_count);
 
             /* Filter to person entities only */
             int person_count = 0;
@@ -901,9 +916,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
 
             /* No similar people — create new entity */
             bool created = false;
-            entity_id = memory_db_entity_upsert(user_id, entity_name, "person", canonical,
-                                                &created);
-            if (entity_id < 0)
+            if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
+                                        &entity_id) != MEMORY_DB_SUCCESS)
                return strdup("Error: failed to create entity");
          }
       }
@@ -913,8 +927,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          char canonical[64];
          memory_make_canonical_name(entity_name, canonical, sizeof(canonical));
          bool created = false;
-         entity_id = memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created);
-         if (entity_id < 0)
+         if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
+                                     &entity_id) != MEMORY_DB_SUCCESS)
             return strdup("Error: failed to create entity");
       }
 
@@ -937,8 +951,9 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type));
 
       contact_result_t results[10];
-      int count = contacts_find(user_id, name[0] ? name : value, field_type[0] ? field_type : NULL,
-                                results, 10);
+      int count = 0;
+      contacts_find(user_id, name[0] ? name : value, field_type[0] ? field_type : NULL, results, 10,
+                    &count);
 
       if (count <= 0)
          return strdup("No contacts found matching that name.");
@@ -960,7 +975,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          tool_param_extract_base(value, field_type, sizeof(field_type));
 
       contact_result_t results[20];
-      int count = contacts_list(user_id, field_type[0] ? field_type : NULL, results, 20, 0);
+      int count = 0;
+      contacts_list(user_id, field_type[0] ? field_type : NULL, results, 20, 0, &count);
 
       if (count <= 0)
          return strdup("No contacts stored.");

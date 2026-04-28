@@ -35,6 +35,7 @@
 #include "config/dawn_config.h"
 #include "core/device_types.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -258,7 +259,7 @@ int tool_registry_init(void) {
 
    if (s_initialized) {
       pthread_mutex_unlock(&s_registry_mutex);
-      return 0; /* Already initialized */
+      return SUCCESS; /* Already initialized */
    }
 
    /* Clear state */
@@ -279,7 +280,7 @@ int tool_registry_init(void) {
    OLOG_INFO("Tool registry initialized");
 
    pthread_mutex_unlock(&s_registry_mutex);
-   return 0;
+   return SUCCESS;
 }
 
 bool tool_registry_is_available(void) {
@@ -472,7 +473,7 @@ int tool_registry_register(const tool_metadata_t *metadata) {
    OLOG_INFO("Registered tool: %s (caps=0x%x)", metadata->name, metadata->capabilities);
 
    pthread_mutex_unlock(&s_registry_mutex);
-   return 0;
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -630,7 +631,7 @@ int tool_registry_parse_configs(const char *config_path) {
    pthread_mutex_unlock(&s_registry_mutex);
 
    toml_free(root);
-   return 0;
+   return SUCCESS;
 }
 
 void tool_registry_write_configs(void *fp) {
@@ -851,9 +852,12 @@ static const char *param_type_to_json_type(tool_param_type_t type) {
 int tool_registry_generate_llm_schema(char *buffer,
                                       size_t size,
                                       bool remote_session,
-                                      bool armor_mode) {
+                                      bool armor_mode,
+                                      int *bytes_written_out) {
+   if (bytes_written_out)
+      *bytes_written_out = 0;
    if (!buffer || size == 0 || !s_initialized) {
-      return -1;
+      return FAILURE;
    }
 
    pthread_mutex_lock(&s_registry_mutex);
@@ -865,7 +869,7 @@ int tool_registry_generate_llm_schema(char *buffer,
    n = snprintf(buffer + written, size - written, "[");
    if (n < 0 || (size_t)n >= size - written) {
       pthread_mutex_unlock(&s_registry_mutex);
-      return -1;
+      return FAILURE;
    }
    written += n;
 
@@ -901,7 +905,7 @@ int tool_registry_generate_llm_schema(char *buffer,
          n = snprintf(buffer + written, size - written, ",");
          if (n < 0 || (size_t)n >= size - written) {
             pthread_mutex_unlock(&s_registry_mutex);
-            return -1;
+            return FAILURE;
          }
          written += n;
       }
@@ -913,7 +917,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                    meta->name, meta->description);
       if (n < 0 || (size_t)n >= size - written) {
          pthread_mutex_unlock(&s_registry_mutex);
-         return -1;
+         return FAILURE;
       }
       written += n;
 
@@ -923,7 +927,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                       ",\"parameters\":{\"type\":\"object\",\"properties\":{");
          if (n < 0 || (size_t)n >= size - written) {
             pthread_mutex_unlock(&s_registry_mutex);
-            return -1;
+            return FAILURE;
          }
          written += n;
 
@@ -939,7 +943,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                n = snprintf(buffer + written, size - written, ",");
                if (n < 0 || (size_t)n >= size - written) {
                   pthread_mutex_unlock(&s_registry_mutex);
-                  return -1;
+                  return FAILURE;
                }
                written += n;
             }
@@ -950,7 +954,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                          param_type_to_json_type(param->type));
             if (n < 0 || (size_t)n >= size - written) {
                pthread_mutex_unlock(&s_registry_mutex);
-               return -1;
+               return FAILURE;
             }
             written += n;
 
@@ -960,7 +964,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                             param->description);
                if (n < 0 || (size_t)n >= size - written) {
                   pthread_mutex_unlock(&s_registry_mutex);
-                  return -1;
+                  return FAILURE;
                }
                written += n;
             }
@@ -970,7 +974,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                n = snprintf(buffer + written, size - written, ",\"enum\":[");
                if (n < 0 || (size_t)n >= size - written) {
                   pthread_mutex_unlock(&s_registry_mutex);
-                  return -1;
+                  return FAILURE;
                }
                written += n;
 
@@ -984,7 +988,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                      n = snprintf(buffer + written, size - written, ",");
                      if (n < 0 || (size_t)n >= size - written) {
                         pthread_mutex_unlock(&s_registry_mutex);
-                        return -1;
+                        return FAILURE;
                      }
                      written += n;
                   }
@@ -992,7 +996,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                   n = snprintf(buffer + written, size - written, "\"%s\"", param->enum_values[e]);
                   if (n < 0 || (size_t)n >= size - written) {
                      pthread_mutex_unlock(&s_registry_mutex);
-                     return -1;
+                     return FAILURE;
                   }
                   written += n;
                }
@@ -1000,7 +1004,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                n = snprintf(buffer + written, size - written, "]");
                if (n < 0 || (size_t)n >= size - written) {
                   pthread_mutex_unlock(&s_registry_mutex);
-                  return -1;
+                  return FAILURE;
                }
                written += n;
             }
@@ -1009,7 +1013,7 @@ int tool_registry_generate_llm_schema(char *buffer,
             n = snprintf(buffer + written, size - written, "}");
             if (n < 0 || (size_t)n >= size - written) {
                pthread_mutex_unlock(&s_registry_mutex);
-               return -1;
+               return FAILURE;
             }
             written += n;
          }
@@ -1018,7 +1022,7 @@ int tool_registry_generate_llm_schema(char *buffer,
          n = snprintf(buffer + written, size - written, "}");
          if (n < 0 || (size_t)n >= size - written) {
             pthread_mutex_unlock(&s_registry_mutex);
-            return -1;
+            return FAILURE;
          }
          written += n;
 
@@ -1036,7 +1040,7 @@ int tool_registry_generate_llm_schema(char *buffer,
             n = snprintf(buffer + written, size - written, ",\"required\":[");
             if (n < 0 || (size_t)n >= size - written) {
                pthread_mutex_unlock(&s_registry_mutex);
-               return -1;
+               return FAILURE;
             }
             written += n;
 
@@ -1051,7 +1055,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                   n = snprintf(buffer + written, size - written, ",");
                   if (n < 0 || (size_t)n >= size - written) {
                      pthread_mutex_unlock(&s_registry_mutex);
-                     return -1;
+                     return FAILURE;
                   }
                   written += n;
                }
@@ -1060,7 +1064,7 @@ int tool_registry_generate_llm_schema(char *buffer,
                n = snprintf(buffer + written, size - written, "\"%s\"", param->name);
                if (n < 0 || (size_t)n >= size - written) {
                   pthread_mutex_unlock(&s_registry_mutex);
-                  return -1;
+                  return FAILURE;
                }
                written += n;
             }
@@ -1068,7 +1072,7 @@ int tool_registry_generate_llm_schema(char *buffer,
             n = snprintf(buffer + written, size - written, "]");
             if (n < 0 || (size_t)n >= size - written) {
                pthread_mutex_unlock(&s_registry_mutex);
-               return -1;
+               return FAILURE;
             }
             written += n;
          }
@@ -1077,7 +1081,7 @@ int tool_registry_generate_llm_schema(char *buffer,
          n = snprintf(buffer + written, size - written, "}");
          if (n < 0 || (size_t)n >= size - written) {
             pthread_mutex_unlock(&s_registry_mutex);
-            return -1;
+            return FAILURE;
          }
          written += n;
       }
@@ -1086,7 +1090,7 @@ int tool_registry_generate_llm_schema(char *buffer,
       n = snprintf(buffer + written, size - written, "}}");
       if (n < 0 || (size_t)n >= size - written) {
          pthread_mutex_unlock(&s_registry_mutex);
-         return -1;
+         return FAILURE;
       }
       written += n;
    }
@@ -1095,12 +1099,16 @@ int tool_registry_generate_llm_schema(char *buffer,
    n = snprintf(buffer + written, size - written, "]");
    if (n < 0 || (size_t)n >= size - written) {
       pthread_mutex_unlock(&s_registry_mutex);
-      return -1;
+      return FAILURE;
    }
    written += n;
 
    pthread_mutex_unlock(&s_registry_mutex);
-   return written;
+
+   if (bytes_written_out) {
+      *bytes_written_out = written;
+   }
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -1301,7 +1309,7 @@ int tool_registry_update_param_enum(const char *tool_name,
              param_name, valid_count, count - valid_count);
 
    pthread_mutex_unlock(&s_registry_mutex);
-   return 0;
+   return SUCCESS;
 }
 
 void tool_registry_invalidate_cache(void) {

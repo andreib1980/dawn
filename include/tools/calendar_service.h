@@ -88,7 +88,7 @@ int calendar_service_sync_now(int64_t account_id);
  * @param calendar_name  Filter by calendar name (case-insensitive), NULL for all
  * @param out            Output array
  * @param max_count      Array capacity
- * @return count, or -1 on error
+ * @return Number of occurrences found (0 if none or on error)
  */
 int calendar_service_today(int user_id,
                            const char *tz_name,
@@ -170,7 +170,7 @@ int calendar_service_delete(int user_id, const char *uid);
 
 /**
  * Build comma-separated lists of writable and read-only calendar names.
- * @return 1 if any read-only calendars exist, 0 if all writable, -1 on error
+ * @return 1 if any read-only calendars exist, 0 if all writable or on error
  */
 int calendar_service_get_access_summary(int user_id,
                                         char *writable,

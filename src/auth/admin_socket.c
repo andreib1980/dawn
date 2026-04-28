@@ -47,6 +47,7 @@
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_recategorize.h"
@@ -140,7 +141,8 @@ int admin_socket_init(void) {
    load_lockout_state();
 
    /* Check if admin users already exist - skip token generation if so */
-   int user_count = auth_db_user_count();
+   int user_count = 0;
+   auth_db_user_count(&user_count);
    bool skip_token = (user_count > 0);
 
    if (skip_token) {
@@ -850,24 +852,24 @@ static const char DUMMY_PASSWORD_HASH[] = "$argon2id$v=19$m=16384,t=3,p=1$AAAAAA
  */
 static int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_size) {
    if (payload_len < sizeof(admin_auth_prefix_t)) {
-      return -1;
+      return FAILURE;
    }
 
    const admin_auth_prefix_t *auth = (const admin_auth_prefix_t *)payload;
 
    /* Validate lengths */
    if (auth->admin_username_len == 0 || auth->admin_username_len > ADMIN_USERNAME_MAX_LEN) {
-      return -1;
+      return FAILURE;
    }
    if (auth->admin_password_len < ADMIN_PASSWORD_MIN_LEN ||
        auth->admin_password_len > ADMIN_PASSWORD_MAX_LEN) {
-      return -1;
+      return FAILURE;
    }
 
    size_t total_auth_size = sizeof(admin_auth_prefix_t) + auth->admin_username_len +
                             auth->admin_password_len;
    if (payload_len < total_auth_size) {
-      return -1;
+      return FAILURE;
    }
 
    /* Extract credentials */
@@ -896,17 +898,17 @@ static int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *
    /* Now check all conditions and log appropriately */
    if (!user_found) {
       auth_db_log_event("ADMIN_AUTH_FAILED", username, NULL, "user not found");
-      return -1;
+      return FAILURE;
    }
 
    if (!is_admin) {
       auth_db_log_event("ADMIN_AUTH_FAILED", username, NULL, "not an admin");
-      return -1;
+      return FAILURE;
    }
 
    if (verify_result != 0) {
       auth_db_log_event("ADMIN_AUTH_FAILED", username, NULL, "wrong password");
-      return -1;
+      return FAILURE;
    }
 
    if (auth_size) {
@@ -1305,8 +1307,9 @@ static int handle_revoke_user_sessions(int client_fd, const char *payload, uint1
    memcpy(username, remaining + 1, username_len);
 
    /* Delete all sessions for user */
-   int count = auth_db_delete_sessions_by_username(username);
-   if (count < 0) {
+   int count = 0;
+   int del_rc = auth_db_delete_sessions_by_username(username, &count);
+   if (del_rc != AUTH_DB_SUCCESS) {
       return send_response(client_fd, ADMIN_RESP_SERVICE_ERROR);
    }
 
@@ -1662,9 +1665,10 @@ static int handle_unblock_ip(int client_fd, const char *payload, uint16_t payloa
    }
 
    /* Clear login attempts from database */
-   int deleted = auth_db_clear_login_attempts(clear_all ? NULL : ip_address);
+   int deleted = 0;
+   int clear_rc = auth_db_clear_login_attempts(clear_all ? NULL : ip_address, &deleted);
 
-   if (deleted < 0) {
+   if (clear_rc != AUTH_DB_SUCCESS) {
       OLOG_ERROR("UNBLOCK_IP: database error");
       return send_response(client_fd, ADMIN_RESP_SERVICE_ERROR);
    }
@@ -1846,7 +1850,7 @@ static int handle_get_metrics_totals(int client_fd, const char *payload, uint16_
    ssize_t written = write(client_fd, data, sizeof(data));
    if (written != sizeof(data)) {
       OLOG_ERROR("Failed to write metrics totals: %zd/%zu", written, sizeof(data));
-      return -1;
+      return FAILURE;
    }
    return 0;
 }
@@ -2127,8 +2131,8 @@ static int handle_music_search(int client_fd, const char *payload, uint16_t len)
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Memory allocation failed");
    }
 
-   int count = music_db_search(payload, results, 50);
-   if (count < 0) {
+   int count = 0;
+   if (music_db_search(payload, results, 50, &count) != SUCCESS) {
       free(results);
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Search failed");
    }
@@ -2175,8 +2179,8 @@ static int handle_music_list(int client_fd, const char *payload, uint16_t len) {
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Memory allocation failed");
    }
 
-   int count = music_db_list(results, limit);
-   if (count < 0) {
+   int count = 0;
+   if (music_db_list(results, limit, &count) != SUCCESS) {
       free(results);
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "List failed");
    }
@@ -2226,8 +2230,8 @@ static int handle_memory_recategorize(int client_fd, const char *payload, uint16
       return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Recategorization already running");
    }
 
-   int count = memory_db_fact_count_general(user.id);
-   if (count < 0) {
+   int count = 0;
+   if (memory_db_fact_count_general(user.id, &count) != MEMORY_DB_SUCCESS) {
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
                                 "Failed to query general facts");
    }

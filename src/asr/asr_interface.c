@@ -604,7 +604,7 @@ const char *asr_engine_name(asr_engine_type_t engine_type) {
 asr_engine_type_t asr_get_engine_type(asr_context_t *ctx) {
    if (!ctx) {
       OLOG_ERROR("ASR: asr_get_engine_type() called with NULL context");
-      return (asr_engine_type_t)-1;
+      return ASR_ENGINE_NONE;
    }
    return ctx->engine_type;
 }

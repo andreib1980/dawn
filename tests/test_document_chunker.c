@@ -55,7 +55,7 @@ static void test_empty_input(void) {
    chunk_result_free(&result);
 
    rc = document_chunk_text(NULL, NULL, &result);
-   ASSERT(rc == -1, "NULL input returns error");
+   ASSERT(rc != 0, "NULL input returns error");
 }
 
 static void test_single_sentence(void) {

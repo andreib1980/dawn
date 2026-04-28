@@ -32,12 +32,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/toml.h"
 #include "utils/string_utils.h"
-
-#define SUCCESS 0
-#define FAILURE 1
 
 /* =============================================================================
  * Static Path Storage for Loaded Config Files

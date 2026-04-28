@@ -310,7 +310,7 @@ extern auth_db_state_t s_db;
 /**
  * @brief Lock mutex and check initialization, returning specified value if not ready
  *
- * Use this for functions that return -1 or false on failure instead of AUTH_DB_FAILURE.
+ * Use this for functions that return a module-specific failure code instead of AUTH_DB_FAILURE.
  */
 #define AUTH_DB_LOCK_OR_RETURN(val)         \
    do {                                     \

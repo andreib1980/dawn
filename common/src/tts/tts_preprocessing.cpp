@@ -219,22 +219,29 @@ void remove_emojis(char *str) {
    *dst = '\0';
 }
 
-int preprocess_text_for_tts_c(const char *input, char *output, size_t output_size) {
+int preprocess_text_for_tts_c(const char *input,
+                              char *output,
+                              size_t output_size,
+                              int *bytes_written) {
+   if (bytes_written)
+      *bytes_written = 0;
    if (!input || !output || output_size == 0)
-      return -1;
+      return 1;
 
-   // Use the C++ implementation and copy result
    std::string result = preprocess_text_for_tts(std::string(input));
 
    if (result.length() >= output_size) {
-      // Output buffer too small - truncate
       std::memcpy(output, result.c_str(), output_size - 1);
       output[output_size - 1] = '\0';
-      return static_cast<int>(output_size - 1);
+      if (bytes_written)
+         *bytes_written = static_cast<int>(output_size - 1);
+      return 0;
    }
 
    std::memcpy(output, result.c_str(), result.length() + 1);
-   return static_cast<int>(result.length());
+   if (bytes_written)
+      *bytes_written = static_cast<int>(result.length());
+   return 0;
 }
 
 }  // extern "C"

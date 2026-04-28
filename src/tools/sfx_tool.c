@@ -233,14 +233,13 @@ static void *sfx_playback_thread(void *arg) {
 
       ssize_t frames_written;
       if (converter) {
-         ssize_t converted = audio_converter_process(converter, read_buffer, (size_t)frames_read,
-                                                     output_buffer, output_buffer_frames);
-         if (converted < 0) {
+         size_t converted = 0;
+         if (audio_converter_process(converter, read_buffer, (size_t)frames_read, output_buffer,
+                                     output_buffer_frames, &converted) != 0) {
             OLOG_ERROR("SFX: Conversion failed in slot %d", slot_idx);
             break;
          }
-         frames_written = audio_stream_playback_write(playback_handle, output_buffer,
-                                                      (size_t)converted);
+         frames_written = audio_stream_playback_write(playback_handle, output_buffer, converted);
       } else {
          frames_written = audio_stream_playback_write(playback_handle, read_buffer,
                                                       (size_t)frames_read);

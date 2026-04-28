@@ -1,3 +1,5 @@
+/* Vendored from cktan/tomlc99 — do not modify for DAWN coding conventions. */
+
 /*
 
   MIT License

@@ -73,7 +73,7 @@ static int send_doc_error(struct lws *wsi, int status, const char *error) {
    if (!err_obj) {
       /* Fallback: bare minimum response */
       lws_return_http_status(wsi, (unsigned int)status, error);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    json_object_object_add(err_obj, "error", json_object_new_string(error));
@@ -91,7 +91,7 @@ static int send_doc_error(struct lws *wsi, int status, const char *error) {
        lws_add_http_header_content_length(wsi, (unsigned long)json_len, &p, end) ||
        webui_add_security_headers(wsi, &p, end) || lws_finalize_http_header(wsi, &p, end)) {
       json_object_put(err_obj);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    int n = lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
@@ -99,7 +99,7 @@ static int send_doc_error(struct lws *wsi, int status, const char *error) {
       lws_write(wsi, (unsigned char *)json_str, json_len, LWS_WRITE_HTTP);
 
    json_object_put(err_obj);
-   return -1; /* Close connection */
+   return LWS_CLOSE_CONNECTION; /* Close connection */
 }
 
 /**
@@ -298,28 +298,28 @@ static int send_doc_success(struct lws *wsi, document_upload_session_t *session,
    if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end)) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
    if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
                                     (unsigned char *)"application/json", 16, &p, end)) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
    if (lws_add_http_header_content_length(wsi, (unsigned long)json_len, &p, end)) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
    if (webui_add_security_headers(wsi, &p, end)) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
    if (lws_finalize_http_header(wsi, &p, end)) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Write headers */
@@ -327,7 +327,7 @@ static int send_doc_success(struct lws *wsi, document_upload_session_t *session,
    if (n < 0) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Write body */
@@ -337,9 +337,9 @@ static int send_doc_success(struct lws *wsi, document_upload_session_t *session,
    json_object_put(resp); /* Frees json-c internal buffers including json_str */
 
    if (n < 0)
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
-   return -1; /* Close connection */
+   return LWS_CLOSE_CONNECTION; /* Close connection */
 }
 
 /**
@@ -353,7 +353,7 @@ static int send_doc_json_response(struct lws *wsi, int status, json_object *resp
    unsigned char *buffer = malloc(buf_size);
    if (!buffer) {
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    unsigned char *start = &buffer[LWS_PRE];
@@ -367,7 +367,7 @@ static int send_doc_json_response(struct lws *wsi, int status, json_object *resp
        webui_add_security_headers(wsi, &p, end) || lws_finalize_http_header(wsi, &p, end)) {
       free(buffer);
       json_object_put(resp);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    int n = lws_write(wsi, start, (size_t)(p - start), LWS_WRITE_HTTP_HEADERS);
@@ -376,7 +376,7 @@ static int send_doc_json_response(struct lws *wsi, int status, json_object *resp
 
    free(buffer);
    json_object_put(resp);
-   return -1; /* Close connection */
+   return LWS_CLOSE_CONNECTION; /* Close connection */
 }
 
 /* =============================================================================
@@ -396,7 +396,7 @@ void webui_documents_session_free(document_upload_session_t *session) {
 
 int webui_documents_handle_upload_start(struct lws *wsi, document_upload_session_t **session_out) {
    if (!session_out)
-      return -1;
+      return LWS_CLOSE_CONNECTION;
 
    *session_out = NULL;
 
@@ -476,7 +476,7 @@ int webui_documents_handle_upload_body(struct lws *wsi,
    if (session->content_len + len > session->max_file_size + 1024) {
       OLOG_WARNING("webui_documents: upload exceeds size limit (%zu + %zu)", session->content_len,
                    len);
-      return -1;
+      return LWS_CLOSE_CONNECTION;
    }
 
    /* Grow buffer if needed */
@@ -490,7 +490,7 @@ int webui_documents_handle_upload_body(struct lws *wsi,
       char *new_buf = realloc(session->content_buf, new_cap);
       if (!new_buf) {
          OLOG_ERROR("webui_documents: failed to grow buffer");
-         return -1;
+         return LWS_CLOSE_CONNECTION;
       }
       session->content_buf = new_buf;
       session->content_cap = new_cap;

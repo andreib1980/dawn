@@ -308,7 +308,7 @@ static void announce_event(const sched_event_t *event) {
 static int scheduler_execute_task(sched_event_t *event) {
    if (!event->tool_name[0]) {
       OLOG_WARNING("scheduler: task %lld has no tool_name", (long long)event->id);
-      return -1;
+      return FAILURE;
    }
 
    /* Look up tool metadata */
@@ -316,21 +316,21 @@ static int scheduler_execute_task(sched_event_t *event) {
    if (!meta) {
       OLOG_WARNING("scheduler: tool '%s' not found (task %lld)", event->tool_name,
                    (long long)event->id);
-      return -1;
+      return FAILURE;
    }
 
    /* Validate SCHEDULABLE capability */
    if (!(meta->capabilities & TOOL_CAP_SCHEDULABLE)) {
       OLOG_WARNING("scheduler: tool '%s' not schedulable (task %lld)", event->tool_name,
                    (long long)event->id);
-      return -1;
+      return FAILURE;
    }
 
    /* Check if tool is enabled at runtime */
    if (!tool_registry_is_enabled(event->tool_name)) {
       OLOG_WARNING("scheduler: tool '%s' disabled (task %lld)", event->tool_name,
                    (long long)event->id);
-      return -1;
+      return FAILURE;
    }
 
    /* Get callback */
@@ -338,7 +338,7 @@ static int scheduler_execute_task(sched_event_t *event) {
    if (!callback) {
       OLOG_WARNING("scheduler: tool '%s' has no callback (task %lld)", event->tool_name,
                    (long long)event->id);
-      return -1;
+      return FAILURE;
    }
 
    /* Execute the tool */
@@ -937,8 +937,8 @@ static void schedule_next_occurrence(const sched_event_t *fired_event) {
    next.snooze_count = 0;
    next.snoozed_until = 0;
 
-   int64_t new_id = scheduler_db_insert(&next);
-   if (new_id > 0) {
+   int64_t new_id = 0;
+   if (scheduler_db_insert(&next, &new_id) == SCHED_DB_SUCCESS) {
       struct tm tm_next;
       localtime_r(&next_fire, &tm_next);
       OLOG_INFO(
@@ -1107,13 +1107,16 @@ static void *scheduler_thread_func(void *arg) {
       return NULL;
 
    /* Clean up old events */
-   int deleted = scheduler_db_cleanup_old_events(g_config.scheduler.event_retention_days);
-   if (deleted > 0)
+   int deleted = 0;
+   if (scheduler_db_cleanup_old_events(g_config.scheduler.event_retention_days, &deleted) ==
+           SCHED_DB_SUCCESS &&
+       deleted > 0)
       OLOG_INFO("scheduler: cleaned up %d old events", deleted);
 
    /* Expire stale missed notifications (older than MISSED_NOTIF_EXPIRE_SEC) */
-   int missed_expired = missed_notif_expire(MISSED_NOTIF_EXPIRE_SEC);
-   if (missed_expired > 0)
+   int missed_expired = 0;
+   if (missed_notif_expire(MISSED_NOTIF_EXPIRE_SEC, &missed_expired) == AUTH_DB_SUCCESS &&
+       missed_expired > 0)
       OLOG_INFO("scheduler: expired %d stale missed notifications", missed_expired);
    time_t last_missed_expire = time(NULL);
 
@@ -1158,8 +1161,9 @@ static void *scheduler_thread_func(void *arg) {
       /* Periodic housekeeping: expire stale missed notifications once per hour. */
       time_t now = time(NULL);
       if (now - last_missed_expire >= 3600) {
-         int expired = missed_notif_expire(MISSED_NOTIF_EXPIRE_SEC);
-         if (expired > 0)
+         int expired = 0;
+         if (missed_notif_expire(MISSED_NOTIF_EXPIRE_SEC, &expired) == AUTH_DB_SUCCESS &&
+             expired > 0)
             OLOG_INFO("scheduler: expired %d stale missed notifications", expired);
          last_missed_expire = now;
       }
@@ -1252,7 +1256,7 @@ int scheduler_get_ringing(sched_event_t *event) {
    pthread_mutex_lock(&ringing_mutex);
    if (!alarm_ringing) {
       pthread_mutex_unlock(&ringing_mutex);
-      return -1;
+      return FAILURE;
    }
    memcpy(event, &ringing_event, sizeof(sched_event_t));
    pthread_mutex_unlock(&ringing_mutex);
@@ -1282,7 +1286,7 @@ int scheduler_dismiss(int64_t event_id) {
    pthread_mutex_unlock(&ringing_mutex);
 
    if (id <= 0)
-      return -1; /* Nothing ringing and no explicit target. */
+      return FAILURE; /* Nothing ringing and no explicit target. */
 
    /* Only stop the alarm sound when the target matches the current one. */
    if (matches_current)
@@ -1314,7 +1318,7 @@ int scheduler_snooze(int64_t event_id, int snooze_minutes) {
 
    if (!alarm_ringing) {
       pthread_mutex_unlock(&ringing_mutex);
-      return -1;
+      return FAILURE;
    }
 
    int64_t id = (event_id > 0) ? event_id : ringing_event.id;
@@ -1323,7 +1327,7 @@ int scheduler_snooze(int64_t event_id, int snooze_minutes) {
     * another user's alarm. */
    if (id != ringing_event.id) {
       pthread_mutex_unlock(&ringing_mutex);
-      return -1;
+      return FAILURE;
    }
    int max_snooze = g_config.scheduler.max_snooze_count;
    int current_snooze = ringing_event.snooze_count;

@@ -32,6 +32,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
 
@@ -646,16 +647,23 @@ weather_response_t *weather_get_by_coords(double latitude,
    return fetch_weather(latitude, longitude, location_name, forecast);
 }
 
-int weather_format_for_llm(const weather_response_t *response, char *buffer, size_t buffer_size) {
+int weather_format_for_llm(const weather_response_t *response,
+                           char *buffer,
+                           size_t buffer_size,
+                           int *bytes_written) {
+   if (bytes_written)
+      *bytes_written = 0;
    if (!response || !buffer || buffer_size == 0) {
-      return -1;
+      return FAILURE;
    }
 
    if (response->error) {
-      return snprintf(buffer, buffer_size, "{\"error\": \"%s\"}", response->error);
+      int n = snprintf(buffer, buffer_size, "{\"error\": \"%s\"}", response->error);
+      if (bytes_written)
+         *bytes_written = n;
+      return SUCCESS;
    }
 
-   // Build the JSON response with current conditions and daily forecast array
    int written = snprintf(buffer, buffer_size,
                           "{"
                           "\"location\": \"%s\", "
@@ -675,10 +683,11 @@ int weather_format_for_llm(const weather_response_t *response, char *buffer, siz
                           response->current.wind_speed_mph, response->current.wind_direction);
 
    if (written < 0 || (size_t)written >= buffer_size) {
-      return written;
+      if (bytes_written)
+         *bytes_written = written;
+      return SUCCESS;
    }
 
-   // Add daily forecasts with relative day labels
    size_t remaining = buffer_size - (size_t)written;
    for (int i = 0; i < response->num_days && remaining > 1; i++) {
       const char *day_label = get_relative_day_label(i, response->daily[i].date);
@@ -699,18 +708,19 @@ int weather_format_for_llm(const weather_response_t *response, char *buffer, siz
                                  response->daily[i].precipitation_chance);
 
       if (day_written < 0) {
-         return day_written;
+         if (bytes_written)
+            *bytes_written = written;
+         return SUCCESS;
       }
-      /* Handle truncation: cap at remaining space */
       if ((size_t)day_written >= remaining) {
          written = (int)(buffer_size - 1);
+         remaining = 1;
          break;
       }
       written += day_written;
       remaining -= (size_t)day_written;
    }
 
-   // Close the forecast array and object
    if (remaining > 2) {
       int close_written = snprintf(buffer + written, remaining, "]}");
       if (close_written > 0 && (size_t)close_written < remaining) {
@@ -718,7 +728,9 @@ int weather_format_for_llm(const weather_response_t *response, char *buffer, siz
       }
    }
 
-   return written;
+   if (bytes_written)
+      *bytes_written = written;
+   return SUCCESS;
 }
 
 void weather_free_response(weather_response_t *response) {

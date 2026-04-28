@@ -96,11 +96,15 @@ void remove_emojis(char *str);
  * @param input The null-terminated input string
  * @param output Buffer to receive preprocessed text (must be large enough)
  * @param output_size Size of the output buffer
- * @return Number of bytes written (excluding null terminator), or -1 on error
+ * @param bytes_written Number of bytes written excluding null terminator (output, may be NULL)
+ * @return 0 on success, 1 on failure
  *
  * @note Output buffer should be at least 2x input size to accommodate expansions
  */
-int preprocess_text_for_tts_c(const char *input, char *output, size_t output_size);
+int preprocess_text_for_tts_c(const char *input,
+                              char *output,
+                              size_t output_size,
+                              int *bytes_written);
 
 #ifdef __cplusplus
 }

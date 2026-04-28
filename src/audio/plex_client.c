@@ -40,11 +40,9 @@
 
 #include "audio/http_download.h"
 #include "config/dawn_config.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
-
-#define SUCCESS 0
-#define FAILURE 1
 
 /* =============================================================================
  * Static State

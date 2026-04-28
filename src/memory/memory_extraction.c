@@ -216,7 +216,8 @@ static char *build_existing_profile(int user_id) {
 
    /* Load existing preferences */
    memory_preference_t prefs[10];
-   int pref_count = memory_db_pref_list(user_id, prefs, 10, 0);
+   int pref_count = 0;
+   memory_db_pref_list(user_id, prefs, 10, 0, &pref_count);
 
    if (pref_count > 0) {
       BUF_PRINTF(profile, off, rem, "Preferences:\n");
@@ -227,7 +228,8 @@ static char *build_existing_profile(int user_id) {
 
    /* Load existing facts */
    memory_fact_t facts[10];
-   int fact_count = memory_db_fact_list(user_id, facts, 10, 0);
+   int fact_count = 0;
+   memory_db_fact_list(user_id, facts, 10, 0, &fact_count);
 
    if (fact_count > 0) {
       if (off > 0)
@@ -240,7 +242,8 @@ static char *build_existing_profile(int user_id) {
 
    /* Load existing entities so LLM reuses canonical names */
    memory_entity_t entities[20];
-   int entity_count = memory_db_entity_list(user_id, entities, 20, 0);
+   int entity_count = 0;
+   memory_db_entity_list(user_id, entities, 20, 0, &entity_count);
 
    if (entity_count > 0) {
       if (off > 0)
@@ -504,10 +507,12 @@ static void process_extraction_response(int user_id,
 
             /* Check for duplicates before storing */
             memory_fact_t similar[3];
-            int similar_count = memory_db_fact_find_similar(user_id, text, similar, 3);
+            int similar_count = 0;
+            memory_db_fact_find_similar(user_id, text, similar, 3, &similar_count);
 
             if (similar_count == 0) {
-               int64_t fact_id = memory_db_fact_create(user_id, text, confidence, source, category);
+               int64_t fact_id = 0;
+               memory_db_fact_create(user_id, text, confidence, source, category, &fact_id);
                OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
                /* Embed the new fact for semantic search */
                if (fact_id > 0 && memory_embeddings_available()) {
@@ -591,11 +596,13 @@ static void process_extraction_response(int user_id,
 
             /* Find and supersede old fact */
             memory_fact_t similar[3];
-            int similar_count = memory_db_fact_find_similar(user_id, old_fact, similar, 3);
+            int similar_count = 0;
+            memory_db_fact_find_similar(user_id, old_fact, similar, 3, &similar_count);
 
             if (similar_count > 0) {
                /* Create new fact and supersede old one */
-               int64_t new_id = memory_db_fact_create(user_id, new_fact, 0.9f, "explicit", NULL);
+               int64_t new_id = 0;
+               memory_db_fact_create(user_id, new_fact, 0.9f, "explicit", NULL, &new_id);
                if (new_id > 0) {
                   memory_db_fact_supersede(similar[0].id, new_id);
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
@@ -654,9 +661,11 @@ static void process_extraction_response(int user_id,
          memory_make_canonical_name(ent_name, canonical, sizeof(canonical));
 
          bool was_created = false;
-         int64_t eid = memory_db_entity_upsert(user_id, ent_name, ent_type, canonical,
-                                               &was_created);
-         if (eid < 0)
+         int64_t eid = 0;
+         if (memory_db_entity_upsert(user_id, ent_name, ent_type, canonical, &was_created, &eid) !=
+             MEMORY_DB_SUCCESS)
+            continue;
+         if (eid == 0)
             continue;
 
          OLOG_INFO("memory_extraction: entity: %s (%s) id=%ld %s", ent_name, ent_type, (long)eid,
@@ -710,18 +719,17 @@ static void process_extraction_response(int user_id,
          /* Resolve subject entity from local map, fallback to upsert */
          char subj_canonical[MEMORY_ENTITY_NAME_MAX];
          memory_make_canonical_name(subj_name, subj_canonical, sizeof(subj_canonical));
-         int64_t subj_id = -1;
+         int64_t subj_id = 0;
          for (int m = 0; m < entity_map_count; m++) {
             if (strcmp(entity_map[m].canonical, subj_canonical) == 0) {
                subj_id = entity_map[m].id;
                break;
             }
          }
-         if (subj_id < 0) {
+         if (subj_id == 0) {
             bool created = false;
-            subj_id = memory_db_entity_upsert(user_id, subj_name, "thing", subj_canonical,
-                                              &created);
-            if (subj_id < 0)
+            if (memory_db_entity_upsert(user_id, subj_name, "thing", subj_canonical, &created,
+                                        &subj_id) != MEMORY_DB_SUCCESS)
                continue;
          }
 
@@ -828,7 +836,7 @@ static void process_extraction_response(int user_id,
          OLOG_WARNING("memory_extraction: blocked injection in summary");
       } else {
          memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
-                                  duration_seconds);
+                                  duration_seconds, NULL);
          OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
       }
    }
@@ -1036,15 +1044,15 @@ static void *extraction_thread(void *arg) {
 
       /* Run fact pruning if enabled */
       if (g_config.memory.pruning_enabled) {
-         int pruned_superseded = memory_db_fact_prune_superseded(
-             ctx->user_id, g_config.memory.prune_superseded_days);
-         int pruned_stale = memory_db_fact_prune_stale(ctx->user_id,
-                                                       g_config.memory.prune_stale_days,
-                                                       g_config.memory.prune_stale_min_confidence);
+         int pruned_superseded = 0;
+         memory_db_fact_prune_superseded(ctx->user_id, g_config.memory.prune_superseded_days,
+                                         &pruned_superseded);
+         int pruned_stale = 0;
+         memory_db_fact_prune_stale(ctx->user_id, g_config.memory.prune_stale_days,
+                                    g_config.memory.prune_stale_min_confidence, &pruned_stale);
          if (pruned_superseded > 0 || pruned_stale > 0) {
             OLOG_INFO("memory_extraction: pruned %d superseded, %d stale facts for user %d",
-                      pruned_superseded > 0 ? pruned_superseded : 0,
-                      pruned_stale > 0 ? pruned_stale : 0, ctx->user_id);
+                      pruned_superseded, pruned_stale, ctx->user_id);
          }
       }
    } else {
@@ -1099,13 +1107,14 @@ int memory_trigger_extraction(int user_id,
 #ifdef ENABLE_AUTH
    /* Re-check privacy status from database (prevents race condition with set_private) */
    if (conversation_id > 0) {
-      int is_private = conv_db_is_private(conversation_id, user_id);
-      if (is_private > 0) {
+      bool is_private = false;
+      conv_db_is_private(conversation_id, user_id, &is_private);
+      if (is_private) {
          OLOG_INFO("memory_extraction: skipping - conversation %lld is private (DB check)",
                    (long long)conversation_id);
          return 0;
       }
-      /* is_private == -1 means error or not found, proceed with extraction */
+      /* On error, is_private stays false — proceed with extraction */
    }
 #endif
 
@@ -1118,10 +1127,7 @@ int memory_trigger_extraction(int user_id,
    /* Check incremental extraction: how many messages were already processed? */
    int last_extracted = 0;
    if (conversation_id > 0) {
-      last_extracted = memory_db_get_last_extracted(conversation_id);
-      if (last_extracted < 0) {
-         last_extracted = 0; /* Treat error as never extracted */
-      }
+      memory_db_get_last_extracted(conversation_id, &last_extracted);
 
       /* Skip if no new messages since last extraction */
       if (message_count <= last_extracted) {

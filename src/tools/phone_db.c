@@ -168,15 +168,16 @@ static void row_to_sms_log(sqlite3_stmt *stmt, phone_sms_log_t *entry) {
  * Call Log
  * ============================================================================= */
 
-int64_t phone_db_call_log_insert(int user_id,
-                                 int direction,
-                                 const char *number,
-                                 const char *contact_name,
-                                 int duration_sec,
-                                 time_t timestamp,
-                                 int status) {
+int phone_db_call_log_insert(int user_id,
+                             int direction,
+                             const char *number,
+                             const char *contact_name,
+                             int duration_sec,
+                             time_t timestamp,
+                             int status,
+                             int64_t *id_out) {
    if (!s_db.initialized) {
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    pthread_mutex_lock(&s_db.mutex);
@@ -190,7 +191,7 @@ int64_t phone_db_call_log_insert(int user_id,
    if (rc != SQLITE_OK) {
       OLOG_ERROR("phone_db: call_log insert prepare failed: %s", sqlite3_errmsg(s_db.db));
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -202,16 +203,20 @@ int64_t phone_db_call_log_insert(int user_id,
    sqlite3_bind_int(stmt, 7, status);
 
    rc = sqlite3_step(stmt);
-   int64_t row_id = -1;
-   if (rc == SQLITE_DONE) {
-      row_id = sqlite3_last_insert_rowid(s_db.db);
-   } else {
+   if (rc != SQLITE_DONE) {
       OLOG_ERROR("phone_db: call_log insert failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(stmt);
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   if (id_out) {
+      *id_out = sqlite3_last_insert_rowid(s_db.db);
    }
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return row_id;
+   return PHONE_DB_SUCCESS;
 }
 
 int phone_db_call_log_update(int64_t id, int duration_sec, int status) {
@@ -246,9 +251,9 @@ int phone_db_call_log_update(int64_t id, int duration_sec, int status) {
    return result;
 }
 
-int phone_db_call_log_recent(int user_id, phone_call_log_t *out, int max) {
-   if (!s_db.initialized || !out || max <= 0) {
-      return -1;
+int phone_db_call_log_recent(int user_id, phone_call_log_t *out, int max, int *count_out) {
+   if (!s_db.initialized || !out || max <= 0 || !count_out) {
+      return PHONE_DB_FAILURE;
    }
 
    pthread_mutex_lock(&s_db.mutex);
@@ -262,7 +267,7 @@ int phone_db_call_log_recent(int user_id, phone_call_log_t *out, int max) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("phone_db: call_log query prepare failed: %s", sqlite3_errmsg(s_db.db));
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -276,21 +281,24 @@ int phone_db_call_log_recent(int user_id, phone_call_log_t *out, int max) {
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return count;
+
+   *count_out = count;
+   return PHONE_DB_SUCCESS;
 }
 
 /* =============================================================================
  * SMS Log
  * ============================================================================= */
 
-int64_t phone_db_sms_log_insert(int user_id,
-                                int direction,
-                                const char *number,
-                                const char *contact_name,
-                                const char *body,
-                                time_t timestamp) {
+int phone_db_sms_log_insert(int user_id,
+                            int direction,
+                            const char *number,
+                            const char *contact_name,
+                            const char *body,
+                            time_t timestamp,
+                            int64_t *id_out) {
    if (!s_db.initialized) {
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    pthread_mutex_lock(&s_db.mutex);
@@ -304,7 +312,7 @@ int64_t phone_db_sms_log_insert(int user_id,
    if (rc != SQLITE_OK) {
       OLOG_ERROR("phone_db: sms_log insert prepare failed: %s", sqlite3_errmsg(s_db.db));
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -315,21 +323,25 @@ int64_t phone_db_sms_log_insert(int user_id,
    sqlite3_bind_int64(stmt, 6, (int64_t)timestamp);
 
    rc = sqlite3_step(stmt);
-   int64_t row_id = -1;
-   if (rc == SQLITE_DONE) {
-      row_id = sqlite3_last_insert_rowid(s_db.db);
-   } else {
+   if (rc != SQLITE_DONE) {
       OLOG_ERROR("phone_db: sms_log insert failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(stmt);
+      pthread_mutex_unlock(&s_db.mutex);
+      return PHONE_DB_FAILURE;
+   }
+
+   if (id_out) {
+      *id_out = sqlite3_last_insert_rowid(s_db.db);
    }
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return row_id;
+   return PHONE_DB_SUCCESS;
 }
 
-int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max) {
-   if (!s_db.initialized || !out || max <= 0) {
-      return -1;
+int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max, int *count_out) {
+   if (!s_db.initialized || !out || max <= 0 || !count_out) {
+      return PHONE_DB_FAILURE;
    }
 
    pthread_mutex_lock(&s_db.mutex);
@@ -346,7 +358,7 @@ int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("phone_db: sms unread query failed: %s", sqlite3_errmsg(s_db.db));
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -360,12 +372,14 @@ int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max) {
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return count;
+
+   *count_out = count;
+   return PHONE_DB_SUCCESS;
 }
 
-int phone_db_sms_log_recent(int user_id, phone_sms_log_t *out, int max) {
-   if (!s_db.initialized || !out || max <= 0) {
-      return -1;
+int phone_db_sms_log_recent(int user_id, phone_sms_log_t *out, int max, int *count_out) {
+   if (!s_db.initialized || !out || max <= 0 || !count_out) {
+      return PHONE_DB_FAILURE;
    }
 
    pthread_mutex_lock(&s_db.mutex);
@@ -379,7 +393,7 @@ int phone_db_sms_log_recent(int user_id, phone_sms_log_t *out, int max) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("phone_db: sms recent query failed: %s", sqlite3_errmsg(s_db.db));
       pthread_mutex_unlock(&s_db.mutex);
-      return -1;
+      return PHONE_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -393,7 +407,9 @@ int phone_db_sms_log_recent(int user_id, phone_sms_log_t *out, int max) {
 
    sqlite3_finalize(stmt);
    pthread_mutex_unlock(&s_db.mutex);
-   return count;
+
+   *count_out = count;
+   return PHONE_DB_SUCCESS;
 }
 
 int phone_db_sms_mark_read(int64_t id) {
@@ -467,10 +483,6 @@ int phone_db_cleanup(int call_retention_days, int sms_retention_days) {
 
 /* =============================================================================
  * Delete operations (user-scoped, for the LLM deletion tool)
- *
- * These use the new PHONE_DB_SUCCESS/FAILURE/NOT_FOUND codes rather than the
- * legacy 0/1/-1 convention used by insert/update/query. Migrating the older
- * functions is tracked separately in docs/TODO.md.
  * ============================================================================= */
 
 int phone_db_sms_log_delete(int user_id, int64_t id) {

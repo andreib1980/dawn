@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "core/embedding_engine.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/document_db.h"
 #include "tools/tool_registry.h"
@@ -191,8 +192,9 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    if (!chunks)
       return strdup("Error: memory allocation failed.");
 
-   int read_count = document_db_chunk_read(doc.id, chunks, count, start_chunk);
-   if (read_count <= 0) {
+   int read_count = 0;
+   if (document_db_chunk_read(doc.id, chunks, count, start_chunk, &read_count) != SUCCESS ||
+       read_count <= 0) {
       free(chunks);
       return strdup("Error: failed to read document chunks.");
    }

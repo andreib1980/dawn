@@ -148,6 +148,7 @@ To prevent circular dependencies and maintain clean architecture, modules are or
 ```
 Layer 0 (Foundation)
 ├── common/src/logging.c           - Logging macros (shared with satellite, no deps)
+├── include/dawn_error.h           - SUCCESS/FAILURE return codes (no deps)
 ├── src/config/                    - Configuration parsing and defaults
 │   ├── config_parser.c
 │   ├── config_defaults.c
@@ -415,15 +416,16 @@ response = NULL;
 
 ### Error Code Convention
 
+Central definitions in `include/dawn_error.h`:
+
 ```c
 #define SUCCESS  0
 #define FAILURE  1
-// Additional specific errors > 1
-#define ERROR_INVALID_FORMAT  2
-#define ERROR_NETWORK_TIMEOUT 3
 ```
 
-**IMPORTANT**: do NOT use negative return values (`-1`, `-errno`). Use positive error codes only.
+Modules define specific error codes > 1 in their own headers (e.g., `AUTH_DB_FAILURE`, `MEMORY_DB_NOT_FOUND`, `SCHED_DB_USER_LIMIT`). Functions that return counts or IDs use an output parameter (`int *count_out`, `int64_t *id_out`) and return `SUCCESS`/`FAILURE`.
+
+**IMPORTANT**: do NOT use negative return values (`-1`, `-errno`). Use positive error codes only. The sole exception is `LWS_CLOSE_CONNECTION` (-1) in lws callback functions, per the libwebsockets API contract.
 
 ### Patterns
 

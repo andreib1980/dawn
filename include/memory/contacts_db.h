@@ -48,13 +48,15 @@ typedef struct {
  * @param field_type  Filter by type ("email", "phone", etc.) or NULL for all
  * @param out         Output array
  * @param max_results Maximum results to return
- * @return Number of results found, or -1 on error
+ * @param count_out   Output: number of results found (may be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
 int contacts_find(int user_id,
                   const char *name,
                   const char *field_type,
                   contact_result_t *out,
-                  int max_results);
+                  int max_results,
+                  int *count_out);
 
 /**
  * @brief Add a contact info record for an entity.
@@ -64,7 +66,7 @@ int contacts_find(int user_id,
  * @param field_type Type: "email", "phone", "address"
  * @param value      The contact value (e.g., email address)
  * @param label      Optional label: "work", "personal", etc.
- * @return 0 on success, 1 on failure
+ * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
 int contacts_add(int user_id,
                  int64_t entity_id,
@@ -77,7 +79,7 @@ int contacts_add(int user_id,
  *
  * @param user_id    User ID (ownership check)
  * @param contact_id Contact record ID
- * @return 0 on success, 1 on failure
+ * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
 int contacts_delete(int user_id, int64_t contact_id);
 
@@ -89,21 +91,24 @@ int contacts_delete(int user_id, int64_t contact_id);
  * @param out        Output array
  * @param max_results Maximum results
  * @param offset     Number of rows to skip (for pagination)
- * @return Number of results, or -1 on error
+ * @param count_out  Output: number of results returned (may be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
 int contacts_list(int user_id,
                   const char *field_type,
                   contact_result_t *out,
                   int max_results,
-                  int offset);
+                  int offset,
+                  int *count_out);
 
 /**
  * @brief Count all contacts for a user.
  *
- * @param user_id User ID
- * @return Contact count, or -1 on error
+ * @param user_id   User ID
+ * @param count_out Output: contact count (may be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
-int contacts_count(int user_id);
+int contacts_count(int user_id, int *count_out);
 
 /**
  * @brief Update an existing contact record.
@@ -113,7 +118,7 @@ int contacts_count(int user_id);
  * @param field_type New field type ("email", "phone", "address")
  * @param value      New contact value
  * @param label      New label ("work", "personal", etc.) or NULL
- * @return 0 on success, 1 on failure
+ * @return SUCCESS (0) on success, FAILURE (1) on failure
  */
 int contacts_update(int user_id,
                     int64_t contact_id,

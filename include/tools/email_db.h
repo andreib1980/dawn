@@ -67,9 +67,10 @@ int email_decrypt_password(const email_account_t *acct, char *out, size_t out_le
 
 /**
  * @brief Create a new email account.
- * @return Account ID (>0) on success, -1 on failure
+ * @param id_out  Receives the new account ID on success
+ * @return 0 on success, 1 on failure
  */
-int64_t email_db_account_create(const email_account_t *acct);
+int email_db_account_create(const email_account_t *acct, int64_t *id_out);
 
 /**
  * @brief Get account by ID.
@@ -79,9 +80,10 @@ int email_db_account_get(int64_t id, email_account_t *out);
 
 /**
  * @brief List accounts for a user.
- * @return Number of accounts, or -1 on error
+ * @param count_out  Number of accounts written to out
+ * @return 0 on success, 1 on failure
  */
-int email_db_account_list(int user_id, email_account_t *out, int max_count);
+int email_db_account_list(int user_id, email_account_t *out, int max_count, int *count_out);
 
 /**
  * @brief Update an existing account.

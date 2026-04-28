@@ -63,7 +63,8 @@ void memory_run_nightly_decay(void) {
 
    /* Get all users with memory data */
    int user_ids[MAX_USERS];
-   int user_count = memory_db_get_all_user_ids(user_ids, MAX_USERS);
+   int user_count = 0;
+   memory_db_get_all_user_ids(user_ids, MAX_USERS, &user_count);
    if (user_count <= 0) {
       last_run = now;
       return;
@@ -77,27 +78,30 @@ void memory_run_nightly_decay(void) {
       int uid = user_ids[i];
 
       /* Apply fact decay */
-      int decayed = memory_db_apply_fact_decay(uid, g_config.memory.decay_inferred_weekly,
-                                               g_config.memory.decay_explicit_weekly,
-                                               g_config.memory.decay_inferred_floor,
-                                               g_config.memory.decay_explicit_floor);
+      int decayed = 0;
+      memory_db_apply_fact_decay(uid, g_config.memory.decay_inferred_weekly,
+                                 g_config.memory.decay_explicit_weekly,
+                                 g_config.memory.decay_inferred_floor,
+                                 g_config.memory.decay_explicit_floor, &decayed);
       if (decayed > 0)
          total_decayed += decayed;
 
       /* Apply preference decay */
       memory_db_apply_pref_decay(uid, g_config.memory.decay_preference_weekly,
-                                 g_config.memory.decay_preference_floor);
+                                 g_config.memory.decay_preference_floor, NULL);
 
       /* Prune low-confidence facts */
-      int pruned = memory_db_prune_low_confidence(uid, g_config.memory.decay_prune_threshold);
+      int pruned = 0;
+      memory_db_prune_low_confidence(uid, g_config.memory.decay_prune_threshold, &pruned);
       if (pruned > 0)
          total_pruned += pruned;
 
       /* Prune old superseded facts */
-      memory_db_fact_prune_superseded(uid, g_config.memory.prune_superseded_days);
+      memory_db_fact_prune_superseded(uid, g_config.memory.prune_superseded_days, NULL);
 
       /* Prune old summaries */
-      int summaries = memory_db_prune_old_summaries(uid, g_config.memory.summary_retention_days);
+      int summaries = 0;
+      memory_db_prune_old_summaries(uid, g_config.memory.summary_retention_days, &summaries);
       if (summaries > 0)
          total_summaries += summaries;
 

@@ -133,16 +133,19 @@ static int extract_words(const char *text,
  * Text Normalization
  * ============================================================================= */
 
-int memory_normalize_text(const char *text, char *out_normalized, size_t max_len) {
+int memory_normalize_text(const char *text, char *out_normalized, size_t max_len, int *len_out) {
+   if (len_out)
+      *len_out = 0;
+
    if (!text || !out_normalized || max_len < 2) {
-      return -1;
+      return 1;
    }
 
    /* Allocate working buffer */
    size_t text_len = strlen(text);
    char *working_buf = malloc(text_len + 1);
    if (!working_buf) {
-      return -1;
+      return 1;
    }
 
    char *words[MEMORY_MAX_WORDS];
@@ -165,7 +168,9 @@ int memory_normalize_text(const char *text, char *out_normalized, size_t max_len
    out_normalized[out_pos] = '\0';
 
    free(working_buf);
-   return (int)out_pos;
+   if (len_out)
+      *len_out = (int)out_pos;
+   return 0;
 }
 
 /* =============================================================================
@@ -198,8 +203,7 @@ uint32_t memory_normalize_and_hash(const char *text) {
    }
 
    char normalized[512];
-   int len = memory_normalize_text(text, normalized, sizeof(normalized));
-   if (len < 0) {
+   if (memory_normalize_text(text, normalized, sizeof(normalized), NULL) != 0) {
       return 0;
    }
 

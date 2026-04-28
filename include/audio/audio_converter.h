@@ -45,7 +45,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -145,13 +144,15 @@ size_t audio_converter_max_output_frames(audio_converter_t *conv, size_t input_f
  * @param input_frames Number of input frames
  * @param output Output buffer (must be large enough - use audio_converter_max_output_frames())
  * @param output_max_frames Maximum frames the output buffer can hold
- * @return Number of output frames written, or -1 on error
+ * @param frames_out Output: number of output frames written
+ * @return 0 on success, 1 on error
  */
-ssize_t audio_converter_process(audio_converter_t *conv,
-                                const int16_t *input,
-                                size_t input_frames,
-                                int16_t *output,
-                                size_t output_max_frames);
+int audio_converter_process(audio_converter_t *conv,
+                            const int16_t *input,
+                            size_t input_frames,
+                            int16_t *output,
+                            size_t output_max_frames,
+                            size_t *frames_out);
 
 /**
  * @brief Reset converter state (e.g., between tracks)

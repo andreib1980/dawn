@@ -139,9 +139,13 @@ weather_response_t *weather_get_by_coords(double latitude,
  * @param response Weather response
  * @param buffer Output buffer
  * @param buffer_size Size of output buffer
- * @return Number of characters written, or -1 on error
+ * @param bytes_written Number of characters written (output)
+ * @return SUCCESS or FAILURE
  */
-int weather_format_for_llm(const weather_response_t *response, char *buffer, size_t buffer_size);
+int weather_format_for_llm(const weather_response_t *response,
+                           char *buffer,
+                           size_t buffer_size,
+                           int *bytes_written);
 
 /**
  * Free a weather response

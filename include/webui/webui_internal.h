@@ -41,7 +41,18 @@
 
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "webui/webui_server.h"
+
+/* =============================================================================
+ * lws Return Convention
+ *
+ * lws callbacks return -1 to close the connection — this is the lws API
+ * contract, not a DAWN error code.  Sole exception to the no-negative-returns
+ * rule.  Internal helpers that cascade up to lws callbacks use this constant
+ * to document the intent.
+ * ============================================================================= */
+#define LWS_CLOSE_CONNECTION (-1)
 
 /* =============================================================================
  * Request Supersession Macro (used by worker threads)
@@ -381,7 +392,7 @@ session_t *lookup_session_by_token(const char *token);
  *
  * @param wsi WebSocket instance
  * @param json JSON string to send
- * @return 0 on success, -1 on error
+ * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
 int send_json_message(struct lws *wsi, const char *json);
 
@@ -394,7 +405,7 @@ int send_json_message(struct lws *wsi, const char *json);
  * @param msg_type Message type (WS_BIN_* constant)
  * @param data Payload data (may be NULL if len=0)
  * @param len Payload length
- * @return 0 on success, -1 on error
+ * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
 int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, size_t len);
 
@@ -456,7 +467,7 @@ bool is_path_within_www(const char *filepath, const char *www_path);
  * @param wsi HTTP connection
  * @param p Pointer to current write position in header buffer
  * @param end Pointer to end of header buffer
- * @return 0 on success, -1 on failure (buffer overflow)
+ * @return SUCCESS on success, FAILURE on failure (buffer overflow)
  */
 int webui_add_security_headers(struct lws *wsi, unsigned char **p, unsigned char *end);
 
@@ -677,7 +688,7 @@ void handle_unlock_user(ws_connection_t *conn, struct json_object *payload);
  * @param preloaded_msgs Optional pre-fetched message array (json_object array
  *        with "role" and "content" fields per element). If NULL, messages are
  *        fetched from the DB. Caller retains ownership; not freed by this function.
- * @return Number of messages restored, or -1 on error
+ * @return Number of messages restored, or LWS_CLOSE_CONNECTION on error
  */
 int webui_restore_conversation_context(ws_connection_t *conn,
                                        const conversation_t *conv,

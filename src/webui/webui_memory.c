@@ -69,9 +69,8 @@ void handle_get_memory_stats(ws_connection_t *conn) {
       json_object_object_add(resp_payload, "newest_fact", json_object_new_int64(stats.newest_fact));
 
       /* Count contacts for this user */
-      int contact_count = contacts_count(conn->auth_user_id);
-      if (contact_count < 0)
-         contact_count = 0;
+      int contact_count = 0;
+      contacts_count(conn->auth_user_id, &contact_count);
       json_object_object_add(resp_payload, "contact_count", json_object_new_int(contact_count));
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -122,9 +121,10 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
    /* Query database */
    memory_fact_t facts[MAX_MEMORY_LIMIT];
    memset(facts, 0, sizeof(facts));
-   int count = memory_db_fact_list(conn->auth_user_id, facts, limit, offset);
+   int count = 0;
+   int list_rc = memory_db_fact_list(conn->auth_user_id, facts, limit, offset, &count);
 
-   if (count >= 0) {
+   if (list_rc == MEMORY_DB_SUCCESS) {
       json_object *facts_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
          json_object *fact_obj = json_object_new_object();
@@ -239,9 +239,10 @@ void handle_list_memory_preferences(ws_connection_t *conn, struct json_object *p
    /* Query database */
    memory_preference_t prefs[MAX_MEMORY_LIMIT];
    memset(prefs, 0, sizeof(prefs));
-   int count = memory_db_pref_list(conn->auth_user_id, prefs, limit, offset);
+   int count = 0;
+   int rc = memory_db_pref_list(conn->auth_user_id, prefs, limit, offset, &count);
 
-   if (count >= 0) {
+   if (rc == MEMORY_DB_SUCCESS) {
       json_object *prefs_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
          json_object *pref_obj = json_object_new_object();
@@ -357,9 +358,10 @@ void handle_list_memory_summaries(ws_connection_t *conn, struct json_object *pay
    /* Query database */
    memory_summary_t summaries[MAX_MEMORY_LIMIT];
    memset(summaries, 0, sizeof(summaries));
-   int count = memory_db_summary_list(conn->auth_user_id, summaries, limit, offset);
+   int count = 0;
+   int rc = memory_db_summary_list(conn->auth_user_id, summaries, limit, offset, &count);
 
-   if (count >= 0) {
+   if (rc == MEMORY_DB_SUCCESS) {
       json_object *summaries_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
          json_object *summary_obj = json_object_new_object();
@@ -480,21 +482,20 @@ void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payl
    /* Load entities (sorted by mention_count desc) */
    memory_entity_t entities[MAX_MEMORY_LIMIT];
    memset(entities, 0, sizeof(entities));
-   int count = memory_db_entity_list(conn->auth_user_id, entities, limit, offset);
+   int count = 0;
+   int rc = memory_db_entity_list(conn->auth_user_id, entities, limit, offset, &count);
 
 /* Bulk-load all relations in a single query (avoids N+1 per-entity queries) */
 #define MAX_RELATIONS_BULK 400
    memory_relation_t all_rels[MAX_RELATIONS_BULK];
    int total_rels = 0;
-   if (count > 0) {
+   if (rc == MEMORY_DB_SUCCESS && count > 0) {
       memset(all_rels, 0, sizeof(all_rels));
-      total_rels = memory_db_relation_list_all_by_user(conn->auth_user_id, all_rels,
-                                                       MAX_RELATIONS_BULK);
-      if (total_rels < 0)
-         total_rels = 0;
+      memory_db_relation_list_all_by_user(conn->auth_user_id, all_rels, MAX_RELATIONS_BULK,
+                                          &total_rels);
    }
 
-   if (count >= 0) {
+   if (rc == MEMORY_DB_SUCCESS) {
       json_object *entities_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
          json_object *entity_obj = json_object_new_object();
@@ -730,15 +731,17 @@ void handle_search_memory(ws_connection_t *conn, struct json_object *payload) {
    /* Search facts */
    memory_fact_t facts[MAX_MEMORY_LIMIT];
    memset(facts, 0, sizeof(facts));
-   int count = memory_db_fact_search(conn->auth_user_id, query, facts, MAX_MEMORY_LIMIT);
+   int count = 0;
+   int rc1 = memory_db_fact_search(conn->auth_user_id, query, facts, MAX_MEMORY_LIMIT, &count);
 
    /* Also search summaries */
    memory_summary_t summaries[MEMORY_MAX_SUMMARIES];
    memset(summaries, 0, sizeof(summaries));
-   int summary_count = memory_db_summary_search(conn->auth_user_id, query, summaries,
-                                                MEMORY_MAX_SUMMARIES);
+   int summary_count = 0;
+   int rc2 = memory_db_summary_search(conn->auth_user_id, query, summaries, MEMORY_MAX_SUMMARIES,
+                                      &summary_count);
 
-   if (count >= 0 && summary_count >= 0) {
+   if (rc1 == MEMORY_DB_SUCCESS && rc2 == MEMORY_DB_SUCCESS) {
       /* Build facts array */
       json_object *facts_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
@@ -891,12 +894,10 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          return;
       }
 
-      int fact_count = memory_db_fact_list(conn->auth_user_id, facts, EXPORT_MAX_FACTS, 0);
-      int pref_count = memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0);
-      if (fact_count < 0)
-         fact_count = 0;
-      if (pref_count < 0)
-         pref_count = 0;
+      int fact_count = 0;
+      memory_db_fact_list(conn->auth_user_id, facts, EXPORT_MAX_FACTS, 0, &fact_count);
+      int pref_count = 0;
+      memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0, &pref_count);
 
       /* Build text output: one line per memory */
       size_t buf_size = (size_t)(fact_count + pref_count + 10) * 600;
@@ -962,20 +963,15 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          return;
       }
 
-      int fact_count = memory_db_fact_list(conn->auth_user_id, facts, EXPORT_MAX_FACTS, 0);
-      int pref_count = memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0);
-      int entity_count = memory_db_entity_list(conn->auth_user_id, entities, EXPORT_MAX_ENTITIES,
-                                               0);
-      int relation_count = memory_db_relation_list_all_by_user(conn->auth_user_id, relations,
-                                                               EXPORT_MAX_RELATIONS);
-      if (fact_count < 0)
-         fact_count = 0;
-      if (pref_count < 0)
-         pref_count = 0;
-      if (entity_count < 0)
-         entity_count = 0;
-      if (relation_count < 0)
-         relation_count = 0;
+      int fact_count = 0;
+      memory_db_fact_list(conn->auth_user_id, facts, EXPORT_MAX_FACTS, 0, &fact_count);
+      int pref_count = 0;
+      memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0, &pref_count);
+      int entity_count = 0;
+      memory_db_entity_list(conn->auth_user_id, entities, EXPORT_MAX_ENTITIES, 0, &entity_count);
+      int relation_count = 0;
+      memory_db_relation_list_all_by_user(conn->auth_user_id, relations, EXPORT_MAX_RELATIONS,
+                                          &relation_count);
 
       /* Build export JSON */
       json_object *export_obj = json_object_new_object();
@@ -1081,13 +1077,15 @@ static bool is_fact_duplicate(int user_id, const char *fact_text) {
       return false;
 
    memory_fact_t existing[5];
-   int found = memory_db_fact_find_by_hash(user_id, hash, existing, 5);
+   int found = 0;
+   memory_db_fact_find_by_hash(user_id, hash, existing, 5, &found);
    if (found > 0)
       return true;
 
    /* Fallback: Jaccard similarity against recent matches */
    memory_fact_t similar[3];
-   int sim_count = memory_db_fact_find_similar(user_id, fact_text, similar, 3);
+   int sim_count = 0;
+   memory_db_fact_find_similar(user_id, fact_text, similar, 3, &sim_count);
    for (int i = 0; i < sim_count; i++) {
       if (memory_is_duplicate(fact_text, similar[i].fact_text, MEMORY_SIMILARITY_THRESHOLD))
          return true;
@@ -1207,7 +1205,8 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             json_object_array_add(preview_arr, preview_item);
 
             if (commit) {
-               memory_db_fact_create(conn->auth_user_id, truncated, confidence, "import", NULL);
+               memory_db_fact_create(conn->auth_user_id, truncated, confidence, "import", NULL,
+                                     NULL);
             }
             imported_facts++;
          }
@@ -1364,7 +1363,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_array_add(preview_arr, preview_item);
 
          if (commit) {
-            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import", NULL);
+            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import", NULL, NULL);
          }
          imported_facts++;
 

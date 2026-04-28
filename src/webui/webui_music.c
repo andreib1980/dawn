@@ -407,11 +407,11 @@ bool webui_music_is_path_valid(const char *path) {
  * @param conn WebSocket connection
  * @param data Opus audio data (will be copied)
  * @param len Length of audio data
- * @return 0 on success, -1 on failure
+ * @return 0 on success, FAILURE on error
  */
 static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t len) {
    if (!conn || !conn->session || !data || len == 0) {
-      return -1;
+      return FAILURE;
    }
 
    /* Backpressure: drop music frames when queue is getting full.
@@ -432,7 +432,7 @@ static int queue_music_data(ws_connection_t *conn, const uint8_t *data, size_t l
    uint8_t *data_copy = malloc(len);
    if (!data_copy) {
       OLOG_ERROR("WebUI music: Failed to allocate music data copy (%zu bytes)", len);
-      return -1;
+      return FAILURE;
    }
    memcpy(data_copy, data, len);
 
@@ -1494,11 +1494,11 @@ void webui_music_set_stream_wsi(session_t *session, struct lws *wsi) {
 
 int webui_music_write_pending(session_t *session, struct lws *wsi) {
    if (!session)
-      return -1;
+      return FAILURE;
 
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
    if (!conn || !conn->music_state)
-      return -1;
+      return FAILURE;
 
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
 
@@ -1517,7 +1517,7 @@ int webui_music_write_pending(session_t *session, struct lws *wsi) {
       OLOG_WARNING("WebUI music: lws_write failed");
       state->write_pending_len = 0;
       pthread_mutex_unlock(&state->write_mutex);
-      return -1;
+      return FAILURE;
    }
 
    state->write_pending_len = 0;
@@ -1560,7 +1560,7 @@ static int queue_music_direct(session_music_state_t *state, const uint8_t *data,
    size_t total_len = 1 + len;
    if (total_len > sizeof(state->write_buffer) - LWS_PRE) {
       pthread_mutex_unlock(&state->write_mutex);
-      return -1;
+      return FAILURE;
    }
 
    state->write_buffer[LWS_PRE] = WS_BIN_MUSIC_DATA;

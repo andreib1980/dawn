@@ -139,12 +139,13 @@ LOG_ERROR("I2C communication failed: %d", error);
 
 ## Code Review Workflow
 
-Trigger phrases: "code review", "review my changes", "run the agents", "run the big three", "run all four", "what do the agents think?".
+Trigger phrases: "code review", "review my changes", "run the agents", "run the big three", "run all four", "run all five", "full review", "what do the agents think?".
 
 1. Capture diff via `git status` + `git diff`.
 2. Launch review agents in **parallel**:
    - **Big three** (code review / run the big three): `architecture-reviewer`, `embedded-efficiency-reviewer`, `security-auditor`.
-   - **All four** (full review / run all four): above + `ui-design-architect` (when UI changes present).
+   - **All four** (run all four): above + `ui-design-architect` (when UI changes present).
+   - **All five** (full review / run all five): above + `coding-standards-auditor` — mandatory for large refactors, new modules, or pre-release audits.
 3. Synthesize into a consolidated table with severity and action (fix / skip / ask). **Fix pre-existing issues when found** — triage on merit (severity + fix effort), not on when introduced.
 4. Apply approved fixes; re-verify format and tests.
 

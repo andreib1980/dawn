@@ -41,6 +41,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 
@@ -282,10 +283,14 @@ static int search_music_database(const char *query, Playlist *playlist) {
    music_search_result_t *results = malloc(MAX_PLAYLIST_LENGTH * sizeof(music_search_result_t));
    if (!results) {
       OLOG_ERROR("Failed to allocate search results buffer");
-      return -1;
+      return FAILURE;
    }
 
-   int count = music_db_search(query, results, MAX_PLAYLIST_LENGTH);
+   int count = 0;
+   if (music_db_search(query, results, MAX_PLAYLIST_LENGTH, &count) != SUCCESS) {
+      free(results);
+      return FAILURE;
+   }
 
    if (count <= 0) {
       free(results);
@@ -356,7 +361,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
          return webui_result ? webui_result : strdup("Music playback failed");
       }
-      /* ret == -1 means not handled, fall through to local handler */
+      /* ret == MUSIC_NOT_HANDLED means not handled, fall through to local handler */
       free(webui_result);
       OLOG_INFO("Music: WebUI deferred '%s' to local handler", action);
    }
@@ -798,7 +803,10 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          char artists[50][AUDIO_METADATA_STRING_MAX];
-         int artist_count = music_db_list_artists(artists, per_page, db_offset);
+         int artist_count = 0;
+         if (music_db_list_artists(artists, per_page, db_offset, &artist_count) != SUCCESS) {
+            return strdup("Failed to list artists");
+         }
 
          size_t buf_size = 4096;
          result = malloc(buf_size);
@@ -834,7 +842,10 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          char artists[50][AUDIO_METADATA_STRING_MAX];
-         int count = music_db_list_artists(artists, per_page, db_offset);
+         int count = 0;
+         if (music_db_list_artists(artists, per_page, db_offset, &count) != SUCCESS) {
+            return strdup("Failed to list artists");
+         }
 
          if (count <= 0 && page == 1) {
             return strdup("No artists found in library");
@@ -873,7 +884,10 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
          }
 
          char albums[50][AUDIO_METADATA_STRING_MAX];
-         int count = music_db_list_albums(albums, per_page, db_offset);
+         int count = 0;
+         if (music_db_list_albums(albums, per_page, db_offset, &count) != SUCCESS) {
+            return strdup("Failed to list albums");
+         }
 
          if (count <= 0 && page == 1) {
             return strdup("No albums found in library");

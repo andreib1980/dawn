@@ -68,8 +68,7 @@ typedef struct {
    int read;
 } phone_sms_log_t;
 
-/* Return codes for delete operations. Insert/update/query keep their legacy
- * 0/1/-1 convention; see note in phone_db.c. */
+/* Return codes for phone_db operations. */
 #define PHONE_DB_SUCCESS 0
 #define PHONE_DB_FAILURE 1
 #define PHONE_DB_NOT_FOUND 2
@@ -116,15 +115,17 @@ void phone_number_normalize(const char *in, char *out, size_t out_size);
 
 /**
  * @brief Insert a call log entry.
- * @return Row ID on success, -1 on error.
+ * @param id_out Output: row ID of inserted entry (can be NULL).
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int64_t phone_db_call_log_insert(int user_id,
-                                 int direction,
-                                 const char *number,
-                                 const char *contact_name,
-                                 int duration_sec,
-                                 time_t timestamp,
-                                 int status);
+int phone_db_call_log_insert(int user_id,
+                             int direction,
+                             const char *number,
+                             const char *contact_name,
+                             int duration_sec,
+                             time_t timestamp,
+                             int status,
+                             int64_t *id_out);
 
 /**
  * @brief Update a call log entry (e.g., set duration after call ends).
@@ -134,35 +135,40 @@ int phone_db_call_log_update(int64_t id, int duration_sec, int status);
 
 /**
  * @brief Query recent call log entries.
- * @param user_id  User ID for isolation.
- * @param out      Output array.
- * @param max      Maximum entries to return.
- * @return Number of entries, or -1 on error.
+ * @param user_id   User ID for isolation.
+ * @param out       Output array.
+ * @param max       Maximum entries to return.
+ * @param count_out Output: number of entries returned.
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int phone_db_call_log_recent(int user_id, phone_call_log_t *out, int max);
+int phone_db_call_log_recent(int user_id, phone_call_log_t *out, int max, int *count_out);
 
 /**
  * @brief Insert an SMS log entry.
- * @return Row ID on success, -1 on error.
+ * @param id_out Output: row ID of inserted entry (can be NULL).
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int64_t phone_db_sms_log_insert(int user_id,
-                                int direction,
-                                const char *number,
-                                const char *contact_name,
-                                const char *body,
-                                time_t timestamp);
+int phone_db_sms_log_insert(int user_id,
+                            int direction,
+                            const char *number,
+                            const char *contact_name,
+                            const char *body,
+                            time_t timestamp,
+                            int64_t *id_out);
 
 /**
  * @brief Get unread SMS entries for a user.
- * @return Number of entries, or -1 on error.
+ * @param count_out Output: number of entries returned.
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max);
+int phone_db_sms_get_unread(int user_id, phone_sms_log_t *out, int max, int *count_out);
 
 /**
  * @brief Query recent SMS log entries.
- * @return Number of entries, or -1 on error.
+ * @param count_out Output: number of entries returned.
+ * @return PHONE_DB_SUCCESS or PHONE_DB_FAILURE.
  */
-int phone_db_sms_log_recent(int user_id, phone_sms_log_t *out, int max);
+int phone_db_sms_log_recent(int user_id, phone_sms_log_t *out, int max, int *count_out);
 
 /**
  * @brief Mark an SMS as read.

@@ -62,7 +62,7 @@ extern "C" {
  * Must be called before music_scanner_start().
  *
  * @param provider Provider struct (must have static lifetime)
- * @return 0 on success, -1 if max providers reached
+ * @return SUCCESS or FAILURE if max providers reached
  */
 int music_scanner_register_source(const music_source_provider_t *provider);
 

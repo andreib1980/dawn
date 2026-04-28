@@ -501,7 +501,7 @@ int llm_tools_add_results_claude(struct json_object *history, const tool_result_
  *
  * @param response JSON response object
  * @param out Output: parsed tool calls
- * @return 0 if tool calls found, 1 if no tool calls, -1 on error
+ * @return 0 if tool calls found, non-zero if no tool calls or error
  */
 int llm_tools_parse_openai_response(struct json_object *response, tool_call_list_t *out);
 
@@ -512,7 +512,7 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
  *
  * @param response JSON response object
  * @param out Output: parsed tool calls
- * @return 0 if tool calls found, 1 if no tool calls, -1 on error
+ * @return 0 if tool calls found, non-zero if no tool calls or error
  */
 int llm_tools_parse_claude_response(struct json_object *response, tool_call_list_t *out);
 

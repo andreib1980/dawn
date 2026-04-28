@@ -109,9 +109,9 @@ typedef struct {
  * Account CRUD
  * ============================================================================ */
 
-int64_t calendar_db_account_create(const calendar_account_t *acct);
+int calendar_db_account_create(const calendar_account_t *acct, int64_t *id_out);
 int calendar_db_account_get(int64_t id, calendar_account_t *out);
-int calendar_db_account_list(int user_id, calendar_account_t *out, int max_count);
+int calendar_db_account_list(int user_id, calendar_account_t *out, int max_count, int *count_out);
 int calendar_db_account_update(const calendar_account_t *acct);
 int calendar_db_account_delete(int64_t id);
 int calendar_db_account_update_sync(int64_t id, time_t last_sync);
@@ -127,32 +127,40 @@ int calendar_db_account_set_enabled(int64_t id, bool enabled);
 
 /**
  * List all enabled accounts across all users (for background sync).
- * Returns count (0 if none).
+ * @param count_out  Number of accounts written to out (0 if none)
+ * @return 0 on success, 1 on failure
  */
-int calendar_db_account_list_enabled(calendar_account_t *out, int max_count);
+int calendar_db_account_list_enabled(calendar_account_t *out, int max_count, int *count_out);
 
 /* ============================================================================
  * Calendar CRUD
  * ============================================================================ */
 
-int64_t calendar_db_calendar_create(const calendar_calendar_t *cal);
+int calendar_db_calendar_create(const calendar_calendar_t *cal, int64_t *id_out);
 int calendar_db_calendar_get(int64_t id, calendar_calendar_t *out);
-int calendar_db_calendar_list(int64_t account_id, calendar_calendar_t *out, int max_count);
+int calendar_db_calendar_list(int64_t account_id,
+                              calendar_calendar_t *out,
+                              int max_count,
+                              int *count_out);
 int calendar_db_calendar_update_ctag(int64_t id, const char *ctag);
 int calendar_db_calendar_set_active(int64_t id, bool active);
 int calendar_db_calendar_delete(int64_t id);
 
 /**
  * Get all active calendars for a user (across all enabled accounts).
- * Returns count (0 if none).
+ * @param count_out  Number of calendars written to out (0 if none)
+ * @return 0 on success, 1 on failure
  */
-int calendar_db_active_calendars_for_user(int user_id, calendar_calendar_t *out, int max_count);
+int calendar_db_active_calendars_for_user(int user_id,
+                                          calendar_calendar_t *out,
+                                          int max_count,
+                                          int *count_out);
 
 /* ============================================================================
  * Event CRUD
  * ============================================================================ */
 
-int64_t calendar_db_event_upsert(const calendar_event_t *event);
+int calendar_db_event_upsert(const calendar_event_t *event, int64_t *id_out);
 int calendar_db_event_get_by_uid(const char *uid, calendar_event_t *out);
 int calendar_db_event_delete(int64_t id);
 int calendar_db_event_delete_by_calendar(int64_t calendar_id);
@@ -161,38 +169,47 @@ int calendar_db_event_delete_by_calendar(int64_t calendar_id);
  * Occurrence CRUD
  * ============================================================================ */
 
-int64_t calendar_db_occurrence_insert(const calendar_occurrence_t *occ);
+int calendar_db_occurrence_insert(const calendar_occurrence_t *occ, int64_t *id_out);
 int calendar_db_occurrence_delete_for_event(int64_t event_id);
 
 /**
  * Query occurrences in a time range across given calendar IDs.
- * Returns count (0 if none). Only returns non-cancelled occurrences.
+ * Only returns non-cancelled occurrences.
+ * @param count_out  Number of occurrences written to out (0 if none)
+ * @return 0 on success, 1 on failure
  */
 int calendar_db_occurrences_in_range(const int64_t *calendar_ids,
                                      int calendar_count,
                                      time_t range_start,
                                      time_t range_end,
                                      calendar_occurrence_t *out,
-                                     int max_count);
+                                     int max_count,
+                                     int *count_out);
 
 /**
  * Query all-day occurrences in a date range (string comparison).
+ * @param count_out  Number of occurrences written to out (0 if none)
+ * @return 0 on success, 1 on failure
  */
 int calendar_db_allday_occurrences_in_range(const int64_t *calendar_ids,
                                             int calendar_count,
                                             const char *start_date,
                                             const char *end_date,
                                             calendar_occurrence_t *out,
-                                            int max_count);
+                                            int max_count,
+                                            int *count_out);
 
 /**
  * Search occurrences by text (LIKE %query% on summary/location).
+ * @param count_out  Number of occurrences written to out (0 if none)
+ * @return 0 on success, 1 on failure
  */
 int calendar_db_occurrences_search(const int64_t *calendar_ids,
                                    int calendar_count,
                                    const char *query,
                                    calendar_occurrence_t *out,
-                                   int max_count);
+                                   int max_count,
+                                   int *count_out);
 
 /**
  * Get the next upcoming occurrence after a given time.

@@ -32,6 +32,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "dawn_error.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,6 +41,12 @@ extern "C" {
 /* =============================================================================
  * Constants
  * ============================================================================= */
+
+/* Scheduler DB return codes */
+#define SCHED_DB_SUCCESS SUCCESS
+#define SCHED_DB_FAILURE FAILURE
+#define SCHED_DB_USER_LIMIT 2
+#define SCHED_DB_GLOBAL_LIMIT 3
 
 #define SCHED_NAME_MAX 128
 #define SCHED_MESSAGE_MAX 512
@@ -138,24 +146,29 @@ sched_source_type_t sched_source_type_from_str(const char *str);
 /**
  * @brief Insert a new scheduled event
  * @param event Event to insert (id and created_at are set by this function)
- * @return Event ID on success, -1 on failure
+ * @param id_out Output: event ID on success
+ * @return SCHED_DB_SUCCESS or SCHED_DB_FAILURE
  */
-int64_t scheduler_db_insert(sched_event_t *event);
+int scheduler_db_insert(sched_event_t *event, int64_t *id_out);
 
 /**
  * @brief Atomically check limits and insert event (TOCTOU-safe)
  * @param event Event to insert
  * @param max_per_user Maximum events per user
  * @param max_total Maximum total events
- * @return Event ID on success, -1 on DB error, -2 per-user limit, -3 global limit
+ * @param id_out Output: event ID on success
+ * @return SCHED_DB_SUCCESS, SCHED_DB_FAILURE, SCHED_DB_USER_LIMIT, or SCHED_DB_GLOBAL_LIMIT
  */
-int64_t scheduler_db_insert_checked(sched_event_t *event, int max_per_user, int max_total);
+int scheduler_db_insert_checked(sched_event_t *event,
+                                int max_per_user,
+                                int max_total,
+                                int64_t *id_out);
 
 /**
  * @brief Get event by ID
  * @param id Event ID
  * @param event Output event struct
- * @return 0 on success, -1 if not found
+ * @return SUCCESS or FAILURE if not found
  */
 int scheduler_db_get(int64_t id, sched_event_t *event);
 
@@ -163,7 +176,7 @@ int scheduler_db_get(int64_t id, sched_event_t *event);
  * @brief Update event status
  * @param id Event ID
  * @param status New status
- * @return 0 on success, -1 on failure
+ * @return SUCCESS or FAILURE
  */
 int scheduler_db_update_status(int64_t id, sched_status_t status);
 
@@ -172,7 +185,7 @@ int scheduler_db_update_status(int64_t id, sched_status_t status);
  * @param id Event ID
  * @param status New status
  * @param fired_at Fired timestamp
- * @return 0 on success, -1 on failure
+ * @return SUCCESS or FAILURE
  */
 int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t fired_at);
 
@@ -180,21 +193,21 @@ int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t f
  * @brief Update fire_at for snooze (also updates snoozed_until and snooze_count)
  * @param id Event ID
  * @param new_fire_at New fire time
- * @return 0 on success, -1 on failure
+ * @return SUCCESS or FAILURE
  */
 int scheduler_db_snooze(int64_t id, time_t new_fire_at);
 
 /**
  * @brief Cancel an event (optimistic: only if still pending/snoozed)
  * @param id Event ID
- * @return 0 if cancelled, -1 if already fired/cancelled
+ * @return SUCCESS if cancelled, FAILURE if already fired/cancelled
  */
 int scheduler_db_cancel(int64_t id);
 
 /**
  * @brief Dismiss a ringing event (optimistic: only if status='ringing')
  * @param id Event ID
- * @return 0 if dismissed, -1 if already handled
+ * @return SUCCESS if dismissed, FAILURE if already handled
  */
 int scheduler_db_dismiss(int64_t id);
 
@@ -231,22 +244,24 @@ int scheduler_db_list_user_events(int user_id, int type, sched_event_t *events, 
  * @param user_id User ID
  * @param name Event name
  * @param event Output event struct
- * @return 0 on success, -1 if not found
+ * @return SUCCESS or FAILURE if not found
  */
 int scheduler_db_find_by_name(int user_id, const char *name, sched_event_t *event);
 
 /**
  * @brief Count pending events for a user
  * @param user_id User ID
- * @return Count, or -1 on error
+ * @param count_out Output: event count on success
+ * @return SCHED_DB_SUCCESS or SCHED_DB_FAILURE
  */
-int scheduler_db_count_user_events(int user_id);
+int scheduler_db_count_user_events(int user_id, int *count_out);
 
 /**
  * @brief Count total pending events across all users
- * @return Count, or -1 on error
+ * @param count_out Output: event count on success
+ * @return SCHED_DB_SUCCESS or SCHED_DB_FAILURE
  */
-int scheduler_db_count_total_events(void);
+int scheduler_db_count_total_events(int *count_out);
 
 /**
  * @brief Get currently ringing events (status='ringing')
@@ -268,9 +283,10 @@ int scheduler_db_get_active_by_uuid(const char *uuid, sched_event_t *events, int
 /**
  * @brief Clean up old fired/cancelled/missed events
  * @param retention_days Delete events older than this many days
- * @return Number of events deleted, or -1 on error
+ * @param deleted_out Output: number of events deleted on success
+ * @return SCHED_DB_SUCCESS or SCHED_DB_FAILURE
  */
-int scheduler_db_cleanup_old_events(int retention_days);
+int scheduler_db_cleanup_old_events(int retention_days, int *deleted_out);
 
 /**
  * @brief Get all pending/snoozed events that should have fired (for missed recovery)

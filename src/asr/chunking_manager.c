@@ -24,11 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "logging.h"
-
-// Return value constants
-#define SUCCESS 0
-#define FAILURE 1
 
 /**
  * @brief Chunking manager internal structure

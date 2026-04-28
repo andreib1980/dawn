@@ -246,7 +246,8 @@ static int append_access_summary(char *buf, int pos, size_t buf_len, int user_id
 
 static char *handle_calendars(int user_id) {
    calendar_account_t accounts[CALENDAR_MAX_ACCOUNTS];
-   int acct_count = calendar_db_account_list(user_id, accounts, 16);
+   int acct_count = 0;
+   calendar_db_account_list(user_id, accounts, 16, &acct_count);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -267,7 +268,8 @@ static char *handle_calendars(int user_id) {
                       status);
 
       calendar_calendar_t cals[16];
-      int cal_count = calendar_db_calendar_list(accounts[a].id, cals, 16);
+      int cal_count = 0;
+      calendar_db_calendar_list(accounts[a].id, cals, 16, &cal_count);
       if (cal_count <= 0) {
          pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "  (no calendars synced yet)\n");
       } else {

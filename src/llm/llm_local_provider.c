@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "dawn_error.h"
 #include "llm/llm_context.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
@@ -97,7 +98,7 @@ static struct {
 static int http_get(const char *url, int timeout_ms, curl_buffer_t *response) {
    CURL *curl = curl_easy_init();
    if (!curl) {
-      return -1;
+      return FAILURE;
    }
 
    /* Clamp timeout to valid bounds */
@@ -123,7 +124,7 @@ static int http_get(const char *url, int timeout_ms, curl_buffer_t *response) {
 
    if (res != CURLE_OK) {
       curl_buffer_free(response);
-      return -1;
+      return FAILURE;
    }
 
    if (http_code >= 400) {
@@ -131,7 +132,7 @@ static int http_get(const char *url, int timeout_ms, curl_buffer_t *response) {
       return (int)http_code;
    }
 
-   return 0;
+   return SUCCESS;
 }
 
 /**
@@ -143,7 +144,7 @@ static int http_post_json(const char *url,
                           curl_buffer_t *response) {
    CURL *curl = curl_easy_init();
    if (!curl) {
-      return -1;
+      return FAILURE;
    }
 
    /* Clamp timeout to valid bounds */
@@ -176,7 +177,7 @@ static int http_post_json(const char *url,
 
    if (res != CURLE_OK) {
       curl_buffer_free(response);
-      return -1;
+      return FAILURE;
    }
 
    if (http_code >= 400) {
@@ -184,7 +185,7 @@ static int http_post_json(const char *url,
       return (int)http_code;
    }
 
-   return 0;
+   return SUCCESS;
 }
 
 /**
@@ -389,7 +390,7 @@ local_provider_t llm_local_detect_provider(const char *endpoint) {
  */
 static int try_ollama_ps_context(const char *base_url, const char *model, int *ctx_out) {
    if (!model || model[0] == '\0') {
-      return -1;
+      return FAILURE;
    }
 
    char url[512];
@@ -400,14 +401,14 @@ static int try_ollama_ps_context(const char *base_url, const char *model, int *c
 
    if (result != 0 || !response.data) {
       curl_buffer_free(&response);
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *root = json_tokener_parse(response.data);
    curl_buffer_free(&response);
 
    if (!root) {
-      return -1;
+      return FAILURE;
    }
 
    /* Look for matching model in running models list */
@@ -427,7 +428,7 @@ static int try_ollama_ps_context(const char *base_url, const char *model, int *c
                   if (ctx > 0) {
                      json_object_put(root);
                      *ctx_out = ctx;
-                     return 0;
+                     return SUCCESS;
                   }
                }
             }
@@ -436,7 +437,7 @@ static int try_ollama_ps_context(const char *base_url, const char *model, int *c
    }
 
    json_object_put(root);
-   return -1;
+   return FAILURE;
 }
 
 /**
@@ -447,7 +448,7 @@ static int try_ollama_ps_context(const char *base_url, const char *model, int *c
  */
 static int try_ollama_show_context(const char *base_url, const char *model, int *ctx_out) {
    if (!model || model[0] == '\0') {
-      return -1;
+      return FAILURE;
    }
 
    char url[512];
@@ -464,7 +465,7 @@ static int try_ollama_show_context(const char *base_url, const char *model, int 
 
    if (result != 0 || !response.data) {
       curl_buffer_free(&response);
-      return -1;
+      return FAILURE;
    }
 
    /* Parse response */
@@ -472,7 +473,7 @@ static int try_ollama_show_context(const char *base_url, const char *model, int 
    curl_buffer_free(&response);
 
    if (!root) {
-      return -1;
+      return FAILURE;
    }
 
    int context_size = 0;
@@ -529,10 +530,10 @@ static int try_ollama_show_context(const char *base_url, const char *model, int 
 
    if (context_size > 0) {
       *ctx_out = context_size;
-      return 0;
+      return SUCCESS;
    }
 
-   return -1;
+   return FAILURE;
 }
 
 /**
@@ -547,14 +548,14 @@ static int try_llamacpp_context(const char *base_url, int *ctx_out) {
 
    if (result != 0 || !response.data) {
       curl_buffer_free(&response);
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *root = json_tokener_parse(response.data);
    curl_buffer_free(&response);
 
    if (!root) {
-      return -1;
+      return FAILURE;
    }
 
    int context_size = 0;
@@ -579,10 +580,10 @@ static int try_llamacpp_context(const char *base_url, int *ctx_out) {
 
    if (context_size > 0) {
       *ctx_out = context_size;
-      return 0;
+      return SUCCESS;
    }
 
-   return -1;
+   return FAILURE;
 }
 
 /**
@@ -600,14 +601,14 @@ static int try_llamacpp_slots_context(const char *base_url, int *ctx_out) {
 
    if (result != 0 || !response.data) {
       curl_buffer_free(&response);
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *root = json_tokener_parse(response.data);
    curl_buffer_free(&response);
 
    if (!root) {
-      return -1;
+      return FAILURE;
    }
 
    /* /slots returns an array — read n_ctx from the first slot */
@@ -624,10 +625,10 @@ static int try_llamacpp_slots_context(const char *base_url, int *ctx_out) {
 
    if (context_size > 0) {
       *ctx_out = context_size;
-      return 0;
+      return SUCCESS;
    }
 
-   return -1;
+   return FAILURE;
 }
 
 int llm_local_query_context_size(const char *endpoint, const char *model) {
@@ -707,17 +708,24 @@ void llm_local_invalidate_models_cache(void) {
 
 /**
  * @brief Parse Ollama /api/tags response
+ * @param count_out Output: number of models parsed
+ * @return SUCCESS or FAILURE
  */
-static int parse_ollama_models(const char *json_str, llm_local_model_t *models, size_t max_models) {
+static int parse_ollama_models(const char *json_str,
+                               llm_local_model_t *models,
+                               size_t max_models,
+                               int *count_out) {
+   if (count_out)
+      *count_out = 0;
    struct json_object *root = json_tokener_parse(json_str);
    if (!root) {
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *models_arr = NULL;
    if (!json_object_object_get_ex(root, "models", &models_arr)) {
       json_object_put(root);
-      return -1;
+      return FAILURE;
    }
 
    int count = 0;
@@ -739,22 +747,31 @@ static int parse_ollama_models(const char *json_str, llm_local_model_t *models, 
    }
 
    json_object_put(root);
-   return count;
+   if (count_out)
+      *count_out = count;
+   return SUCCESS;
 }
 
 /**
  * @brief Parse OpenAI-compatible /v1/models response
+ * @param count_out Output: number of models parsed
+ * @return SUCCESS or FAILURE
  */
-static int parse_openai_models(const char *json_str, llm_local_model_t *models, size_t max_models) {
+static int parse_openai_models(const char *json_str,
+                               llm_local_model_t *models,
+                               size_t max_models,
+                               int *count_out) {
+   if (count_out)
+      *count_out = 0;
    struct json_object *root = json_tokener_parse(json_str);
    if (!root) {
-      return -1;
+      return FAILURE;
    }
 
    struct json_object *data_arr = NULL;
    if (!json_object_object_get_ex(root, "data", &data_arr)) {
       json_object_put(root);
-      return -1;
+      return FAILURE;
    }
 
    int count = 0;
@@ -776,7 +793,9 @@ static int parse_openai_models(const char *json_str, llm_local_model_t *models, 
    }
 
    json_object_put(root);
-   return count;
+   if (count_out)
+      *count_out = count;
+   return SUCCESS;
 }
 
 int llm_local_list_models(const char *endpoint,
@@ -812,30 +831,31 @@ int llm_local_list_models(const char *endpoint,
    char url[544]; /* base_url + "/v1/models" suffix */
    curl_buffer_t response;
    int result;
-   int count = -1;
+   int count = 0;
+   bool parsed = false;
 
    if (provider == LOCAL_PROVIDER_OLLAMA) {
       /* GET /api/tags for Ollama */
       snprintf(url, sizeof(url), "%s/api/tags", base_url);
       result = http_get(url, 5000, &response);
 
-      if (result == 0 && response.data) {
-         count = parse_ollama_models(response.data, models, max_models);
+      if (result == SUCCESS && response.data) {
+         parsed = (parse_ollama_models(response.data, models, max_models, &count) == SUCCESS);
       }
    } else {
       /* GET /v1/models for llama.cpp and generic */
       snprintf(url, sizeof(url), "%s/v1/models", base_url);
       result = http_get(url, 5000, &response);
 
-      if (result == 0 && response.data) {
-         count = parse_openai_models(response.data, models, max_models);
+      if (result == SUCCESS && response.data) {
+         parsed = (parse_openai_models(response.data, models, max_models, &count) == SUCCESS);
       }
    }
 
    curl_buffer_free(&response);
 
    /* Update cache and return on success */
-   if (count >= 0) {
+   if (parsed) {
       pthread_mutex_lock(&s_state.mutex);
       size_t cache_count = ((size_t)count < LLM_LOCAL_MAX_MODELS) ? (size_t)count
                                                                   : LLM_LOCAL_MAX_MODELS;

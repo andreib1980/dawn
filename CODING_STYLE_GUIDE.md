@@ -307,11 +307,20 @@ int read_sensor(i2c_bus_t *bus, uint8_t address, float *result);
 ```
 
 ### Return Values
-- **Use `SUCCESS` (0) and `FAILURE` (1) macros** for return values
-- Define specific error codes > 1 for detailed error reporting
+- **Use `SUCCESS` (0) and `FAILURE` (1)** from `include/dawn_error.h` for return values
+- Modules may define specific error codes > 1 (e.g., `AUTH_DB_FAILURE`, `SCHED_DB_USER_LIMIT`)
 - **DO NOT use negative return values** (no -1, no negative errno)
 - Return 0 on success, positive values on error
-- For count/size functions, use separate output parameter for errors
+- For count/size functions, use a separate output parameter and return SUCCESS/FAILURE
+- **Allowed negative-return exceptions** (all other code must use positive codes):
+  - **lws callbacks**: return `LWS_CLOSE_CONNECTION` (-1) per the libwebsockets API contract (defined in `include/webui/webui_internal.h`)
+  - **Music dispatch routing**: `MUSIC_NOT_HANDLED` (-1) signals "not handled, fall through to next handler" (defined in `include/webui/webui_music.h`)
+  - **`time_t` sentinels**: static `parse_iso8601` helpers return `(time_t)-1` to mirror `mktime()`'s standard failure convention
+  - **Internal static index/slot finders**: private-to-file functions (e.g., `hash_lookup`, `find_free_slot`, `vocab_lookup`) return -1 as "not found" sentinel — never exposed in public API
+  - **fd/socket creation**: `create_listening_socket` returns -1 per POSIX socket convention
+  - **Vendored code**: `src/tools/toml.c` (third-party, MIT) is unmodified
+  - **Domain "not available" sentinels**: public getters where -1 is a semantically meaningful "not available" value distinct from all valid returns (e.g., `component_status_get_hud_age` returns -1 if never received)
+  - **`common/` shared library**: buffer-writing functions in common/ use -1 for error since common/ has its own error codes (`TTS_SUCCESS`/`TTS_FAILURE`), not `dawn_error.h`
 
 ```c
 #define SUCCESS 0

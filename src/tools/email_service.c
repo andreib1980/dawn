@@ -192,7 +192,8 @@ static int build_conn_for_account(const email_account_t *acct, email_conn_t *con
 
 static int find_account(int user_id, const char *account_name, email_account_t *out) {
    email_account_t accounts[EMAIL_MAX_ACCOUNTS];
-   int count = email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS);
+   int count = 0;
+   email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
    if (count <= 0)
       return 1;
 
@@ -220,7 +221,8 @@ static int find_account(int user_id, const char *account_name, email_account_t *
 
 static int find_writable_account(int user_id, email_account_t *out) {
    email_account_t accounts[EMAIL_MAX_ACCOUNTS];
-   int count = email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS);
+   int count = 0;
+   email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
 
    int result = 1;
    for (int i = 0; i < count; i++) {
@@ -375,7 +377,8 @@ int email_service_add_account(int user_id,
 
    /* Duplicate check: same user + (OAuth key or username+server) */
    email_account_t existing[16];
-   int count = email_db_account_list(user_id, existing, 16);
+   int count = 0;
+   email_db_account_list(user_id, existing, 16, &count);
    for (int i = 0; i < count; i++) {
       if (is_oauth && oauth_account_key && oauth_account_key[0] &&
           strcmp(existing[i].oauth_account_key, oauth_account_key) == 0) {
@@ -415,8 +418,8 @@ int email_service_add_account(int user_id,
          return 1;
    }
 
-   int64_t id = email_db_account_create(&acct);
-   return (id < 0) ? 1 : 0;
+   int64_t id = 0;
+   return email_db_account_create(&acct, &id);
 }
 
 int email_service_remove_account(int64_t account_id) {
@@ -428,7 +431,8 @@ int email_service_remove_account(int64_t account_id) {
    if (strcmp(acct.auth_type, "oauth") == 0 && acct.oauth_account_key[0]) {
       bool calendar_uses_account = false;
       calendar_account_t cal_accts[CALENDAR_MAX_ACCOUNTS];
-      int cal_count = calendar_db_account_list(acct.user_id, cal_accts, CALENDAR_MAX_ACCOUNTS);
+      int cal_count = 0;
+      calendar_db_account_list(acct.user_id, cal_accts, CALENDAR_MAX_ACCOUNTS, &cal_count);
       for (int i = 0; i < cal_count; i++) {
          if (strcmp(cal_accts[i].auth_type, "oauth") == 0 &&
              strcmp(cal_accts[i].oauth_account_key, acct.oauth_account_key) == 0) {
@@ -492,7 +496,9 @@ int email_service_test_connection(int64_t account_id, bool *imap_ok, bool *smtp_
 }
 
 int email_service_list_accounts(int user_id, email_account_t *out, int max) {
-   return email_db_account_list(user_id, out, max);
+   int count = 0;
+   email_db_account_list(user_id, out, max, &count);
+   return count;
 }
 
 /* =============================================================================
@@ -578,7 +584,8 @@ int email_service_read(int user_id,
 
    /* No account specified — try all enabled accounts until one succeeds */
    email_account_t accounts[16];
-   int acct_count = email_db_account_list(user_id, accounts, 16);
+   int acct_count = 0;
+   email_db_account_list(user_id, accounts, 16, &acct_count);
    for (int i = 0; i < acct_count; i++) {
       if (!accounts[i].enabled)
          continue;
@@ -722,7 +729,8 @@ int email_service_search(int user_id,
    /* No account specified — search ALL enabled accounts and merge results.
     * Pagination only applies to single-account searches. */
    email_account_t accounts[16];
-   int acct_count = email_db_account_list(user_id, accounts, 16);
+   int acct_count = 0;
+   email_db_account_list(user_id, accounts, 16, &acct_count);
    if (acct_count <= 0)
       return 1;
 
@@ -1277,7 +1285,8 @@ int email_service_get_access_summary(int user_id,
                                      char *read_only_out,
                                      size_t r_len) {
    email_account_t accounts[EMAIL_MAX_ACCOUNTS];
-   int count = email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS);
+   int count = 0;
+   email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
    if (count <= 0)
       return 2;
 

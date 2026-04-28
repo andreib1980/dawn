@@ -15,6 +15,7 @@
 #include "audio/audio_converter.h"
 #include "config/dawn_config.h"
 #include "dawn.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "ui/metrics.h"
 
@@ -840,12 +841,12 @@ int text_to_speech_to_pcm(const char *text,
                           uint32_t *sample_rate_out) {
    if (!text || !pcm_data_out || !pcm_samples_out) {
       OLOG_ERROR("Invalid parameters for PCM generation");
-      return -1;
+      return FAILURE;
    }
 
    if (!tts_handle.is_initialized) {
       OLOG_ERROR("TTS not initialized for PCM generation");
-      return -1;
+      return FAILURE;
    }
 
    // THREAD SAFETY: Lock the TTS mutex to prevent conflicts with local TTS
@@ -893,7 +894,7 @@ int text_to_speech_to_pcm(const char *text,
       if (audioBuffer.empty()) {
          OLOG_ERROR("Generated PCM data is empty");
          pthread_mutex_unlock(&tts_mutex);
-         return -1;
+         return FAILURE;
       }
 
       // Allocate output buffer and copy samples
@@ -903,7 +904,7 @@ int text_to_speech_to_pcm(const char *text,
       if (!*pcm_data_out) {
          OLOG_ERROR("Failed to allocate PCM buffer (%zu samples)", *pcm_samples_out);
          pthread_mutex_unlock(&tts_mutex);
-         return -1;
+         return FAILURE;
       }
 
       memcpy(*pcm_data_out, audioBuffer.data(), *pcm_samples_out * sizeof(int16_t));
@@ -929,7 +930,7 @@ int text_to_speech_to_pcm(const char *text,
       }
 
       pthread_mutex_unlock(&tts_mutex);
-      return -1;
+      return FAILURE;
    }
 }
 
@@ -958,7 +959,7 @@ static void create_wav_header(WAVHeader *header,
 int text_to_speech_to_wav(const char *text, uint8_t **wav_data_out, size_t *wav_size_out) {
    if (!text || !wav_data_out || !wav_size_out) {
       OLOG_ERROR("Invalid parameters for WAV generation");
-      return -1;
+      return FAILURE;
    }
 
    // Generate raw PCM samples
@@ -969,7 +970,7 @@ int text_to_speech_to_wav(const char *text, uint8_t **wav_data_out, size_t *wav_
    int result = text_to_speech_to_pcm(text, &pcm_data, &pcm_samples, &sample_rate);
    if (result != 0 || !pcm_data || pcm_samples == 0) {
       OLOG_ERROR("PCM generation failed for WAV wrapper");
-      return -1;
+      return FAILURE;
    }
 
    // Calculate sizes
@@ -981,7 +982,7 @@ int text_to_speech_to_wav(const char *text, uint8_t **wav_data_out, size_t *wav_
    if (!wav_data) {
       OLOG_ERROR("Failed to allocate WAV buffer (%zu bytes)", wav_size);
       free(pcm_data);
-      return -1;
+      return FAILURE;
    }
 
    // Create WAV header (16-bit mono at synthesized sample rate)
@@ -1011,7 +1012,7 @@ int text_to_speech_to_wav(const char *text, uint8_t **wav_data_out, size_t *wav_
  */
 int tts_wait_for_completion(int timeout_ms) {
    if (!tts_handle.is_initialized) {
-      return -1;
+      return FAILURE;
    }
 
    struct timespec start_time;
@@ -1039,7 +1040,7 @@ int tts_wait_for_completion(int timeout_ms) {
                                 (now.tv_nsec - start_time.tv_nsec) / 1000000);
          if (elapsed_ms >= timeout_ms) {
             OLOG_WARNING("TTS wait timeout after %d ms", elapsed_ms);
-            return -1;
+            return FAILURE;
          }
       }
 

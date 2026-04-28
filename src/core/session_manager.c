@@ -1138,8 +1138,8 @@ void session_check_idle_conversations(void) {
       session_t *s = idle_sessions[i];
       OLOG_INFO("Session %u: Idle timeout after %d minutes, saving conversation", s->session_id,
                 g_config.memory.conversation_idle_timeout_min);
-      int64_t conv_id = session_save_voice_conversation(s);
-      if (conv_id > 0) {
+      int64_t conv_id = 0;
+      if (session_save_voice_conversation(s, &conv_id) == 0 && conv_id > 0) {
          OLOG_INFO("Session %u: Saved as conversation %lld", s->session_id, (long long)conv_id);
       }
       session_release(s);
@@ -1347,9 +1347,12 @@ void session_update_interaction_complete(session_t *session) {
    session->last_interaction_complete = time(NULL);
 }
 
-int64_t session_save_voice_conversation(session_t *session) {
-   if (!session) {
-      return -1;
+int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
+   if (conv_id_out)
+      *conv_id_out = 0;
+
+   if (!session || !conv_id_out) {
+      return 1;
    }
 
    pthread_mutex_lock(&session->history_mutex);
@@ -1357,14 +1360,14 @@ int64_t session_save_voice_conversation(session_t *session) {
    /* Check if there are messages to save */
    if (!session->conversation_history) {
       pthread_mutex_unlock(&session->history_mutex);
-      return -1;
+      return 1;
    }
 
    int msg_count = (int)json_object_array_length(session->conversation_history);
    if (msg_count < 2) {
       /* No user messages, just system prompt */
       pthread_mutex_unlock(&session->history_mutex);
-      return -1;
+      return 1;
    }
 
    /* Get user ID: prefer session's mapped user, fall back to config default */
@@ -1410,12 +1413,12 @@ int64_t session_save_voice_conversation(session_t *session) {
    }
 
    /* Create conversation in database with voice origin */
-   int64_t conv_id = -1;
+   int64_t conv_id = 0;
    int rc = conv_db_create_with_origin(user_id, title, "voice", &conv_id);
    if (rc != AUTH_DB_SUCCESS) {
       OLOG_ERROR("Session %u: Failed to create voice conversation: %d", session->session_id, rc);
       pthread_mutex_unlock(&session->history_mutex);
-      return -1;
+      return 1;
    }
 
    /* Save all messages to database */
@@ -1475,7 +1478,8 @@ int64_t session_save_voice_conversation(session_t *session) {
    OLOG_INFO("Session %u: Saved voice conversation %lld (%d messages, user %d)",
              session->session_id, (long long)conv_id, msg_count, user_id);
 
-   return conv_id;
+   *conv_id_out = conv_id;
+   return 0;
 }
 
 void session_init_system_prompt(session_t *session, const char *system_prompt) {

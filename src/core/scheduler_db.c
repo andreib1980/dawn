@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -187,8 +188,8 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
  * CRUD Operations
  * ============================================================================= */
 
-int64_t scheduler_db_insert(sched_event_t *event) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int scheduler_db_insert(sched_event_t *event, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
 
    event->created_at = time(NULL);
 
@@ -204,7 +205,7 @@ int64_t scheduler_db_insert(sched_event_t *event) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("scheduler_db: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return SCHED_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, event->user_id);
@@ -234,21 +235,27 @@ int64_t scheduler_db_insert(sched_event_t *event) {
    sqlite3_bind_int(stmt, 21, 0);
 
    rc = sqlite3_step(stmt);
-   int64_t id = -1;
+   int result = SCHED_DB_FAILURE;
    if (rc == SQLITE_DONE) {
-      id = sqlite3_last_insert_rowid(s_db.db);
+      int64_t id = sqlite3_last_insert_rowid(s_db.db);
       event->id = id;
+      if (id_out)
+         *id_out = id;
+      result = SCHED_DB_SUCCESS;
    } else {
       OLOG_ERROR("scheduler_db: insert failed: %s", sqlite3_errmsg(s_db.db));
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return id;
+   return result;
 }
 
-int64_t scheduler_db_insert_checked(sched_event_t *event, int max_per_user, int max_total) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int scheduler_db_insert_checked(sched_event_t *event,
+                                int max_per_user,
+                                int max_total,
+                                int64_t *id_out) {
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
 
    /* Check per-user limit under the same lock as insert */
    const char *count_user_sql = "SELECT COUNT(*) FROM scheduled_events "
@@ -262,7 +269,7 @@ int64_t scheduler_db_insert_checked(sched_event_t *event, int max_per_user, int 
          if (user_count >= max_per_user) {
             sqlite3_finalize(cnt_stmt);
             AUTH_DB_UNLOCK();
-            return -2; /* per-user limit exceeded */
+            return SCHED_DB_USER_LIMIT;
          }
       }
       sqlite3_finalize(cnt_stmt);
@@ -279,7 +286,7 @@ int64_t scheduler_db_insert_checked(sched_event_t *event, int max_per_user, int 
          if (total_count >= max_total) {
             sqlite3_finalize(cnt_stmt);
             AUTH_DB_UNLOCK();
-            return -3; /* global limit exceeded */
+            return SCHED_DB_GLOBAL_LIMIT;
          }
       }
       sqlite3_finalize(cnt_stmt);
@@ -300,7 +307,7 @@ int64_t scheduler_db_insert_checked(sched_event_t *event, int max_per_user, int 
    if (rc != SQLITE_OK) {
       OLOG_ERROR("scheduler_db: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return SCHED_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, event->user_id);
@@ -330,37 +337,40 @@ int64_t scheduler_db_insert_checked(sched_event_t *event, int max_per_user, int 
    sqlite3_bind_int(stmt, 21, 0);
 
    rc = sqlite3_step(stmt);
-   int64_t id = -1;
+   int result = SCHED_DB_FAILURE;
    if (rc == SQLITE_DONE) {
-      id = sqlite3_last_insert_rowid(s_db.db);
+      int64_t id = sqlite3_last_insert_rowid(s_db.db);
       event->id = id;
+      if (id_out)
+         *id_out = id;
+      result = SCHED_DB_SUCCESS;
    } else {
       OLOG_ERROR("scheduler_db: insert failed: %s", sqlite3_errmsg(s_db.db));
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return id;
+   return result;
 }
 
 int scheduler_db_get(int64_t id, sched_event_t *event) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "SELECT " SCHED_SELECT_COLS " FROM scheduled_events WHERE id = ?";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_int64(stmt, 1, id);
    rc = sqlite3_step(stmt);
 
-   int result = -1;
+   int result = FAILURE;
    if (rc == SQLITE_ROW) {
       extract_event_row(stmt, event);
-      result = 0;
+      result = SUCCESS;
    }
 
    sqlite3_finalize(stmt);
@@ -369,21 +379,21 @@ int scheduler_db_get(int64_t id, sched_event_t *event) {
 }
 
 int scheduler_db_update_status(int64_t id, sched_status_t status) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = ? WHERE id = ?";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_text(stmt, 1, sched_status_to_str(status), -1, SQLITE_STATIC);
    sqlite3_bind_int64(stmt, 2, id);
 
    rc = sqlite3_step(stmt);
-   int result = (rc == SQLITE_DONE) ? 0 : -1;
+   int result = (rc == SQLITE_DONE) ? SUCCESS : FAILURE;
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -391,14 +401,14 @@ int scheduler_db_update_status(int64_t id, sched_status_t status) {
 }
 
 int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t fired_at) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = ?, fired_at = ? WHERE id = ?";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_text(stmt, 1, sched_status_to_str(status), -1, SQLITE_STATIC);
@@ -406,7 +416,7 @@ int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t f
    sqlite3_bind_int64(stmt, 3, id);
 
    rc = sqlite3_step(stmt);
-   int result = (rc == SQLITE_DONE) ? 0 : -1;
+   int result = (rc == SQLITE_DONE) ? SUCCESS : FAILURE;
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -414,7 +424,7 @@ int scheduler_db_update_status_fired(int64_t id, sched_status_t status, time_t f
 }
 
 int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = 'snoozed', fire_at = ?, "
                      "snoozed_until = ?, snooze_count = snooze_count + 1 "
@@ -423,7 +433,7 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_int64(stmt, 1, (int64_t)new_fire_at);
@@ -432,7 +442,7 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
 
    rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
-   int result = (rc == SQLITE_DONE && changes > 0) ? 0 : -1;
+   int result = (rc == SQLITE_DONE && changes > 0) ? SUCCESS : FAILURE;
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -440,7 +450,7 @@ int scheduler_db_snooze(int64_t id, time_t new_fire_at) {
 }
 
 int scheduler_db_cancel(int64_t id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = 'cancelled' "
                      "WHERE id = ? AND status IN ('pending', 'snoozed')";
@@ -448,13 +458,13 @@ int scheduler_db_cancel(int64_t id) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_int64(stmt, 1, id);
    rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
-   int result = (rc == SQLITE_DONE && changes > 0) ? 0 : -1;
+   int result = (rc == SQLITE_DONE && changes > 0) ? SUCCESS : FAILURE;
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -462,7 +472,7 @@ int scheduler_db_cancel(int64_t id) {
 }
 
 int scheduler_db_dismiss(int64_t id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "UPDATE scheduled_events SET status = 'dismissed', fired_at = ? "
                      "WHERE id = ? AND status = 'ringing'";
@@ -470,7 +480,7 @@ int scheduler_db_dismiss(int64_t id) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_int64(stmt, 1, (int64_t)time(NULL));
@@ -478,7 +488,7 @@ int scheduler_db_dismiss(int64_t id) {
 
    rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
-   int result = (rc == SQLITE_DONE && changes > 0) ? 0 : -1;
+   int result = (rc == SQLITE_DONE && changes > 0) ? SUCCESS : FAILURE;
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -580,7 +590,7 @@ int scheduler_db_list_user_events(int user_id, int type, sched_event_t *events, 
 }
 
 int scheduler_db_find_by_name(int user_id, const char *name, sched_event_t *event) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
    const char *sql = "SELECT " SCHED_SELECT_COLS " FROM scheduled_events "
                      "WHERE user_id = ? AND name = ? COLLATE NOCASE "
@@ -590,16 +600,16 @@ int scheduler_db_find_by_name(int user_id, const char *name, sched_event_t *even
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_TRANSIENT);
 
-   int result = -1;
+   int result = FAILURE;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       extract_event_row(stmt, event);
-      result = 0;
+      result = SUCCESS;
    }
 
    sqlite3_finalize(stmt);
@@ -607,8 +617,8 @@ int scheduler_db_find_by_name(int user_id, const char *name, sched_event_t *even
    return result;
 }
 
-int scheduler_db_count_user_events(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int scheduler_db_count_user_events(int user_id, int *count_out) {
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
 
    const char *sql = "SELECT COUNT(*) FROM scheduled_events "
                      "WHERE user_id = ? AND status IN ('pending', 'snoozed', 'ringing')";
@@ -616,22 +626,25 @@ int scheduler_db_count_user_events(int user_id) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return SCHED_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
 
-   int count = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW)
-      count = sqlite3_column_int(stmt, 0);
+   int result = SCHED_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      if (count_out)
+         *count_out = sqlite3_column_int(stmt, 0);
+      result = SCHED_DB_SUCCESS;
+   }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   return result;
 }
 
-int scheduler_db_count_total_events(void) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int scheduler_db_count_total_events(int *count_out) {
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
 
    const char *sql = "SELECT COUNT(*) FROM scheduled_events "
                      "WHERE status IN ('pending', 'snoozed', 'ringing')";
@@ -639,16 +652,19 @@ int scheduler_db_count_total_events(void) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return SCHED_DB_FAILURE;
    }
 
-   int count = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW)
-      count = sqlite3_column_int(stmt, 0);
+   int result = SCHED_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      if (count_out)
+         *count_out = sqlite3_column_int(stmt, 0);
+      result = SCHED_DB_SUCCESS;
+   }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   return result;
 }
 
 int scheduler_db_get_ringing(sched_event_t *events, int max_count) {
@@ -703,8 +719,8 @@ int scheduler_db_get_active_by_uuid(const char *uuid, sched_event_t *events, int
    return count;
 }
 
-int scheduler_db_cleanup_old_events(int retention_days) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int scheduler_db_cleanup_old_events(int retention_days, int *deleted_out) {
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
 
    time_t cutoff = time(NULL) - (time_t)retention_days * 86400;
 
@@ -716,18 +732,23 @@ int scheduler_db_cleanup_old_events(int retention_days) {
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return SCHED_DB_FAILURE;
    }
 
    sqlite3_bind_int64(stmt, 1, (int64_t)cutoff);
    sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
 
    rc = sqlite3_step(stmt);
-   int deleted = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : -1;
+   int result = SCHED_DB_FAILURE;
+   if (rc == SQLITE_DONE) {
+      if (deleted_out)
+         *deleted_out = sqlite3_changes(s_db.db);
+      result = SCHED_DB_SUCCESS;
+   }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return deleted;
+   return result;
 }
 
 int scheduler_db_get_missed_events(sched_event_t *events, int max_count) {

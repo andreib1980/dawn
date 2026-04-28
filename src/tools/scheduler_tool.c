@@ -406,20 +406,21 @@ static char *handle_create(struct json_object *details,
    }
 
    /* Atomic limit check + insert */
-   int64_t id = scheduler_db_insert_checked(&event, g_config.scheduler.max_events_per_user,
-                                            g_config.scheduler.max_events_total);
-   if (id == -2) {
+   int64_t id = 0;
+   int insert_rc = scheduler_db_insert_checked(&event, g_config.scheduler.max_events_per_user,
+                                               g_config.scheduler.max_events_total, &id);
+   if (insert_rc == SCHED_DB_USER_LIMIT) {
       snprintf(result, sizeof(result),
                "Error: maximum events per user reached (%d). Cancel some events first.",
                g_config.scheduler.max_events_per_user);
       return strdup(result);
    }
-   if (id == -3) {
+   if (insert_rc == SCHED_DB_GLOBAL_LIMIT) {
       snprintf(result, sizeof(result), "Error: maximum total events reached (%d).",
                g_config.scheduler.max_events_total);
       return strdup(result);
    }
-   if (id < 0) {
+   if (insert_rc != SCHED_DB_SUCCESS) {
       snprintf(result, sizeof(result), "Error: failed to create event");
       return strdup(result);
    }

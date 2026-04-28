@@ -118,21 +118,28 @@ int auth_db_get_user(const char *username, auth_user_t *user_out) {
    return AUTH_DB_FAILURE;
 }
 
-int auth_db_user_count(void) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int auth_db_user_count(int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_FAILURE;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_count_users);
    int rc = sqlite3_step(s_db.stmt_count_users);
 
-   int count = -1;
    if (rc == SQLITE_ROW) {
-      count = sqlite3_column_int(s_db.stmt_count_users, 0);
+      *count_out = sqlite3_column_int(s_db.stmt_count_users, 0);
+   } else {
+      sqlite3_reset(s_db.stmt_count_users);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_reset(s_db.stmt_count_users);
    AUTH_DB_UNLOCK();
 
-   return count;
+   return AUTH_DB_SUCCESS;
 }
 
 int auth_db_validate_username(const char *username) {
@@ -280,26 +287,33 @@ int auth_db_list_users(auth_user_summary_callback_t callback, void *ctx) {
    return AUTH_DB_SUCCESS;
 }
 
-int auth_db_count_admins(void) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int auth_db_count_admins(int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_FAILURE;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    const char *sql = "SELECT COUNT(*) FROM users WHERE is_admin = 1";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
-   int count = -1;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      count = sqlite3_column_int(stmt, 0);
+      *count_out = sqlite3_column_int(stmt, 0);
+   } else {
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
 
-   return count;
+   return AUTH_DB_SUCCESS;
 }
 
 int auth_db_delete_user(const char *username) {

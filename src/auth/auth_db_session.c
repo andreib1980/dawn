@@ -325,23 +325,29 @@ bool auth_db_session_belongs_to_user(const char *prefix, int user_id) {
    return belongs;
 }
 
-int auth_db_delete_sessions_by_username(const char *username) {
+int auth_db_delete_sessions_by_username(const char *username, int *deleted_out) {
    if (!username) {
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
    /* Look up user to get their ID */
    auth_user_t user;
    int rc = auth_db_get_user(username, &user);
+   if (rc == AUTH_DB_NOT_FOUND) {
+      if (deleted_out) {
+         *deleted_out = 0;
+      }
+      return AUTH_DB_SUCCESS;
+   }
    if (rc != AUTH_DB_SUCCESS) {
-      return (rc == AUTH_DB_NOT_FOUND) ? 0 : -1;
+      return AUTH_DB_FAILURE;
    }
 
-   return auth_db_delete_user_sessions(user.id);
+   return auth_db_delete_user_sessions(user.id, deleted_out);
 }
 
-int auth_db_delete_user_sessions(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int auth_db_delete_user_sessions(int user_id, int *deleted_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_delete_user_sessions);
    sqlite3_bind_int(s_db.stmt_delete_user_sessions, 1, user_id);
@@ -352,7 +358,14 @@ int auth_db_delete_user_sessions(int user_id) {
 
    AUTH_DB_UNLOCK();
 
-   return (rc == SQLITE_DONE) ? changes : -1;
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+
+   if (deleted_out) {
+      *deleted_out = changes;
+   }
+   return AUTH_DB_SUCCESS;
 }
 
 int auth_db_list_sessions(auth_session_summary_callback_t callback, void *ctx) {
@@ -426,24 +439,31 @@ int auth_db_list_user_sessions(int user_id, auth_session_summary_callback_t call
    return AUTH_DB_SUCCESS;
 }
 
-int auth_db_count_sessions(void) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int auth_db_count_sessions(int *count_out) {
+   if (!count_out) {
+      return AUTH_DB_FAILURE;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    const char *sql = "SELECT COUNT(*) FROM sessions";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return AUTH_DB_FAILURE;
    }
 
-   int count = -1;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      count = sqlite3_column_int(stmt, 0);
+      *count_out = sqlite3_column_int(stmt, 0);
+   } else {
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
 
-   return count;
+   return AUTH_DB_SUCCESS;
 }

@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 
@@ -92,7 +93,7 @@ static int vocab_load(const char *path) {
    FILE *fp = fopen(path, "r");
    if (!fp) {
       OLOG_ERROR("memory_embed_onnx: cannot open vocab: %s", path);
-      return -1;
+      return FAILURE;
    }
 
    memset(s_vocab_table, 0, sizeof(s_vocab_table));
@@ -306,7 +307,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
 
    /* Load vocabulary */
    if (vocab_load(VOCAB_PATH) != 0) {
-      return -1;
+      return FAILURE;
    }
 
    /* Get ONNX Runtime API */
@@ -314,7 +315,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
    if (!s_onnx.ort) {
       OLOG_ERROR("memory_embed_onnx: failed to get ONNX Runtime API");
       vocab_free();
-      return -1;
+      return FAILURE;
    }
 
    /* Create environment */
@@ -324,7 +325,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
       OLOG_ERROR("memory_embed_onnx: create env failed: %s", s_onnx.ort->GetErrorMessage(status));
       s_onnx.ort->ReleaseStatus(status);
       vocab_free();
-      return -1;
+      return FAILURE;
    }
 
    /* Session options */
@@ -336,7 +337,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseEnv(s_onnx.env);
       vocab_free();
-      return -1;
+      return FAILURE;
    }
 
 #pragma GCC diagnostic push
@@ -354,7 +355,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseEnv(s_onnx.env);
       vocab_free();
-      return -1;
+      return FAILURE;
    }
 
    /* Memory info */
@@ -367,7 +368,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
       s_onnx.ort->ReleaseSession(s_onnx.session);
       s_onnx.ort->ReleaseEnv(s_onnx.env);
       vocab_free();
-      return -1;
+      return FAILURE;
    }
 
    s_onnx.initialized = true;
@@ -399,7 +400,7 @@ static void onnx_cleanup(void) {
  */
 static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims) {
    if (!s_onnx.initialized || !text || !out || !out_dims)
-      return -1;
+      return FAILURE;
 
    /* Tokenize */
    int64_t input_ids[ONNX_MAX_SEQ_LEN];
@@ -411,7 +412,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
    if (seq_len <= 2) {
       /* Only [CLS] and [SEP] — no real content */
       *out_dims = 0;
-      return -1;
+      return FAILURE;
    }
 
    /* Create input tensors */
@@ -426,7 +427,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
                                                        &input_tensors[0]);
    if (status != NULL) {
       s_onnx.ort->ReleaseStatus(status);
-      return -1;
+      return FAILURE;
    }
 
    status = s_onnx.ort->CreateTensorWithDataAsOrtValue(s_onnx.memory_info, attention_mask,
@@ -436,7 +437,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
    if (status != NULL) {
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseValue(input_tensors[0]);
-      return -1;
+      return FAILURE;
    }
 
    status = s_onnx.ort->CreateTensorWithDataAsOrtValue(s_onnx.memory_info, token_type_ids,
@@ -447,7 +448,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseValue(input_tensors[0]);
       s_onnx.ort->ReleaseValue(input_tensors[1]);
-      return -1;
+      return FAILURE;
    }
 
    /* Run inference */
@@ -467,7 +468,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
    if (status != NULL) {
       OLOG_ERROR("memory_embed_onnx: inference failed: %s", s_onnx.ort->GetErrorMessage(status));
       s_onnx.ort->ReleaseStatus(status);
-      return -1;
+      return FAILURE;
    }
 
    /* Get output data — shape [1, seq_len, hidden_dim] */
@@ -476,7 +477,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
    if (status != NULL) {
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseValue(output_tensor);
-      return -1;
+      return FAILURE;
    }
 
    /* Get output shape to determine hidden_dim */
@@ -485,7 +486,7 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
    if (shape_status) {
       s_onnx.ort->ReleaseStatus(shape_status);
       s_onnx.ort->ReleaseValue(output_tensor);
-      return -1;
+      return FAILURE;
    }
    size_t num_dims;
    OrtStatus *dim_status = s_onnx.ort->GetDimensionsCount(shape_info, &num_dims);

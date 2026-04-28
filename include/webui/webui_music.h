@@ -331,8 +331,18 @@ int webui_music_write_pending(session_t *session, struct lws *wsi);
  * @param action Music action (play, stop, pause, resume, next, previous)
  * @param query Search query for play/search actions, or NULL
  * @param result_out Output: allocated result string (caller must free)
- * @return 0 on success, non-zero on error
+ * @return 0 on success, >0 on error, MUSIC_NOT_HANDLED if action should
+ *         fall through to the default (local) handler
  */
+
+/**
+ * @brief Return value from webui_music_execute_tool() meaning "not handled,
+ *        fall through to the default handler".
+ *
+ * Distinct from SUCCESS (0 = handled OK) and positive error codes (>0 = error).
+ */
+#define MUSIC_NOT_HANDLED (-1)
+
 int webui_music_execute_tool(ws_connection_t *conn,
                              const char *action,
                              const char *query,

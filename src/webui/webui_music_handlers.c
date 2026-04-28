@@ -31,6 +31,7 @@
 #include "audio/music_db.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
 #include "webui/webui_music_internal.h"
@@ -209,7 +210,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
 
          /* Get track metadata from unified DB (all sources) */
          music_search_result_t track_info;
-         if (music_db_get_by_path(path, &track_info) != 0) {
+         bool found = false;
+         if (music_db_get_by_path(path, &track_info, &found) != SUCCESS || !found) {
             /* Fallback: use path as title */
             safe_strncpy(track_info.path, path, sizeof(track_info.path));
             safe_strncpy(track_info.title, path, sizeof(track_info.title));
@@ -287,8 +289,9 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
             return;
          }
 
-         int count = music_db_search(query, results, WEBUI_MUSIC_MAX_QUEUE);
-         if (count <= 0) {
+         int count = 0;
+         if (music_db_search(query, results, WEBUI_MUSIC_MAX_QUEUE, &count) != SUCCESS ||
+             count <= 0) {
             free(results);
             webui_music_send_error(conn, "NOT_FOUND", "No music found matching query");
             return;
@@ -529,7 +532,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
       }
 
       music_search_result_t track_info;
-      if (music_db_get_by_path(path, &track_info) != 0) {
+      bool found = false;
+      if (music_db_get_by_path(path, &track_info, &found) != SUCCESS || !found) {
          safe_strncpy(track_info.path, path, sizeof(track_info.path));
          safe_strncpy(track_info.title, path, sizeof(track_info.title));
          track_info.artist[0] = '\0';
@@ -674,7 +678,12 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate track list");
          return;
       }
-      int count = music_db_get_by_artist(artist_name, tracks, 100);
+      int count = 0;
+      if (music_db_get_by_artist(artist_name, tracks, 100, &count) != SUCCESS || count == 0) {
+         free(tracks);
+         webui_music_send_error(conn, "NOT_FOUND", "No tracks found for artist");
+         return;
+      }
 
       user_music_queue_t *uq = state->shared_queue;
       pthread_mutex_lock(&uq->queue_mutex);
@@ -713,7 +722,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate track list");
          return;
       }
-      int count = music_db_get_by_album(album_name, tracks, 50);
+      int count = 0;
+      music_db_get_by_album(album_name, tracks, 50, &count);
 
       user_music_queue_t *uq = state->shared_queue;
       pthread_mutex_lock(&uq->queue_mutex);
@@ -794,7 +804,8 @@ void handle_music_search(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
-   int count = music_db_search(query, results, limit);
+   int count = 0;
+   music_db_search(query, results, limit, &count);
 
    /* Build response */
    struct json_object *response = json_object_new_object();
@@ -802,7 +813,7 @@ void handle_music_search(ws_connection_t *conn, struct json_object *payload) {
 
    struct json_object *resp_payload = json_object_new_object();
    json_object_object_add(resp_payload, "query", json_object_new_string(query));
-   json_object_object_add(resp_payload, "count", json_object_new_int(count > 0 ? count : 0));
+   json_object_object_add(resp_payload, "count", json_object_new_int(count));
 
    struct json_object *results_arr = json_object_new_array();
    for (int i = 0; i < count; i++) {
@@ -889,7 +900,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
          json_object_put(response);
          return;
       }
-      int count = music_db_list_paged(tracks, limit, offset);
+      int count = 0;
+      music_db_list_paged(tracks, limit, offset, &count);
 
       /* Include total count for pagination */
       music_db_stats_t stats;
@@ -922,7 +934,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
          json_object_put(response);
          return;
       }
-      int count = music_db_list_artists_with_stats(artists, limit, offset);
+      int count = 0;
+      music_db_list_artists_with_stats(artists, limit, offset, &count);
 
       /* Include total count for pagination */
       music_db_stats_t stats;
@@ -953,7 +966,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
          json_object_put(response);
          return;
       }
-      int count = music_db_list_albums_with_stats(albums, limit, offset);
+      int count = 0;
+      music_db_list_albums_with_stats(albums, limit, offset, &count);
 
       /* Include total count for pagination */
       music_db_stats_t stats;
@@ -989,7 +1003,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
          json_object_put(response);
          return;
       }
-      int count = music_db_get_by_artist(artist_name, tracks, 100);
+      int count = 0;
+      music_db_get_by_artist(artist_name, tracks, 100, &count);
 
       struct json_object *tracks_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {
@@ -1022,7 +1037,8 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
          json_object_put(response);
          return;
       }
-      int count = music_db_get_by_album(album_name, tracks, 50);
+      int count = 0;
+      music_db_get_by_album(album_name, tracks, 50, &count);
 
       struct json_object *tracks_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {
@@ -1135,7 +1151,8 @@ void handle_music_queue(ws_connection_t *conn, struct json_object *payload) {
       }
 
       music_search_result_t result;
-      if (music_db_get_by_path(path, &result) != 0) {
+      bool found = false;
+      if (music_db_get_by_path(path, &result, &found) != SUCCESS || !found) {
          webui_music_send_error(conn, "NOT_FOUND", "Track not found in database");
          return;
       }
@@ -1275,8 +1292,8 @@ int webui_music_execute_tool(ws_connection_t *conn,
             *result_out = strdup("Memory allocation failed");
          return 1;
       }
-      int count = music_db_search(query, results, WEBUI_MUSIC_MAX_QUEUE);
-      if (count <= 0) {
+      int count = 0;
+      if (music_db_search(query, results, WEBUI_MUSIC_MAX_QUEUE, &count) != SUCCESS || count <= 0) {
          free(results);
          if (result_out) {
             char buf[256];
@@ -1542,7 +1559,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (result_out) {
          *result_out = NULL; /* Signal to fall through to regular handler */
       }
-      return -1; /* -1 means "not handled, use default" */
+      return MUSIC_NOT_HANDLED;
    }
 
    if (result_out) {

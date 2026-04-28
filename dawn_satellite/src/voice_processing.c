@@ -543,7 +543,8 @@ static void on_sentence_complete(const char *sentence, void *userdata) {
 #ifdef HAVE_TTS_PIPER
    /* Preprocess the sentence for TTS */
    char preprocessed[4096];
-   int preproc_len = preprocess_text_for_tts_c(sentence, preprocessed, sizeof(preprocessed));
+   int preproc_len = 0;
+   preprocess_text_for_tts_c(sentence, preprocessed, sizeof(preprocessed), &preproc_len);
    if (preproc_len <= 0) {
       return; /* All content was emoji/symbols - nothing to speak */
    }

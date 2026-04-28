@@ -94,20 +94,20 @@ static int callback_music_websocket(struct lws *wsi,
             /* Reject binary frames before auth (prevents reading past buffer) */
             if (lws_frame_is_binary(wsi)) {
                OLOG_WARNING("Music server: Unexpected binary frame before auth");
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             }
 
             /* Parse auth message */
             struct json_object *msg = json_tokener_parse((const char *)in);
             if (!msg) {
                OLOG_WARNING("Music server: Invalid JSON in auth message");
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             }
 
             struct json_object *type_obj;
             if (!json_object_object_get_ex(msg, "type", &type_obj)) {
                json_object_put(msg);
-               return -1;
+               return LWS_CLOSE_CONNECTION;
             }
 
             const char *type = json_object_get_string(type_obj);
@@ -144,7 +144,7 @@ static int callback_music_websocket(struct lws *wsi,
                      memcpy(&buf[LWS_PRE], response, response_len);
                      lws_write(wsi, &buf[LWS_PRE], response_len, LWS_WRITE_TEXT);
                      json_object_put(msg);
-                     return -1; /* Close connection */
+                     return LWS_CLOSE_CONNECTION;
                   }
                }
             }
@@ -259,7 +259,7 @@ int webui_music_server_init(int port) {
    if (!s_music_lws_context) {
       OLOG_ERROR("Music server: Failed to create libwebsockets context");
       pthread_mutex_unlock(&s_music_mutex);
-      return -1;
+      return FAILURE;
    }
 
    s_music_port = port;
@@ -272,7 +272,7 @@ int webui_music_server_init(int port) {
       s_music_lws_context = NULL;
       atomic_store(&s_music_server_running, false);
       pthread_mutex_unlock(&s_music_mutex);
-      return -1;
+      return FAILURE;
    }
 
    OLOG_INFO("Music server: Started on port %d", port);

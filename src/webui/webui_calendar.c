@@ -60,9 +60,10 @@ void handle_calendar_list_accounts(ws_connection_t *conn) {
    json_object *resp_payload = json_object_new_object();
 
    calendar_account_t accounts[32];
-   int count = calendar_db_account_list(conn->auth_user_id, accounts, 32);
+   int count = 0;
+   int list_rc = calendar_db_account_list(conn->auth_user_id, accounts, 32, &count);
 
-   if (count < 0) {
+   if (list_rc != 0) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to list accounts"));
@@ -341,9 +342,10 @@ void handle_calendar_list_calendars(ws_connection_t *conn, json_object *payload)
                                 json_object_new_string("Account not found or access denied"));
       } else {
          calendar_calendar_t cals[32];
-         int count = calendar_db_calendar_list(account_id, cals, 32);
+         int count = 0;
+         int cal_list_rc = calendar_db_calendar_list(account_id, cals, 32, &count);
 
-         if (count < 0) {
+         if (cal_list_rc != 0) {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
             json_object_object_add(resp_payload, "error",
                                    json_object_new_string("Failed to list calendars"));

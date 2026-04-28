@@ -30,6 +30,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "core/crypto_store.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -127,8 +128,8 @@ static void row_to_account(sqlite3_stmt *st, email_account_t *out) {
  * CRUD Operations
  * ============================================================================= */
 
-int64_t email_db_account_create(const email_account_t *acct) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int email_db_account_create(const email_account_t *acct, int64_t *id_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_email_acct_create;
    sqlite3_reset(st);
@@ -153,17 +154,18 @@ int64_t email_db_account_create(const email_account_t *acct) {
    sqlite3_bind_int(st, 18, acct->max_body_chars > 0 ? acct->max_body_chars : 4000);
    sqlite3_bind_int64(st, 19, (int64_t)time(NULL));
 
-   int rc = sqlite3_step(st);
-   int64_t id = -1;
-   if (rc == SQLITE_DONE) {
-      id = sqlite3_last_insert_rowid(s_db.db);
+   int result = FAILURE;
+   if (sqlite3_step(st) == SQLITE_DONE) {
+      if (id_out)
+         *id_out = sqlite3_last_insert_rowid(s_db.db);
+      result = SUCCESS;
    } else {
       OLOG_ERROR("email_db: account create failed: %s", sqlite3_errmsg(s_db.db));
    }
    sqlite3_reset(st);
 
    AUTH_DB_UNLOCK();
-   return id;
+   return result;
 }
 
 int email_db_account_get(int64_t id, email_account_t *out) {
@@ -184,8 +186,8 @@ int email_db_account_get(int64_t id, email_account_t *out) {
    return result;
 }
 
-int email_db_account_list(int user_id, email_account_t *out, int max_count) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int email_db_account_list(int user_id, email_account_t *out, int max_count, int *count_out) {
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *st = s_db.stmt_email_acct_list;
    sqlite3_reset(st);
@@ -198,8 +200,11 @@ int email_db_account_list(int user_id, email_account_t *out, int max_count) {
    }
    sqlite3_reset(st);
 
+   if (count_out)
+      *count_out = count;
+
    AUTH_DB_UNLOCK();
-   return count;
+   return SUCCESS;
 }
 
 int email_db_account_update(const email_account_t *acct) {

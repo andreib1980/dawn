@@ -420,7 +420,7 @@ const char *smartthings_auth_mode_str(st_auth_mode_t mode);
  * @param device Device to format
  * @param buf Output buffer
  * @param buf_size Buffer size
- * @return Length written, or -1 on error
+ * @return Number of bytes written on success, FAILURE (1) on error
  */
 int smartthings_device_to_json(const st_device_t *device, char *buf, size_t buf_size);
 
@@ -430,7 +430,7 @@ int smartthings_device_to_json(const st_device_t *device, char *buf, size_t buf_
  * @param list Device list to format
  * @param buf Output buffer
  * @param buf_size Buffer size
- * @return Length written, or -1 on error
+ * @return Number of bytes written on success, FAILURE (1) on error
  */
 int smartthings_list_to_json(const st_device_list_t *list, char *buf, size_t buf_size);
 

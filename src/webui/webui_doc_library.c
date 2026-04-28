@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
@@ -94,10 +95,11 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
    if (limit > DOC_LIBRARY_DEFAULT_LIMIT)
       limit = DOC_LIBRARY_DEFAULT_LIMIT;
 
-   int count = show_all ? document_db_list_all(docs, limit, offset)
-                        : document_db_list(conn->auth_user_id, docs, limit, offset);
+   int count = 0;
+   int list_rc = show_all ? document_db_list_all(docs, limit, offset, &count)
+                          : document_db_list(conn->auth_user_id, docs, limit, offset, &count);
 
-   if (count < 0) {
+   if (list_rc != SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to list documents"));

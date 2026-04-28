@@ -63,9 +63,10 @@ extern "C" {
  * @param text Input text to normalize
  * @param out_normalized Output: normalized text (caller allocates)
  * @param max_len Maximum output buffer size
- * @return Number of characters written, or -1 on error
+ * @param len_out Output: number of characters written (may be NULL)
+ * @return 0 on success, 1 on error
  */
-int memory_normalize_text(const char *text, char *out_normalized, size_t max_len);
+int memory_normalize_text(const char *text, char *out_normalized, size_t max_len, int *len_out);
 
 /* =============================================================================
  * Hashing

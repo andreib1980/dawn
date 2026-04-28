@@ -40,6 +40,7 @@
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "core/time_query_parser.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_types.h"
@@ -244,27 +245,29 @@ static const char *classify_fact_embedding(const float *fact_emb,
    return CATEGORY_SEEDS[best_idx].category;
 }
 
-/* Read a user's flag.  Returns 0 if not yet backfilled, non-zero (timestamp)
- * if already done.  Errors return -1 (caller should treat as "skip and retry
- * next time"). */
-static int64_t user_categories_backfilled_at(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+/* Read a user's flag.  Sets *ts_out to 0 if not yet backfilled, non-zero (timestamp)
+ * if already done.  Returns 0 on success, 1 on error (caller should treat as
+ * "skip and retry next time"). */
+static int user_categories_backfilled_at(int user_id, int64_t *ts_out) {
+   if (ts_out)
+      *ts_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, "SELECT categories_backfilled_at FROM users WHERE id = ?",
                                -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return 1;
    }
    sqlite3_bind_int(stmt, 1, user_id);
-   int64_t ts = -1;
-   if (sqlite3_step(stmt) == SQLITE_ROW) {
-      ts = sqlite3_column_int64(stmt, 0);
+   if (sqlite3_step(stmt) == SQLITE_ROW && ts_out) {
+      *ts_out = sqlite3_column_int64(stmt, 0);
    }
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return ts;
+   return 0;
 }
 
 static void user_set_categories_backfilled(int user_id, int64_t ts) {
@@ -284,11 +287,18 @@ static void user_set_categories_backfilled(int user_id, int64_t ts) {
 }
 
 /* Iterate user's facts with embeddings + general category, classify, batch-UPDATE
- * the assigned category.  Returns number of facts classified (assigned non-general)
- * or -1 on hard error.  Caller already verified embedding engine + flag state. */
-static int categorize_user_facts(int user_id, const float *centroids, int dims) {
+ * the assigned category.  Sets *classified_out to the count of facts classified
+ * (assigned non-general).  Returns 0 on success, 1 on hard error.
+ * Caller already verified embedding engine + flag state. */
+static int categorize_user_facts(int user_id,
+                                 const float *centroids,
+                                 int dims,
+                                 int *classified_out) {
+   if (classified_out)
+      *classified_out = 0;
+
    if (!centroids || dims <= 0)
-      return -1;
+      return 1;
 
    int classified = 0;
    int touched = 0;
@@ -307,7 +317,7 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
    } row_t;
    row_t *rows = calloc(CATEGORY_BACKFILL_FETCH, sizeof(row_t));
    if (!rows)
-      return -1;
+      return 1;
 
    while (!atomic_load(&s_backfill_shutdown)) {
       /* Pull the next batch by id > cursor.  This is the fix for the infinite
@@ -317,7 +327,7 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
       if (!s_db.initialized) {
          pthread_mutex_unlock(&s_db.mutex);
          free(rows);
-         return -1;
+         return 1;
       }
       sqlite3_stmt *stmt = NULL;
       int rc = sqlite3_prepare_v2(s_db.db,
@@ -330,7 +340,7 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
       if (rc != SQLITE_OK) {
          AUTH_DB_UNLOCK();
          free(rows);
-         return -1;
+         return 1;
       }
       sqlite3_bind_int(stmt, 1, user_id);
       sqlite3_bind_int64(stmt, 2, cursor_id);
@@ -403,7 +413,7 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
       if (!s_db.initialized) {
          pthread_mutex_unlock(&s_db.mutex);
          free(rows);
-         return -1;
+         return 1;
       }
       char *errmsg = NULL;
       int begin_rc = sqlite3_exec(s_db.db, "BEGIN", NULL, NULL, &errmsg);
@@ -413,7 +423,7 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
          sqlite3_free(errmsg);
          pthread_mutex_unlock(&s_db.mutex);
          free(rows);
-         return -1;
+         return 1;
       }
       sqlite3_free(errmsg);
       errmsg = NULL;
@@ -450,7 +460,7 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
          sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
          pthread_mutex_unlock(&s_db.mutex);
          free(rows);
-         return -1;
+         return 1;
       }
       sqlite3_free(errmsg);
       AUTH_DB_UNLOCK();
@@ -477,7 +487,9 @@ static int categorize_user_facts(int user_id, const float *centroids, int dims) 
          OLOG_INFO("memory_embeddings:   %s: %d", CATEGORY_SEEDS[c].category, per_cat_count[c]);
       }
    }
-   return classified;
+   if (classified_out)
+      *classified_out = classified;
+   return 0;
 }
 
 /* =============================================================================
@@ -527,7 +539,7 @@ static int cache_load(int user_id) {
 
    int dims = embedding_engine_dims();
    if (dims <= 0)
-      return -1;
+      return FAILURE;
 
    /* Allocate for EMBEDDING_SEARCH_CAP entries */
    int cap = EMBEDDING_SEARCH_CAP;
@@ -538,14 +550,14 @@ static int cache_load(int user_id) {
 
    if (!s_cache.ids || !s_cache.embeddings || !s_cache.norms || !s_cache.created_ats) {
       cache_free_data();
-      return -1;
+      return FAILURE;
    }
 
-   int loaded = memory_db_fact_get_embeddings(user_id, dims, s_cache.ids, s_cache.embeddings,
-                                              s_cache.norms, s_cache.created_ats, cap);
-   if (loaded < 0) {
+   int loaded = 0;
+   if (memory_db_fact_get_embeddings(user_id, dims, s_cache.ids, s_cache.embeddings, s_cache.norms,
+                                     s_cache.created_ats, cap, &loaded) != MEMORY_DB_SUCCESS) {
       cache_free_data();
-      return -1;
+      return FAILURE;
    }
 
    s_cache.count = loaded;
@@ -605,14 +617,14 @@ int memory_embeddings_dims(void) {
 
 int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
    if (!text || !out || !out_dims)
-      return -1;
+      return FAILURE;
 
    return embedding_engine_embed(text, out, MAX_EMBEDDING_DIMS, out_dims);
 }
 
 int memory_embeddings_embed_and_store(int user_id, int64_t fact_id, const char *text) {
    if (!embedding_engine_available() || !text)
-      return -1;
+      return FAILURE;
 
    float embedding[MAX_EMBEDDING_DIMS];
    int dims = 0;
@@ -658,7 +670,7 @@ static int entity_cache_load(int user_id) {
 
    int dims = embedding_engine_dims();
    if (dims <= 0)
-      return -1;
+      return FAILURE;
 
    s_entity_cache.ids = malloc(ENTITY_CACHE_CAP * sizeof(int64_t));
    s_entity_cache.names = malloc(ENTITY_CACHE_CAP * sizeof(*s_entity_cache.names));
@@ -669,16 +681,16 @@ static int entity_cache_load(int user_id) {
    if (!s_entity_cache.ids || !s_entity_cache.names || !s_entity_cache.types ||
        !s_entity_cache.embeddings || !s_entity_cache.norms) {
       entity_cache_free();
-      return -1;
+      return FAILURE;
    }
 
-   int loaded = memory_db_entity_get_embeddings(user_id, dims, s_entity_cache.ids,
-                                                s_entity_cache.names, s_entity_cache.types,
-                                                s_entity_cache.embeddings, s_entity_cache.norms,
-                                                ENTITY_CACHE_CAP);
-   if (loaded < 0) {
+   int loaded = 0;
+   if (memory_db_entity_get_embeddings(user_id, dims, s_entity_cache.ids, s_entity_cache.names,
+                                       s_entity_cache.types, s_entity_cache.embeddings,
+                                       s_entity_cache.norms, ENTITY_CACHE_CAP,
+                                       &loaded) != MEMORY_DB_SUCCESS) {
       entity_cache_free();
-      return -1;
+      return FAILURE;
    }
 
    s_entity_cache.count = loaded;
@@ -694,7 +706,7 @@ static int entity_cache_load(int user_id) {
 
 int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, const char *text) {
    if (!embedding_engine_available() || !text)
-      return -1;
+      return FAILURE;
 
    float embedding[MAX_EMBEDDING_DIMS];
    int dims = 0;
@@ -956,7 +968,8 @@ static void *backfill_thread_fn(void *arg) {
       int64_t ids[50];
       char texts[50][512];
 
-      int count = memory_db_fact_list_without_embedding(user_id, dims, ids, texts, batch_size);
+      int count = 0;
+      memory_db_fact_list_without_embedding(user_id, dims, ids, texts, batch_size, &count);
       if (count <= 0)
          break;
 
@@ -981,17 +994,17 @@ static void *backfill_thread_fn(void *arg) {
     * the same thread rather than as a separate scheduled job.  Idempotent across
     * reboots via users.categories_backfilled_at timestamp. */
    if (!atomic_load(&s_backfill_shutdown) && embedding_engine_available()) {
-      int64_t flag = user_categories_backfilled_at(user_id);
-      if (flag == 0) {
+      int64_t flag = 0;
+      if (user_categories_backfilled_at(user_id, &flag) == 0 && flag == 0) {
          OLOG_INFO("memory_embeddings: starting category backfill for user %d", user_id);
          int dims = 0;
          float *centroids = build_category_centroids(&dims);
          if (centroids && dims > 0) {
-            int classified = categorize_user_facts(user_id, centroids, dims);
-            free(centroids);
-            if (classified >= 0) {
+            int classified = 0;
+            if (categorize_user_facts(user_id, centroids, dims, &classified) == 0) {
                user_set_categories_backfilled(user_id, (int64_t)time(NULL));
             }
+            free(centroids);
          } else {
             OLOG_WARNING("memory_embeddings: category centroid build failed, skipping backfill");
          }

@@ -87,9 +87,10 @@ int missed_notif_insert(int user_id,
  * @param user_id    Target user
  * @param max_count  Maximum rows to return (also used as SQL LIMIT)
  * @param out        Output buffer (at least max_count entries)
- * @return Number of rows filled, or -1 on error
+ * @param count_out  Output: number of rows filled
+ * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on error
  */
-int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out);
+int missed_notif_get_for_user(int user_id, int max_count, missed_notif_t *out, int *count_out);
 
 /**
  * @brief Delete a single missed notification, enforcing user ownership.
@@ -106,20 +107,22 @@ int missed_notif_delete_by_user(int64_t id, int user_id);
 /**
  * @brief Delete all missed notifications for a user.
  *
- * @param user_id  User whose queue to clear
- * @return Number of rows deleted, or -1 on error
+ * @param user_id      User whose queue to clear
+ * @param deleted_out  Output: number of rows deleted (may be NULL)
+ * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on error
  */
-int missed_notif_delete_all_for_user(int user_id);
+int missed_notif_delete_all_for_user(int user_id, int *deleted_out);
 
 /**
  * @brief Delete missed notifications older than max_age_sec.
  *
  * Deletes in batches of MISSED_NOTIF_EXPIRE_BATCH to avoid long DB locks.
  *
- * @param max_age_sec  Rows with created_at older than now - max_age_sec are deleted
- * @return Total number of rows deleted, or -1 on error
+ * @param max_age_sec    Rows with created_at older than now - max_age_sec are deleted
+ * @param deleted_out    Output: total number of rows deleted (may be NULL)
+ * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on error
  */
-int missed_notif_expire(int max_age_sec);
+int missed_notif_expire(int max_age_sec, int *deleted_out);
 
 #ifdef __cplusplus
 }

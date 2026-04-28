@@ -240,10 +240,11 @@ int image_store_update_retention(const char *id, int user_id, image_retention_t 
 /**
  * @brief Count images for a user
  *
- * @param user_id User ID
- * @return Number of images, or -1 on error
+ * @param user_id   User ID
+ * @param count_out Output: number of images (may be NULL)
+ * @return IMAGE_STORE_SUCCESS or IMAGE_STORE_FAILURE
  */
-int image_store_count_user(int user_id);
+int image_store_count_user(int user_id, int *count_out);
 
 /* =============================================================================
  * Validation
@@ -283,9 +284,10 @@ bool image_store_validate_mime(const char *mime_type);
  *
  * Deletes both files and metadata within a transaction.
  *
- * @return Number of images deleted, or -1 on error
+ * @param deleted_out Output: number of images deleted (may be NULL)
+ * @return IMAGE_STORE_SUCCESS or IMAGE_STORE_FAILURE
  */
-int image_store_cleanup(void);
+int image_store_cleanup(int *deleted_out);
 
 /**
  * @brief Get storage statistics

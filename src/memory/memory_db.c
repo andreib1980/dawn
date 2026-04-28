@@ -194,13 +194,16 @@ static void populate_summary_from_row(sqlite3_stmt *stmt, memory_summary_t *summ
  * Fact Operations
  * ============================================================================= */
 
-int64_t memory_db_fact_create(int user_id,
-                              const char *fact_text,
-                              float confidence,
-                              const char *source,
-                              const char *category) {
+int memory_db_fact_create(int user_id,
+                          const char *fact_text,
+                          float confidence,
+                          const char *source,
+                          const char *category,
+                          int64_t *id_out) {
+   if (id_out)
+      *id_out = 0;
    if (!fact_text || !source) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    /* category may be NULL — schema default 'general' applies via the column DEFAULT,
@@ -211,7 +214,7 @@ int64_t memory_db_fact_create(int user_id,
    /* Compute normalized hash for deduplication */
    uint32_t normalized_hash = memory_normalize_and_hash(fact_text);
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_create;
    sqlite3_reset(stmt);
@@ -229,15 +232,18 @@ int64_t memory_db_fact_create(int user_id,
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: fact_create failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    int64_t id = sqlite3_last_insert_rowid(s_db.db);
    AUTH_DB_UNLOCK();
 
+   if (id_out)
+      *id_out = id;
+
    OLOG_INFO("memory_db: created fact %ld for user %d (hash=%u, category=%s)", (long)id, user_id,
              normalized_hash, cat);
-   return id;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* Category-filtered keyword search.  Pre-filters at the SQL level so the embedding
@@ -246,15 +252,18 @@ int memory_db_fact_search_by_category(int user_id,
                                       const char *keywords,
                                       const char *category,
                                       memory_fact_t *out_facts,
-                                      int max_facts) {
+                                      int max_facts,
+                                      int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !category || !out_facts || max_facts <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    char pattern[MEMORY_FACT_TEXT_MAX];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_search_by_category;
    sqlite3_reset(stmt);
@@ -271,7 +280,9 @@ int memory_db_fact_search_by_category(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* Per-fact category UPDATE used by the centroid backfill pass (v34).
@@ -297,11 +308,14 @@ int memory_db_fact_update_category(int64_t fact_id, const char *category) {
 int memory_db_fact_list_general(int user_id,
                                 int64_t cursor_id,
                                 memory_fact_t *out_facts,
-                                int max_facts) {
+                                int max_facts,
+                                int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_facts || max_facts <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_list_general;
    sqlite3_reset(stmt);
@@ -317,24 +331,31 @@ int memory_db_fact_list_general(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_count_general(int user_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_fact_count_general(int user_id, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_count_general;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
 
-   int count = -1;
+   int count = 0;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       count = sqlite3_column_int(stmt, 0);
    }
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact) {
@@ -359,12 +380,18 @@ int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact) {
    return result;
 }
 
-int memory_db_fact_list(int user_id, memory_fact_t *out_facts, int max_facts, int offset) {
+int memory_db_fact_list(int user_id,
+                        memory_fact_t *out_facts,
+                        int max_facts,
+                        int offset,
+                        int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_facts || max_facts <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_list;
    sqlite3_reset(stmt);
@@ -380,21 +407,26 @@ int memory_db_fact_list(int user_id, memory_fact_t *out_facts, int max_facts, in
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_search(int user_id,
                           const char *keywords,
                           memory_fact_t *out_facts,
-                          int max_facts) {
+                          int max_facts,
+                          int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !out_facts || max_facts <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    char pattern[MEMORY_FACT_TEXT_MAX];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_search;
    sqlite3_reset(stmt);
@@ -410,7 +442,9 @@ int memory_db_fact_search(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_update_access(int64_t fact_id, int user_id) {
@@ -483,16 +517,19 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
 int memory_db_fact_find_similar(int user_id,
                                 const char *fact_text,
                                 memory_fact_t *out_facts,
-                                int max_facts) {
+                                int max_facts,
+                                int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!fact_text || !out_facts || max_facts <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    /* Extract key words from fact for similarity search */
    char pattern[MEMORY_FACT_TEXT_MAX];
    build_like_pattern(fact_text, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_find_similar;
    sqlite3_reset(stmt);
@@ -513,18 +550,23 @@ int memory_db_fact_find_similar(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_find_by_hash(int user_id,
                                 uint32_t hash,
                                 memory_fact_t *out_facts,
-                                int max_facts) {
+                                int max_facts,
+                                int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_facts || max_facts <= 0 || hash == 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_find_by_hash;
    sqlite3_reset(stmt);
@@ -545,11 +587,16 @@ int memory_db_fact_find_by_hash(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_prune_superseded(int user_id, int retention_days) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    time_t cutoff = time(NULL) - (retention_days * 24 * 60 * 60);
 
@@ -566,17 +613,22 @@ int memory_db_fact_prune_superseded(int user_id, int retention_days) {
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: prune_superseded failed: %s", sqlite3_errmsg(s_db.db));
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
+   if (count_out)
+      *count_out = deleted;
    if (deleted > 0) {
       OLOG_INFO("memory_db: pruned %d superseded facts for user %d", deleted, user_id);
    }
-   return deleted;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    time_t cutoff = time(NULL) - (stale_days * 24 * 60 * 60);
 
@@ -594,13 +646,15 @@ int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: prune_stale failed: %s", sqlite3_errmsg(s_db.db));
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
+   if (count_out)
+      *count_out = deleted;
    if (deleted > 0) {
       OLOG_INFO("memory_db: pruned %d stale facts for user %d", deleted, user_id);
    }
-   return deleted;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* =============================================================================
@@ -611,15 +665,18 @@ int memory_db_fact_search_since(int user_id,
                                 const char *keywords,
                                 time_t since_ts,
                                 memory_fact_t *out_facts,
-                                int max_facts) {
+                                int max_facts,
+                                int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !out_facts || max_facts <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    char pattern[MEMORY_FACT_TEXT_MAX];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_search_since;
    sqlite3_reset(stmt);
@@ -636,22 +693,27 @@ int memory_db_fact_search_since(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_summary_search_since(int user_id,
                                    const char *keywords,
                                    time_t since_ts,
                                    memory_summary_t *out_summaries,
-                                   int max_summaries) {
+                                   int max_summaries,
+                                   int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !out_summaries || max_summaries <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    char pattern[MEMORY_SUMMARY_MAX];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_summary_search_since;
    sqlite3_reset(stmt);
@@ -669,18 +731,23 @@ int memory_db_summary_search_since(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_list_since(int user_id,
                               time_t since_ts,
                               memory_fact_t *out_facts,
-                              int max_facts) {
+                              int max_facts,
+                              int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_facts || max_facts <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_list_since;
    sqlite3_reset(stmt);
@@ -696,18 +763,23 @@ int memory_db_fact_list_since(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_summary_list_since(int user_id,
                                  time_t since_ts,
                                  memory_summary_t *out_summaries,
-                                 int max_summaries) {
+                                 int max_summaries,
+                                 int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_summaries || max_summaries <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_summary_list_since;
    sqlite3_reset(stmt);
@@ -723,7 +795,9 @@ int memory_db_summary_list_since(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* =============================================================================
@@ -789,12 +863,18 @@ int memory_db_pref_get(int user_id, const char *category, memory_preference_t *o
    return result;
 }
 
-int memory_db_pref_list(int user_id, memory_preference_t *out_prefs, int max_prefs, int offset) {
+int memory_db_pref_list(int user_id,
+                        memory_preference_t *out_prefs,
+                        int max_prefs,
+                        int offset,
+                        int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_prefs || max_prefs <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_pref_list;
    sqlite3_reset(stmt);
@@ -810,21 +890,26 @@ int memory_db_pref_list(int user_id, memory_preference_t *out_prefs, int max_pre
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_pref_search(int user_id,
                           const char *keywords,
                           memory_preference_t *out_prefs,
-                          int max_prefs) {
+                          int max_prefs,
+                          int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !out_prefs || max_prefs <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    char pattern[256];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_pref_search;
    sqlite3_reset(stmt);
@@ -841,7 +926,9 @@ int memory_db_pref_search(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_pref_delete(int user_id, const char *category) {
@@ -872,18 +959,21 @@ int memory_db_pref_delete(int user_id, const char *category) {
  * Summary Operations
  * ============================================================================= */
 
-int64_t memory_db_summary_create(int user_id,
-                                 const char *session_id,
-                                 const char *summary,
-                                 const char *topics,
-                                 const char *sentiment,
-                                 int message_count,
-                                 int duration_seconds) {
+int memory_db_summary_create(int user_id,
+                             const char *session_id,
+                             const char *summary,
+                             const char *topics,
+                             const char *sentiment,
+                             int message_count,
+                             int duration_seconds,
+                             int64_t *id_out) {
+   if (id_out)
+      *id_out = 0;
    if (!session_id || !summary) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_summary_create;
    sqlite3_reset(stmt);
@@ -902,25 +992,31 @@ int64_t memory_db_summary_create(int user_id,
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: summary_create failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    int64_t id = sqlite3_last_insert_rowid(s_db.db);
    AUTH_DB_UNLOCK();
 
+   if (id_out)
+      *id_out = id;
+
    OLOG_INFO("memory_db: created summary %ld for user %d", (long)id, user_id);
-   return id;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_summary_list(int user_id,
                            memory_summary_t *out_summaries,
                            int max_summaries,
-                           int offset) {
+                           int offset,
+                           int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_summaries || max_summaries <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_summary_list;
    sqlite3_reset(stmt);
@@ -936,7 +1032,9 @@ int memory_db_summary_list(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_summary_mark_consolidated(int64_t summary_id) {
@@ -956,15 +1054,18 @@ int memory_db_summary_mark_consolidated(int64_t summary_id) {
 int memory_db_summary_search(int user_id,
                              const char *keywords,
                              memory_summary_t *out_summaries,
-                             int max_summaries) {
+                             int max_summaries,
+                             int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !out_summaries || max_summaries <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    char pattern[MEMORY_SUMMARY_MAX];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_summary_search;
    sqlite3_reset(stmt);
@@ -981,7 +1082,9 @@ int memory_db_summary_search(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_summary_delete(int64_t summary_id, int user_id) {
@@ -1168,21 +1271,26 @@ int memory_db_get_stats(int user_id, memory_stats_t *out_stats) {
  * Extraction Tracking
  * ============================================================================= */
 
-int memory_db_get_last_extracted(int64_t conversation_id) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_get_last_extracted(int64_t conversation_id, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_conv_get_last_extracted;
    sqlite3_reset(stmt);
    sqlite3_bind_int64(stmt, 1, conversation_id);
 
-   int result = -1;
+   int result = 0;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       result = sqlite3_column_int(stmt, 0);
    }
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return result;
+   if (count_out)
+      *count_out = result;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_set_last_extracted(int64_t conversation_id, int message_count) {
@@ -1210,8 +1318,12 @@ int memory_db_apply_fact_decay(int user_id,
                                float inferred_rate,
                                float explicit_rate,
                                float inferred_floor,
-                               float explicit_floor) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+                               float explicit_floor,
+                               int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(
@@ -1228,7 +1340,7 @@ int memory_db_apply_fact_decay(int user_id,
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: apply_fact_decay prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_bind_double(stmt, 1, (double)explicit_floor);
@@ -1245,14 +1357,19 @@ int memory_db_apply_fact_decay(int user_id,
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: apply_fact_decay failed: %s", sqlite3_errmsg(s_db.db));
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   return affected;
+   if (count_out)
+      *count_out = affected;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(
@@ -1265,7 +1382,7 @@ int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: apply_pref_decay prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_bind_double(stmt, 1, (double)pref_floor);
@@ -1280,14 +1397,19 @@ int memory_db_apply_pref_decay(int user_id, float pref_rate, float pref_floor) {
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: apply_pref_decay failed: %s", sqlite3_errmsg(s_db.db));
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   return affected;
+   if (count_out)
+      *count_out = affected;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_prune_low_confidence(int user_id, float threshold) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_prune_low_confidence(int user_id, float threshold, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    /* Wrap audit log + delete in a transaction for consistency */
    sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
@@ -1321,7 +1443,7 @@ int memory_db_prune_low_confidence(int user_id, float threshold) {
       OLOG_ERROR("memory_db: prune_low_confidence prepare failed: %s", sqlite3_errmsg(s_db.db));
       sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -1335,17 +1457,22 @@ int memory_db_prune_low_confidence(int user_id, float threshold) {
       OLOG_ERROR("memory_db: prune_low_confidence failed: %s", sqlite3_errmsg(s_db.db));
       sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
 
-   return deleted;
+   if (count_out)
+      *count_out = deleted;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_prune_old_summaries(int user_id, int retention_days) {
-   AUTH_DB_LOCK_OR_RETURN(-1);
+int memory_db_prune_old_summaries(int user_id, int retention_days, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
 
    time_t cutoff = time(NULL) - ((time_t)retention_days * 24 * 60 * 60);
 
@@ -1356,7 +1483,7 @@ int memory_db_prune_old_summaries(int user_id, int retention_days) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: prune_old_summaries prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -1370,21 +1497,25 @@ int memory_db_prune_old_summaries(int user_id, int retention_days) {
 
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: prune_old_summaries failed: %s", sqlite3_errmsg(s_db.db));
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
+   if (count_out)
+      *count_out = deleted;
    if (deleted > 0) {
       OLOG_INFO("memory_db: pruned %d old summaries for user %d", deleted, user_id);
    }
-   return deleted;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_get_all_user_ids(int *out_ids, int max_ids) {
+int memory_db_get_all_user_ids(int *out_ids, int max_ids, int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_ids || max_ids <= 0) {
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
@@ -1394,7 +1525,7 @@ int memory_db_get_all_user_ids(int *out_ids, int max_ids) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: get_all_user_ids prepare failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    int count = 0;
@@ -1404,7 +1535,9 @@ int memory_db_get_all_user_ids(int *out_ids, int max_ids) {
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* =============================================================================
@@ -1448,11 +1581,14 @@ int memory_db_fact_get_embeddings(int user_id,
                                   float *out_embeddings,
                                   float *out_norms,
                                   int64_t *out_created_ats,
-                                  int max_count) {
+                                  int max_count,
+                                  int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_ids || !out_embeddings || !out_norms || max_count <= 0 || expected_dims <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_fact_get_embeddings);
    sqlite3_bind_int(s_db.stmt_memory_fact_get_embeddings, 1, user_id);
@@ -1484,18 +1620,23 @@ int memory_db_fact_get_embeddings(int user_id,
 
    sqlite3_reset(s_db.stmt_memory_fact_get_embeddings);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_fact_list_without_embedding(int user_id,
                                           int expected_dims,
                                           int64_t *out_ids,
                                           char out_texts[][512],
-                                          int max_count) {
+                                          int max_count,
+                                          int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_ids || !out_texts || max_count <= 0 || expected_dims <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_fact_list_without_embedding);
    sqlite3_bind_int(s_db.stmt_memory_fact_list_without_embedding, 1, user_id);
@@ -1519,7 +1660,9 @@ int memory_db_fact_list_without_embedding(int user_id,
 
    sqlite3_reset(s_db.stmt_memory_fact_list_without_embedding);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* =============================================================================
@@ -1549,15 +1692,18 @@ void memory_make_canonical_name(const char *name, char *out, size_t size) {
    out[j] = '\0';
 }
 
-int64_t memory_db_entity_upsert(int user_id,
-                                const char *name,
-                                const char *entity_type,
-                                const char *canonical_name,
-                                bool *out_created) {
+int memory_db_entity_upsert(int user_id,
+                            const char *name,
+                            const char *entity_type,
+                            const char *canonical_name,
+                            bool *out_created,
+                            int64_t *id_out) {
+   if (id_out)
+      *id_out = 0;
    if (!name || !entity_type || !canonical_name)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_entity_upsert);
    sqlite3_bind_int(s_db.stmt_memory_entity_upsert, 1, user_id);
@@ -1565,7 +1711,7 @@ int64_t memory_db_entity_upsert(int user_id,
    sqlite3_bind_text(s_db.stmt_memory_entity_upsert, 3, entity_type, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(s_db.stmt_memory_entity_upsert, 4, canonical_name, -1, SQLITE_TRANSIENT);
 
-   int64_t entity_id = -1;
+   int64_t entity_id = 0;
    int rc = sqlite3_step(s_db.stmt_memory_entity_upsert);
    if (rc == SQLITE_ROW) {
       entity_id = sqlite3_column_int64(s_db.stmt_memory_entity_upsert, 0);
@@ -1575,11 +1721,16 @@ int64_t memory_db_entity_upsert(int user_id,
       }
    } else {
       OLOG_ERROR("memory_db: entity upsert failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_reset(s_db.stmt_memory_entity_upsert);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_reset(s_db.stmt_memory_entity_upsert);
    AUTH_DB_UNLOCK();
-   return entity_id;
+   if (id_out)
+      *id_out = entity_id;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_entity_get_by_name(int user_id,
@@ -1983,11 +2134,14 @@ static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *re
 int memory_db_relation_list_by_subject(int user_id,
                                        int64_t subject_entity_id,
                                        memory_relation_t *out,
-                                       int max) {
+                                       int max,
+                                       int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out || max <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_relation_list_by_subject);
    sqlite3_bind_int(s_db.stmt_memory_relation_list_by_subject, 1, user_id);
@@ -2002,17 +2156,22 @@ int memory_db_relation_list_by_subject(int user_id,
 
    sqlite3_reset(s_db.stmt_memory_relation_list_by_subject);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_relation_list_by_object(int user_id,
                                       int64_t object_entity_id,
                                       memory_relation_t *out,
-                                      int max) {
+                                      int max,
+                                      int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out || max <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_relation_list_by_object);
    sqlite3_bind_int(s_db.stmt_memory_relation_list_by_object, 1, user_id);
@@ -2027,7 +2186,9 @@ int memory_db_relation_list_by_object(int user_id,
 
    sqlite3_reset(s_db.stmt_memory_relation_list_by_object);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* As-of variant.  When as_of_ts == 0, defaults to "currently valid".  Used by
@@ -2037,14 +2198,17 @@ int memory_db_relation_list_by_subject_at(int user_id,
                                           int64_t subject_entity_id,
                                           int64_t as_of_ts,
                                           memory_relation_t *out,
-                                          int max) {
+                                          int max,
+                                          int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out || max <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
    if (as_of_ts <= 0)
       as_of_ts = (int64_t)time(NULL);
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_relation_list_by_subject_at;
    sqlite3_reset(stmt);
@@ -2062,14 +2226,21 @@ int memory_db_relation_list_by_subject_at(int user_id,
 
    sqlite3_reset(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_relation_list_all_by_user(int user_id, memory_relation_t *out, int max) {
+int memory_db_relation_list_all_by_user(int user_id,
+                                        memory_relation_t *out,
+                                        int max,
+                                        int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out || max <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    /* Single query: all relations for this user, ordered by subject for grouping.
     * valid_from/valid_to appended last (v33) to match populate_relation_from_row order. */
@@ -2084,7 +2255,7 @@ int memory_db_relation_list_all_by_user(int user_id, memory_relation_t *out, int
                                -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return -1;
+      return MEMORY_DB_FAILURE;
    }
 
    sqlite3_bind_int(stmt, 1, user_id);
@@ -2098,7 +2269,9 @@ int memory_db_relation_list_all_by_user(int user_id, memory_relation_t *out, int
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 static void populate_entity_from_row(sqlite3_stmt *stmt, memory_entity_t *entity) {
@@ -2128,12 +2301,14 @@ static void populate_entity_from_row(sqlite3_stmt *stmt, memory_entity_t *entity
    entity->last_seen = (time_t)sqlite3_column_int64(stmt, 7);
 }
 
-int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset) {
+int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset, int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out || max <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
    /* Reuse entity_search statement with "%" pattern to match all entities */
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_entity_search);
    sqlite3_bind_int(s_db.stmt_memory_entity_search, 1, user_id);
@@ -2149,17 +2324,25 @@ int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset
 
    sqlite3_reset(s_db.stmt_memory_entity_search);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_entity_search(int user_id, const char *keywords, memory_entity_t *out, int max) {
+int memory_db_entity_search(int user_id,
+                            const char *keywords,
+                            memory_entity_t *out,
+                            int max,
+                            int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!keywords || !out || max <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
    char pattern[256];
    build_like_pattern(keywords, pattern, sizeof(pattern));
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_entity_search);
    sqlite3_bind_int(s_db.stmt_memory_entity_search, 1, user_id);
@@ -2175,7 +2358,9 @@ int memory_db_entity_search(int user_id, const char *keywords, memory_entity_t *
 
    sqlite3_reset(s_db.stmt_memory_entity_search);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }
 
 int memory_db_entity_set_photo(int user_id, int64_t entity_id, const char *photo_id) {
@@ -2442,12 +2627,15 @@ int memory_db_entity_get_embeddings(int user_id,
                                     char out_types[][MEMORY_ENTITY_TYPE_MAX],
                                     float *out_embeddings,
                                     float *out_norms,
-                                    int max) {
+                                    int max,
+                                    int *count_out) {
+   if (count_out)
+      *count_out = 0;
    if (!out_ids || !out_names || !out_types || !out_embeddings || !out_norms || max <= 0 ||
        expected_dims <= 0)
-      return -1;
+      return MEMORY_DB_FAILURE;
 
-   AUTH_DB_LOCK_OR_RETURN(-1);
+   AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_reset(s_db.stmt_memory_entity_get_embeddings);
    sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 1, user_id);
@@ -2491,5 +2679,7 @@ int memory_db_entity_get_embeddings(int user_id,
 
    sqlite3_reset(s_db.stmt_memory_entity_get_embeddings);
    AUTH_DB_UNLOCK();
-   return count;
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
 }

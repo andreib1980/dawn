@@ -325,7 +325,8 @@ static char *handle_send(struct json_object *details, int user_id) {
       snprintf(resolved_addr, sizeof(resolved_addr), "%s", to);
    } else {
       contact_result_t contacts[5];
-      int found = contacts_find(user_id, to, "email", contacts, 5);
+      int found = 0;
+      contacts_find(user_id, to, "email", contacts, 5, &found);
 
       if (found == 0) {
          char err[256];

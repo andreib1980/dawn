@@ -1,6 +1,6 @@
 ---
 name: review
-description: Run all four review agents on changes, synthesize findings, triage based on developer thinking, and fix approved items. Trigger when the user says "review", "run the agents", "run all four", "code review", or similar.
+description: Run all five review agents on changes, synthesize findings, triage based on developer thinking, and fix approved items. Trigger when the user says "review", "run the agents", "run all four", "run all five", "full review", "code review", or similar.
 disable-model-invocation: false
 user-invocable: true
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Agent
@@ -26,7 +26,7 @@ The user may also say something like "and fix everything" or "auto-fix" — this
 
 ## Step 2: Launch Review Agents
 
-Launch all four agents **in parallel** (single message, multiple Agent tool calls). Feed each one the actual diff content and the project context (embedded C on Jetson, CLAUDE.md standards).
+Launch all five agents **in parallel** (single message, multiple Agent tool calls). Feed each one the actual diff content and the project context (embedded C on Jetson, CLAUDE.md standards).
 
 The agents already know their domains and how to structure their output:
 
@@ -34,6 +34,7 @@ The agents already know their domains and how to structure their output:
 2. **embedded-efficiency-reviewer**
 3. **security-auditor**
 4. **ui-design-architect** — relevant for ANY UI changes: web (JS/CSS/HTML), SDL, LVGL, or any other display/interaction layer
+5. **coding-standards-auditor** — audits compliance with CLAUDE.md and CODING_STYLE_GUIDE.md (return codes, naming, Doxygen, formatting, include hygiene)
 
 If the changes clearly don't touch any UI surface at all, you may skip the ui-design-architect and note why.
 

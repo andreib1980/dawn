@@ -45,6 +45,7 @@
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
+#include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -1794,7 +1795,7 @@ int llm_tools_add_results_claude(struct json_object *history, const tool_result_
 
 int llm_tools_parse_openai_response(struct json_object *response, tool_call_list_t *out) {
    if (!response || !out) {
-      return -1;
+      return FAILURE;
    }
 
    out->count = 0;
@@ -1869,7 +1870,7 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
 
 int llm_tools_parse_claude_response(struct json_object *response, tool_call_list_t *out) {
    if (!response || !out) {
-      return -1;
+      return FAILURE;
    }
 
    out->count = 0;

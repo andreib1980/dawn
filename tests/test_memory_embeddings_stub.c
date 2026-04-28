@@ -68,7 +68,8 @@ int memory_db_fact_get_embeddings(int user_id,
                                   float *out_embeddings,
                                   float *out_norms,
                                   int64_t *out_created_ats,
-                                  int max_count) {
+                                  int max_count,
+                                  int *count_out) {
    (void)user_id;
    (void)expected_dims;
    (void)out_ids;
@@ -76,6 +77,8 @@ int memory_db_fact_get_embeddings(int user_id,
    (void)out_norms;
    (void)out_created_ats;
    (void)max_count;
+   if (count_out)
+      *count_out = 0;
    return 0;
 }
 
@@ -83,12 +86,15 @@ int memory_db_fact_list_without_embedding(int user_id,
                                           int expected_dims,
                                           int64_t *out_ids,
                                           char out_texts[][512],
-                                          int max_count) {
+                                          int max_count,
+                                          int *count_out) {
    (void)user_id;
    (void)expected_dims;
    (void)out_ids;
    (void)out_texts;
    (void)max_count;
+   if (count_out)
+      *count_out = 0;
    return 0;
 }
 
@@ -101,7 +107,8 @@ int memory_db_entity_get_embeddings(int user_id,
                                     char out_types[][MEMORY_ENTITY_TYPE_MAX],
                                     float *out_embeddings,
                                     float *out_norms,
-                                    int max_count) {
+                                    int max_count,
+                                    int *count_out) {
    (void)user_id;
    (void)expected_dims;
    (void)out_ids;
@@ -110,6 +117,8 @@ int memory_db_entity_get_embeddings(int user_id,
    (void)out_embeddings;
    (void)out_norms;
    (void)max_count;
+   if (count_out)
+      *count_out = 0;
    return 0;
 }
 
