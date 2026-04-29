@@ -503,6 +503,93 @@ add_executable(test_crypto_store
 target_link_libraries(test_crypto_store dawn_common unity sodium pthread)
 add_test(NAME test_crypto_store COMMAND test_crypto_store)
 
+# Test: Input Queue
+# Tests FIFO push/pop, full queue eviction, clear, source names
+add_executable(test_input_queue
+               test_input_queue.c
+               ${SRC_ROOT}/src/input_queue.c)
+
+target_link_libraries(test_input_queue dawn_common unity pthread)
+add_test(NAME test_input_queue COMMAND test_input_queue)
+
+# Test: Config Validate
+# Tests range/enum/dependency validation of dawn_config_t
+add_executable(test_config_validate
+               test_config_validate.c
+               ${SRC_ROOT}/src/config/config_validate.c)
+
+target_link_libraries(test_config_validate unity)
+add_test(NAME test_config_validate COMMAND test_config_validate)
+
+# Test: Calculator
+# Tests math evaluation (tinyexpr), unit/base conversion, random
+add_executable(test_calculator
+               test_calculator.c
+               ${SRC_ROOT}/src/tools/calculator.c
+               ${SRC_ROOT}/src/tools/tinyexpr.c)
+
+target_link_libraries(test_calculator dawn_common unity m pthread)
+add_test(NAME test_calculator COMMAND test_calculator)
+
+# Test: Contacts DB
+# Tests CRUD, search, field filtering, user isolation
+add_executable(test_contacts_db
+               test_contacts_db.c
+               test_contacts_db_stub.c
+               ${SRC_ROOT}/src/memory/contacts_db.c)
+
+target_link_libraries(test_contacts_db dawn_common unity sqlite3 pthread)
+add_test(NAME test_contacts_db COMMAND test_contacts_db)
+
+# Test: Calendar DB
+# Tests account/calendar/event CRUD, cascade delete
+add_executable(test_calendar_db
+               test_calendar_db.c
+               ${SRC_ROOT}/src/tools/calendar_db.c
+               ${SRC_ROOT}/src/auth/auth_db_core.c
+               ${SRC_ROOT}/src/auth/auth_db_user.c
+               ${SRC_ROOT}/src/auth/auth_db_session.c
+               ${SRC_ROOT}/src/auth/auth_db_conv.c
+               ${SRC_ROOT}/src/auth/auth_db_settings.c
+               ${SRC_ROOT}/src/auth/auth_db_satellite.c
+               ${SRC_ROOT}/src/auth/auth_db_metrics.c
+               ${SRC_ROOT}/src/auth/auth_db_maint.c
+               ${SRC_ROOT}/src/auth/auth_db_audit.c
+               ${SRC_ROOT}/src/auth/auth_db_rate_limit.c
+               ${SRC_ROOT}/src/core/path_utils.c)
+
+target_link_libraries(test_calendar_db dawn_common unity sqlite3 pthread m)
+add_test(NAME test_calendar_db COMMAND test_calendar_db)
+
+# Test: Auth DB
+# Tests user CRUD, sessions, conversations, settings
+add_executable(test_auth_db
+               test_auth_db.c
+               ${SRC_ROOT}/src/auth/auth_db_core.c
+               ${SRC_ROOT}/src/auth/auth_db_user.c
+               ${SRC_ROOT}/src/auth/auth_db_session.c
+               ${SRC_ROOT}/src/auth/auth_db_conv.c
+               ${SRC_ROOT}/src/auth/auth_db_settings.c
+               ${SRC_ROOT}/src/auth/auth_db_satellite.c
+               ${SRC_ROOT}/src/auth/auth_db_metrics.c
+               ${SRC_ROOT}/src/auth/auth_db_maint.c
+               ${SRC_ROOT}/src/auth/auth_db_audit.c
+               ${SRC_ROOT}/src/auth/auth_db_rate_limit.c
+               ${SRC_ROOT}/src/core/path_utils.c)
+
+target_link_libraries(test_auth_db dawn_common unity sqlite3 pthread m)
+add_test(NAME test_auth_db COMMAND test_auth_db)
+
+# Test: Tool Registry
+# Tests register, lookup, alias, capability, count, lock, variations
+add_executable(test_tool_registry
+               test_tool_registry.c
+               test_tool_registry_stub.c
+               ${SRC_ROOT}/src/tools/tool_registry.c)
+
+target_link_libraries(test_tool_registry dawn_common unity pthread ${JSONC_LIBRARIES})
+add_test(NAME test_tool_registry COMMAND test_tool_registry)
+
 # =============================================================================
 # CTest Labels
 # =============================================================================
@@ -517,6 +604,8 @@ set_tests_properties(
    test_time_query_parser test_context_compaction
    test_word_to_number test_text_filter test_memory_similarity
    test_rate_limiter test_crypto_store
+   test_input_queue test_config_validate test_calculator
+   test_contacts_db test_calendar_db test_auth_db test_tool_registry
    PROPERTIES LABELS "ci")
 
 # Hardware-dependent tests: require ONNX, CUDA, or external APIs
@@ -556,6 +645,13 @@ add_custom_target(tests-ci
                           test_memory_similarity
                           test_rate_limiter
                           test_crypto_store
+                          test_input_queue
+                          test_config_validate
+                          test_calculator
+                          test_contacts_db
+                          test_calendar_db
+                          test_auth_db
+                          test_tool_registry
                   COMMENT "Building CI-safe unit tests")
 
 add_custom_target(tests
@@ -591,4 +687,11 @@ add_custom_target(tests
                           test_memory_similarity
                           test_rate_limiter
                           test_crypto_store
+                          test_input_queue
+                          test_config_validate
+                          test_calculator
+                          test_contacts_db
+                          test_calendar_db
+                          test_auth_db
+                          test_tool_registry
                   COMMENT "Building all tests")

@@ -60,30 +60,7 @@ jobs:
       - name: Build CI tests
         run: make -C build-ci -j"$(nproc)" tests-ci
 
-      - name: Run tests (legacy bash runner)
-        run: |
-          cd build-ci/tests
-          failed=0
-          for test in \
-            test_scheduler test_music_db test_document_chunker \
-            test_document_db test_embedding_engine test_memory_embeddings \
-            test_plan_executor test_sse_parser test_sentence_buffer \
-            test_session_commands test_wake_word test_instruction_loader \
-            test_document_extract test_phone_db test_missed_notifications_db \
-            test_memory_filter test_temporal_relations test_relation_supersede \
-            test_time_query_parser test_context_compaction; do
-            echo "::group::${test}"
-            if ./"${test}"; then
-              echo "::endgroup::"
-            else
-              echo "::endgroup::"
-              echo "::error::${test} FAILED"
-              failed=1
-            fi
-          done
-          exit $failed
-
-      - name: Run tests (ctest)
+      - name: Run tests
         run: ctest --test-dir build-ci --output-on-failure --no-tests=error -L ci
 
   # -------------------------------------------------------------------------
