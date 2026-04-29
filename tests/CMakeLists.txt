@@ -15,6 +15,7 @@ set(CMAKE_C_STANDARD 11)
 # is a test-runner only — `make tests-ci` must be run first to build the binaries.
 add_library(unity STATIC unity/unity.c)
 target_include_directories(unity PUBLIC unity)
+target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE)
 
 # Source root directory (parent of tests/)
 set(SRC_ROOT ${CMAKE_SOURCE_DIR})
@@ -456,6 +457,52 @@ target_link_libraries(test_memory_filter
                       unity)
 add_test(NAME test_memory_filter COMMAND test_memory_filter)
 
+# Test: Word to Number
+# Tests English text-to-number conversion (units, teens, tens, magnitudes, decimals)
+add_executable(test_word_to_number
+               test_word_to_number.c
+               ${SRC_ROOT}/src/word_to_number.c)
+
+target_link_libraries(test_word_to_number unity m)
+add_test(NAME test_word_to_number COMMAND test_word_to_number)
+
+# Test: Text Filter
+# Tests <command> tag stripping, nesting, streaming chunks, buffer overflow
+add_executable(test_text_filter
+               test_text_filter.c
+               ${SRC_ROOT}/src/core/text_filter.c)
+
+target_link_libraries(test_text_filter unity)
+add_test(NAME test_text_filter COMMAND test_text_filter)
+
+# Test: Memory Similarity
+# Tests text normalization, FNV-1a hashing, Jaccard similarity, dedup detection
+add_executable(test_memory_similarity
+               test_memory_similarity.c
+               ${SRC_ROOT}/src/memory/memory_similarity.c)
+
+target_link_libraries(test_memory_similarity unity m)
+add_test(NAME test_memory_similarity COMMAND test_memory_similarity)
+
+# Test: Rate Limiter
+# Tests rate limiting, LRU eviction, IPv6 normalization
+add_executable(test_rate_limiter
+               test_rate_limiter.c
+               ${SRC_ROOT}/src/core/rate_limiter.c)
+
+target_link_libraries(test_rate_limiter unity pthread)
+add_test(NAME test_rate_limiter COMMAND test_rate_limiter)
+
+# Test: Crypto Store
+# Tests libsodium encrypt/decrypt roundtrip, corrupt data, buffer checks
+add_executable(test_crypto_store
+               test_crypto_store.c
+               test_crypto_store_stub.c
+               ${SRC_ROOT}/src/core/crypto_store.c)
+
+target_link_libraries(test_crypto_store dawn_common unity sodium pthread)
+add_test(NAME test_crypto_store COMMAND test_crypto_store)
+
 # =============================================================================
 # CTest Labels
 # =============================================================================
@@ -468,6 +515,8 @@ set_tests_properties(
    test_document_extract test_phone_db test_missed_notifications_db
    test_temporal_relations test_relation_supersede
    test_time_query_parser test_context_compaction
+   test_word_to_number test_text_filter test_memory_similarity
+   test_rate_limiter test_crypto_store
    PROPERTIES LABELS "ci")
 
 # Hardware-dependent tests: require ONNX, CUDA, or external APIs
@@ -502,6 +551,11 @@ add_custom_target(tests-ci
                           test_relation_supersede
                           test_time_query_parser
                           test_context_compaction
+                          test_word_to_number
+                          test_text_filter
+                          test_memory_similarity
+                          test_rate_limiter
+                          test_crypto_store
                   COMMENT "Building CI-safe unit tests")
 
 add_custom_target(tests
@@ -532,4 +586,9 @@ add_custom_target(tests
                           test_relation_supersede
                           test_time_query_parser
                           test_context_compaction
+                          test_word_to_number
+                          test_text_filter
+                          test_memory_similarity
+                          test_rate_limiter
+                          test_crypto_store
                   COMMENT "Building all tests")

@@ -192,7 +192,7 @@ int crypto_store_decrypt(const unsigned char *ciphertext,
    if (crypto_store_init() != 0)
       return 1;
 
-   if (ct_len <= crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
+   if (ct_len < crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
       OLOG_ERROR("crypto_store: ciphertext too short");
       return 1;
    }
