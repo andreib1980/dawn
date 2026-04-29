@@ -590,6 +590,56 @@ add_executable(test_tool_registry
 target_link_libraries(test_tool_registry dawn_common unity pthread ${JSONC_LIBRARIES})
 add_test(NAME test_tool_registry COMMAND test_tool_registry)
 
+# Test: Device Types
+# Tests pattern matching for boolean/analog/getter/music/trigger/passphrase device types
+add_executable(test_device_types
+               test_device_types.c
+               ${SRC_ROOT}/src/core/device_types.c)
+
+target_link_libraries(test_device_types dawn_common unity)
+add_test(NAME test_device_types COMMAND test_device_types)
+
+# Test: HTML Parser
+# Tests HTML-to-Markdown conversion, entity decoding, link resolution, plain-text mode
+add_executable(test_html_parser
+               test_html_parser.c
+               ${SRC_ROOT}/src/tools/html_parser.c)
+
+target_link_libraries(test_html_parser dawn_common unity)
+add_test(NAME test_html_parser COMMAND test_html_parser)
+
+# Test: TTS Preprocessing
+# Tests preprocess_text_for_tts_c() — emoji/asterisk stripping, em-dash, currency,
+# temperature, state/day/month abbreviation expansion. Compiles tts_preprocessing.cpp
+# directly to avoid dawn_common_tts (which requires Piper/ONNX).
+add_executable(test_tts_preprocessing
+               test_tts_preprocessing.c
+               ${SRC_ROOT}/common/src/tts/tts_preprocessing.cpp)
+
+target_link_libraries(test_tts_preprocessing unity)
+add_test(NAME test_tts_preprocessing COMMAND test_tts_preprocessing)
+
+# Test: Email DB
+# Tests email account CRUD, list, user isolation, flags, OAuth variant
+add_executable(test_email_db
+               test_email_db.c
+               test_email_db_stub.c
+               ${SRC_ROOT}/src/tools/email_db.c
+               ${SRC_ROOT}/src/auth/auth_db_core.c
+               ${SRC_ROOT}/src/auth/auth_db_user.c
+               ${SRC_ROOT}/src/auth/auth_db_session.c
+               ${SRC_ROOT}/src/auth/auth_db_conv.c
+               ${SRC_ROOT}/src/auth/auth_db_settings.c
+               ${SRC_ROOT}/src/auth/auth_db_satellite.c
+               ${SRC_ROOT}/src/auth/auth_db_metrics.c
+               ${SRC_ROOT}/src/auth/auth_db_maint.c
+               ${SRC_ROOT}/src/auth/auth_db_audit.c
+               ${SRC_ROOT}/src/auth/auth_db_rate_limit.c
+               ${SRC_ROOT}/src/core/path_utils.c)
+
+target_link_libraries(test_email_db dawn_common unity sqlite3 pthread m)
+add_test(NAME test_email_db COMMAND test_email_db)
+
 # =============================================================================
 # CTest Labels
 # =============================================================================
@@ -606,6 +656,7 @@ set_tests_properties(
    test_rate_limiter test_crypto_store
    test_input_queue test_config_validate test_calculator
    test_contacts_db test_calendar_db test_auth_db test_tool_registry
+   test_device_types test_html_parser test_tts_preprocessing test_email_db
    PROPERTIES LABELS "ci")
 
 # Hardware-dependent tests: require ONNX, CUDA, or external APIs
@@ -652,6 +703,10 @@ add_custom_target(tests-ci
                           test_calendar_db
                           test_auth_db
                           test_tool_registry
+                          test_device_types
+                          test_html_parser
+                          test_tts_preprocessing
+                          test_email_db
                   COMMENT "Building CI-safe unit tests")
 
 add_custom_target(tests
@@ -694,4 +749,8 @@ add_custom_target(tests
                           test_calendar_db
                           test_auth_db
                           test_tool_registry
+                          test_device_types
+                          test_html_parser
+                          test_tts_preprocessing
+                          test_email_db
                   COMMENT "Building all tests")
