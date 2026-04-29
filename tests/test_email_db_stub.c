@@ -18,17 +18,25 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Stubs for test_email_db: replaces crypto_store_encrypt/decrypt with no-op
- * failing variants so the linker is satisfied without pulling crypto_store.c
- * (and its g_config / libsodium init dependencies) into the test binary.
+ * Stubs for test_email_db: replaces crypto_store_encrypt/decrypt so the linker
+ * is satisfied without pulling crypto_store.c (and its g_config / libsodium init
+ * dependencies) into the test binary.
  *
- * email_db tests place raw bytes directly into encrypted_password and never
- * invoke email_encrypt_password() / email_decrypt_password(), so these stubs
- * are never actually called from the test paths. The encrypt/decrypt logic
- * itself is covered by test_crypto_store.c.
+ * The test_email_db tests place raw bytes directly into encrypted_password and
+ * never invoke email_encrypt_password() / email_decrypt_password(), so these
+ * stubs must NEVER be reached on test paths. They abort() with a diagnostic if
+ * a future refactor introduces a code path that calls them — preferring loud
+ * failure over silent corruption. The encrypt/decrypt logic itself is covered
+ * by test_crypto_store.c against the real crypto_store.c implementation.
+ *
+ * The headers are included so any signature change in core/crypto_store.h
+ * becomes a compile error here rather than a silent linker mismatch.
  */
 
-#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "core/crypto_store.h"
 
 int crypto_store_encrypt(const void *plaintext,
                          size_t plaintext_len,
@@ -39,9 +47,11 @@ int crypto_store_encrypt(const void *plaintext,
    (void)plaintext_len;
    (void)out;
    (void)out_capacity;
-   if (out_written)
-      *out_written = 0;
-   return 1; /* FAILURE — never invoked in this test */
+   (void)out_written;
+   fprintf(stderr, "test_email_db_stub: crypto_store_encrypt() called from test path. "
+                   "If a refactor added a real call, either invoke crypto_store_init() in setUp "
+                   "and link the real crypto_store.c, or update the stub.\n");
+   abort();
 }
 
 int crypto_store_decrypt(const unsigned char *ciphertext,
@@ -53,7 +63,9 @@ int crypto_store_decrypt(const unsigned char *ciphertext,
    (void)ciphertext_len;
    (void)out;
    (void)out_capacity;
-   if (out_written)
-      *out_written = 0;
-   return 1; /* FAILURE — never invoked in this test */
+   (void)out_written;
+   fprintf(stderr, "test_email_db_stub: crypto_store_decrypt() called from test path. "
+                   "If a refactor added a real call, either invoke crypto_store_init() in setUp "
+                   "and link the real crypto_store.c, or update the stub.\n");
+   abort();
 }

@@ -21,6 +21,16 @@
  * Provides the minimal set of symbols that tool_registry.c references
  * at link time so the test binary can build without pulling in the full
  * daemon (LLM, MQTT, TOML parser, session manager, etc.).
+ *
+ * GUARD INVARIANT: every stub in this file MUST include the production header
+ * that declares the stubbed symbol so that signature drift becomes a compile
+ * error rather than a silent linker mismatch.
+ *
+ * MULTI-CLIENT GUARD: any session_manager_* stub MUST be wrapped in
+ * `#ifdef ENABLE_MULTI_CLIENT`. When WEBUI is OFF (e.g., the `ci` preset),
+ * core/session_manager.h provides static-inline fallbacks (see lines ~995–1114
+ * of that header) and a non-inline definition here would collide. The same
+ * pattern applies in test_plan_executor_stub.c.
  */
 
 #include <stddef.h>
@@ -28,6 +38,10 @@
 
 #include "config/dawn_config.h"
 #include "core/device_types.h"
+#include "core/session_manager.h"
+#include "llm/llm_command_parser.h"
+#include "llm/llm_tools.h"
+#include "tools/toml.h"
 
 /* ============================================================================
  * Global config stubs (extern'd in dawn_config.h)
@@ -108,25 +122,24 @@ void invalidate_system_instructions(void) {
  * TOML stubs — toml_parse_file / toml_table_in / toml_free
  *
  * tool_registry_parse_configs() calls these. The test does not exercise
- * config parsing, so returning NULL / no-op is safe.
+ * config parsing, so returning NULL / no-op is safe. Signatures match
+ * tools/toml.h (included at the top of this file).
  * ============================================================================ */
 
-struct toml_table_t;
-
-struct toml_table_t *toml_parse_file(FILE *fp, char *errbuf, int errbufsz) {
+toml_table_t *toml_parse_file(FILE *fp, char *errbuf, int errbufsz) {
    (void)fp;
    if (errbuf && errbufsz > 0)
       errbuf[0] = '\0';
    return NULL;
 }
 
-struct toml_table_t *toml_table_in(const struct toml_table_t *tab, const char *key) {
+toml_table_t *toml_table_in(const toml_table_t *tab, const char *key) {
    (void)tab;
    (void)key;
    return NULL;
 }
 
-void toml_free(struct toml_table_t *tab) {
+void toml_free(toml_table_t *tab) {
    (void)tab;
 }
 

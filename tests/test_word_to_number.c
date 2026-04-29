@@ -24,6 +24,11 @@
 #include "unity.h"
 #include "word_to_number.h"
 
+/* parseNumericalWord is internal to word_to_number.c (not in the public header).
+ * Declare it here so the test can exercise it directly without warnings under
+ * -Werror=implicit-function-declaration. */
+extern int parseNumericalWord(const char *token);
+
 void setUp(void) {
 }
 

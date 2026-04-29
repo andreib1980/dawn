@@ -279,17 +279,19 @@ static void test_count_tool_variations_with_aliases(void) {
                                  "total variations equals single tool when only one registered");
 }
 
+static void foreach_increment_callback(const tool_metadata_t *metadata, void *user_data) {
+   (void)metadata;
+   int *count = (int *)user_data;
+   (*count)++;
+}
+
 static void test_foreach_iterates_all(void) {
    tool_registry_register(&mock_tool);
    tool_registry_register(&mock_tool_network);
 
    int count = 0;
-   tool_registry_foreach((tool_foreach_callback_t)(void (*)(const tool_metadata_t *, void *))
-                         /* Use a simple lambda-like callback via a helper */
-                         NULL,
-                         &count);
-   /* Since we can't easily use inline callbacks in C, test via count API */
-   TEST_ASSERT_EQUAL_INT_MESSAGE(2, tool_registry_count(), "count confirms both tools registered");
+   tool_registry_foreach(foreach_increment_callback, &count);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(2, count, "foreach invokes callback once per registered tool");
 }
 
 static void test_cache_invalidation(void) {
@@ -325,6 +327,7 @@ int main(void) {
    RUN_TEST(test_duplicate_name_rejected);
    RUN_TEST(test_count_tool_variations);
    RUN_TEST(test_count_tool_variations_with_aliases);
+   RUN_TEST(test_foreach_iterates_all);
    RUN_TEST(test_cache_invalidation);
 
    return UNITY_END();

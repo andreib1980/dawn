@@ -154,7 +154,7 @@ static void test_convert_same_unit(void) {
 static void test_convert_incompatible(void) {
    char *s = calculator_convert("5 miles to kg");
    TEST_ASSERT_NOT_NULL(s);
-   TEST_ASSERT_NOT_NULL(strstr(s, "annot convert"));
+   TEST_ASSERT_NOT_NULL(strstr(s, "Cannot convert"));
    free(s);
 }
 
