@@ -31,24 +31,7 @@
 
 #include "auth/auth_db_internal.h"
 #include "memory/memory_db.h"
-
-/* ============================================================================
- * Test Harness
- * ============================================================================ */
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_ASSERT(condition, msg)    \
-   do {                                \
-      if (condition) {                 \
-         printf("  [PASS] %s\n", msg); \
-         tests_passed++;               \
-      } else {                         \
-         printf("  [FAIL] %s\n", msg); \
-         tests_failed++;               \
-      }                                \
-   } while (0)
+#include "unity.h"
 
 /* ============================================================================
  * Schema + Statement Setup
@@ -157,9 +140,21 @@ static void teardown_db(void) {
       sqlite3_finalize(s_db.stmt_memory_relation_close_open);
    if (s_db.stmt_memory_fact_supersede)
       sqlite3_finalize(s_db.stmt_memory_fact_supersede);
+   s_db.stmt_memory_relation_create = NULL;
+   s_db.stmt_memory_relation_close_open = NULL;
+   s_db.stmt_memory_fact_supersede = NULL;
    if (s_db.db)
       sqlite3_close(s_db.db);
+   pthread_mutex_destroy(&s_db.mutex);
    memset(&s_db, 0, sizeof(s_db));
+}
+
+void setUp(void) {
+   setup_db();
+}
+
+void tearDown(void) {
+   teardown_db();
 }
 
 /* ============================================================================
@@ -212,55 +207,44 @@ static int64_t get_fact_superseded_by(int64_t fact_id) {
  * ============================================================================ */
 
 static void test_exclusive_supersede_returns_old_fact_id(void) {
-   printf("\n--- test_exclusive_supersede_returns_old_fact_id ---\n");
-
    int user_id = 1;
    int64_t fact_a = insert_fact(user_id, "Alice works at Google");
    int64_t alice = insert_entity(user_id, "alice", "person");
    int64_t google = insert_entity(user_id, "google", "org");
    int64_t microsoft = insert_entity(user_id, "microsoft", "org");
 
-   /* Create initial relation with fact_id */
    memory_db_relation_supersede(user_id, alice, "works_at", google, NULL, fact_a, 0.9f, 0, 0, NULL);
 
-   /* Supersede with new employer */
    int64_t fact_b = insert_fact(user_id, "Alice works at Microsoft");
    int64_t old_fact_id = 0;
    int rc = memory_db_relation_supersede(user_id, alice, "works_at", microsoft, NULL, fact_b, 0.9f,
                                          0, 0, &old_fact_id);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "supersede returns SUCCESS");
-   TEST_ASSERT(old_fact_id == fact_a, "old_fact_id matches original fact");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
 
-   /* Propagate supersede to fact layer */
    memory_db_fact_supersede(old_fact_id, fact_b);
    int64_t superseded_by = get_fact_superseded_by(fact_a);
-   TEST_ASSERT(superseded_by == fact_b, "old fact's superseded_by set to new fact");
+   TEST_ASSERT_EQUAL_INT64(fact_b, superseded_by);
 }
 
 static void test_no_fact_id_on_old_relation(void) {
-   printf("\n--- test_no_fact_id_on_old_relation ---\n");
-
    int user_id = 2;
    int64_t bob = insert_entity(user_id, "bob", "person");
    int64_t nyc = insert_entity(user_id, "nyc", "place");
    int64_t sf = insert_entity(user_id, "sf", "place");
 
-   /* Old relation without fact_id (legacy data, fact_id=0) */
    memory_db_relation_supersede(user_id, bob, "lives_in", nyc, NULL, 0, 0.8f, 0, 0, NULL);
 
-   /* Supersede */
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, bob, "lives_in", sf, NULL, 0, 0.8f, 0, 0,
                                          &old_fact_id);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "supersede returns SUCCESS");
-   TEST_ASSERT(old_fact_id == 0, "old_fact_id is 0 when legacy relation has no linked fact");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
 }
 
 static void test_non_exclusive_skips(void) {
-   printf("\n--- test_non_exclusive_skips ---\n");
-
    int user_id = 3;
    int64_t fact_a = insert_fact(user_id, "Carol likes cats");
    int64_t carol = insert_entity(user_id, "carol", "person");
@@ -274,13 +258,11 @@ static void test_non_exclusive_skips(void) {
    int rc = memory_db_relation_supersede(user_id, carol, "likes", dogs, NULL, fact_b, 0.8f, 0, 0,
                                          &old_fact_id);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "non-exclusive supersede returns SUCCESS");
-   TEST_ASSERT(old_fact_id == 0, "non-exclusive relation does not return old_fact_id");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
 }
 
 static void test_null_out_param(void) {
-   printf("\n--- test_null_out_param ---\n");
-
    int user_id = 4;
    int64_t dave = insert_entity(user_id, "dave", "person");
    int64_t mit = insert_entity(user_id, "mit", "org");
@@ -288,12 +270,10 @@ static void test_null_out_param(void) {
    int rc = memory_db_relation_supersede(user_id, dave, "attends_school", mit, NULL, 0, 0.8f, 0, 0,
                                          NULL);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "NULL out_old_fact_id does not crash");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
 }
 
 static void test_same_object_idempotent(void) {
-   printf("\n--- test_same_object_idempotent ---\n");
-
    int user_id = 5;
    int64_t fact_a = insert_fact(user_id, "Eve works at Apple");
    int64_t eve = insert_entity(user_id, "eve", "person");
@@ -301,56 +281,45 @@ static void test_same_object_idempotent(void) {
 
    memory_db_relation_supersede(user_id, eve, "works_at", apple, NULL, fact_a, 0.9f, 0, 0, NULL);
 
-   /* Re-mention same relation — should NOT close the existing row */
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, eve, "works_at", apple, NULL, fact_a, 0.9f, 0, 0,
                                          &old_fact_id);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "idempotent supersede returns SUCCESS");
-   TEST_ASSERT(old_fact_id == 0, "same object does not trigger close (idempotent)");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
 }
 
 static void test_contradictory_pair(void) {
-   printf("\n--- test_contradictory_pair ---\n");
-
    int user_id = 6;
    int64_t fact_a = insert_fact(user_id, "Frank likes spiders");
    int64_t frank = insert_entity(user_id, "frank", "person");
    int64_t spiders = insert_entity(user_id, "spiders", "thing");
 
-   /* Create initial "likes" relation */
    memory_db_relation_supersede(user_id, frank, "likes", spiders, NULL, fact_a, 0.8f, 0, 0, NULL);
 
-   /* Now store "dislikes" for same (subject, object) */
    int64_t fact_b = insert_fact(user_id, "Frank dislikes spiders");
    int64_t old_fact_id = 0;
    int rc = memory_db_relation_supersede(user_id, frank, "dislikes", spiders, NULL, fact_b, 0.9f, 0,
                                          0, &old_fact_id);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "contradictory pair supersede returns SUCCESS");
-   TEST_ASSERT(old_fact_id == fact_a,
-               "contradictory pair returns old fact_id from opposing relation");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
 }
 
 static void test_contradictory_pair_different_object(void) {
-   printf("\n--- test_contradictory_pair_different_object ---\n");
-
    int user_id = 7;
    int64_t fact_a = insert_fact(user_id, "Grace enjoys cooking");
    int64_t grace = insert_entity(user_id, "grace", "person");
 
-   /* Literal-value relation (no object entity) */
    memory_db_relation_supersede(user_id, grace, "enjoys", 0, "cooking", fact_a, 0.8f, 0, 0, NULL);
 
-   /* Different object — should NOT close the "cooking" relation */
    int64_t fact_b = insert_fact(user_id, "Grace hates gardening");
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, grace, "hates", 0, "gardening", fact_b, 0.9f, 0,
                                          0, &old_fact_id);
 
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "different-object contradictory returns SUCCESS");
-   TEST_ASSERT(old_fact_id == 0,
-               "contradictory pair with different object does NOT close old relation");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
 }
 
 /* ============================================================================
@@ -358,19 +327,13 @@ static void test_contradictory_pair_different_object(void) {
  * ============================================================================ */
 
 int main(void) {
-   printf("=== test_relation_supersede ===\n");
-   setup_db();
-
-   test_exclusive_supersede_returns_old_fact_id();
-   test_no_fact_id_on_old_relation();
-   test_non_exclusive_skips();
-   test_null_out_param();
-   test_same_object_idempotent();
-   test_contradictory_pair();
-   test_contradictory_pair_different_object();
-
-   teardown_db();
-
-   printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
-   return tests_failed > 0 ? 1 : 0;
+   UNITY_BEGIN();
+   RUN_TEST(test_exclusive_supersede_returns_old_fact_id);
+   RUN_TEST(test_no_fact_id_on_old_relation);
+   RUN_TEST(test_non_exclusive_skips);
+   RUN_TEST(test_null_out_param);
+   RUN_TEST(test_same_object_idempotent);
+   RUN_TEST(test_contradictory_pair);
+   RUN_TEST(test_contradictory_pair_different_object);
+   return UNITY_END();
 }

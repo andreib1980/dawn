@@ -31,55 +31,39 @@
 #include <string.h>
 
 #include "tools/plan_executor.h"
+#include "unity.h"
 
-/* ============================================================================
- * Test Harness
- * ============================================================================ */
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define ASSERT(cond, msg)                                  \
-   do {                                                    \
-      if (cond) {                                          \
-         printf("  [PASS] %s\n", msg);                     \
-         tests_passed++;                                   \
-      } else {                                             \
-         printf("  [FAIL] %s (line %d)\n", msg, __LINE__); \
-         tests_failed++;                                   \
-      }                                                    \
-   } while (0)
+void setUp(void) {
+}
+void tearDown(void) {
+}
 
 /* ============================================================================
  * 1. Variable Name Validation
  * ============================================================================ */
 
 static void test_variable_name_validation(void) {
-   printf("\n=== test_variable_name_validation ===\n");
-
    /* Valid names */
-   ASSERT(plan_validate_var_name("x") == true, "single char valid");
-   ASSERT(plan_validate_var_name("result") == true, "lowercase word valid");
-   ASSERT(plan_validate_var_name("my_var") == true, "underscore valid");
-   ASSERT(plan_validate_var_name("_private") == true, "leading underscore valid");
-   ASSERT(plan_validate_var_name("var123") == true, "trailing digits valid");
-   ASSERT(plan_validate_var_name("a1b2c3") == true, "mixed alpha-digits valid");
-   ASSERT(plan_validate_var_name("abcdefghijklmnopqrstuvwxyz012345") == true,
-          "32-char max length valid");
+   TEST_ASSERT_TRUE(plan_validate_var_name("x"));
+   TEST_ASSERT_TRUE(plan_validate_var_name("result"));
+   TEST_ASSERT_TRUE(plan_validate_var_name("my_var"));
+   TEST_ASSERT_TRUE(plan_validate_var_name("_private"));
+   TEST_ASSERT_TRUE(plan_validate_var_name("var123"));
+   TEST_ASSERT_TRUE(plan_validate_var_name("a1b2c3"));
+   TEST_ASSERT_TRUE(plan_validate_var_name("abcdefghijklmnopqrstuvwxyz012345"));
 
    /* Invalid names */
-   ASSERT(plan_validate_var_name(NULL) == false, "NULL rejected");
-   ASSERT(plan_validate_var_name("") == false, "empty string rejected");
-   ASSERT(plan_validate_var_name("1start") == false, "leading digit rejected");
-   ASSERT(plan_validate_var_name("CamelCase") == false, "uppercase rejected");
-   ASSERT(plan_validate_var_name("has space") == false, "space rejected");
-   ASSERT(plan_validate_var_name("has-dash") == false, "dash rejected");
-   ASSERT(plan_validate_var_name("has.dot") == false, "dot rejected");
-   ASSERT(plan_validate_var_name("has$dollar") == false, "dollar rejected");
-   ASSERT(plan_validate_var_name("has{brace") == false, "brace rejected");
-   ASSERT(plan_validate_var_name("has}brace") == false, "close brace rejected");
-   ASSERT(plan_validate_var_name("abcdefghijklmnopqrstuvwxyz0123456") == false,
-          "33-char over max rejected");
+   TEST_ASSERT_FALSE(plan_validate_var_name(NULL));
+   TEST_ASSERT_FALSE(plan_validate_var_name(""));
+   TEST_ASSERT_FALSE(plan_validate_var_name("1start"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("CamelCase"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("has space"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("has-dash"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("has.dot"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("has$dollar"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("has{brace"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("has}brace"));
+   TEST_ASSERT_FALSE(plan_validate_var_name("abcdefghijklmnopqrstuvwxyz0123456"));
 }
 
 /* ============================================================================
@@ -87,30 +71,29 @@ static void test_variable_name_validation(void) {
  * ============================================================================ */
 
 static void test_variable_store(void) {
-   printf("\n=== test_variable_store ===\n");
-
    plan_context_t ctx = { 0 };
 
    /* Set and get */
    plan_vars_set(&ctx, "foo", "hello");
-   ASSERT(strcmp(plan_vars_get(&ctx, "foo"), "hello") == 0, "set/get basic");
-   ASSERT(ctx.var_count == 1, "var_count is 1 after first set");
+   TEST_ASSERT_EQUAL_STRING("hello", plan_vars_get(&ctx, "foo"));
+   TEST_ASSERT_EQUAL_INT(1, ctx.var_count);
 
    /* Overwrite existing */
    plan_vars_set(&ctx, "foo", "world");
-   ASSERT(strcmp(plan_vars_get(&ctx, "foo"), "world") == 0, "overwrite works");
-   ASSERT(ctx.var_count == 1, "var_count still 1 after overwrite");
+   TEST_ASSERT_EQUAL_STRING("world", plan_vars_get(&ctx, "foo"));
+   TEST_ASSERT_EQUAL_INT(1, ctx.var_count);
 
    /* Multiple variables */
    plan_vars_set(&ctx, "bar", "value2");
    plan_vars_set(&ctx, "baz", "value3");
-   ASSERT(ctx.var_count == 3, "var_count is 3");
-   ASSERT(strcmp(plan_vars_get(&ctx, "bar"), "value2") == 0, "second var correct");
-   ASSERT(strcmp(plan_vars_get(&ctx, "baz"), "value3") == 0, "third var correct");
+   TEST_ASSERT_EQUAL_INT(3, ctx.var_count);
+   TEST_ASSERT_EQUAL_STRING("value2", plan_vars_get(&ctx, "bar"));
+   TEST_ASSERT_EQUAL_STRING("value3", plan_vars_get(&ctx, "baz"));
 
-   /* Get nonexistent — should return NULL */
+   /* Get nonexistent */
    const char *missing = plan_vars_get(&ctx, "nonexistent");
-   ASSERT(missing == NULL || missing[0] == '\0', "nonexistent returns NULL or empty");
+   TEST_ASSERT_TRUE_MESSAGE(missing == NULL || missing[0] == '\0',
+                            "nonexistent returns NULL or empty");
 
    /* Success flag */
    plan_vars_set_success(&ctx, "foo", true);
@@ -118,12 +101,10 @@ static void test_variable_store(void) {
 
    /* Cleanup frees all heap values */
    plan_context_cleanup(&ctx);
-   ASSERT(ctx.var_count == 0, "cleanup resets var_count");
+   TEST_ASSERT_EQUAL_INT(0, ctx.var_count);
 }
 
 static void test_variable_store_max_capacity(void) {
-   printf("\n=== test_variable_store_max_capacity ===\n");
-
    plan_context_t ctx = { 0 };
 
    /* Fill to PLAN_MAX_VARS */
@@ -132,12 +113,13 @@ static void test_variable_store_max_capacity(void) {
       snprintf(name, sizeof(name), "var_%02d", i);
       plan_vars_set(&ctx, name, "value");
    }
-   ASSERT(ctx.var_count == PLAN_MAX_VARS, "filled to max capacity");
+   TEST_ASSERT_EQUAL_INT(PLAN_MAX_VARS, ctx.var_count);
 
    /* One more should silently fail */
    plan_vars_set(&ctx, "overflow_var", "should_fail");
    const char *overflow = plan_vars_get(&ctx, "overflow_var");
-   ASSERT(overflow == NULL || overflow[0] == '\0', "variable beyond max capacity not stored");
+   TEST_ASSERT_TRUE_MESSAGE(overflow == NULL || overflow[0] == '\0',
+                            "variable beyond max capacity not stored");
 
    plan_context_cleanup(&ctx);
 }
@@ -147,8 +129,6 @@ static void test_variable_store_max_capacity(void) {
  * ============================================================================ */
 
 static void test_condition_evaluation(void) {
-   printf("\n=== test_condition_evaluation ===\n");
-
    plan_context_t ctx = { 0 };
    plan_vars_set(&ctx, "full", "some result text");
    plan_vars_set(&ctx, "empty_str", "");
@@ -163,47 +143,41 @@ static void test_condition_evaluation(void) {
    plan_vars_set_success(&ctx, "empty_str", false);
 
    /* .empty / .notempty */
-   ASSERT(plan_eval_condition(&ctx, "full.empty") == false, "non-empty var .empty is false");
-   ASSERT(plan_eval_condition(&ctx, "full.notempty") == true, "non-empty var .notempty is true");
-   ASSERT(plan_eval_condition(&ctx, "empty_str.empty") == true, "empty string .empty is true");
-   ASSERT(plan_eval_condition(&ctx, "empty_str.notempty") == false,
-          "empty string .notempty is false");
-   ASSERT(plan_eval_condition(&ctx, "none_str.empty") == true, "\"none\" .empty is true");
-   ASSERT(plan_eval_condition(&ctx, "no_results.empty") == true, "\"no results\" .empty is true");
-   ASSERT(plan_eval_condition(&ctx, "array_empty.empty") == true, "\"[]\" .empty is true");
-   ASSERT(plan_eval_condition(&ctx, "undefined_var.empty") == true, "undefined var .empty is true");
-   ASSERT(plan_eval_condition(&ctx, "undefined_var.notempty") == false,
-          "undefined var .notempty is false");
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "full.empty"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "full.notempty"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "empty_str.empty"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "empty_str.notempty"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "none_str.empty"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "no_results.empty"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "array_empty.empty"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "undefined_var.empty"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "undefined_var.notempty"));
 
    /* .contains */
-   ASSERT(plan_eval_condition(&ctx, "rain_forecast.contains:rain") == true,
-          "contains 'rain' case-insensitive");
-   ASSERT(plan_eval_condition(&ctx, "rain_forecast.contains:RAIN") == true,
-          "contains 'RAIN' case-insensitive");
-   ASSERT(plan_eval_condition(&ctx, "clear_forecast.contains:rain") == false,
-          "clear forecast does not contain rain");
-   ASSERT(plan_eval_condition(&ctx, "rain_forecast.contains:afternoon") == true,
-          "contains 'afternoon'");
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "rain_forecast.contains:rain"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "rain_forecast.contains:RAIN"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "clear_forecast.contains:rain"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "rain_forecast.contains:afternoon"));
 
    /* .equals */
-   ASSERT(plan_eval_condition(&ctx, "exact_match.equals:hello") == true, "equals exact match");
-   ASSERT(plan_eval_condition(&ctx, "exact_match.equals:HELLO") == true, "equals case-insensitive");
-   ASSERT(plan_eval_condition(&ctx, "exact_match.equals:world") == false, "equals non-match");
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "exact_match.equals:hello"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "exact_match.equals:HELLO"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "exact_match.equals:world"));
 
    /* .success / .failed */
-   ASSERT(plan_eval_condition(&ctx, "full.success") == true, "success var .success is true");
-   ASSERT(plan_eval_condition(&ctx, "full.failed") == false, "success var .failed is false");
-   ASSERT(plan_eval_condition(&ctx, "empty_str.success") == false, "failed var .success is false");
-   ASSERT(plan_eval_condition(&ctx, "empty_str.failed") == true, "failed var .failed is true");
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "full.success"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "full.failed"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "empty_str.success"));
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "empty_str.failed"));
 
    /* Boolean literals */
-   ASSERT(plan_eval_condition(&ctx, "true") == true, "literal 'true' is true");
-   ASSERT(plan_eval_condition(&ctx, "false") == false, "literal 'false' is false");
+   TEST_ASSERT_TRUE(plan_eval_condition(&ctx, "true"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "false"));
 
-   /* Malformed conditions — should evaluate to false (safe default) */
-   ASSERT(plan_eval_condition(&ctx, "") == false, "empty condition is false");
-   ASSERT(plan_eval_condition(&ctx, "full.bogus_op") == false, "unknown operator is false");
-   ASSERT(plan_eval_condition(&ctx, "noperiod") == false, "no operator (no period) is false");
+   /* Malformed conditions */
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, ""));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "full.bogus_op"));
+   TEST_ASSERT_FALSE(plan_eval_condition(&ctx, "noperiod"));
 
    plan_context_cleanup(&ctx);
 }
@@ -213,8 +187,6 @@ static void test_condition_evaluation(void) {
  * ============================================================================ */
 
 static void test_interpolation(void) {
-   printf("\n=== test_interpolation ===\n");
-
    plan_context_t ctx = { 0 };
    plan_vars_set(&ctx, "name", "Friday");
    plan_vars_set(&ctx, "room", "kitchen");
@@ -225,43 +197,45 @@ static void test_interpolation(void) {
 
    /* Simple substitution */
    rc = plan_interpolate(&ctx, "Hello $name", out, sizeof(out));
-   ASSERT(rc == 0 && strcmp(out, "Hello Friday") == 0, "simple $var interpolation");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("Hello Friday", out);
 
    /* Braced substitution */
    rc = plan_interpolate(&ctx, "${room}_light", out, sizeof(out));
-   ASSERT(rc == 0 && strcmp(out, "kitchen_light") == 0, "${var} brace interpolation");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("kitchen_light", out);
 
    /* Multiple variables */
    rc = plan_interpolate(&ctx, "$name is in the $room ($count)", out, sizeof(out));
-   ASSERT(rc == 0 && strcmp(out, "Friday is in the kitchen (42)") == 0,
-          "multiple variables interpolated");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("Friday is in the kitchen (42)", out);
 
    /* Undefined variable — expands to empty */
    rc = plan_interpolate(&ctx, "value is $undefined here", out, sizeof(out));
-   ASSERT(rc == 0 && strcmp(out, "value is  here") == 0, "undefined var expands to empty");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("value is  here", out);
 
    /* No variables — passthrough */
    rc = plan_interpolate(&ctx, "no variables here", out, sizeof(out));
-   ASSERT(rc == 0 && strcmp(out, "no variables here") == 0, "no-var passthrough");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("no variables here", out);
 
    /* Lone dollar sign (not a variable) */
    rc = plan_interpolate(&ctx, "costs $5 each", out, sizeof(out));
-   ASSERT(rc == 0, "lone dollar doesn't crash");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    /* Adjacent dollar signs */
    rc = plan_interpolate(&ctx, "$$name", out, sizeof(out));
-   ASSERT(rc == 0, "double dollar doesn't crash");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    /* Empty braces */
    rc = plan_interpolate(&ctx, "x ${}y", out, sizeof(out));
-   ASSERT(rc == 0, "empty braces don't crash");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_cleanup(&ctx);
 }
 
 static void test_interpolation_size_limit(void) {
-   printf("\n=== test_interpolation_size_limit ===\n");
-
    plan_context_t ctx = { 0 };
 
    /* Set a long variable value */
@@ -273,8 +247,8 @@ static void test_interpolation_size_limit(void) {
    /* Interpolate into a small buffer — should truncate, not overflow */
    char small_out[32];
    int rc = plan_interpolate(&ctx, "prefix $big suffix", small_out, sizeof(small_out));
-   ASSERT(rc == 0, "interpolation into small buffer succeeds");
-   ASSERT(strlen(small_out) < sizeof(small_out), "output fits in buffer");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_TRUE_MESSAGE(strlen(small_out) < sizeof(small_out), "output fits in buffer");
 
    plan_context_cleanup(&ctx);
 }
@@ -284,21 +258,16 @@ static void test_interpolation_size_limit(void) {
  * ============================================================================ */
 
 static void test_parse_valid_plan(void) {
-   printf("\n=== test_parse_valid_plan ===\n");
-
-   /* Minimal valid plan with a single log step */
    const char *json = "[{\"type\": \"log\", \"message\": \"hello\"}]";
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "valid single-step plan parses");
-   ASSERT(plan != NULL, "plan array is non-NULL");
-   ASSERT(json_object_array_length(plan) == 1, "plan has 1 step");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(plan);
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(plan));
    json_object_put(plan);
 }
 
 static void test_parse_multi_step_plan(void) {
-   printf("\n=== test_parse_multi_step_plan ===\n");
-
    const char *json = "["
                       "  {\"type\": \"set\", \"var\": \"x\", \"value\": \"hello\"},"
                       "  {\"type\": \"log\", \"message\": \"$x world\"},"
@@ -308,48 +277,40 @@ static void test_parse_multi_step_plan(void) {
                       "]";
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "multi-step plan with if/set/log parses");
-   ASSERT(json_object_array_length(plan) == 3, "plan has 3 top-level steps");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(plan));
    json_object_put(plan);
 }
 
 static void test_parse_invalid_json(void) {
-   printf("\n=== test_parse_invalid_json ===\n");
-
    struct json_object *plan = NULL;
 
    /* Not JSON at all */
-   ASSERT(plan_parse("this is not json", &plan) != 0, "garbage text rejected");
-   ASSERT(plan == NULL, "plan is NULL on failure");
+   TEST_ASSERT_NOT_EQUAL(0, plan_parse("this is not json", &plan));
+   TEST_ASSERT_NULL(plan);
 
    /* JSON but not an array */
-   ASSERT(plan_parse("{\"type\": \"log\"}", &plan) != 0, "JSON object rejected");
+   TEST_ASSERT_NOT_EQUAL(0, plan_parse("{\"type\": \"log\"}", &plan));
 
    /* Empty array */
    int rc = plan_parse("[]", &plan);
    if (rc == 0) {
-      ASSERT(json_object_array_length(plan) == 0, "empty plan has 0 steps");
+      TEST_ASSERT_EQUAL_INT(0, (int)json_object_array_length(plan));
       json_object_put(plan);
-   } else {
-      ASSERT(1, "empty plan rejected (also acceptable)");
    }
 }
 
 static void test_parse_null_input(void) {
-   printf("\n=== test_parse_null_input ===\n");
-
    struct json_object *plan = NULL;
-   ASSERT(plan_parse(NULL, &plan) != 0, "NULL input rejected");
-   ASSERT(plan_parse("", &plan) != 0, "empty string rejected");
+   TEST_ASSERT_NOT_EQUAL(0, plan_parse(NULL, &plan));
+   TEST_ASSERT_NOT_EQUAL(0, plan_parse("", &plan));
 }
 
 static void test_parse_oversized_plan(void) {
-   printf("\n=== test_parse_oversized_plan ===\n");
-
    /* Build a JSON string larger than PLAN_MAX_PLAN_SIZE (16384) */
    size_t big_size = PLAN_MAX_PLAN_SIZE + 1024;
    char *big_json = malloc(big_size);
-   ASSERT(big_json != NULL, "allocated oversized buffer");
+   TEST_ASSERT_NOT_NULL(big_json);
    if (!big_json)
       return;
 
@@ -360,33 +321,27 @@ static void test_parse_oversized_plan(void) {
    strcpy(big_json + big_size - 4, "\"}]");
 
    struct json_object *plan = NULL;
-   ASSERT(plan_parse(big_json, &plan) != 0, "oversized plan rejected");
+   TEST_ASSERT_NOT_EQUAL(0, plan_parse(big_json, &plan));
    free(big_json);
 }
 
 static void test_parse_invalid_step_type(void) {
-   printf("\n=== test_parse_invalid_step_type ===\n");
-
    const char *json = "[{\"type\": \"execute_shell\", \"cmd\": \"rm -rf /\"}]";
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
    if (rc == 0) {
-      ASSERT(plan != NULL, "plan parsed (will fail at execution)");
+      TEST_ASSERT_NOT_NULL(plan);
       json_object_put(plan);
-   } else {
-      ASSERT(1, "unknown step type rejected at parse time");
    }
 }
 
 static void test_parse_invalid_variable_names(void) {
-   printf("\n=== test_parse_invalid_variable_names ===\n");
-
    /* 'store' with invalid name in call step */
    const char *json1 = "[{\"type\": \"call\", \"tool\": \"weather\", "
                        "\"args\": {\"action\": \"forecast\"}, \"store\": \"BAD_NAME\"}]";
    struct json_object *plan = NULL;
    int rc = plan_parse(json1, &plan);
-   ASSERT(rc != 0, "uppercase store variable rejected");
+   TEST_ASSERT_NOT_EQUAL(0, rc);
    if (plan)
       json_object_put(plan);
 
@@ -394,7 +349,7 @@ static void test_parse_invalid_variable_names(void) {
    const char *json2 = "[{\"type\": \"set\", \"var\": \"$inject\", \"value\": \"bad\"}]";
    plan = NULL;
    rc = plan_parse(json2, &plan);
-   ASSERT(rc != 0, "dollar in variable name rejected");
+   TEST_ASSERT_NOT_EQUAL(0, rc);
    if (plan)
       json_object_put(plan);
 
@@ -403,7 +358,7 @@ static void test_parse_invalid_variable_names(void) {
                        "\"steps\": [{\"type\": \"log\", \"message\": \"hi\"}]}]";
    plan = NULL;
    rc = plan_parse(json3, &plan);
-   ASSERT(rc != 0, "dot in loop variable rejected");
+   TEST_ASSERT_NOT_EQUAL(0, rc);
    if (plan)
       json_object_put(plan);
 }
@@ -413,8 +368,6 @@ static void test_parse_invalid_variable_names(void) {
  * ============================================================================ */
 
 static void test_execute_set_and_log(void) {
-   printf("\n=== test_execute_set_and_log ===\n");
-
    const char *json = "["
                       "  {\"type\": \"set\", \"var\": \"greeting\", \"value\": \"Hello world\"},"
                       "  {\"type\": \"log\", \"message\": \"$greeting\"}"
@@ -422,24 +375,22 @@ static void test_execute_set_and_log(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "execution succeeds");
-   ASSERT(strstr(ctx.output, "Hello world") != NULL, "output contains interpolated greeting");
-   ASSERT(ctx.total_steps_executed == 2, "2 steps executed");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "Hello world"));
+   TEST_ASSERT_EQUAL_INT(2, ctx.total_steps_executed);
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_execute_if_then(void) {
-   printf("\n=== test_execute_if_then ===\n");
-
    const char *json = "["
                       "  {\"type\": \"set\", \"var\": \"data\", \"value\": \"something\"},"
                       "  {\"type\": \"if\", \"condition\": \"data.notempty\", \"then\": ["
@@ -451,24 +402,22 @@ static void test_execute_if_then(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "execution succeeds");
-   ASSERT(strstr(ctx.output, "then branch") != NULL, "then branch executed");
-   ASSERT(strstr(ctx.output, "else branch") == NULL, "else branch not executed");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "then branch"));
+   TEST_ASSERT_NULL(strstr(ctx.output, "else branch"));
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_execute_if_else(void) {
-   printf("\n=== test_execute_if_else ===\n");
-
    const char *json = "["
                       "  {\"type\": \"if\", \"condition\": \"undefined_var.notempty\", \"then\": ["
                       "    {\"type\": \"log\", \"message\": \"then branch\"}"
@@ -479,24 +428,22 @@ static void test_execute_if_else(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "execution succeeds");
-   ASSERT(strstr(ctx.output, "else branch") != NULL, "else branch executed");
-   ASSERT(strstr(ctx.output, "then branch") == NULL, "then branch not executed");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "else branch"));
+   TEST_ASSERT_NULL(strstr(ctx.output, "then branch"));
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_execute_loop(void) {
-   printf("\n=== test_execute_loop ===\n");
-
    const char *json = "["
                       "  {\"type\": \"loop\", \"over\": [\"kitchen\", \"bedroom\", \"office\"], "
                       "   \"as\": \"room\", \"steps\": ["
@@ -506,27 +453,24 @@ static void test_execute_loop(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "execution succeeds");
-   ASSERT(strstr(ctx.output, "Processing kitchen") != NULL, "loop iteration 1");
-   ASSERT(strstr(ctx.output, "Processing bedroom") != NULL, "loop iteration 2");
-   ASSERT(strstr(ctx.output, "Processing office") != NULL, "loop iteration 3");
-   /* 1 loop step + 3 log steps = 4 total executions */
-   ASSERT(ctx.total_steps_executed == 4, "4 total steps (1 loop + 3 logs)");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "Processing kitchen"));
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "Processing bedroom"));
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "Processing office"));
+   TEST_ASSERT_EQUAL_INT(4, ctx.total_steps_executed);
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_execute_nested_if_in_loop(void) {
-   printf("\n=== test_execute_nested_if_in_loop ===\n");
-
    const char *json = "["
                       "  {\"type\": \"set\", \"var\": \"target\", \"value\": \"bedroom\"},"
                       "  {\"type\": \"loop\", \"over\": [\"kitchen\", \"bedroom\", \"office\"], "
@@ -539,16 +483,15 @@ static void test_execute_nested_if_in_loop(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "execution succeeds");
-   ASSERT(strstr(ctx.output, "Found target: bedroom") != NULL,
-          "conditional in loop matched correctly");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "Found target: bedroom"));
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
@@ -559,8 +502,6 @@ static void test_execute_nested_if_in_loop(void) {
  * ============================================================================ */
 
 static void test_max_steps_exceeded(void) {
-   printf("\n=== test_max_steps_exceeded ===\n");
-
    /* Build a plan with PLAN_MAX_STEPS + 5 log steps using json-c */
    struct json_object *plan = json_object_new_array();
    for (int i = 0; i < PLAN_MAX_STEPS + 5; i++) {
@@ -575,16 +516,15 @@ static void test_max_steps_exceeded(void) {
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    int rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc != 0, "plan exceeding max steps returns error");
-   ASSERT(ctx.total_steps_executed <= PLAN_MAX_STEPS, "execution stopped at or before max steps");
+   TEST_ASSERT_NOT_EQUAL(0, rc);
+   TEST_ASSERT_TRUE_MESSAGE(ctx.total_steps_executed <= PLAN_MAX_STEPS,
+                            "execution stopped at or before max steps");
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_max_depth_exceeded(void) {
-   printf("\n=== test_max_depth_exceeded ===\n");
-
    /* Build deeply nested if statements exceeding PLAN_MAX_DEPTH (5) */
    const char *json = "[{\"type\": \"if\", \"condition\": \"true\", \"then\": ["
                       "  {\"type\": \"if\", \"condition\": \"true\", \"then\": ["
@@ -602,22 +542,20 @@ static void test_max_depth_exceeded(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "deeply nested plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc != 0, "deeply nested plan fails with depth error");
+   TEST_ASSERT_NOT_EQUAL(0, rc);
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_loop_iteration_cap(void) {
-   printf("\n=== test_loop_iteration_cap ===\n");
-
    /* Build a loop with more than PLAN_MAX_LOOP_ITERATIONS (10) items */
    struct json_object *plan = json_object_new_array();
    struct json_object *loop_step = json_object_new_object();
@@ -625,7 +563,7 @@ static void test_loop_iteration_cap(void) {
    json_object_object_add(loop_step, "as", json_object_new_string("item"));
 
    struct json_object *over = json_object_new_array();
-   for (int i = 0; i < 20; i++) { /* 20 > PLAN_MAX_LOOP_ITERATIONS */
+   for (int i = 0; i < 20; i++) {
       char val[8];
       snprintf(val, sizeof(val), "item%d", i);
       json_object_array_add(over, json_object_new_string(val));
@@ -646,8 +584,8 @@ static void test_loop_iteration_cap(void) {
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    int rc = plan_execute_steps(&ctx, plan);
-   /* Should cap at 10 iterations: 1 loop step + 10 log steps = 11 total */
-   ASSERT(ctx.total_steps_executed <= PLAN_MAX_LOOP_ITERATIONS + 1, "loop iterations capped");
+   TEST_ASSERT_TRUE_MESSAGE(ctx.total_steps_executed <= PLAN_MAX_LOOP_ITERATIONS + 1,
+                            "loop iterations capped");
    (void)rc;
 
    plan_context_cleanup(&ctx);
@@ -655,15 +593,12 @@ static void test_loop_iteration_cap(void) {
 }
 
 static void test_output_buffer_overflow(void) {
-   printf("\n=== test_output_buffer_overflow ===\n");
-
    /* Generate many log messages that would overflow the output buffer */
    struct json_object *plan = json_object_new_array();
    char long_msg[256];
    memset(long_msg, 'X', sizeof(long_msg) - 1);
    long_msg[sizeof(long_msg) - 1] = '\0';
 
-   /* LLM_TOOLS_RESULT_LEN is 8192; each message is 255 bytes; ~40 messages to overflow */
    for (int i = 0; i < 50; i++) {
       struct json_object *step = json_object_new_object();
       json_object_object_add(step, "type", json_object_new_string("log"));
@@ -676,11 +611,11 @@ static void test_output_buffer_overflow(void) {
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    int rc = plan_execute_steps(&ctx, plan);
-   /* Should succeed (fail-forward) but output should be truncated */
-   ASSERT(rc == 0, "plan completes despite output overflow");
-   ASSERT(ctx.output_len <= (int)sizeof(ctx.output), "output stays within buffer");
-   ASSERT(strstr(ctx.output, "[truncated]") != NULL || ctx.output_len > 0,
-          "output truncated or present");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_TRUE_MESSAGE(ctx.output_len <= (int)sizeof(ctx.output),
+                            "output stays within buffer");
+   TEST_ASSERT_TRUE_MESSAGE(strstr(ctx.output, "[truncated]") != NULL || ctx.output_len > 0,
+                            "output truncated or present");
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
@@ -691,8 +626,6 @@ static void test_output_buffer_overflow(void) {
  * ============================================================================ */
 
 static void test_tool_capability_whitelist(void) {
-   printf("\n=== test_tool_capability_whitelist ===\n");
-
    tool_metadata_t allowed_tool = { 0 };
    allowed_tool.name = "weather";
    allowed_tool.capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE;
@@ -709,11 +642,10 @@ static void test_tool_capability_whitelist(void) {
    self_ref.name = "execute_plan";
    self_ref.capabilities = TOOL_CAP_SCHEDULABLE;
 
-   ASSERT(plan_tool_is_allowed(&allowed_tool) == true, "SCHEDULABLE tool allowed");
-   ASSERT(plan_tool_is_allowed(&dangerous_tool) == false,
-          "DANGEROUS tool blocked despite SCHEDULABLE");
-   ASSERT(plan_tool_is_allowed(&no_schedule_tool) == false, "non-SCHEDULABLE tool blocked");
-   ASSERT(plan_tool_is_allowed(&self_ref) == false, "execute_plan self-reference blocked");
+   TEST_ASSERT_TRUE(plan_tool_is_allowed(&allowed_tool));
+   TEST_ASSERT_FALSE(plan_tool_is_allowed(&dangerous_tool));
+   TEST_ASSERT_FALSE(plan_tool_is_allowed(&no_schedule_tool));
+   TEST_ASSERT_FALSE(plan_tool_is_allowed(&self_ref));
 }
 
 /* ============================================================================
@@ -721,13 +653,10 @@ static void test_tool_capability_whitelist(void) {
  * ============================================================================ */
 
 static void test_parse_json_string_form(void) {
-   printf("\n=== test_parse_json_string_form ===\n");
-
-   /* Test the direct array form (string form depends on tool callback) */
    const char *direct = "[{\"type\": \"log\", \"message\": \"hello\"}]";
    struct json_object *plan = NULL;
    int rc = plan_parse(direct, &plan);
-   ASSERT(rc == 0, "direct array form parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
    if (plan)
       json_object_put(plan);
 }
@@ -737,32 +666,29 @@ static void test_parse_json_string_form(void) {
  * ============================================================================ */
 
 static void test_empty_loop(void) {
-   printf("\n=== test_empty_loop ===\n");
-
    const char *json = "[{\"type\": \"loop\", \"over\": [], \"as\": \"item\", \"steps\": ["
                       "  {\"type\": \"log\", \"message\": \"should not appear\"}"
                       "]}]";
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "empty loop plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "empty loop succeeds");
-   ASSERT(ctx.output[0] == '\0' || strstr(ctx.output, "should not appear") == NULL,
-          "empty loop body never executed");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_TRUE_MESSAGE(ctx.output[0] == '\0' ||
+                                strstr(ctx.output, "should not appear") == NULL,
+                            "empty loop body never executed");
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_if_without_else(void) {
-   printf("\n=== test_if_without_else ===\n");
-
    const char *json = "["
                       "  {\"type\": \"if\", \"condition\": \"false\", \"then\": ["
                       "    {\"type\": \"log\", \"message\": \"should not appear\"}"
@@ -771,25 +697,23 @@ static void test_if_without_else(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "if-without-else parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "if-without-else succeeds when condition is false");
-   ASSERT(ctx.output[0] == '\0' || strstr(ctx.output, "should not appear") == NULL,
-          "then branch not executed");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_TRUE_MESSAGE(ctx.output[0] == '\0' ||
+                                strstr(ctx.output, "should not appear") == NULL,
+                            "then branch not executed");
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
 }
 
 static void test_set_overwrite_in_loop(void) {
-   printf("\n=== test_set_overwrite_in_loop ===\n");
-
-   /* The loop variable should be updated each iteration */
    const char *json = "["
                       "  {\"type\": \"loop\", \"over\": [\"first\", \"second\", \"third\"], "
                       "   \"as\": \"item\", \"steps\": ["
@@ -800,15 +724,15 @@ static void test_set_overwrite_in_loop(void) {
 
    struct json_object *plan = NULL;
    int rc = plan_parse(json, &plan);
-   ASSERT(rc == 0, "plan parses");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == 0, "execution succeeds");
-   ASSERT(strstr(ctx.output, "last=third") != NULL, "loop variable overwrite leaves final value");
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "last=third"));
 
    plan_context_cleanup(&ctx);
    json_object_put(plan);
@@ -819,8 +743,6 @@ static void test_set_overwrite_in_loop(void) {
  * ============================================================================ */
 
 static void test_arg_interpolation_safe(void) {
-   printf("\n=== test_arg_interpolation_safe ===\n");
-
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
@@ -835,21 +757,21 @@ static void test_arg_interpolation_safe(void) {
 
    char out_json[1024];
    int rc = plan_build_args_json(&ctx, args, out_json, sizeof(out_json));
-   ASSERT(rc == 0, "arg construction succeeds");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
    /* The output should be valid JSON */
    struct json_object *parsed = json_tokener_parse(out_json);
-   ASSERT(parsed != NULL, "interpolated args produce valid JSON");
+   TEST_ASSERT_NOT_NULL(parsed);
 
    /* The interpolated value should preserve the original string content */
    if (parsed) {
       struct json_object *query_obj;
       bool has_query = json_object_object_get_ex(parsed, "query", &query_obj);
-      ASSERT(has_query && json_object_is_type(query_obj, json_type_string), "query field exists");
+      TEST_ASSERT_TRUE_MESSAGE(has_query && json_object_is_type(query_obj, json_type_string),
+                               "query field exists");
       if (has_query) {
          const char *query_str = json_object_get_string(query_obj);
-         ASSERT(strstr(query_str, "quotes") != NULL,
-                "original content preserved through interpolation");
+         TEST_ASSERT_NOT_NULL(strstr(query_str, "quotes"));
       }
       json_object_put(parsed);
    }
@@ -859,8 +781,6 @@ static void test_arg_interpolation_safe(void) {
 }
 
 static void test_arg_delimiter_injection(void) {
-   printf("\n=== test_arg_delimiter_injection ===\n");
-
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
@@ -873,11 +793,11 @@ static void test_arg_delimiter_injection(void) {
 
    char out_json[1024];
    int rc = plan_build_args_json(&ctx, args, out_json, sizeof(out_json));
-   ASSERT(rc == 0, "arg construction succeeds with :: in value");
+   TEST_ASSERT_EQUAL_INT(0, rc);
 
-   /* Parse and verify — the :: should be in the string value, not interpreted */
+   /* Parse and verify */
    struct json_object *parsed = json_tokener_parse(out_json);
-   ASSERT(parsed != NULL, "output is valid JSON despite :: in value");
+   TEST_ASSERT_NOT_NULL(parsed);
    if (parsed)
       json_object_put(parsed);
 
@@ -886,8 +806,6 @@ static void test_arg_delimiter_injection(void) {
 }
 
 static void test_interpolation_dot_access(void) {
-   printf("\n=== test_interpolation_dot_access ===\n");
-
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
@@ -899,55 +817,50 @@ static void test_interpolation_dot_access(void) {
 
    /* $step.color should extract "red" */
    plan_interpolate(&ctx, "$step.color", out, sizeof(out));
-   ASSERT(strcmp(out, "red") == 0, "$step.color extracts field value");
+   TEST_ASSERT_EQUAL_STRING("red", out);
 
    /* $step.room should extract "bedroom" */
    plan_interpolate(&ctx, "$step.room", out, sizeof(out));
-   ASSERT(strcmp(out, "bedroom") == 0, "$step.room extracts field value");
+   TEST_ASSERT_EQUAL_STRING("bedroom", out);
 
    /* $step without dot should output the raw JSON */
    plan_interpolate(&ctx, "$step", out, sizeof(out));
-   ASSERT(strstr(out, "color") != NULL, "$step without dot outputs raw JSON");
+   TEST_ASSERT_NOT_NULL(strstr(out, "color"));
 
    /* $step.missing should output nothing (field doesn't exist) */
    plan_interpolate(&ctx, "$step.missing", out, sizeof(out));
-   ASSERT(out[0] == '\0', "$step.missing produces empty for unknown field");
+   TEST_ASSERT_EQUAL_STRING("", out);
 
    /* Non-JSON variable with dot access falls through to raw value */
    plan_vars_set(&ctx, "plain", "hello");
    plan_interpolate(&ctx, "$plain.field", out, sizeof(out));
-   ASSERT(strcmp(out, "hello") == 0, "dot-access on non-JSON falls back to raw value");
+   TEST_ASSERT_EQUAL_STRING("hello", out);
 
    /* Dot access in a larger template */
    plan_interpolate(&ctx, "Set $step.room to $step.color", out, sizeof(out));
-   ASSERT(strcmp(out, "Set bedroom to red") == 0, "dot-access in mixed template");
+   TEST_ASSERT_EQUAL_STRING("Set bedroom to red", out);
 
    plan_context_cleanup(&ctx);
 }
 
 static void test_loop_with_object_items(void) {
-   printf("\n=== test_loop_with_object_items ===\n");
-
    plan_context_t ctx = { 0 };
    ctx.timeout_s = 5;
    clock_gettime(CLOCK_MONOTONIC, &ctx.start_time);
 
-   /* Simulate what the loop executor does with JSON objects:
-    * over: [{"color":"red"}, {"color":"blue"}], as: "item" */
    const char *plan_json =
        "[{\"type\":\"loop\",\"over\":[{\"color\":\"red\"},{\"color\":\"blue\"}],"
        "\"as\":\"item\",\"steps\":[{\"type\":\"log\",\"message\":\"$item.color\"}]}]";
 
    struct json_object *plan = NULL;
    int rc = plan_parse(plan_json, &plan);
-   ASSERT(rc == PLAN_OK, "object-loop plan parses");
+   TEST_ASSERT_EQUAL_INT(PLAN_OK, rc);
 
    rc = plan_execute_steps(&ctx, plan);
-   ASSERT(rc == PLAN_OK, "object-loop executes");
+   TEST_ASSERT_EQUAL_INT(PLAN_OK, rc);
 
-   /* Output should contain both colors */
-   ASSERT(strstr(ctx.output, "red") != NULL, "loop output contains first object field");
-   ASSERT(strstr(ctx.output, "blue") != NULL, "loop output contains second object field");
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "red"));
+   TEST_ASSERT_NOT_NULL(strstr(ctx.output, "blue"));
 
    json_object_put(plan);
    plan_context_cleanup(&ctx);
@@ -958,68 +871,39 @@ static void test_loop_with_object_items(void) {
  * ============================================================================ */
 
 int main(void) {
-   printf("Plan Executor Unit Tests\n");
-   printf("========================\n");
+   UNITY_BEGIN();
 
-   /* 1. Variable name validation */
-   test_variable_name_validation();
+   RUN_TEST(test_variable_name_validation);
+   RUN_TEST(test_variable_store);
+   RUN_TEST(test_variable_store_max_capacity);
+   RUN_TEST(test_condition_evaluation);
+   RUN_TEST(test_interpolation);
+   RUN_TEST(test_interpolation_size_limit);
+   RUN_TEST(test_parse_valid_plan);
+   RUN_TEST(test_parse_multi_step_plan);
+   RUN_TEST(test_parse_invalid_json);
+   RUN_TEST(test_parse_null_input);
+   RUN_TEST(test_parse_oversized_plan);
+   RUN_TEST(test_parse_invalid_step_type);
+   RUN_TEST(test_parse_invalid_variable_names);
+   RUN_TEST(test_execute_set_and_log);
+   RUN_TEST(test_execute_if_then);
+   RUN_TEST(test_execute_if_else);
+   RUN_TEST(test_execute_loop);
+   RUN_TEST(test_execute_nested_if_in_loop);
+   RUN_TEST(test_max_steps_exceeded);
+   RUN_TEST(test_max_depth_exceeded);
+   RUN_TEST(test_loop_iteration_cap);
+   RUN_TEST(test_output_buffer_overflow);
+   RUN_TEST(test_tool_capability_whitelist);
+   RUN_TEST(test_parse_json_string_form);
+   RUN_TEST(test_empty_loop);
+   RUN_TEST(test_if_without_else);
+   RUN_TEST(test_set_overwrite_in_loop);
+   RUN_TEST(test_arg_interpolation_safe);
+   RUN_TEST(test_arg_delimiter_injection);
+   RUN_TEST(test_interpolation_dot_access);
+   RUN_TEST(test_loop_with_object_items);
 
-   /* 2. Variable store */
-   test_variable_store();
-   test_variable_store_max_capacity();
-
-   /* 3. Condition evaluation */
-   test_condition_evaluation();
-
-   /* 4. Interpolation */
-   test_interpolation();
-   test_interpolation_size_limit();
-
-   /* 5. Plan parsing */
-   test_parse_valid_plan();
-   test_parse_multi_step_plan();
-   test_parse_invalid_json();
-   test_parse_null_input();
-   test_parse_oversized_plan();
-   test_parse_invalid_step_type();
-   test_parse_invalid_variable_names();
-
-   /* 6. Plan execution — pure logic */
-   test_execute_set_and_log();
-   test_execute_if_then();
-   test_execute_if_else();
-   test_execute_loop();
-   test_execute_nested_if_in_loop();
-
-   /* 7. Safety limits */
-   test_max_steps_exceeded();
-   test_max_depth_exceeded();
-   test_loop_iteration_cap();
-   test_output_buffer_overflow();
-
-   /* 8. Tool capability checks */
-   test_tool_capability_whitelist();
-
-   /* 9. JSON format handling */
-   test_parse_json_string_form();
-
-   /* 10. Edge cases */
-   test_empty_loop();
-   test_if_without_else();
-   test_set_overwrite_in_loop();
-
-   /* 11. Argument construction */
-   test_arg_interpolation_safe();
-   test_arg_delimiter_injection();
-
-   /* 12. Dot-access interpolation and object loops */
-   test_interpolation_dot_access();
-   test_loop_with_object_items();
-
-   /* Summary */
-   printf("\n========================\n");
-   printf("Results: %d passed, %d failed (total: %d)\n", tests_passed, tests_failed,
-          tests_passed + tests_failed);
-
-   return tests_failed > 0 ? 1 : 0;
+   return UNITY_END();
 }

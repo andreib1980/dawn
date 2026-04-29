@@ -28,50 +28,35 @@
 #include <string.h>
 
 #include "core/embedding_engine.h"
+#include "unity.h"
 
-/* ============================================================================
- * Test Harness
- * ============================================================================ */
+void setUp(void) {
+}
+void tearDown(void) {
+}
 
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_ASSERT(condition, msg)    \
-   do {                                \
-      if (condition) {                 \
-         printf("  [PASS] %s\n", msg); \
-         tests_passed++;               \
-      } else {                         \
-         printf("  [FAIL] %s\n", msg); \
-         tests_failed++;               \
-      }                                \
-   } while (0)
-
-/* Float comparison with tolerance */
+/* Float comparison tolerance */
 #define EPSILON 1e-5f
-#define NEAR(a, b) (fabsf((a) - (b)) < EPSILON)
 
 /* ============================================================================
  * Test: L2 Norm Basics
  * ============================================================================ */
 
 static void test_l2_norm_basic(void) {
-   printf("\n--- test_l2_norm_basic ---\n");
-
    /* Unit vectors */
    float e1[] = { 1.0f, 0.0f, 0.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(e1, 3), 1.0f), "unit vector norm = 1.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 1.0f, embedding_engine_l2_norm(e1, 3));
 
    float e2[] = { 0.0f, 1.0f, 0.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(e2, 3), 1.0f), "unit vector y norm = 1.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 1.0f, embedding_engine_l2_norm(e2, 3));
 
    /* Known value: [3, 4] -> norm = 5 */
    float v34[] = { 3.0f, 4.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(v34, 2), 5.0f), "[3,4] norm = 5.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 5.0f, embedding_engine_l2_norm(v34, 2));
 
    /* All ones: [1,1,1,1] -> norm = 2 */
    float ones[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(ones, 4), 2.0f), "[1,1,1,1] norm = 2.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 2.0f, embedding_engine_l2_norm(ones, 4));
 }
 
 /* ============================================================================
@@ -79,25 +64,23 @@ static void test_l2_norm_basic(void) {
  * ============================================================================ */
 
 static void test_l2_norm_edge(void) {
-   printf("\n--- test_l2_norm_edge ---\n");
-
    /* Zero vector */
    float zeros[] = { 0.0f, 0.0f, 0.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(zeros, 3), 0.0f), "zero vector norm = 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, embedding_engine_l2_norm(zeros, 3));
 
    /* NULL input */
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(NULL, 3), 0.0f), "NULL returns 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, embedding_engine_l2_norm(NULL, 3));
 
    /* Zero dims */
    float v[] = { 1.0f, 2.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(v, 0), 0.0f), "dims=0 returns 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, embedding_engine_l2_norm(v, 0));
 
    /* Negative dims */
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(v, -1), 0.0f), "dims=-1 returns 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, embedding_engine_l2_norm(v, -1));
 
    /* Single element */
    float single[] = { 7.0f };
-   TEST_ASSERT(NEAR(embedding_engine_l2_norm(single, 1), 7.0f), "single element norm = abs(val)");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 7.0f, embedding_engine_l2_norm(single, 1));
 }
 
 /* ============================================================================
@@ -105,11 +88,9 @@ static void test_l2_norm_edge(void) {
  * ============================================================================ */
 
 static void test_cosine_identical(void) {
-   printf("\n--- test_cosine_identical ---\n");
-
    float a[] = { 1.0f, 2.0f, 3.0f, 4.0f };
    float sim = embedding_engine_cosine(a, a, 4);
-   TEST_ASSERT(NEAR(sim, 1.0f), "identical vectors: cosine = 1.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 1.0f, sim);
 }
 
 /* ============================================================================
@@ -117,12 +98,10 @@ static void test_cosine_identical(void) {
  * ============================================================================ */
 
 static void test_cosine_orthogonal(void) {
-   printf("\n--- test_cosine_orthogonal ---\n");
-
    float a[] = { 1.0f, 0.0f, 0.0f };
    float b[] = { 0.0f, 1.0f, 0.0f };
    float sim = embedding_engine_cosine(a, b, 3);
-   TEST_ASSERT(NEAR(sim, 0.0f), "orthogonal vectors: cosine = 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 }
 
 /* ============================================================================
@@ -130,13 +109,11 @@ static void test_cosine_orthogonal(void) {
  * ============================================================================ */
 
 static void test_cosine_opposite(void) {
-   printf("\n--- test_cosine_opposite ---\n");
-
    float a[] = { 1.0f, 0.0f };
    float b[] = { -1.0f, 0.0f };
    float sim = embedding_engine_cosine(a, b, 2);
    /* Implementation clamps negative to 0 */
-   TEST_ASSERT(NEAR(sim, 0.0f), "opposite vectors: cosine clamped to 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 }
 
 /* ============================================================================
@@ -144,8 +121,6 @@ static void test_cosine_opposite(void) {
  * ============================================================================ */
 
 static void test_cosine_with_norms(void) {
-   printf("\n--- test_cosine_with_norms ---\n");
-
    float a[] = { 3.0f, 4.0f };
    float b[] = { 4.0f, 3.0f };
    float norm_a = embedding_engine_l2_norm(a, 2); /* 5.0 */
@@ -153,7 +128,7 @@ static void test_cosine_with_norms(void) {
 
    float sim = embedding_engine_cosine_with_norms(a, b, 2, norm_a, norm_b);
    /* dot = 12+12 = 24, cos = 24/25 = 0.96 */
-   TEST_ASSERT(NEAR(sim, 0.96f), "pre-computed norms: [3,4]·[4,3] = 0.96");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.96f, sim);
 }
 
 /* ============================================================================
@@ -161,28 +136,26 @@ static void test_cosine_with_norms(void) {
  * ============================================================================ */
 
 static void test_cosine_edge(void) {
-   printf("\n--- test_cosine_edge ---\n");
-
    float a[] = { 1.0f, 2.0f };
    float zeros[] = { 0.0f, 0.0f };
 
    /* Zero vector -> zero norm -> should return 0 (no division by zero) */
    float sim = embedding_engine_cosine(a, zeros, 2);
-   TEST_ASSERT(NEAR(sim, 0.0f), "cosine with zero vector = 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 
    sim = embedding_engine_cosine_with_norms(a, zeros, 2, 2.236f, 0.0f);
-   TEST_ASSERT(NEAR(sim, 0.0f), "pre-computed norms with zero norm_b = 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 
    /* NULL inputs */
    sim = embedding_engine_cosine(NULL, a, 2);
-   TEST_ASSERT(NEAR(sim, 0.0f), "NULL first arg = 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 
    sim = embedding_engine_cosine(a, NULL, 2);
-   TEST_ASSERT(NEAR(sim, 0.0f), "NULL second arg = 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 
    /* dims = 0 */
    sim = embedding_engine_cosine(a, a, 0);
-   TEST_ASSERT(NEAR(sim, 0.0f), "dims=0 returns 0.0");
+   TEST_ASSERT_FLOAT_WITHIN(EPSILON, 0.0f, sim);
 }
 
 /* ============================================================================
@@ -190,17 +163,15 @@ static void test_cosine_edge(void) {
  * ============================================================================ */
 
 static void test_large_vector(void) {
-   printf("\n--- test_large_vector ---\n");
-
    /* 384-dim vector (typical embedding size) */
    const int dims = 384;
    float *a = malloc((size_t)dims * sizeof(float));
    float *b = malloc((size_t)dims * sizeof(float));
 
    if (!a || !b) {
-      printf("  [SKIP] malloc failed\n");
       free(a);
       free(b);
+      TEST_FAIL_MESSAGE("malloc failed");
       return;
    }
 
@@ -209,24 +180,25 @@ static void test_large_vector(void) {
    memset(b, 0, (size_t)dims * sizeof(float));
    a[0] = 1.0f;
    b[0] = 1.0f;
-   TEST_ASSERT(NEAR(embedding_engine_cosine(a, b, dims), 1.0f),
-               "384-dim identical unit vectors = 1.0");
+   TEST_ASSERT_FLOAT_WITHIN_MESSAGE(EPSILON, 1.0f, embedding_engine_cosine(a, b, dims),
+                                    "384-dim identical unit vectors = 1.0");
 
    /* Fill with same values -> cosine = 1.0 */
    for (int i = 0; i < dims; i++) {
       a[i] = (float)(i + 1) * 0.01f;
       b[i] = (float)(i + 1) * 0.01f;
    }
-   TEST_ASSERT(NEAR(embedding_engine_cosine(a, b, dims), 1.0f), "384-dim identical vectors = 1.0");
+   TEST_ASSERT_FLOAT_WITHIN_MESSAGE(EPSILON, 1.0f, embedding_engine_cosine(a, b, dims),
+                                    "384-dim identical vectors = 1.0");
 
    /* Slightly different -> close to 1.0 */
    b[0] += 0.001f;
    float sim = embedding_engine_cosine(a, b, dims);
-   TEST_ASSERT(sim > 0.99f && sim < 1.001f, "384-dim nearly identical > 0.99");
+   TEST_ASSERT_TRUE_MESSAGE(sim > 0.99f && sim < 1.001f, "384-dim nearly identical > 0.99");
 
    /* L2 norm of 384-dim vector */
    float norm = embedding_engine_l2_norm(a, dims);
-   TEST_ASSERT(norm > 0.0f, "384-dim norm is positive");
+   TEST_ASSERT_TRUE_MESSAGE(norm > 0.0f, "384-dim norm is positive");
 
    free(a);
    free(b);
@@ -237,11 +209,9 @@ static void test_large_vector(void) {
  * ============================================================================ */
 
 static void test_not_initialized(void) {
-   printf("\n--- test_not_initialized ---\n");
-
    /* Without init, these should return safe defaults */
-   TEST_ASSERT(embedding_engine_available() == false, "not available without init");
-   TEST_ASSERT(embedding_engine_dims() == 0, "dims=0 without init");
+   TEST_ASSERT_FALSE_MESSAGE(embedding_engine_available(), "not available without init");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, embedding_engine_dims(), "dims=0 without init");
 }
 
 /* ============================================================================
@@ -249,21 +219,15 @@ static void test_not_initialized(void) {
  * ============================================================================ */
 
 int main(void) {
-   printf("=== Embedding Engine Unit Tests ===\n");
-
-   test_l2_norm_basic();
-   test_l2_norm_edge();
-   test_cosine_identical();
-   test_cosine_orthogonal();
-   test_cosine_opposite();
-   test_cosine_with_norms();
-   test_cosine_edge();
-   test_large_vector();
-   test_not_initialized();
-
-   printf("\n========================================\n");
-   printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
-   printf("========================================\n");
-
-   return tests_failed > 0 ? 1 : 0;
+   UNITY_BEGIN();
+   RUN_TEST(test_l2_norm_basic);
+   RUN_TEST(test_l2_norm_edge);
+   RUN_TEST(test_cosine_identical);
+   RUN_TEST(test_cosine_orthogonal);
+   RUN_TEST(test_cosine_opposite);
+   RUN_TEST(test_cosine_with_norms);
+   RUN_TEST(test_cosine_edge);
+   RUN_TEST(test_large_vector);
+   RUN_TEST(test_not_initialized);
+   return UNITY_END();
 }

@@ -31,24 +31,7 @@
 #include <unistd.h>
 
 #include "tools/instruction_loader.h"
-
-/* ============================================================================
- * Test Harness
- * ============================================================================ */
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define ASSERT(cond, msg)                                  \
-   do {                                                    \
-      if (cond) {                                          \
-         printf("  [PASS] %s\n", msg);                     \
-         tests_passed++;                                   \
-      } else {                                             \
-         printf("  [FAIL] %s (line %d)\n", msg, __LINE__); \
-         tests_failed++;                                   \
-      }                                                    \
-   } while (0)
+#include "unity.h"
 
 /* ============================================================================
  * Test Fixture — create temp instruction files
@@ -84,18 +67,6 @@ static void cleanup_test_files(void) {
    rmdir(TEST_DIR);
 }
 
-/* ============================================================================
- * We need to override the base dir for testing. The loader uses
- * instruction_loader_get_base_dir() which returns the compile-time default.
- * We'll test with the real function by symlinking, or we can test the
- * loader's internal logic by creating files at the default path.
- *
- * Simpler approach: create a symlink from the default dir to our test dir,
- * or just create files in CWD-relative tool_instructions/.
- *
- * Simplest: create test files at the path the loader expects.
- * ============================================================================ */
-
 #define CWD_TEST_DIR "tool_instructions"
 #define CWD_TOOL_NAME "test_loader_tmp"
 
@@ -118,35 +89,42 @@ static void cleanup_cwd_test_files(void) {
    /* Don't rmdir CWD_TEST_DIR — may contain real tool instructions */
 }
 
+void setUp(void) {
+}
+void tearDown(void) {
+}
+
 /* ============================================================================
  * 1. Null/Empty Input Handling
  * ============================================================================ */
 
 static void test_null_inputs(void) {
-   printf("\n=== test_null_inputs ===\n");
    char *output = NULL;
 
-   ASSERT(instruction_loader_load(NULL, "formal", &output) != 0, "NULL tool_name rejected");
-   ASSERT(output == NULL, "output is NULL on error");
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, instruction_loader_load(NULL, "formal", &output),
+                                 "NULL tool_name rejected");
+   TEST_ASSERT_NULL_MESSAGE(output, "output is NULL on error");
 
-   ASSERT(instruction_loader_load("", "formal", &output) != 0, "empty tool_name rejected");
-   ASSERT(output == NULL, "output is NULL on empty tool_name");
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, instruction_loader_load("", "formal", &output),
+                                 "empty tool_name rejected");
+   TEST_ASSERT_NULL_MESSAGE(output, "output is NULL on empty tool_name");
 
    /* NULL modules with valid tool — should still load _core.md */
    int rc = instruction_loader_load(CWD_TOOL_NAME, NULL, &output);
-   ASSERT(rc == 0, "NULL modules loads _core.md only");
-   ASSERT(output != NULL, "output not NULL when _core.md exists");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "NULL modules loads _core.md only");
+   TEST_ASSERT_NOT_NULL_MESSAGE(output, "output not NULL when _core.md exists");
    if (output) {
-      ASSERT(strstr(output, "Core rules") != NULL, "_core.md content present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Core rules"), "_core.md content present");
       free(output);
       output = NULL;
    }
 
    /* Empty modules string */
    rc = instruction_loader_load(CWD_TOOL_NAME, "", &output);
-   ASSERT(rc == 0, "empty modules loads _core.md only");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "empty modules loads _core.md only");
    if (output) {
-      ASSERT(strstr(output, "Core rules") != NULL, "_core.md content in empty modules");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Core rules"),
+                                   "_core.md content in empty modules");
       free(output);
       output = NULL;
    }
@@ -157,17 +135,16 @@ static void test_null_inputs(void) {
  * ============================================================================ */
 
 static void test_single_module(void) {
-   printf("\n=== test_single_module ===\n");
    char *output = NULL;
 
    int rc = instruction_loader_load(CWD_TOOL_NAME, "formal", &output);
-   ASSERT(rc == 0, "single module loads successfully");
-   ASSERT(output != NULL, "output not NULL");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "single module loads successfully");
+   TEST_ASSERT_NOT_NULL_MESSAGE(output, "output not NULL");
    if (output) {
-      ASSERT(strstr(output, "Core rules") != NULL, "_core.md content present");
-      ASSERT(strstr(output, "Formal style") != NULL, "formal.md content present");
-      ASSERT(strstr(output, "Casual style") == NULL, "casual.md NOT present");
-      ASSERT(strstr(output, "---") != NULL, "separator between sections");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Core rules"), "_core.md content present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Formal style"), "formal.md content present");
+      TEST_ASSERT_NULL_MESSAGE(strstr(output, "Casual style"), "casual.md NOT present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "---"), "separator between sections");
       free(output);
    }
 }
@@ -177,16 +154,15 @@ static void test_single_module(void) {
  * ============================================================================ */
 
 static void test_multiple_modules(void) {
-   printf("\n=== test_multiple_modules ===\n");
    char *output = NULL;
 
    int rc = instruction_loader_load(CWD_TOOL_NAME, "formal,casual", &output);
-   ASSERT(rc == 0, "multiple modules load successfully");
-   ASSERT(output != NULL, "output not NULL");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "multiple modules load successfully");
+   TEST_ASSERT_NOT_NULL_MESSAGE(output, "output not NULL");
    if (output) {
-      ASSERT(strstr(output, "Core rules") != NULL, "_core.md content present");
-      ASSERT(strstr(output, "Formal style") != NULL, "formal.md content present");
-      ASSERT(strstr(output, "Casual style") != NULL, "casual.md content present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Core rules"), "_core.md content present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Formal style"), "formal.md content present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Casual style"), "casual.md content present");
       free(output);
    }
 }
@@ -196,15 +172,16 @@ static void test_multiple_modules(void) {
  * ============================================================================ */
 
 static void test_whitespace_handling(void) {
-   printf("\n=== test_whitespace_handling ===\n");
    char *output = NULL;
 
    int rc = instruction_loader_load(CWD_TOOL_NAME, " formal , casual ", &output);
-   ASSERT(rc == 0, "whitespace-padded modules load");
-   ASSERT(output != NULL, "output not NULL");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "whitespace-padded modules load");
+   TEST_ASSERT_NOT_NULL_MESSAGE(output, "output not NULL");
    if (output) {
-      ASSERT(strstr(output, "Formal style") != NULL, "formal.md found despite whitespace");
-      ASSERT(strstr(output, "Casual style") != NULL, "casual.md found despite whitespace");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Formal style"),
+                                   "formal.md found despite whitespace");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Casual style"),
+                                   "casual.md found despite whitespace");
       free(output);
    }
 }
@@ -214,15 +191,14 @@ static void test_whitespace_handling(void) {
  * ============================================================================ */
 
 static void test_missing_module(void) {
-   printf("\n=== test_missing_module ===\n");
    char *output = NULL;
 
    /* One valid, one invalid */
    int rc = instruction_loader_load(CWD_TOOL_NAME, "formal,nonexistent", &output);
-   ASSERT(rc == 0, "partial load succeeds (valid + missing)");
-   ASSERT(output != NULL, "output not NULL");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "partial load succeeds (valid + missing)");
+   TEST_ASSERT_NOT_NULL_MESSAGE(output, "output not NULL");
    if (output) {
-      ASSERT(strstr(output, "Formal style") != NULL, "valid module content present");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Formal style"), "valid module content present");
       free(output);
    }
 }
@@ -232,12 +208,11 @@ static void test_missing_module(void) {
  * ============================================================================ */
 
 static void test_missing_tool(void) {
-   printf("\n=== test_missing_tool ===\n");
    char *output = NULL;
 
    int rc = instruction_loader_load("no_such_tool_xyz", "formal", &output);
-   ASSERT(rc != 0, "nonexistent tool returns error");
-   ASSERT(output == NULL, "output is NULL for missing tool");
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "nonexistent tool returns error");
+   TEST_ASSERT_NULL_MESSAGE(output, "output is NULL for missing tool");
 }
 
 /* ============================================================================
@@ -245,25 +220,27 @@ static void test_missing_tool(void) {
  * ============================================================================ */
 
 static void test_path_traversal(void) {
-   printf("\n=== test_path_traversal ===\n");
    char *output = NULL;
 
    /* Tool name with path traversal */
-   ASSERT(instruction_loader_load("../etc", "passwd", &output) != 0, "tool_name with ../ rejected");
-   ASSERT(output == NULL, "no output on traversal attempt (tool)");
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, instruction_loader_load("../etc", "passwd", &output),
+                                 "tool_name with ../ rejected");
+   TEST_ASSERT_NULL_MESSAGE(output, "no output on traversal attempt (tool)");
 
-   ASSERT(instruction_loader_load("foo/bar", "baz", &output) != 0, "tool_name with / rejected");
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, instruction_loader_load("foo/bar", "baz", &output),
+                                 "tool_name with / rejected");
 
    /* Module name with path traversal */
    int rc = instruction_loader_load(CWD_TOOL_NAME, "../../etc/passwd", &output);
    /* Should still succeed (loads _core.md), but the malicious module is skipped */
    if (rc == 0 && output) {
-      ASSERT(strstr(output, "root:") == NULL, "no /etc/passwd content leaked");
+      TEST_ASSERT_NULL_MESSAGE(strstr(output, "root:"), "no /etc/passwd content leaked");
       free(output);
       output = NULL;
    } else {
       /* If _core.md loaded, rc is 0. If not (no _core), could be error. Either is safe. */
-      ASSERT(output == NULL || strstr(output, "root:") == NULL, "path traversal in module blocked");
+      TEST_ASSERT_TRUE_MESSAGE(output == NULL || strstr(output, "root:") == NULL,
+                               "path traversal in module blocked");
       free(output);
       output = NULL;
    }
@@ -272,7 +249,8 @@ static void test_path_traversal(void) {
    rc = instruction_loader_load(CWD_TOOL_NAME, ".hidden", &output);
    if (rc == 0 && output) {
       /* Should only have _core.md, not the .hidden module */
-      ASSERT(strstr(output, "Core rules") != NULL, "only _core.md loaded, dot module skipped");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Core rules"),
+                                   "only _core.md loaded, dot module skipped");
       free(output);
       output = NULL;
    }
@@ -283,16 +261,15 @@ static void test_path_traversal(void) {
  * ============================================================================ */
 
 static void test_core_only(void) {
-   printf("\n=== test_core_only ===\n");
    char *output = NULL;
 
    int rc = instruction_loader_load(CWD_TOOL_NAME, "", &output);
-   ASSERT(rc == 0, "core-only load succeeds");
-   ASSERT(output != NULL, "output not NULL");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "core-only load succeeds");
+   TEST_ASSERT_NOT_NULL_MESSAGE(output, "output not NULL");
    if (output) {
-      ASSERT(strstr(output, "Core rules") != NULL, "_core.md content present");
-      ASSERT(strstr(output, "Formal") == NULL, "no module content");
-      ASSERT(strstr(output, "Casual") == NULL, "no module content");
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(output, "Core rules"), "_core.md content present");
+      TEST_ASSERT_NULL_MESSAGE(strstr(output, "Formal"), "no module content");
+      TEST_ASSERT_NULL_MESSAGE(strstr(output, "Casual"), "no module content");
       free(output);
    }
 }
@@ -302,12 +279,11 @@ static void test_core_only(void) {
  * ============================================================================ */
 
 static void test_base_dir_api(void) {
-   printf("\n=== test_base_dir_api ===\n");
-
    const char *dir = instruction_loader_get_base_dir();
-   ASSERT(dir != NULL, "base dir not NULL");
-   ASSERT(strlen(dir) > 0, "base dir not empty");
-   ASSERT(strcmp(dir, INSTRUCTION_LOADER_DEFAULT_DIR) == 0, "base dir matches default");
+   TEST_ASSERT_NOT_NULL_MESSAGE(dir, "base dir not NULL");
+   TEST_ASSERT_TRUE_MESSAGE(strlen(dir) > 0, "base dir not empty");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE(INSTRUCTION_LOADER_DEFAULT_DIR, dir,
+                                    "base dir matches default");
 }
 
 /* ============================================================================
@@ -315,24 +291,23 @@ static void test_base_dir_api(void) {
  * ============================================================================ */
 
 int main(void) {
-   printf("=== Instruction Loader Unit Tests ===\n");
-
    /* Set up test files in CWD-relative path */
    setup_cwd_test_files();
 
-   test_null_inputs();
-   test_single_module();
-   test_multiple_modules();
-   test_whitespace_handling();
-   test_missing_module();
-   test_missing_tool();
-   test_path_traversal();
-   test_core_only();
-   test_base_dir_api();
+   UNITY_BEGIN();
+   RUN_TEST(test_null_inputs);
+   RUN_TEST(test_single_module);
+   RUN_TEST(test_multiple_modules);
+   RUN_TEST(test_whitespace_handling);
+   RUN_TEST(test_missing_module);
+   RUN_TEST(test_missing_tool);
+   RUN_TEST(test_path_traversal);
+   RUN_TEST(test_core_only);
+   RUN_TEST(test_base_dir_api);
+   int result = UNITY_END();
 
    /* Clean up */
    cleanup_cwd_test_files();
 
-   printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
-   return tests_failed > 0 ? 1 : 0;
+   return result;
 }

@@ -60,7 +60,7 @@ jobs:
       - name: Build CI tests
         run: make -C build-ci -j"$(nproc)" tests-ci
 
-      - name: Run tests
+      - name: Run tests (legacy bash runner)
         run: |
           cd build-ci/tests
           failed=0
@@ -70,7 +70,8 @@ jobs:
             test_plan_executor test_sse_parser test_sentence_buffer \
             test_session_commands test_wake_word test_instruction_loader \
             test_document_extract test_phone_db test_missed_notifications_db \
-            test_memory_filter test_temporal_relations test_relation_supersede; do
+            test_memory_filter test_temporal_relations test_relation_supersede \
+            test_time_query_parser test_context_compaction; do
             echo "::group::${test}"
             if ./"${test}"; then
               echo "::endgroup::"
@@ -81,6 +82,9 @@ jobs:
             fi
           done
           exit $failed
+
+      - name: Run tests (ctest)
+        run: ctest --test-dir build-ci --output-on-failure --no-tests=error -L ci
 
   # -------------------------------------------------------------------------
   # Job 3: Docker Build (~10 min)

@@ -35,21 +35,7 @@
 #include "auth/auth_db_internal.h"
 #include "memory/memory_db.h"
 #include "memory/memory_types.h"
-
-/* Test harness */
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_ASSERT(cond, msg)         \
-   do {                                \
-      if (cond) {                      \
-         printf("  [PASS] %s\n", msg); \
-         tests_passed++;               \
-      } else {                         \
-         printf("  [FAIL] %s\n", msg); \
-         tests_failed++;               \
-      }                                \
-   } while (0)
+#include "unity.h"
 
 /* DDL mirroring auth_db_core.c (relevant subset).  Covers v19 base tables
  * (memory_entities, memory_facts) plus v33 additions (memory_relations with
@@ -85,8 +71,6 @@ static const char *DDL =
    "  VALUES (21, 1, 'Microsoft', 'org', 'microsoft');"
    "INSERT INTO memory_entities (id, user_id, name, entity_type, canonical_name)"
    "  VALUES (22, 1, 'Apple', 'org', 'apple');"
-   /* Fresh subject + targets used only by the as-of test, isolated from earlier
-    * tests' state to avoid cross-test object-id collisions. */
    "INSERT INTO memory_entities (id, user_id, name, entity_type, canonical_name)"
    "  VALUES (50, 1, 'Bob', 'person', 'bob');"
    "INSERT INTO memory_entities (id, user_id, name, entity_type, canonical_name)"
@@ -114,7 +98,6 @@ static const char *DDL =
    ");";
 /* clang-format on */
 
-/* Prepare only the relation statements memory_db.c needs for these tests. */
 static int prepare_statements(void) {
    int rc;
 
@@ -166,23 +149,51 @@ static int prepare_statements(void) {
    return 0;
 }
 
-static int setup_db(void) {
-   if (sqlite3_open(":memory:", &s_db.db) != SQLITE_OK)
-      return -1;
+static void setup_db(void) {
+   if (sqlite3_open(":memory:", &s_db.db) != SQLITE_OK) {
+      fprintf(stderr, "Failed to open in-memory DB\n");
+      exit(1);
+   }
 
    char *err = NULL;
    if (sqlite3_exec(s_db.db, DDL, NULL, NULL, &err) != SQLITE_OK) {
       fprintf(stderr, "DDL failed: %s\n", err ? err : "?");
       sqlite3_free(err);
-      return -1;
+      exit(1);
    }
 
    if (prepare_statements() != 0) {
       fprintf(stderr, "prepare failed\n");
-      return -1;
+      exit(1);
    }
    s_db.initialized = true;
-   return 0;
+}
+
+static void teardown_db(void) {
+   if (s_db.stmt_memory_relation_create)
+      sqlite3_finalize(s_db.stmt_memory_relation_create);
+   if (s_db.stmt_memory_relation_close_open)
+      sqlite3_finalize(s_db.stmt_memory_relation_close_open);
+   if (s_db.stmt_memory_relation_list_by_subject)
+      sqlite3_finalize(s_db.stmt_memory_relation_list_by_subject);
+   if (s_db.stmt_memory_relation_list_by_subject_at)
+      sqlite3_finalize(s_db.stmt_memory_relation_list_by_subject_at);
+   s_db.stmt_memory_relation_create = NULL;
+   s_db.stmt_memory_relation_close_open = NULL;
+   s_db.stmt_memory_relation_list_by_subject = NULL;
+   s_db.stmt_memory_relation_list_by_subject_at = NULL;
+   if (s_db.db)
+      sqlite3_close(s_db.db);
+   s_db.db = NULL;
+   s_db.initialized = false;
+}
+
+void setUp(void) {
+   setup_db();
+}
+
+void tearDown(void) {
+   teardown_db();
 }
 
 static int count_open_relations(int subject_id, const char *relation) {
@@ -205,50 +216,36 @@ static int count_open_relations(int subject_id, const char *relation) {
  * ============================================================================ */
 
 static void test_supersede_exclusive(void) {
-   printf("\n--- test_supersede_exclusive (works_at) ---\n");
-
    /* Insert: Alice works_at Google */
    int rc = memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, 0, 0, NULL);
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "supersede insert #1 ok");
-   TEST_ASSERT(count_open_relations(10, "works_at") == 1, "one open works_at after first insert");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "works_at"));
 
-   /* Now: Alice works_at Microsoft → must auto-close Google */
+   /* Now: Alice works_at Microsoft — must auto-close Google */
    rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "supersede insert #2 ok");
-   TEST_ASSERT(count_open_relations(10, "works_at") == 1,
-               "still one open works_at (prior auto-closed)");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "works_at"));
 }
 
 static void test_supersede_idempotent_same_object(void) {
-   printf("\n--- test_supersede_idempotent_same_object ---\n");
-
-   /* Re-insert: Alice works_at Microsoft (same target as prior test) */
+   /* Insert: Alice works_at Microsoft */
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
    int prior = count_open_relations(10, "works_at");
+
+   /* Re-insert same target */
    int rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
-   TEST_ASSERT(rc == MEMORY_DB_SUCCESS, "re-insert same object ok");
-   /* Expectation: a NEW row is added, but the prior open Microsoft row is NOT
-    * closed because object matches.  So open count goes prior + 1.
-    * (The dedup-of-duplicate-opens problem is handled at the extraction layer
-    * via memory_db_fact_find_similar; supersede is purely a write-side primitive.) */
-   TEST_ASSERT(count_open_relations(10, "works_at") == prior + 1,
-               "same-object re-insert does not auto-close");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(prior + 1, count_open_relations(10, "works_at"));
 }
 
 static void test_non_exclusive_does_not_close(void) {
-   printf("\n--- test_non_exclusive_does_not_close ---\n");
-
-   /* "likes" is not in EXCLUSIVE_RELATIONS — multiple open rows valid. */
    memory_db_relation_supersede(1, 10, "likes", 20, NULL, 0, 0.7f, 0, 0, NULL);
    memory_db_relation_supersede(1, 10, "likes", 21, NULL, 0, 0.7f, 0, 0, NULL);
    memory_db_relation_supersede(1, 10, "likes", 22, NULL, 0, 0.7f, 0, 0, NULL);
-   int n = count_open_relations(10, "likes");
-   TEST_ASSERT(n == 3, "all three 'likes' relations remain open");
+   TEST_ASSERT_EQUAL_INT(3, count_open_relations(10, "likes"));
 }
 
 static void test_list_by_subject_at(void) {
-   printf("\n--- test_list_by_subject_at (historical query) ---\n");
-
-   /* Use fresh subject Bob (50) with two lives_in rows with disjoint validity. */
    memory_db_relation_create(1, 50, "lives_in", 60, NULL, 0, 0.9f, 1000, 2000);
    memory_db_relation_create(1, 50, "lives_in", 61, NULL, 0, 0.9f, 2000, 0);
 
@@ -257,7 +254,7 @@ static void test_list_by_subject_at(void) {
    /* As-of 1500: only CityA row matches */
    int n = 0;
    int rc = memory_db_relation_list_by_subject_at(1, 50, 1500, out, 10, &n);
-   TEST_ASSERT(rc == 0, "relation_list_by_subject_at succeeds");
+   TEST_ASSERT_EQUAL_INT(0, rc);
    bool found_a = false, found_b = false;
    for (int i = 0; i < n; i++) {
       if (out[i].object_entity_id == 60)
@@ -265,12 +262,12 @@ static void test_list_by_subject_at(void) {
       if (out[i].object_entity_id == 61)
          found_b = true;
    }
-   TEST_ASSERT(found_a, "as-of 1500 includes CityA row");
-   TEST_ASSERT(!found_b, "as-of 1500 excludes CityB row (valid_from = 2000)");
+   TEST_ASSERT_TRUE_MESSAGE(found_a, "as-of 1500 includes CityA row");
+   TEST_ASSERT_FALSE_MESSAGE(found_b, "as-of 1500 excludes CityB row");
 
    /* As-of 2500: only CityB row matches */
    rc = memory_db_relation_list_by_subject_at(1, 50, 2500, out, 10, &n);
-   TEST_ASSERT(rc == 0, "relation_list_by_subject_at (2500) succeeds");
+   TEST_ASSERT_EQUAL_INT(0, rc);
    found_a = false;
    found_b = false;
    for (int i = 0; i < n; i++) {
@@ -279,25 +276,13 @@ static void test_list_by_subject_at(void) {
       if (out[i].object_entity_id == 61)
          found_b = true;
    }
-   TEST_ASSERT(!found_a, "as-of 2500 excludes CityA (valid_to = 2000)");
-   TEST_ASSERT(found_b, "as-of 2500 includes CityB row");
+   TEST_ASSERT_FALSE_MESSAGE(found_a, "as-of 2500 excludes CityA");
+   TEST_ASSERT_TRUE_MESSAGE(found_b, "as-of 2500 includes CityB row");
 }
 
 static void test_supersede_closes_at_new_valid_from(void) {
-   printf("\n--- test_supersede_closes_at_new_valid_from ---\n");
-
-   /* Historical ingestion: Alice works_at Google 2018-2020, then Microsoft
-    * starting 2020.  If supersede closes Google at time(NULL) instead of the
-    * new row's valid_from, both rows overlap from 2020..now and
-    * list_by_subject_at(2019) would return both. */
-   int64_t t2018 = 1514764800; /* 2018-01-01 */
-   int64_t t2020 = 1577836800; /* 2020-01-01 */
-
-   /* Reset subject 10's works_at rows from prior tests */
-   sqlite3_exec(s_db.db,
-                "DELETE FROM memory_relations WHERE subject_entity_id = 10 "
-                "AND relation = 'works_at'",
-                NULL, NULL, NULL);
+   int64_t t2018 = 1514764800;
+   int64_t t2020 = 1577836800;
 
    memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0, NULL);
    memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0, NULL);
@@ -305,37 +290,27 @@ static void test_supersede_closes_at_new_valid_from(void) {
    /* As-of 2019: only Google should be valid */
    memory_relation_t out[10];
    int n = 0;
-   int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800 /* 2019 */, out, 10, &n);
-   TEST_ASSERT(rc == 0, "relation_list_by_subject_at (2019) succeeds");
+   int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10, &n);
+   TEST_ASSERT_EQUAL_INT(0, rc);
    int works_at_count = 0;
    for (int i = 0; i < n; i++) {
       if (strcmp(out[i].relation, "works_at") == 0)
          works_at_count++;
    }
-   TEST_ASSERT(works_at_count == 1,
-               "as-of 2019: exactly one works_at (Google) — no overlap with Microsoft");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(1, works_at_count,
+                                 "as-of 2019: exactly one works_at — no overlap");
 }
 
 static void test_supersede_skips_close_for_historical_insert(void) {
-   printf("\n--- test_supersede_skips_close_for_historical_insert ---\n");
-
-   /* Reset subject 10's works_at rows from prior tests */
-   sqlite3_exec(s_db.db,
-                "DELETE FROM memory_relations WHERE subject_entity_id = 10 "
-                "AND relation = 'works_at'",
-                NULL, NULL, NULL);
-
    /* Establish current reality: Alice works_at Microsoft, ongoing */
    memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
 
-   /* Ingest a HISTORICAL fact discovered later: Alice worked at Google 2018-2020.
-    * This must NOT close the current Microsoft row — it's adding a bounded
-    * historical slice, not superseding the present. */
+   /* Ingest HISTORICAL: Alice worked at Google 2018-2020 */
    int64_t t2018 = 1514764800;
    int64_t t2020 = 1577836800;
    memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020, NULL);
 
-   /* Microsoft row should still be open (valid_to NULL). */
+   /* Microsoft row should still be open */
    sqlite3_stmt *stmt = NULL;
    sqlite3_prepare_v2(s_db.db,
                       "SELECT COUNT(*) FROM memory_relations "
@@ -346,49 +321,37 @@ static void test_supersede_skips_close_for_historical_insert(void) {
    if (sqlite3_step(stmt) == SQLITE_ROW)
       open_microsoft = sqlite3_column_int(stmt, 0);
    sqlite3_finalize(stmt);
-   TEST_ASSERT(open_microsoft == 1,
-               "historical insert does not close the current (open) Microsoft row");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(1, open_microsoft,
+                                 "historical insert does not close current Microsoft row");
 
-   /* As-of 2019 returns Google only; as-of now returns Microsoft only. */
+   /* As-of 2019 returns Google */
    memory_relation_t out[10];
    int n = 0;
    int rc = memory_db_relation_list_by_subject_at(1, 10, 1546300800, out, 10, &n);
-   TEST_ASSERT(rc == 0, "relation_list_by_subject_at (historical) succeeds");
+   TEST_ASSERT_EQUAL_INT(0, rc);
    bool found_google_2019 = false;
    for (int i = 0; i < n; i++) {
       if (strcmp(out[i].relation, "works_at") == 0 && out[i].object_entity_id == 20)
          found_google_2019 = true;
    }
-   TEST_ASSERT(found_google_2019, "as-of 2019: Google row is valid");
+   TEST_ASSERT_TRUE_MESSAGE(found_google_2019, "as-of 2019: Google row is valid");
 }
 
 static void test_canonical_categories(void) {
-   printf("\n--- test_canonical_categories ---\n");
-
-   TEST_ASSERT(MEMORY_FACT_CATEGORY_COUNT == 8, "8 canonical categories");
-   TEST_ASSERT(strcmp(MEMORY_FACT_CATEGORIES[0], "personal") == 0, "first is 'personal'");
-   TEST_ASSERT(strcmp(MEMORY_FACT_CATEGORIES[7], "general") == 0, "last is 'general' (fallback)");
-   TEST_ASSERT(MEMORY_FACT_CATEGORIES[8] == NULL, "list is NULL-terminated");
+   TEST_ASSERT_EQUAL_INT(8, MEMORY_FACT_CATEGORY_COUNT);
+   TEST_ASSERT_EQUAL_STRING("personal", MEMORY_FACT_CATEGORIES[0]);
+   TEST_ASSERT_EQUAL_STRING("general", MEMORY_FACT_CATEGORIES[7]);
+   TEST_ASSERT_NULL(MEMORY_FACT_CATEGORIES[8]);
 }
 
 int main(void) {
-   if (setup_db() != 0) {
-      fprintf(stderr, "setup failed\n");
-      return 1;
-   }
-
-   test_supersede_exclusive();
-   test_supersede_idempotent_same_object();
-   test_non_exclusive_does_not_close();
-   test_list_by_subject_at();
-   test_supersede_closes_at_new_valid_from();
-   test_supersede_skips_close_for_historical_insert();
-   test_canonical_categories();
-
-   printf("\n=========================================\n");
-   printf("Tests passed: %d, failed: %d\n", tests_passed, tests_failed);
-   printf("=========================================\n");
-
-   sqlite3_close(s_db.db);
-   return tests_failed > 0 ? 1 : 0;
+   UNITY_BEGIN();
+   RUN_TEST(test_supersede_exclusive);
+   RUN_TEST(test_supersede_idempotent_same_object);
+   RUN_TEST(test_non_exclusive_does_not_close);
+   RUN_TEST(test_list_by_subject_at);
+   RUN_TEST(test_supersede_closes_at_new_valid_from);
+   RUN_TEST(test_supersede_skips_close_for_historical_insert);
+   RUN_TEST(test_canonical_categories);
+   return UNITY_END();
 }

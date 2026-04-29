@@ -32,24 +32,12 @@
 #include "auth/auth_db_internal.h"
 #include "dawn_error.h"
 #include "tools/document_db.h"
+#include "unity.h"
 
 /* ============================================================================
  * Test Harness
  * ============================================================================ */
 
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_ASSERT(condition, msg)    \
-   do {                                \
-      if (condition) {                 \
-         printf("  [PASS] %s\n", msg); \
-         tests_passed++;               \
-      } else {                         \
-         printf("  [FAIL] %s\n", msg); \
-         tests_failed++;               \
-      }                                \
-   } while (0)
 
 /* ============================================================================
  * Setup / Teardown
@@ -263,18 +251,19 @@ static void test_create_and_get(void) {
                                       "aabbccdd11223344aabbccdd11223344"
                                       "aabbccdd11223344aabbccdd11223344",
                                       5, false, &id);
-   TEST_ASSERT(create_rc == SUCCESS && id > 0, "create returns SUCCESS with positive ID");
+   TEST_ASSERT_TRUE_MESSAGE(create_rc == SUCCESS && id > 0,
+                            "create returns SUCCESS with positive ID");
 
    document_t doc;
    int rc = document_db_get(id, &doc);
-   TEST_ASSERT(rc == 0, "get returns success");
-   TEST_ASSERT(doc.id == id, "ID matches");
-   TEST_ASSERT(doc.user_id == 1, "user_id matches");
-   TEST_ASSERT(strcmp(doc.filename, "report.pdf") == 0, "filename matches");
-   TEST_ASSERT(strcmp(doc.filetype, "pdf") == 0, "filetype matches");
-   TEST_ASSERT(doc.num_chunks == 5, "num_chunks matches");
-   TEST_ASSERT(doc.is_global == false, "is_global is false");
-   TEST_ASSERT(doc.created_at > 0, "created_at is set");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "get returns success");
+   TEST_ASSERT_TRUE_MESSAGE(doc.id == id, "ID matches");
+   TEST_ASSERT_TRUE_MESSAGE(doc.user_id == 1, "user_id matches");
+   TEST_ASSERT_TRUE_MESSAGE(strcmp(doc.filename, "report.pdf") == 0, "filename matches");
+   TEST_ASSERT_TRUE_MESSAGE(strcmp(doc.filetype, "pdf") == 0, "filetype matches");
+   TEST_ASSERT_TRUE_MESSAGE(doc.num_chunks == 5, "num_chunks matches");
+   TEST_ASSERT_TRUE_MESSAGE(doc.is_global == false, "is_global is false");
+   TEST_ASSERT_TRUE_MESSAGE(doc.created_at > 0, "created_at is set");
 }
 
 /* ============================================================================
@@ -286,7 +275,7 @@ static void test_get_nonexistent(void) {
 
    document_t doc;
    int rc = document_db_get(99999, &doc);
-   TEST_ASSERT(rc == FAILURE, "get non-existent returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(rc == FAILURE, "get non-existent returns FAILURE");
 }
 
 /* ============================================================================
@@ -300,14 +289,14 @@ static void test_delete(void) {
    document_db_create(1, "temp.txt", "/docs/temp.txt", "txt",
                       "1111111111111111111111111111111111111111111111111111111111111111", 1, false,
                       &id);
-   TEST_ASSERT(id > 0, "create for delete test");
+   TEST_ASSERT_TRUE_MESSAGE(id > 0, "create for delete test");
 
    int rc = document_db_delete(id);
-   TEST_ASSERT(rc == 0, "delete returns success");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "delete returns success");
 
    document_t doc;
    rc = document_db_get(id, &doc);
-   TEST_ASSERT(rc == FAILURE, "get after delete returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(rc == FAILURE, "get after delete returns FAILURE");
 }
 
 /* ============================================================================
@@ -320,7 +309,7 @@ static void test_count_user(void) {
    /* User 2 starts with 0 docs */
    int count = 0;
    document_db_count_user(2, &count);
-   TEST_ASSERT(count == 0, "user 2 starts with 0 docs");
+   TEST_ASSERT_TRUE_MESSAGE(count == 0, "user 2 starts with 0 docs");
 
    /* Create two docs for user 2 */
    int64_t tmp_id = 0;
@@ -332,7 +321,7 @@ static void test_count_user(void) {
                       &tmp_id);
 
    document_db_count_user(2, &count);
-   TEST_ASSERT(count == 2, "user 2 has 2 docs after creating two");
+   TEST_ASSERT_TRUE_MESSAGE(count == 2, "user 2 has 2 docs after creating two");
 }
 
 /* ============================================================================
@@ -345,17 +334,17 @@ static void test_find_by_hash(void) {
    const char *hash = "4444444444444444444444444444444444444444444444444444444444444444";
    int64_t id = 0;
    document_db_create(1, "hashed.md", "hashed.md", "md", hash, 3, false, &id);
-   TEST_ASSERT(id > 0, "create doc with known hash");
+   TEST_ASSERT_TRUE_MESSAGE(id > 0, "create doc with known hash");
 
    int64_t found = 0;
    document_db_find_by_hash(hash, 1, &found);
-   TEST_ASSERT(found == id, "find_by_hash returns correct ID");
+   TEST_ASSERT_TRUE_MESSAGE(found == id, "find_by_hash returns correct ID");
 
    int64_t not_found = 0;
    document_db_find_by_hash("0000000000000000000000000000000000000000000"
                             "000000000000000000000000",
                             1, &not_found);
-   TEST_ASSERT(not_found == 0, "find_by_hash returns 0 for unknown hash");
+   TEST_ASSERT_TRUE_MESSAGE(not_found == 0, "find_by_hash returns 0 for unknown hash");
 }
 
 /* ============================================================================
@@ -368,7 +357,8 @@ static void test_list(void) {
    document_t docs[10];
    int count = 0;
    int list_rc = document_db_list(1, docs, 10, 0, &count);
-   TEST_ASSERT(list_rc == SUCCESS && count >= 0, "list returns SUCCESS with non-negative count");
+   TEST_ASSERT_TRUE_MESSAGE(list_rc == SUCCESS && count >= 0,
+                            "list returns SUCCESS with non-negative count");
 
    /* All returned docs should belong to user 1 or be global */
    int all_accessible = 1;
@@ -376,7 +366,7 @@ static void test_list(void) {
       if (docs[i].user_id != 1 && !docs[i].is_global)
          all_accessible = 0;
    }
-   TEST_ASSERT(all_accessible, "list only returns user's own or global docs");
+   TEST_ASSERT_TRUE_MESSAGE(all_accessible, "list only returns user's own or global docs");
 }
 
 /* ============================================================================
@@ -386,13 +376,16 @@ static void test_list(void) {
 static void test_list_all(void) {
    printf("\n--- test_list_all ---\n");
 
+   int64_t id1 = 0, id2 = 0;
+   document_db_create(1, "u1.txt", "u1.txt", "txt", "hash_u1", 1, false, &id1);
+   document_db_create(2, "u2.txt", "u2.txt", "txt", "hash_u2", 1, false, &id2);
+
    document_t docs[20];
    int count = 0;
    int list_rc = document_db_list_all(docs, 20, 0, &count);
-   TEST_ASSERT(list_rc == SUCCESS && count >= 0,
-               "list_all returns SUCCESS with non-negative count");
+   TEST_ASSERT_TRUE_MESSAGE(list_rc == SUCCESS && count >= 0,
+                            "list_all returns SUCCESS with non-negative count");
 
-   /* Should include docs from both users */
    int has_user1 = 0, has_user2 = 0;
    for (int i = 0; i < count; i++) {
       if (docs[i].user_id == 1)
@@ -400,16 +393,15 @@ static void test_list_all(void) {
       if (docs[i].user_id == 2)
          has_user2 = 1;
    }
-   TEST_ASSERT(has_user1, "list_all includes user 1 docs");
-   TEST_ASSERT(has_user2, "list_all includes user 2 docs");
+   TEST_ASSERT_TRUE_MESSAGE(has_user1, "list_all includes user 1 docs");
+   TEST_ASSERT_TRUE_MESSAGE(has_user2, "list_all includes user 2 docs");
 
-   /* Verify owner_name populated via JOIN */
    int has_owner_name = 0;
    for (int i = 0; i < count; i++) {
       if (strlen(docs[i].owner_name) > 0)
          has_owner_name = 1;
    }
-   TEST_ASSERT(has_owner_name, "list_all populates owner_name from users JOIN");
+   TEST_ASSERT_TRUE_MESSAGE(has_owner_name, "list_all populates owner_name from users JOIN");
 }
 
 /* ============================================================================
@@ -424,17 +416,17 @@ static void test_list_pagination(void) {
    /* Get first page (limit 2) */
    int page1 = 0;
    document_db_list_all(docs, 2, 0, &page1);
-   TEST_ASSERT(page1 >= 0, "page 1 returns non-negative count");
+   TEST_ASSERT_TRUE_MESSAGE(page1 >= 0, "page 1 returns non-negative count");
 
    /* Get second page */
    int page2 = 0;
    document_db_list_all(docs, 2, 2, &page2);
-   TEST_ASSERT(page2 >= 0, "page 2 returns non-negative count");
+   TEST_ASSERT_TRUE_MESSAGE(page2 >= 0, "page 2 returns non-negative count");
 
    /* Total should equal list_all with high limit */
    int total = 0;
    document_db_list_all(docs, 20, 0, &total);
-   TEST_ASSERT(page1 + page2 <= total, "pages don't exceed total");
+   TEST_ASSERT_TRUE_MESSAGE(page1 + page2 <= total, "pages don't exceed total");
 }
 
 /* ============================================================================
@@ -448,23 +440,23 @@ static void test_update_global(void) {
    document_db_create(1, "private.txt", "private.txt", "txt",
                       "5555555555555555555555555555555555555555555555555555555555555555", 1, false,
                       &id);
-   TEST_ASSERT(id > 0, "create private doc");
+   TEST_ASSERT_TRUE_MESSAGE(id > 0, "create private doc");
 
    document_t doc;
    document_db_get(id, &doc);
-   TEST_ASSERT(doc.is_global == false, "starts as private");
+   TEST_ASSERT_TRUE_MESSAGE(doc.is_global == false, "starts as private");
 
    int rc = document_db_update_global(id, true);
-   TEST_ASSERT(rc == 0, "update_global returns success");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "update_global returns success");
 
    document_db_get(id, &doc);
-   TEST_ASSERT(doc.is_global == true, "now global after update");
+   TEST_ASSERT_TRUE_MESSAGE(doc.is_global == true, "now global after update");
 
    rc = document_db_update_global(id, false);
-   TEST_ASSERT(rc == 0, "update_global back to private");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "update_global back to private");
 
    document_db_get(id, &doc);
-   TEST_ASSERT(doc.is_global == false, "private again after second update");
+   TEST_ASSERT_TRUE_MESSAGE(doc.is_global == false, "private again after second update");
 }
 
 /* ============================================================================
@@ -478,7 +470,7 @@ static void test_global_visibility(void) {
    document_db_create(1, "shared.pdf", "shared.pdf", "pdf",
                       "6666666666666666666666666666666666666666666666666666666666666666", 2, true,
                       &id);
-   TEST_ASSERT(id > 0, "create global doc owned by user 1");
+   TEST_ASSERT_TRUE_MESSAGE(id > 0, "create global doc owned by user 1");
 
    /* User 2 should see it in their list */
    document_t docs[10];
@@ -489,7 +481,7 @@ static void test_global_visibility(void) {
       if (docs[i].id == id)
          found = 1;
    }
-   TEST_ASSERT(found, "global doc visible to user 2 via list");
+   TEST_ASSERT_TRUE_MESSAGE(found, "global doc visible to user 2 via list");
 }
 
 /* ============================================================================
@@ -503,23 +495,23 @@ static void test_find_by_name(void) {
    document_db_create(1, "MyReport2024.pdf", "MyReport2024.pdf", "pdf",
                       "7777777777777777777777777777777777777777777777777777777777777777", 4, false,
                       &id);
-   TEST_ASSERT(id > 0, "create doc for name search");
+   TEST_ASSERT_TRUE_MESSAGE(id > 0, "create doc for name search");
 
    document_t doc;
    int rc = document_db_find_by_name(1, "MyReport2024.pdf", &doc);
-   TEST_ASSERT(rc == 0, "exact name match found");
-   TEST_ASSERT(doc.id == id, "exact match returns correct doc");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "exact name match found");
+   TEST_ASSERT_TRUE_MESSAGE(doc.id == id, "exact match returns correct doc");
 
    rc = document_db_find_by_name(1, "Report2024", &doc);
-   TEST_ASSERT(rc == 0, "partial name match found");
-   TEST_ASSERT(doc.id == id, "partial match returns correct doc");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "partial name match found");
+   TEST_ASSERT_TRUE_MESSAGE(doc.id == id, "partial match returns correct doc");
 
    rc = document_db_find_by_name(1, "nonexistent_document", &doc);
-   TEST_ASSERT(rc == FAILURE, "non-existent name returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(rc == FAILURE, "non-existent name returns FAILURE");
 
    /* User 2 should NOT find user 1's private doc */
    rc = document_db_find_by_name(2, "MyReport2024.pdf", &doc);
-   TEST_ASSERT(rc == FAILURE, "other user cannot find private doc by name");
+   TEST_ASSERT_TRUE_MESSAGE(rc == FAILURE, "other user cannot find private doc by name");
 }
 
 /* ============================================================================
@@ -534,7 +526,7 @@ static void test_chunk_create_and_read(void) {
                       "888888888888888888888888888888888888888888888888888888"
                       "8888888888",
                       3, false, &doc_id);
-   TEST_ASSERT(doc_id > 0, "create doc for chunk test");
+   TEST_ASSERT_TRUE_MESSAGE(doc_id > 0, "create doc for chunk test");
 
    /* Create 3 chunks with dummy embeddings */
    float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
@@ -542,26 +534,28 @@ static void test_chunk_create_and_read(void) {
    document_db_chunk_create(doc_id, 0, "First chunk text.", emb, 4, 1.0f, 0, &c0);
    document_db_chunk_create(doc_id, 1, "Second chunk text.", emb, 4, 1.0f, 0, &c1);
    document_db_chunk_create(doc_id, 2, "Third chunk text.", emb, 4, 1.0f, 0, &c2);
-   TEST_ASSERT(c0 > 0, "chunk 0 created");
-   TEST_ASSERT(c1 > 0, "chunk 1 created");
-   TEST_ASSERT(c2 > 0, "chunk 2 created");
+   TEST_ASSERT_TRUE_MESSAGE(c0 > 0, "chunk 0 created");
+   TEST_ASSERT_TRUE_MESSAGE(c1 > 0, "chunk 1 created");
+   TEST_ASSERT_TRUE_MESSAGE(c2 > 0, "chunk 2 created");
 
    /* Read all chunks */
    document_chunk_t chunks[5];
    int count = 0;
    document_db_chunk_read(doc_id, chunks, 5, 0, &count);
-   TEST_ASSERT(count == 3, "read returns 3 chunks");
-   TEST_ASSERT(chunks[0].chunk_index == 0, "chunk 0 index correct");
-   TEST_ASSERT(chunks[1].chunk_index == 1, "chunk 1 index correct");
-   TEST_ASSERT(chunks[2].chunk_index == 2, "chunk 2 index correct");
-   TEST_ASSERT(strcmp(chunks[0].text, "First chunk text.") == 0, "chunk 0 text matches");
-   TEST_ASSERT(strcmp(chunks[2].text, "Third chunk text.") == 0, "chunk 2 text matches");
+   TEST_ASSERT_TRUE_MESSAGE(count == 3, "read returns 3 chunks");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[0].chunk_index == 0, "chunk 0 index correct");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[1].chunk_index == 1, "chunk 1 index correct");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[2].chunk_index == 2, "chunk 2 index correct");
+   TEST_ASSERT_TRUE_MESSAGE(strcmp(chunks[0].text, "First chunk text.") == 0,
+                            "chunk 0 text matches");
+   TEST_ASSERT_TRUE_MESSAGE(strcmp(chunks[2].text, "Third chunk text.") == 0,
+                            "chunk 2 text matches");
 
    /* Paginated read: start at chunk 1, limit 2 */
    document_db_chunk_read(doc_id, chunks, 2, 1, &count);
-   TEST_ASSERT(count == 2, "paginated read returns 2 chunks");
-   TEST_ASSERT(chunks[0].chunk_index == 1, "first paginated chunk is index 1");
-   TEST_ASSERT(chunks[1].chunk_index == 2, "second paginated chunk is index 2");
+   TEST_ASSERT_TRUE_MESSAGE(count == 2, "paginated read returns 2 chunks");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[0].chunk_index == 1, "first paginated chunk is index 1");
+   TEST_ASSERT_TRUE_MESSAGE(chunks[1].chunk_index == 2, "second paginated chunk is index 2");
 }
 
 /* ============================================================================
@@ -573,24 +567,25 @@ static void test_invalid_params(void) {
 
    /* NULL output params */
    int dummy_count = 0;
-   TEST_ASSERT(document_db_list(1, NULL, 10, 0, &dummy_count) == FAILURE,
-               "list with NULL out returns FAILURE");
-   TEST_ASSERT(document_db_list_all(NULL, 10, 0, &dummy_count) == FAILURE,
-               "list_all with NULL out returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(document_db_list(1, NULL, 10, 0, &dummy_count) == FAILURE,
+                            "list with NULL out returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(document_db_list_all(NULL, 10, 0, &dummy_count) == FAILURE,
+                            "list_all with NULL out returns FAILURE");
 
    /* Zero/negative limit */
    document_t docs[5];
-   TEST_ASSERT(document_db_list(1, docs, 0, 0, &dummy_count) == FAILURE,
-               "list with limit 0 returns FAILURE");
-   TEST_ASSERT(document_db_list(1, docs, -1, 0, &dummy_count) == FAILURE,
-               "list with negative limit returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(document_db_list(1, docs, 0, 0, &dummy_count) == FAILURE,
+                            "list with limit 0 returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(document_db_list(1, docs, -1, 0, &dummy_count) == FAILURE,
+                            "list with negative limit returns FAILURE");
 
    /* Delete non-existent */
-   TEST_ASSERT(document_db_delete(99999) == FAILURE, "delete non-existent returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(document_db_delete(99999) == FAILURE,
+                            "delete non-existent returns FAILURE");
 
    /* Update global non-existent */
-   TEST_ASSERT(document_db_update_global(99999, true) == FAILURE,
-               "update_global non-existent returns FAILURE");
+   TEST_ASSERT_TRUE_MESSAGE(document_db_update_global(99999, true) == FAILURE,
+                            "update_global non-existent returns FAILURE");
 }
 
 /* ============================================================================
@@ -605,7 +600,7 @@ static void test_cascade_delete(void) {
                       "999999999999999999999999999999999999999999999999999999"
                       "9999999999",
                       2, false, &doc_id);
-   TEST_ASSERT(doc_id > 0, "create doc for cascade test");
+   TEST_ASSERT_TRUE_MESSAGE(doc_id > 0, "create doc for cascade test");
 
    float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
    int64_t tmp_chunk = 0;
@@ -616,45 +611,43 @@ static void test_cascade_delete(void) {
    document_chunk_t chunks[5];
    int count = 0;
    document_db_chunk_read(doc_id, chunks, 5, 0, &count);
-   TEST_ASSERT(count == 2, "chunks exist before delete");
+   TEST_ASSERT_TRUE_MESSAGE(count == 2, "chunks exist before delete");
 
    /* Delete document — chunks should cascade */
    int rc = document_db_delete(doc_id);
-   TEST_ASSERT(rc == 0, "delete returns success");
+   TEST_ASSERT_TRUE_MESSAGE(rc == 0, "delete returns success");
 
    document_db_chunk_read(doc_id, chunks, 5, 0, &count);
-   TEST_ASSERT(count == 0, "chunks removed after cascade delete");
+   TEST_ASSERT_TRUE_MESSAGE(count == 0, "chunks removed after cascade delete");
 }
 
 /* ============================================================================
  * Main
  * ============================================================================ */
 
-int main(void) {
-   printf("=== Document DB Unit Tests ===\n");
-
+void setUp(void) {
    setup_db();
+}
 
-   test_create_and_get();
-   test_get_nonexistent();
-   test_delete();
-   test_count_user();
-   test_find_by_hash();
-   test_list();
-   test_list_all();
-   test_list_pagination();
-   test_update_global();
-   test_global_visibility();
-   test_find_by_name();
-   test_chunk_create_and_read();
-   test_invalid_params();
-   test_cascade_delete();
-
+void tearDown(void) {
    teardown_db();
+}
 
-   printf("\n========================================\n");
-   printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
-   printf("========================================\n");
-
-   return tests_failed > 0 ? 1 : 0;
+int main(void) {
+   UNITY_BEGIN();
+   RUN_TEST(test_create_and_get);
+   RUN_TEST(test_get_nonexistent);
+   RUN_TEST(test_delete);
+   RUN_TEST(test_count_user);
+   RUN_TEST(test_find_by_hash);
+   RUN_TEST(test_list);
+   RUN_TEST(test_list_all);
+   RUN_TEST(test_list_pagination);
+   RUN_TEST(test_update_global);
+   RUN_TEST(test_global_visibility);
+   RUN_TEST(test_find_by_name);
+   RUN_TEST(test_chunk_create_and_read);
+   RUN_TEST(test_invalid_params);
+   RUN_TEST(test_cascade_delete);
+   return UNITY_END();
 }

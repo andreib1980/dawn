@@ -1,62 +1,132 @@
 /*
- * Test program for sentence buffering
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Unit tests for the sentence buffer used by the TTS streaming pipeline.
  */
 
-#include <stdio.h>
 #include <string.h>
 
+#include "unity.h"
 #include "utils/sentence_buffer.h"
 
-static int sentence_count = 0;
+#define MAX_CAPTURED 16
+#define MAX_SENTENCE_LEN 256
 
-void test_sentence_callback(const char *sentence, void *userdata) {
+static int sentence_count;
+static char captured[MAX_CAPTURED][MAX_SENTENCE_LEN];
+
+static void capture_callback(const char *sentence, void *userdata) {
+   (void)userdata;
+   if (sentence_count < MAX_CAPTURED) {
+      strncpy(captured[sentence_count], sentence, MAX_SENTENCE_LEN - 1);
+      captured[sentence_count][MAX_SENTENCE_LEN - 1] = '\0';
+   }
    sentence_count++;
-   printf("[Sentence %d]: %s\n", sentence_count, sentence);
 }
 
-int main(void) {
-   printf("=== Sentence Buffer Test ===\n\n");
+void setUp(void) {
+   sentence_count = 0;
+   memset(captured, 0, sizeof(captured));
+}
 
-   sentence_buffer_t *buf = sentence_buffer_create(test_sentence_callback, NULL);
-   if (!buf) {
-      fprintf(stderr, "Failed to create sentence buffer\n");
-      return 1;
-   }
+void tearDown(void) {
+}
 
-   // Test 1: Simple sentence with period
-   printf("Test 1: Simple sentence\n");
+void test_simple_sentence(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
    sentence_buffer_feed(buf, "Hello world. ");
-   printf("\n");
+   TEST_ASSERT_EQUAL_INT(1, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("Hello world.", captured[0]);
 
-   // Test 2: Sentence split across chunks
-   printf("Test 2: Split sentence\n");
+   sentence_buffer_free(buf);
+}
+
+void test_split_across_chunks(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
    sentence_buffer_feed(buf, "This is ");
+   TEST_ASSERT_EQUAL_INT(0, sentence_count);
    sentence_buffer_feed(buf, "a test. ");
-   printf("\n");
+   TEST_ASSERT_EQUAL_INT(1, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("This is a test.", captured[0]);
 
-   // Test 3: Multiple terminators
-   printf("Test 3: Multiple terminators\n");
+   sentence_buffer_free(buf);
+}
+
+void test_multiple_terminators(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
    sentence_buffer_feed(buf, "Question? ");
+   TEST_ASSERT_EQUAL_INT(1, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("Question?", captured[0]);
+
    sentence_buffer_feed(buf, "Exclamation! ");
+   TEST_ASSERT_EQUAL_INT(2, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("Exclamation!", captured[1]);
+
+   /* Colon is NOT a sentence terminator (only on :\n) */
    sentence_buffer_feed(buf, "Note: ");
-   printf("\n");
+   TEST_ASSERT_EQUAL_INT(2, sentence_count);
 
-   // Test 4: Long chunk with multiple sentences
-   printf("Test 4: Multiple sentences in one chunk\n");
+   sentence_buffer_free(buf);
+}
+
+void test_multiple_sentences_one_chunk(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
    sentence_buffer_feed(buf, "First sentence. Second sentence! Third one? ");
-   printf("\n");
+   TEST_ASSERT_EQUAL_INT(3, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("First sentence.", captured[0]);
+   TEST_ASSERT_EQUAL_STRING("Second sentence!", captured[1]);
+   TEST_ASSERT_EQUAL_STRING("Third one?", captured[2]);
 
-   // Test 5: Incomplete sentence that needs flush
-   printf("Test 5: Incomplete sentence (should flush)\n");
+   sentence_buffer_free(buf);
+}
+
+void test_flush_incomplete(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
    sentence_buffer_feed(buf, "Incomplete without terminator");
-   sentence_buffer_flush(buf);
-   printf("\n");
+   TEST_ASSERT_EQUAL_INT(0, sentence_count);
 
-   // Test 6: Simulate OpenAI-style chunking
-   printf("Test 6: OpenAI-style token chunks\n");
+   sentence_buffer_flush(buf);
+   TEST_ASSERT_EQUAL_INT(1, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("Incomplete without terminator", captured[0]);
+
+   sentence_buffer_free(buf);
+}
+
+void test_token_by_token(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
    sentence_buffer_feed(buf, "Hello");
    sentence_buffer_feed(buf, "!");
-   sentence_buffer_feed(buf, " ");  // This space triggers sentence
+   sentence_buffer_feed(buf, " ");
+   TEST_ASSERT_EQUAL_INT(1, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("Hello!", captured[0]);
+
    sentence_buffer_feed(buf, "2");
    sentence_buffer_feed(buf, " ");
    sentence_buffer_feed(buf, "+");
@@ -67,20 +137,55 @@ int main(void) {
    sentence_buffer_feed(buf, " ");
    sentence_buffer_feed(buf, "4");
    sentence_buffer_feed(buf, ".");
-   sentence_buffer_flush(buf);  // Flush the final sentence
-   printf("\n");
-
-   // Test 7: Newlines and whitespace
-   printf("Test 7: Newlines\n");
-   sentence_buffer_feed(buf, "Hello!\n\n2 + 2 equals 4.");
    sentence_buffer_flush(buf);
-   printf("\n");
+   TEST_ASSERT_EQUAL_INT(2, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("2 + 2 equals 4.", captured[1]);
 
    sentence_buffer_free(buf);
+}
 
-   printf("=== Test Complete ===\n");
-   printf("Total sentences extracted: %d\n", sentence_count);
-   printf("Expected: ~13 sentences\n");
+void test_paragraph_break(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
 
-   return 0;
+   sentence_buffer_feed(buf, "Hello!\n\n2 + 2 equals 4.");
+   TEST_ASSERT_EQUAL_INT(1, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("Hello!", captured[0]);
+
+   sentence_buffer_flush(buf);
+   TEST_ASSERT_EQUAL_INT(2, sentence_count);
+   TEST_ASSERT_EQUAL_STRING("2 + 2 equals 4.", captured[1]);
+
+   sentence_buffer_free(buf);
+}
+
+void test_create_null_callback(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(NULL, NULL);
+   TEST_ASSERT_NULL(buf);
+}
+
+void test_clear_discards(void) {
+   sentence_buffer_t *buf = sentence_buffer_create(capture_callback, NULL);
+   TEST_ASSERT_NOT_NULL(buf);
+
+   sentence_buffer_feed(buf, "Buffered text");
+   sentence_buffer_clear(buf);
+   sentence_buffer_flush(buf);
+   TEST_ASSERT_EQUAL_INT(0, sentence_count);
+
+   sentence_buffer_free(buf);
+}
+
+int main(void) {
+   UNITY_BEGIN();
+   RUN_TEST(test_simple_sentence);
+   RUN_TEST(test_split_across_chunks);
+   RUN_TEST(test_multiple_terminators);
+   RUN_TEST(test_multiple_sentences_one_chunk);
+   RUN_TEST(test_flush_incomplete);
+   RUN_TEST(test_token_by_token);
+   RUN_TEST(test_paragraph_break);
+   RUN_TEST(test_create_null_callback);
+   RUN_TEST(test_clear_discards);
+   return UNITY_END();
 }

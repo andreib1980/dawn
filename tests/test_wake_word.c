@@ -28,48 +28,12 @@
 #include <string.h>
 
 #include "core/wake_word.h"
+#include "unity.h"
 
-/* ============================================================================
- * Test Harness
- * ============================================================================ */
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-static int assertions_passed = 0;
-
-#define ASSERT(cond, msg)                                 \
-   do {                                                   \
-      if (cond) {                                         \
-         assertions_passed++;                             \
-      } else {                                            \
-         printf("  FAIL: %s (line %d)\n", msg, __LINE__); \
-         tests_failed++;                                  \
-         return;                                          \
-      }                                                   \
-   } while (0)
-
-#define ASSERT_STR_EQ(a, b, msg)                                                                   \
-   do {                                                                                            \
-      if ((a) && (b) && strcmp((a), (b)) == 0) {                                                   \
-         assertions_passed++;                                                                      \
-      } else {                                                                                     \
-         printf("  FAIL: %s — expected \"%s\", got \"%s\" (line %d)\n", msg, (b) ? (b) : "(null)", \
-                (a) ? (a) : "(null)", __LINE__);                                                   \
-         tests_failed++;                                                                           \
-         return;                                                                                   \
-      }                                                                                            \
-   } while (0)
-
-#define RUN_TEST(fn)                \
-   do {                             \
-      int before = tests_failed;    \
-      printf("  %s...", #fn);       \
-      fn();                         \
-      if (tests_failed == before) { \
-         tests_passed++;            \
-         printf(" OK\n");           \
-      }                             \
-   } while (0)
+void setUp(void) {
+}
+void tearDown(void) {
+}
 
 /* ============================================================================
  * Normalize Tests
@@ -77,41 +41,41 @@ static int assertions_passed = 0;
 
 static void test_normalize_basic(void) {
    char *r = wake_word_normalize("Hello World");
-   ASSERT(r != NULL, "normalize returns non-NULL");
-   ASSERT_STR_EQ(r, "hello world", "lowercase conversion");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r, "normalize returns non-NULL");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("hello world", r, "lowercase conversion");
    free(r);
 }
 
 static void test_normalize_punctuation(void) {
    char *r = wake_word_normalize("Hey, Friday! What's up?");
-   ASSERT(r != NULL, "normalize returns non-NULL");
-   ASSERT_STR_EQ(r, "hey friday whats up", "punctuation stripped");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r, "normalize returns non-NULL");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("hey friday whats up", r, "punctuation stripped");
    free(r);
 }
 
 static void test_normalize_digits(void) {
    char *r = wake_word_normalize("Set timer for 5 minutes");
-   ASSERT(r != NULL, "normalize returns non-NULL");
-   ASSERT_STR_EQ(r, "set timer for 5 minutes", "digits preserved");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r, "normalize returns non-NULL");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("set timer for 5 minutes", r, "digits preserved");
    free(r);
 }
 
 static void test_normalize_null(void) {
    char *r = wake_word_normalize(NULL);
-   ASSERT(r == NULL, "NULL input returns NULL");
+   TEST_ASSERT_NULL_MESSAGE(r, "NULL input returns NULL");
 }
 
 static void test_normalize_empty(void) {
    char *r = wake_word_normalize("");
-   ASSERT(r != NULL, "empty input returns non-NULL");
-   ASSERT_STR_EQ(r, "", "empty input returns empty string");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r, "empty input returns non-NULL");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("", r, "empty input returns empty string");
    free(r);
 }
 
 static void test_normalize_only_punctuation(void) {
    char *r = wake_word_normalize("...!!??");
-   ASSERT(r != NULL, "only punctuation returns non-NULL");
-   ASSERT_STR_EQ(r, "", "only punctuation returns empty string");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r, "only punctuation returns non-NULL");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("", r, "only punctuation returns empty string");
    free(r);
 }
 
@@ -121,86 +85,86 @@ static void test_normalize_only_punctuation(void) {
 
 static void test_wake_hey_friday(void) {
    wake_word_result_t r = wake_word_check("hey friday");
-   ASSERT(r.detected, "hey friday detected");
-   ASSERT(!r.has_command, "no command after wake word");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "hey friday detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.has_command, "no command after wake word");
 }
 
 static void test_wake_hello_friday(void) {
    wake_word_result_t r = wake_word_check("hello friday");
-   ASSERT(r.detected, "hello friday detected");
-   ASSERT(!r.has_command, "no command");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "hello friday detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.has_command, "no command");
 }
 
 static void test_wake_okay_friday(void) {
    wake_word_result_t r = wake_word_check("okay friday");
-   ASSERT(r.detected, "okay friday detected");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "okay friday detected");
 }
 
 static void test_wake_good_morning_friday(void) {
    wake_word_result_t r = wake_word_check("good morning friday");
-   ASSERT(r.detected, "good morning friday detected");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "good morning friday detected");
 }
 
 static void test_wake_with_command(void) {
    wake_word_result_t r = wake_word_check("hey friday what time is it");
-   ASSERT(r.detected, "wake word detected");
-   ASSERT(r.has_command, "command detected after wake word");
-   ASSERT(r.command != NULL, "command pointer non-NULL");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "wake word detected");
+   TEST_ASSERT_TRUE_MESSAGE(r.has_command, "command detected after wake word");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r.command, "command pointer non-NULL");
    /* Command should point to clean text (no leading whitespace/punctuation) */
-   ASSERT_STR_EQ(r.command, "what time is it", "command text correct");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("what time is it", r.command, "command text correct");
 }
 
 static void test_wake_with_punctuation(void) {
    wake_word_result_t r = wake_word_check("Hey, Friday! Turn on the lights.");
-   ASSERT(r.detected, "wake word detected through punctuation");
-   ASSERT(r.has_command, "command detected after punctuated wake word");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "wake word detected through punctuation");
+   TEST_ASSERT_TRUE_MESSAGE(r.has_command, "command detected after punctuated wake word");
 }
 
 static void test_wake_mixed_case(void) {
    wake_word_result_t r = wake_word_check("HEY FRIDAY");
-   ASSERT(r.detected, "uppercase wake word detected");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "uppercase wake word detected");
 }
 
 static void test_wake_not_detected(void) {
    wake_word_result_t r = wake_word_check("what is the weather today");
-   ASSERT(!r.detected, "no wake word in random speech");
-   ASSERT(!r.has_command, "no command without wake word");
+   TEST_ASSERT_FALSE_MESSAGE(r.detected, "no wake word in random speech");
+   TEST_ASSERT_FALSE_MESSAGE(r.has_command, "no command without wake word");
 }
 
 static void test_wake_partial_name(void) {
    /* "fri" is not "friday" — should not match */
    wake_word_result_t r = wake_word_check("hey fri");
-   ASSERT(!r.detected, "partial wake word not detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.detected, "partial wake word not detected");
 }
 
 static void test_wake_name_embedded(void) {
    /* "friday" embedded in a longer word — strstr would match, but it's
     * preceded by "hey " prefix so "hey fridaynight" matches "hey friday" */
    wake_word_result_t r = wake_word_check("hey fridaynight plans");
-   ASSERT(r.detected, "wake word detected (prefix match)");
-   ASSERT(r.has_command, "trailing text is command");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "wake word detected (prefix match)");
+   TEST_ASSERT_TRUE_MESSAGE(r.has_command, "trailing text is command");
 }
 
 static void test_wake_null_input(void) {
    wake_word_result_t r = wake_word_check(NULL);
-   ASSERT(!r.detected, "NULL input not detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.detected, "NULL input not detected");
 }
 
 static void test_wake_empty_input(void) {
    wake_word_result_t r = wake_word_check("");
-   ASSERT(!r.detected, "empty input not detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.detected, "empty input not detected");
 }
 
 static void test_wake_only_whitespace(void) {
    wake_word_result_t r = wake_word_check("   ");
-   ASSERT(!r.detected, "whitespace-only not detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.detected, "whitespace-only not detected");
 }
 
 static void test_wake_word_only_trailing_punct(void) {
    /* "hey friday." — wake word with trailing punctuation, no real command */
    wake_word_result_t r = wake_word_check("hey friday.");
-   ASSERT(r.detected, "wake word detected");
-   ASSERT(!r.has_command, "trailing punctuation is not a command");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "wake word detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.has_command, "trailing punctuation is not a command");
 }
 
 static void test_wake_all_prefixes(void) {
@@ -214,7 +178,7 @@ static void test_wake_all_prefixes(void) {
       wake_word_result_t r = wake_word_check(buf);
       char msg[128];
       snprintf(msg, sizeof(msg), "'%s friday' detected", prefixes[i]);
-      ASSERT(r.detected, msg);
+      TEST_ASSERT_TRUE_MESSAGE(r.detected, msg);
    }
 }
 
@@ -224,47 +188,47 @@ static void test_wake_all_prefixes(void) {
 
 static void test_goodbye_detected(void) {
    wake_word_result_t r = wake_word_check("goodbye");
-   ASSERT(r.is_goodbye, "goodbye detected");
-   ASSERT(!r.detected, "goodbye is not a wake word");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_goodbye, "goodbye detected");
+   TEST_ASSERT_FALSE_MESSAGE(r.detected, "goodbye is not a wake word");
 }
 
 static void test_goodbye_good_night(void) {
    wake_word_result_t r = wake_word_check("Good Night");
-   ASSERT(r.is_goodbye, "good night detected (case insensitive)");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_goodbye, "good night detected (case insensitive)");
 }
 
 static void test_cancel_stop(void) {
    wake_word_result_t r = wake_word_check("stop");
-   ASSERT(r.is_cancel, "stop detected as cancel");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_cancel, "stop detected as cancel");
 }
 
 static void test_cancel_never_mind(void) {
    wake_word_result_t r = wake_word_check("never mind");
-   ASSERT(r.is_cancel, "never mind detected as cancel");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_cancel, "never mind detected as cancel");
 }
 
 static void test_cancel_with_punctuation(void) {
    wake_word_result_t r = wake_word_check("Stop!");
-   ASSERT(r.is_cancel, "stop with punctuation detected");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_cancel, "stop with punctuation detected");
 }
 
 static void test_ignore_empty(void) {
    /* Empty string after normalization matches the "" ignore word,
     * but wake_word_check returns early for empty input */
    wake_word_result_t r = wake_word_check("the");
-   ASSERT(r.is_ignore, "'the' detected as ignore word");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_ignore, "'the' detected as ignore word");
 }
 
 static void test_ignore_nevermind(void) {
    wake_word_result_t r = wake_word_check("nevermind");
-   ASSERT(r.is_ignore, "nevermind detected as ignore");
+   TEST_ASSERT_TRUE_MESSAGE(r.is_ignore, "nevermind detected as ignore");
 }
 
 static void test_not_goodbye(void) {
    wake_word_result_t r = wake_word_check("what is the weather");
-   ASSERT(!r.is_goodbye, "random text is not goodbye");
-   ASSERT(!r.is_cancel, "random text is not cancel");
-   ASSERT(!r.is_ignore, "random text is not ignore");
+   TEST_ASSERT_FALSE_MESSAGE(r.is_goodbye, "random text is not goodbye");
+   TEST_ASSERT_FALSE_MESSAGE(r.is_cancel, "random text is not cancel");
+   TEST_ASSERT_FALSE_MESSAGE(r.is_ignore, "random text is not ignore");
 }
 
 /* ============================================================================
@@ -273,16 +237,17 @@ static void test_not_goodbye(void) {
 
 static void test_command_with_leading_spaces(void) {
    wake_word_result_t r = wake_word_check("hey friday   what time is it");
-   ASSERT(r.detected, "detected with extra spaces");
-   ASSERT(r.has_command, "command detected");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "detected with extra spaces");
+   TEST_ASSERT_TRUE_MESSAGE(r.has_command, "command detected");
 }
 
 static void test_command_with_commas(void) {
    wake_word_result_t r = wake_word_check("Hey Friday, please turn on the lights");
-   ASSERT(r.detected, "detected through comma");
-   ASSERT(r.has_command, "command after comma");
+   TEST_ASSERT_TRUE_MESSAGE(r.detected, "detected through comma");
+   TEST_ASSERT_TRUE_MESSAGE(r.has_command, "command after comma");
    /* wake_word_check now strips leading punctuation/whitespace from command */
-   ASSERT(r.command[0] == 'p' || r.command[0] == 'P', "command starts with actual text");
+   TEST_ASSERT_TRUE_MESSAGE(r.command[0] == 'p' || r.command[0] == 'P',
+                            "command starts with actual text");
 }
 
 /* ============================================================================
@@ -290,12 +255,12 @@ static void test_command_with_commas(void) {
  * ============================================================================ */
 
 int main(void) {
-   printf("=== Wake Word Unit Tests ===\n\n");
-
    /* Initialize with "friday" as the AI name */
    wake_word_init("friday");
 
-   printf("--- Normalization ---\n");
+   UNITY_BEGIN();
+
+   /* Normalization */
    RUN_TEST(test_normalize_basic);
    RUN_TEST(test_normalize_punctuation);
    RUN_TEST(test_normalize_digits);
@@ -303,7 +268,7 @@ int main(void) {
    RUN_TEST(test_normalize_empty);
    RUN_TEST(test_normalize_only_punctuation);
 
-   printf("\n--- Wake Word Detection ---\n");
+   /* Wake Word Detection */
    RUN_TEST(test_wake_hey_friday);
    RUN_TEST(test_wake_hello_friday);
    RUN_TEST(test_wake_okay_friday);
@@ -320,7 +285,7 @@ int main(void) {
    RUN_TEST(test_wake_word_only_trailing_punct);
    RUN_TEST(test_wake_all_prefixes);
 
-   printf("\n--- Goodbye / Cancel / Ignore ---\n");
+   /* Goodbye / Cancel / Ignore */
    RUN_TEST(test_goodbye_detected);
    RUN_TEST(test_goodbye_good_night);
    RUN_TEST(test_cancel_stop);
@@ -330,12 +295,9 @@ int main(void) {
    RUN_TEST(test_ignore_nevermind);
    RUN_TEST(test_not_goodbye);
 
-   printf("\n--- Command Extraction Edge Cases ---\n");
+   /* Command Extraction Edge Cases */
    RUN_TEST(test_command_with_leading_spaces);
    RUN_TEST(test_command_with_commas);
 
-   printf("\n=== Results: %d passed, %d failed (%d assertions) ===\n", tests_passed, tests_failed,
-          assertions_passed);
-
-   return tests_failed > 0 ? 1 : 0;
+   return UNITY_END();
 }

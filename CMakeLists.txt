@@ -849,6 +849,10 @@ execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/c
 # =============================================================================
 # Tests are not built by default. Run "make tests" to build all test executables.
 # Individual tests can be built with "make test_<name>" after running cmake.
+# enable_testing() must be here (not inside tests/) so CTestTestfile.cmake is
+# generated at the build root — EXCLUDE_FROM_ALL subdirs only propagate to their
+# own build directory.
+enable_testing()
 add_subdirectory(tests EXCLUDE_FROM_ALL)
 
 # =============================================================================

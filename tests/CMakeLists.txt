@@ -9,6 +9,13 @@
 
 set(CMAKE_C_STANDARD 11)
 
+# Unity test framework (vendored, matches STAT/ECHO repos)
+# NOTE: DAWN uses EXCLUDE_FROM_ALL for tests (unlike ECHO/STAT which build tests
+# by default) because the Jetson target has limited resources. This means ctest
+# is a test-runner only — `make tests-ci` must be run first to build the binaries.
+add_library(unity STATIC unity/unity.c)
+target_include_directories(unity PUBLIC unity)
+
 # Source root directory (parent of tests/)
 set(SRC_ROOT ${CMAKE_SOURCE_DIR})
 
@@ -27,7 +34,9 @@ add_executable(test_sse_parser
 
 target_link_libraries(test_sse_parser
                       dawn_common
+                      unity
                       ${JSONC_LIBRARIES})
+add_test(NAME test_sse_parser COMMAND test_sse_parser)
 
 # Test: Sentence Buffer
 add_executable(test_sentence_buffer
@@ -36,7 +45,9 @@ add_executable(test_sentence_buffer
 
 target_link_libraries(test_sentence_buffer
                       dawn_common
+                      unity
                       ${JSONC_LIBRARIES})
+add_test(NAME test_sentence_buffer COMMAND test_sentence_buffer)
 
 # Test: End-to-End Streaming
 add_executable(test_streaming
@@ -59,6 +70,7 @@ target_link_libraries(test_streaming
                       ${JSONC_LIBRARIES}
                       OpenSSL::SSL
                       OpenSSL::Crypto)
+add_test(NAME test_streaming COMMAND test_streaming)
 
 # Test: ASR Benchmark (requires both Vosk and Whisper)
 add_executable(asr_benchmark
@@ -82,11 +94,13 @@ target_link_libraries(asr_benchmark
                       ${CUBLAS_LIBRARIES}
                       ${CUSOLVER_LIBRARIES}
                       ${CURAND_LIBRARIES})
+add_test(NAME asr_benchmark COMMAND asr_benchmark)
 
 # Test: VAD Model Comparison
 add_executable(test_vad_models test_vad_models.c)
 target_include_directories(test_vad_models PRIVATE /usr/local/include/onnxruntime)
 target_link_libraries(test_vad_models onnxruntime m)
+add_test(NAME test_vad_models COMMAND test_vad_models)
 
 # Test: VAD API Unit Test
 add_executable(test_vad_api
@@ -100,6 +114,7 @@ target_link_libraries(test_vad_api
                       onnxruntime
                       m
                       ${JSONC_LIBRARIES})
+add_test(NAME test_vad_api COMMAND test_vad_api)
 
 # Test: ASR Concurrent Context
 # Verifies multi-context support for multi-client architecture
@@ -124,6 +139,7 @@ target_link_libraries(test_asr_concurrent
                       ${CUBLAS_LIBRARIES}
                       ${CUSOLVER_LIBRARIES}
                       ${CURAND_LIBRARIES})
+add_test(NAME test_asr_concurrent COMMAND test_asr_concurrent)
 
 # Test: Per-Session LLM Commands
 # Tests thread-local storage mechanism for command context (session pointer passing)
@@ -132,7 +148,9 @@ add_executable(test_session_commands
                test_session_commands.c)
 
 target_link_libraries(test_session_commands
+                      unity
                       pthread)
+add_test(NAME test_session_commands COMMAND test_session_commands)
 
 # Test: TF-IDF Summarizer Quality
 # Fetches articles from diverse outlets and analyzes summarizer output quality
@@ -152,6 +170,7 @@ target_link_libraries(test_summarizer_quality
                       ${CURL_LIBRARIES}
                       ${JSONC_LIBRARIES}
                       m)
+add_test(NAME test_summarizer_quality COMMAND test_summarizer_quality)
 
 # Test: Scheduler DB Unit Test
 add_executable(test_scheduler
@@ -161,9 +180,11 @@ add_executable(test_scheduler
 
 target_link_libraries(test_scheduler
                       dawn_common
+                      unity
                       sqlite3
                       pthread
                       ${JSONC_LIBRARIES})
+add_test(NAME test_scheduler COMMAND test_scheduler)
 
 # Test: Music DB Unit Test
 # Tests search, dedup, browse, source abstraction, and stale deletion
@@ -175,8 +196,10 @@ add_executable(test_music_db
 
 target_link_libraries(test_music_db
                       dawn_common
+                      unity
                       sqlite3
                       pthread)
+add_test(NAME test_music_db COMMAND test_music_db)
 
 # Test: Memory Embeddings Math Utilities
 # Tests cosine similarity, L2 norm, and hybrid score logic (no ONNX/DB needed)
@@ -189,9 +212,11 @@ add_executable(test_memory_embeddings
 
 target_link_libraries(test_memory_embeddings
                       dawn_common
+                      unity
                       sqlite3
                       pthread
                       m)
+add_test(NAME test_memory_embeddings COMMAND test_memory_embeddings)
 
 # Test: Context Compaction (LCM Phase 1)
 # Tests deterministic compaction, target calculation, and token range estimation.
@@ -200,7 +225,8 @@ add_executable(test_context_compaction
                test_context_compaction.c
                test_context_compaction_impl.c)
 
-target_link_libraries(test_context_compaction ${JSONC_LIBRARIES})
+target_link_libraries(test_context_compaction unity ${JSONC_LIBRARIES})
+add_test(NAME test_context_compaction COMMAND test_context_compaction)
 
 # Test: Time Query Parser (#3-A)
 # Pure module: parses natural-language temporal expressions in queries.
@@ -208,7 +234,8 @@ add_executable(test_time_query_parser
                test_time_query_parser.c
                ${SRC_ROOT}/src/core/time_query_parser.c)
 
-target_link_libraries(test_time_query_parser m)
+target_link_libraries(test_time_query_parser unity m)
+add_test(NAME test_time_query_parser COMMAND test_time_query_parser)
 
 # Test: Temporal Relations (v33)
 # Tests memory_db_relation_supersede auto-close behavior + as-of queries.
@@ -221,9 +248,11 @@ add_executable(test_temporal_relations
 
 target_link_libraries(test_temporal_relations
                       dawn_common
+                      unity
                       sqlite3
                       pthread
                       m)
+add_test(NAME test_temporal_relations COMMAND test_temporal_relations)
 
 # Test: Document Extract
 # Tests extension validation, Content-Type mapping, plain text extraction, error codes
@@ -233,7 +262,7 @@ add_executable(test_document_extract
                ${SRC_ROOT}/src/tools/html_parser.c)
 
 target_include_directories(test_document_extract PRIVATE ${SRC_ROOT}/include)
-target_link_libraries(test_document_extract dawn_common)
+target_link_libraries(test_document_extract dawn_common unity)
 
 # Conditionally link document extraction libraries for the test
 if(MUPDF_FOUND)
@@ -249,6 +278,7 @@ if(LIBZIP_FOUND AND LIBXML2_FOUND)
     target_link_libraries(test_document_extract ${LIBZIP_LIBRARIES} ${LIBXML2_LIBRARIES})
     target_compile_definitions(test_document_extract PRIVATE HAVE_LIBZIP HAVE_LIBXML2)
 endif()
+add_test(NAME test_document_extract COMMAND test_document_extract)
 
 # Test: Document Chunker
 # Tests paragraph splitting, sentence splitting, overlap, merging, edge cases
@@ -256,7 +286,8 @@ add_executable(test_document_chunker
                test_document_chunker.c
                ${SRC_ROOT}/src/tools/document_chunker.c)
 
-target_link_libraries(test_document_chunker m)
+target_link_libraries(test_document_chunker unity m)
+add_test(NAME test_document_chunker COMMAND test_document_chunker)
 
 # Test: Document DB CRUD
 # Tests create, get, list, delete, global toggle, find_by_name, chunk ops
@@ -267,9 +298,11 @@ add_executable(test_document_db
 
 target_link_libraries(test_document_db
                       dawn_common
+                      unity
                       sqlite3
                       pthread
                       ${JSONC_LIBRARIES})
+add_test(NAME test_document_db COMMAND test_document_db)
 
 # Test: Embedding Engine Math
 # Tests L2 norm, cosine similarity (no model/provider needed)
@@ -280,8 +313,10 @@ add_executable(test_embedding_engine
 
 target_link_libraries(test_embedding_engine
                       dawn_common
+                      unity
                       pthread
                       m)
+add_test(NAME test_embedding_engine COMMAND test_embedding_engine)
 
 # Test: Plan Executor
 # Tests variable store, conditions, interpolation, parsing, execution, safety limits
@@ -292,8 +327,10 @@ add_executable(test_plan_executor
 
 target_link_libraries(test_plan_executor
                       dawn_common
+                      unity
                       ${JSONC_LIBRARIES}
                       pthread)
+add_test(NAME test_plan_executor COMMAND test_plan_executor)
 
 # Test: Wake Word Matching
 # Tests normalization, wake word detection, command extraction, goodbye/cancel/ignore
@@ -302,7 +339,9 @@ add_executable(test_wake_word
                ${SRC_ROOT}/src/core/wake_word.c)
 
 target_link_libraries(test_wake_word
-                      dawn_common)
+                      dawn_common
+                      unity)
+add_test(NAME test_wake_word COMMAND test_wake_word)
 
 # Test: Instruction Loader
 # Tests file loading, path traversal sanitization, module concatenation, edge cases
@@ -311,7 +350,9 @@ add_executable(test_instruction_loader
                ${SRC_ROOT}/src/tools/instruction_loader.c)
 
 target_link_libraries(test_instruction_loader
-                      dawn_common)
+                      dawn_common
+                      unity)
+add_test(NAME test_instruction_loader COMMAND test_instruction_loader)
 
 # =============================================================================
 # Benchmark: Retrieval Quality (LongMemEval, LoCoMo, ConvoMem)
@@ -372,9 +413,11 @@ add_executable(test_relation_supersede
 
 target_link_libraries(test_relation_supersede
                       dawn_common
+                      unity
                       sqlite3
                       pthread
                       m)
+add_test(NAME test_relation_supersede COMMAND test_relation_supersede)
 
 # Test: Phone DB Unit Test
 add_executable(test_phone_db
@@ -384,8 +427,10 @@ add_executable(test_phone_db
 
 target_link_libraries(test_phone_db
                       dawn_common
+                      unity
                       sqlite3
                       pthread)
+add_test(NAME test_phone_db COMMAND test_phone_db)
 
 # Test: Missed Notifications DB Unit Test
 add_executable(test_missed_notifications_db
@@ -395,8 +440,10 @@ add_executable(test_missed_notifications_db
 
 target_link_libraries(test_missed_notifications_db
                       dawn_common
+                      unity
                       sqlite3
                       pthread)
+add_test(NAME test_missed_notifications_db COMMAND test_missed_notifications_db)
 
 # Test: Memory Injection Filter
 # Pure module: blocked pattern detection, normalization, ReAct co-occurrence.
@@ -405,7 +452,29 @@ add_executable(test_memory_filter
                ${SRC_ROOT}/src/memory/memory_filter.c)
 
 target_link_libraries(test_memory_filter
-                      dawn_common)
+                      dawn_common
+                      unity)
+add_test(NAME test_memory_filter COMMAND test_memory_filter)
+
+# =============================================================================
+# CTest Labels
+# =============================================================================
+# CI-safe tests: no ONNX, CUDA, hardware, or external API dependencies
+set_tests_properties(
+   test_scheduler test_music_db test_document_chunker test_document_db
+   test_embedding_engine test_memory_embeddings test_memory_filter
+   test_plan_executor test_sse_parser test_sentence_buffer
+   test_session_commands test_wake_word test_instruction_loader
+   test_document_extract test_phone_db test_missed_notifications_db
+   test_temporal_relations test_relation_supersede
+   test_time_query_parser test_context_compaction
+   PROPERTIES LABELS "ci")
+
+# Hardware-dependent tests: require ONNX, CUDA, or external APIs
+set_tests_properties(
+   test_streaming asr_benchmark test_vad_models test_vad_api
+   test_asr_concurrent test_summarizer_quality
+   PROPERTIES LABELS "hardware")
 
 # =============================================================================
 # Aggregate "tests" target
@@ -431,6 +500,8 @@ add_custom_target(tests-ci
                           test_missed_notifications_db
                           test_temporal_relations
                           test_relation_supersede
+                          test_time_query_parser
+                          test_context_compaction
                   COMMENT "Building CI-safe unit tests")
 
 add_custom_target(tests
@@ -457,4 +528,8 @@ add_custom_target(tests
                           test_plan_executor
                           test_phone_db
                           test_missed_notifications_db
+                          test_temporal_relations
+                          test_relation_supersede
+                          test_time_query_parser
+                          test_context_compaction
                   COMMENT "Building all tests")

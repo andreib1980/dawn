@@ -28,20 +28,12 @@
 #include <time.h>
 
 #include "core/time_query_parser.h"
+#include "unity.h"
 
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_ASSERT(cond, msg)         \
-   do {                                \
-      if (cond) {                      \
-         printf("  [PASS] %s\n", msg); \
-         tests_passed++;               \
-      } else {                         \
-         printf("  [FAIL] %s\n", msg); \
-         tests_failed++;               \
-      }                                \
-   } while (0)
+void setUp(void) {
+}
+void tearDown(void) {
+}
 
 /* Pinned "now" = 2024-04-15 12:00 UTC for relative-expression tests.
  * Noon matches make_ts() in the parser — keeps the same calendar day for
@@ -69,62 +61,58 @@ static int64_t make_ref(int year, int month0, int day) {
  * ============================================================================ */
 
 static void test_month_year(void) {
-   printf("\n--- test_month_year ---\n");
-
    time_query_t tq;
    time_query_parse("Was the first half of September 2022 a good month for Nate?", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "September 2022 → found");
-   TEST_ASSERT(tq.kind == TQP_ABSOLUTE, "September 2022 → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "September 2022 found");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(TQP_ABSOLUTE, tq.kind, "September 2022 ABSOLUTE");
    int64_t expected = make_ref(2022, 8, 15);
-   TEST_ASSERT(llabs(tq.target_ts - expected) < 86400, "September 2022 → mid-Sept 2022");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - expected) < 86400, "September 2022 mid-Sept 2022");
 
    time_query_parse("In May 2020 we moved", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "May 2020 → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "May 2020 ABSOLUTE");
 
    time_query_parse("on January 5 2019", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "January 2019 → found via abbrev path");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "January 2019 found via abbrev path");
 }
 
 static void test_season_year(void) {
-   printf("\n--- test_season_year ---\n");
-
    time_query_t tq;
    time_query_parse("What state did Joanna visit in summer 2021?", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "summer 2021 → found");
-   TEST_ASSERT(tq.kind == TQP_ABSOLUTE, "summer 2021 → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "summer 2021 found");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(TQP_ABSOLUTE, tq.kind, "summer 2021 ABSOLUTE");
    int64_t july_2021 = make_ref(2021, 6, 15); /* July midpoint */
-   TEST_ASSERT(llabs(tq.target_ts - july_2021) < 30 * 86400, "summer 2021 → mid-summer 2021");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - july_2021) < 30 * 86400,
+                            "summer 2021 mid-summer 2021");
 
    time_query_parse("the winter 2020 storm", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "winter 2020 → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "winter 2020 found");
    /* Winter 2020 = Dec 2020 - Feb 2021, midpoint = mid-January 2021 */
    int64_t jan_2021 = make_ref(2021, 0, 15);
-   TEST_ASSERT(llabs(tq.target_ts - jan_2021) < 30 * 86400, "winter 2020 → mid-January 2021");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - jan_2021) < 30 * 86400,
+                            "winter 2020 mid-January 2021");
 
    time_query_parse("during fall 2022", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "fall 2022 → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "fall 2022 found");
 }
 
 static void test_lone_year(void) {
-   printf("\n--- test_lone_year ---\n");
-
    time_query_t tq;
    time_query_parse("things that happened in 2020", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "in 2020 → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "in 2020 ABSOLUTE");
 
    time_query_parse("plans for 2025", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "for 2025 → found (future)");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "for 2025 found (future)");
 
    /* Year inside a longer number should NOT match. */
    time_query_parse("call 12022 if you need help", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "12022 inside number → no match");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "12022 inside number no match");
 
    time_query_parse("conv id 20210", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "20210 (5-digit) → no match");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "20210 (5-digit) no match");
 
    /* Out-of-range years should not match. */
    time_query_parse("dating from 1850", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "1850 (pre-1900) → no match");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "1850 (pre-1900) no match");
 }
 
 /* ============================================================================
@@ -132,68 +120,58 @@ static void test_lone_year(void) {
  * ============================================================================ */
 
 static void test_yesterday(void) {
-   printf("\n--- test_yesterday ---\n");
-
    time_query_t tq;
    int64_t now = pin_now();
    time_query_parse("what did we discuss yesterday", now, &tq);
-   TEST_ASSERT(tq.found, "yesterday → found");
-   TEST_ASSERT(tq.kind == TQP_RELATIVE, "yesterday → RELATIVE");
-   TEST_ASSERT(llabs(tq.target_ts - (now - 86400)) < 60, "yesterday → now - 1d");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "yesterday found");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(TQP_RELATIVE, tq.kind, "yesterday RELATIVE");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - (now - 86400)) < 60, "yesterday now - 1d");
 }
 
 static void test_last_unit(void) {
-   printf("\n--- test_last_unit ---\n");
-
    time_query_t tq;
    int64_t now = pin_now();
    time_query_parse("did anything happen last week", now, &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_RELATIVE, "last week → RELATIVE");
-   TEST_ASSERT(llabs(tq.target_ts - (now - 7 * 86400)) < 60, "last week → now - 7d");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_RELATIVE, "last week RELATIVE");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - (now - 7 * 86400)) < 60, "last week now - 7d");
 
    time_query_parse("a month ago I started", now, &tq);
-   TEST_ASSERT(tq.found, "a month ago → found");
-   TEST_ASSERT(llabs(tq.target_ts - (now - 30 * 86400)) < 60, "a month ago → now - 30d");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "a month ago found");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - (now - 30 * 86400)) < 60, "a month ago now - 30d");
 
    time_query_parse("last year was rough", now, &tq);
-   TEST_ASSERT(tq.found, "last year → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "last year found");
 }
 
 static void test_today(void) {
-   printf("\n--- test_today ---\n");
-
    time_query_t tq;
    int64_t now = pin_now();
    time_query_parse("what did I say today", now, &tq);
-   TEST_ASSERT(tq.found, "today → found");
-   TEST_ASSERT(llabs(tq.target_ts - now) < 60, "today → now");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "today found");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - now) < 60, "today now");
 }
 
 static void test_vague(void) {
-   printf("\n--- test_vague ---\n");
-
    time_query_t tq;
    int64_t now = pin_now();
    time_query_parse("we talked recently about lunch", now, &tq);
-   TEST_ASSERT(tq.found, "recently → found");
-   TEST_ASSERT(tq.kind == TQP_VAGUE, "recently → VAGUE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "recently found");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(TQP_VAGUE, tq.kind, "recently VAGUE");
 }
 
 static void test_no_match(void) {
-   printf("\n--- test_no_match ---\n");
-
    time_query_t tq;
    time_query_parse("what's the weather like", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "no temporal expression → not found");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "no temporal expression not found");
 
    time_query_parse("", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "empty query → not found");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "empty query not found");
 
    /* Word boundary: "fall" inside "fallback" must not match. */
    time_query_parse("we need a fallback for 2099", pin_now(), &tq);
    /* The "2099" should still match. */
-   TEST_ASSERT(tq.found && strcmp(tq.matched, "2099") == 0,
-               "fallback 2099 → matches 2099, not 'fall'");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && strcmp(tq.matched, "2099") == 0,
+                            "fallback 2099 matches 2099, not 'fall'");
 }
 
 /* ============================================================================
@@ -201,31 +179,29 @@ static void test_no_match(void) {
  * ============================================================================ */
 
 static void test_proximity(void) {
-   printf("\n--- test_proximity ---\n");
-
    time_query_t tq;
    time_query_parse("September 2022", pin_now(), &tq);
 
    /* Right on the target — score = 1.0 */
    float p = time_query_proximity(&tq, tq.target_ts);
-   TEST_ASSERT(fabsf(p - 1.0f) < 0.01f, "distance 0 → score ≈ 1.0");
+   TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.01f, 1.0f, p, "distance 0 score 1.0");
 
-   /* One window away — score ≈ exp(-0.5) ≈ 0.61 */
+   /* One window away — score ~ exp(-0.5) ~ 0.61 */
    p = time_query_proximity(&tq, tq.target_ts + tq.window_seconds);
-   TEST_ASSERT(fabsf(p - 0.6065f) < 0.05f, "distance 1w → score ≈ 0.61");
+   TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.05f, 0.6065f, p, "distance 1w score 0.61");
 
-   /* Far away — score ≈ 0 */
+   /* Far away — score ~ 0 */
    p = time_query_proximity(&tq, tq.target_ts + 5 * tq.window_seconds);
-   TEST_ASSERT(p < 0.01f, "distance 5w → score ≈ 0");
+   TEST_ASSERT_TRUE_MESSAGE(p < 0.01f, "distance 5w score 0");
 
-   /* No temporal query → score 0 */
+   /* No temporal query — score 0 */
    time_query_t empty = { 0 };
    p = time_query_proximity(&empty, tq.target_ts);
-   TEST_ASSERT(p == 0.0f, "no temporal query → score 0");
+   TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.001f, 0.0f, p, "no temporal query score 0");
 
-   /* No chunk timestamp → score 0 */
+   /* No chunk timestamp — score 0 */
    p = time_query_proximity(&tq, 0);
-   TEST_ASSERT(p == 0.0f, "chunk_ts = 0 → score 0");
+   TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.001f, 0.0f, p, "chunk_ts = 0 score 0");
 }
 
 /* ============================================================================
@@ -233,32 +209,29 @@ static void test_proximity(void) {
  * ============================================================================ */
 
 static void test_n_units_ago(void) {
-   printf("\n--- test_n_units_ago ---\n");
-
    time_query_t tq;
    int64_t now = pin_now();
 
    time_query_parse("how many days ago did I attend the service", now, &tq);
-   /* "how many days/weeks/months ago" with no explicit number — handled by
-    * try_how_many_ago as a recency hint (target = now - 14d, window = 60d).
-    * Without this, structural failures dominate the "how many" subset. */
-   TEST_ASSERT(tq.found && tq.kind == TQP_RELATIVE,
-               "'how many days ago' without N → recency anchor");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_RELATIVE,
+                            "'how many days ago' without N recency anchor");
 
    time_query_parse("5 days ago I went hiking", now, &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_RELATIVE, "5 days ago → RELATIVE");
-   TEST_ASSERT(llabs(tq.target_ts - (now - 5 * 86400)) < 60, "5 days ago → now - 5d");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_RELATIVE, "5 days ago RELATIVE");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - (now - 5 * 86400)) < 60, "5 days ago now - 5d");
 
    time_query_parse("two weeks ago I bought a guitar", now, &tq);
-   TEST_ASSERT(tq.found, "two weeks ago → found");
-   TEST_ASSERT(llabs(tq.target_ts - (now - 14 * 86400)) < 60, "two weeks ago → now - 14d");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "two weeks ago found");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - (now - 14 * 86400)) < 60,
+                            "two weeks ago now - 14d");
 
    time_query_parse("in the past 30 days I started running", now, &tq);
-   TEST_ASSERT(tq.found, "in the past 30 days → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "in the past 30 days found");
 
    time_query_parse("3 months ago I moved", now, &tq);
-   TEST_ASSERT(tq.found, "3 months ago → found");
-   TEST_ASSERT(llabs(tq.target_ts - (now - 90 * 86400)) < 86400, "3 months ago → ~now - 90d");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "3 months ago found");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - (now - 90 * 86400)) < 86400,
+                            "3 months ago ~now - 90d");
 }
 
 /* ============================================================================
@@ -266,50 +239,49 @@ static void test_n_units_ago(void) {
  * ============================================================================ */
 
 static void test_bare_month(void) {
-   printf("\n--- test_bare_month ---\n");
-
    time_query_t tq;
    int64_t now = pin_now(); /* April 15, 2024 */
 
    time_query_parse("what did I do in September", now, &tq);
-   TEST_ASSERT(tq.found, "in September → found (most-recent)");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "in September found (most-recent)");
    /* September 2023 (most recent past September from April 2024) */
    int64_t sept_2023 = make_ref(2023, 8, 15);
-   TEST_ASSERT(llabs(tq.target_ts - sept_2023) < 86400, "in September → mid-Sept 2023");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - sept_2023) < 86400, "in September mid-Sept 2023");
 
    time_query_parse("what about June plans", now, &tq);
    /* June 2023 (last completed June from April 2024) */
    int64_t june_2023 = make_ref(2023, 5, 15);
-   TEST_ASSERT(tq.found && llabs(tq.target_ts - june_2023) < 86400,
-               "bare June → June 2023 (most recent)");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && llabs(tq.target_ts - june_2023) < 86400,
+                            "bare June June 2023 (most recent)");
 
-   /* "may" with temporal preposition → month */
+   /* "may" with temporal preposition — month */
    time_query_parse("in may", now, &tq);
-   TEST_ASSERT(tq.found, "'in may' → found (month)");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "'in may' found (month)");
    int64_t may_2023 = make_ref(2023, 4, 15);
-   TEST_ASSERT(llabs(tq.target_ts - may_2023) < 86400, "'in may' → May 2023 (most recent)");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - may_2023) < 86400,
+                            "'in may' May 2023 (most recent)");
 
    time_query_parse("last may was warm", now, &tq);
-   TEST_ASSERT(tq.found, "'last may' → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "'last may' found");
 
    time_query_parse("during may", now, &tq);
-   TEST_ASSERT(tq.found, "'during may' → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "'during may' found");
 
    time_query_parse("early may", now, &tq);
-   TEST_ASSERT(tq.found, "'early may' → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "'early may' found");
 
    time_query_parse("by may we should finish", now, &tq);
-   TEST_ASSERT(tq.found, "'by may' → found");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "'by may' found");
 
-   /* "may" without temporal context → verb, not matched */
+   /* "may" without temporal context — verb, not matched */
    time_query_parse("I may visit Paris", now, &tq);
-   TEST_ASSERT(!tq.found, "bare 'may' → not matched (verb)");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "bare 'may' not matched (verb)");
 
    time_query_parse("may I help you", now, &tq);
-   TEST_ASSERT(!tq.found, "'may' at start → not matched");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "'may' at start not matched");
 
    time_query_parse("he may decide", now, &tq);
-   TEST_ASSERT(!tq.found, "'he may' → not matched");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "'he may' not matched");
 }
 
 /* ============================================================================
@@ -317,68 +289,70 @@ static void test_bare_month(void) {
  * ============================================================================ */
 
 static void test_iso_date(void) {
-   printf("\n--- test_iso_date ---\n");
-
    time_query_t tq;
 
-   /* YYYY-MM-DD — exact day, ±1 day window */
+   /* YYYY-MM-DD — exact day, +/-1 day window */
    time_query_parse("2020-03-15", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "2020-03-15 → found ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "2020-03-15 found ABSOLUTE");
    int64_t mar15 = make_ref(2020, 2, 15);
-   TEST_ASSERT(llabs(tq.target_ts - mar15) < 86400, "2020-03-15 → target near March 15");
-   TEST_ASSERT(tq.window_seconds == 86400, "2020-03-15 → window = 1 day");
-   TEST_ASSERT(strcmp(tq.matched, "2020-03-15") == 0, "2020-03-15 → matched string");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - mar15) < 86400, "2020-03-15 target near March 15");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(86400, (int)tq.window_seconds, "2020-03-15 window = 1 day");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("2020-03-15", tq.matched, "2020-03-15 matched string");
 
-   /* YYYY-MM — month-level, ±15 day window */
+   /* YYYY-MM — month-level, +/-15 day window */
    time_query_parse("2022-11", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "2022-11 → found ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "2022-11 found ABSOLUTE");
    int64_t nov15 = make_ref(2022, 10, 15);
-   TEST_ASSERT(llabs(tq.target_ts - nov15) < 86400, "2022-11 → target near Nov 15");
-   TEST_ASSERT(tq.window_seconds == 15 * 86400, "2022-11 → window = 15 days");
+   TEST_ASSERT_TRUE_MESSAGE(llabs(tq.target_ts - nov15) < 86400, "2022-11 target near Nov 15");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(15 * 86400, (int)tq.window_seconds, "2022-11 window = 15 days");
 
    /* Embedded in sentence */
    time_query_parse("documents from 2022-11-05", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "embedded ISO date → found");
-   TEST_ASSERT(strcmp(tq.matched, "2022-11-05") == 0, "embedded → matched string");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "embedded ISO date found");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("2022-11-05", tq.matched, "embedded matched string");
 
    /* Invalid month — falls through to try_year (matches "2020" with 180d window) */
    time_query_parse("2020-13-01", pin_now(), &tq);
-   TEST_ASSERT(!tq.found || tq.window_seconds != 86400, "month 13 → not matched as ISO date");
+   TEST_ASSERT_TRUE_MESSAGE(!tq.found || tq.window_seconds != 86400,
+                            "month 13 not matched as ISO date");
 
    /* Invalid day — falls through to try_year */
    time_query_parse("2020-03-32", pin_now(), &tq);
-   TEST_ASSERT(!tq.found || tq.window_seconds != 86400, "day 32 → not matched as ISO date");
+   TEST_ASSERT_TRUE_MESSAGE(!tq.found || tq.window_seconds != 86400,
+                            "day 32 not matched as ISO date");
 
    /* Year out of range */
    time_query_parse("1850-06-15", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "year 1850 → not found");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "year 1850 not found");
 
    /* No left word boundary */
    time_query_parse("abc2020-03-15", pin_now(), &tq);
-   TEST_ASSERT(!tq.found, "no left boundary → not found");
+   TEST_ASSERT_FALSE_MESSAGE(tq.found, "no left boundary not found");
 
    /* No right word boundary — try_year may still match "2020" */
    time_query_parse("2020-03-15abc", pin_now(), &tq);
-   TEST_ASSERT(!tq.found || tq.window_seconds != 86400,
-               "no right boundary → not matched as ISO date");
+   TEST_ASSERT_TRUE_MESSAGE(!tq.found || tq.window_seconds != 86400,
+                            "no right boundary not matched as ISO date");
 
    /* Precedence: ISO date beats bare year */
    time_query_parse("what happened 2020-03-15", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.window_seconds == 86400,
-               "ISO date beats bare year (window = 1 day, not 180 days)");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.window_seconds == 86400,
+                            "ISO date beats bare year (window = 1 day, not 180 days)");
 
    /* Datetime with T accepted as right boundary */
    time_query_parse("2020-03-15T14:30:00Z", pin_now(), &tq);
-   TEST_ASSERT(tq.found, "datetime with T → found (date portion)");
-   TEST_ASSERT(strcmp(tq.matched, "2020-03-15") == 0, "datetime with T → matched date only");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found, "datetime with T found (date portion)");
+   TEST_ASSERT_EQUAL_STRING_MESSAGE("2020-03-15", tq.matched, "datetime with T matched date only");
 
    /* Slash separator is NOT ISO-8601 */
    time_query_parse("2020/03/15", pin_now(), &tq);
-   TEST_ASSERT(!tq.found || tq.window_seconds != 86400, "slash separator → not ISO date");
+   TEST_ASSERT_TRUE_MESSAGE(!tq.found || tq.window_seconds != 86400,
+                            "slash separator not ISO date");
 
    /* Single-digit month not valid strict ISO */
    time_query_parse("2020-3-15", pin_now(), &tq);
-   TEST_ASSERT(!tq.found || tq.window_seconds != 86400, "single-digit month → not strict ISO date");
+   TEST_ASSERT_TRUE_MESSAGE(!tq.found || tq.window_seconds != 86400,
+                            "single-digit month not strict ISO date");
 }
 
 /* ============================================================================
@@ -386,42 +360,37 @@ static void test_iso_date(void) {
  * ============================================================================ */
 
 static void test_locomo_cat3_samples(void) {
-   printf("\n--- test_locomo_cat3_samples ---\n");
-
    time_query_t tq;
 
    /* From LoCoMo: "What state did Joanna visit in summer 2021?" */
    time_query_parse("What state did Joanna visit in summer 2021?", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "Joanna summer 2021 → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "Joanna summer 2021 ABSOLUTE");
 
    /* "Was the first half of September 2022 a good month career-wise for Nate and Joanna?" */
    time_query_parse(
        "Was the first half of September 2022 a good month career-wise for Nate and Joanna?",
        pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "Sept 2022 career → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "Sept 2022 career ABSOLUTE");
 
    /* "Which US states might Tim be in during September 2023?" */
    time_query_parse("Which US states might Tim be in during September 2023?", pin_now(), &tq);
-   TEST_ASSERT(tq.found && tq.kind == TQP_ABSOLUTE, "Tim Sept 2023 → ABSOLUTE");
+   TEST_ASSERT_TRUE_MESSAGE(tq.found && tq.kind == TQP_ABSOLUTE, "Tim Sept 2023 ABSOLUTE");
 }
 
 int main(void) {
-   test_month_year();
-   test_season_year();
-   test_lone_year();
-   test_yesterday();
-   test_last_unit();
-   test_today();
-   test_vague();
-   test_no_match();
-   test_n_units_ago();
-   test_bare_month();
-   test_iso_date();
-   test_proximity();
-   test_locomo_cat3_samples();
-
-   printf("\n=========================================\n");
-   printf("Tests passed: %d, failed: %d\n", tests_passed, tests_failed);
-   printf("=========================================\n");
-   return tests_failed > 0 ? 1 : 0;
+   UNITY_BEGIN();
+   RUN_TEST(test_month_year);
+   RUN_TEST(test_season_year);
+   RUN_TEST(test_lone_year);
+   RUN_TEST(test_yesterday);
+   RUN_TEST(test_last_unit);
+   RUN_TEST(test_today);
+   RUN_TEST(test_vague);
+   RUN_TEST(test_no_match);
+   RUN_TEST(test_n_units_ago);
+   RUN_TEST(test_bare_month);
+   RUN_TEST(test_iso_date);
+   RUN_TEST(test_proximity);
+   RUN_TEST(test_locomo_cat3_samples);
+   return UNITY_END();
 }
