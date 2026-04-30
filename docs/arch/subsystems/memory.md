@@ -116,6 +116,14 @@ Memory extraction happens at session end, not during conversation. This adds zer
    - Per-user: decay facts → decay preferences → prune low-confidence → prune superseded → prune old summaries
    - Configurable rates, floors, and thresholds via `[memory.decay]`
 
+- **memory_recovery.c/h**: Extraction recovery worker
+   - Dedicated background thread (`nice 10`) that runs an immediate startup pass and re-scans on `[memory.recovery] recurring_interval_seconds`
+   - Picks up conversations whose `last_extracted_msg_count < message_count` after `idle_threshold_seconds` (default 1 h) — typically left behind by a daemon crash mid-extraction or by an extraction that returned an error
+   - Skips private conversations and rows with fewer than 2 messages (matches `memory_trigger_extraction()`'s own gate)
+   - Per-conversation tracking: `extraction_attempts` (cap defaults to 2; `0` = unlimited) and `extraction_last_attempt_at`. New activity on the conversation auto-resets the counter via the `extraction_last_attempt_at < updated_at` clause in the scan SQL
+   - Reuses `memory_trigger_extraction()`. Successful extraction clears the recovery counters atomically through the existing `memory_db_set_last_extracted` UPDATE
+   - Sequentially processes one stuck conversation at a time, blocking on `memory_extraction_in_progress()` (5-minute per-conv timeout) so the per-user extraction slot never queues
+
 ## Database Schema
 
 Five tables in the auth database (`/var/lib/dawn/auth.db`):
@@ -196,6 +204,12 @@ preference_floor = 0.40   # Preferences never below 40%
 prune_threshold = 0.25    # Delete facts below this confidence
 summary_retention_days = 30
 access_reinforcement_boost = 0.05  # +5% on access (1-hour cooldown)
+
+[memory.recovery]
+enabled = true                      # Re-extract conversations stuck behind crashes/failures
+idle_threshold_seconds = 3600       # Treat as stuck after 1 h of inactivity
+max_attempts = 2                    # Cap retries per conversation (0 = unlimited)
+recurring_interval_seconds = 86400  # Daily rescan (0 = startup-only)
 ```
 
 ## WebUI Memory Viewer

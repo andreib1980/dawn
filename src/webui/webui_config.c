@@ -756,6 +756,19 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       CONFIG_CLAMP(config->memory.embedding_vector_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.temporal_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.category_threshold, 0.05f, 0.95f);
+
+      /* Extraction recovery settings */
+      JSON_TO_CONFIG_BOOL(section, "recovery_enabled", config->memory.recovery_enabled);
+      JSON_TO_CONFIG_INT(section, "recovery_idle_threshold_seconds",
+                         config->memory.recovery_idle_threshold_seconds);
+      JSON_TO_CONFIG_INT(section, "recovery_max_attempts", config->memory.recovery_max_attempts);
+      JSON_TO_CONFIG_INT(section, "recovery_recurring_interval_seconds",
+                         config->memory.recovery_recurring_interval_seconds);
+      CONFIG_CLAMP(config->memory.recovery_idle_threshold_seconds, 60, 30 * 86400);
+      CONFIG_CLAMP(config->memory.recovery_max_attempts, 0, 100);
+      if (config->memory.recovery_recurring_interval_seconds != 0) {
+         CONFIG_CLAMP(config->memory.recovery_recurring_interval_seconds, 60, 30 * 86400);
+      }
    }
 
    /* [shutdown] */

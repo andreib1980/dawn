@@ -417,6 +417,24 @@
 # backfill_on_startup = true      # Generate missing embeddings on startup
                                   # Env: DAWN_MEMORY_EMBEDDINGS_BACKFILL_ON_STARTUP
 
+[memory.recovery]
+# Re-runs memory extraction on conversations whose last_extracted_msg_count
+# is behind message_count after the configured idle window.  Catches sessions
+# left unconsolidated by daemon crashes or extraction failures.  A worker
+# thread runs an immediate startup pass and then re-scans on the recurring
+# interval.  Each conversation is processed sequentially so extraction never
+# competes with itself.
+# enabled = true                  # Enable extraction recovery
+# idle_threshold_seconds = 3600   # Minimum idle time (seconds) before recovery
+                                  # considers a conversation stuck.  Default 1 h.
+                                  # Range: 60 - 2592000
+# max_attempts = 2                # Cap on retries per conversation.  Activity
+                                  # on the conversation auto-resets the counter.
+                                  # 0 disables the cap.  Default 2.
+# recurring_interval_seconds = 86400  # Cadence of the recurring scan after
+                                      # the startup pass.  0 = startup-only.
+                                      # Default 86400 (daily).
+
 # =============================================================================
 # Scheduler (timers, alarms, reminders)
 # =============================================================================

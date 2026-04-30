@@ -1188,6 +1188,20 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    CONFIG_CLAMP(config->embedding_vector_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->temporal_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->category_threshold, 0.05f, 0.95f);
+
+   /* Parse [memory.recovery] sub-table */
+   toml_table_t *recovery = toml_table_in(table, "recovery");
+   if (recovery) {
+      static const char *const rec_keys[] = { "enabled", "idle_threshold_seconds", "max_attempts",
+                                              "recurring_interval_seconds", NULL };
+      warn_unknown_keys(recovery, "memory.recovery", rec_keys);
+
+      PARSE_BOOL(recovery, "enabled", config->recovery_enabled);
+      PARSE_INT(recovery, "idle_threshold_seconds", config->recovery_idle_threshold_seconds);
+      PARSE_INT(recovery, "max_attempts", config->recovery_max_attempts);
+      PARSE_INT(recovery, "recurring_interval_seconds",
+                config->recovery_recurring_interval_seconds);
+   }
 }
 
 static void parse_shutdown(toml_table_t *table, shutdown_config_t *config) {

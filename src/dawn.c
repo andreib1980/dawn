@@ -108,6 +108,7 @@
 #include "auth/auth_crypto.h"
 #include "auth/auth_maintenance.h"
 #include "image_store.h"
+#include "memory/memory_recovery.h"
 #endif
 #ifdef ENABLE_AEC
 #include "audio/aec_processor.h"
@@ -2383,6 +2384,11 @@ mqtt_disabled:
       if (auth_maintenance_start() != 0) {
          OLOG_WARNING("Failed to start auth maintenance thread");
       }
+
+      /* Start memory extraction recovery worker — startup pass + recurring */
+      if (memory_recovery_start() != 0) {
+         OLOG_WARNING("Failed to start memory recovery thread");
+      }
    }
 #endif
 
@@ -3805,6 +3811,8 @@ server_shutdown:
 
 #ifdef ENABLE_AUTH
    /* Shutdown auth subsystem in reverse initialization order */
+   OLOG_INFO("Shutdown: memory_recovery_stop");
+   memory_recovery_stop();
    OLOG_INFO("Shutdown: auth_maintenance_stop");
    auth_maintenance_stop();
    OLOG_INFO("Shutdown: admin_socket_shutdown");

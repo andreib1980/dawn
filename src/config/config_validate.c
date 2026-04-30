@@ -141,6 +141,15 @@ int config_validate(const dawn_config_t *config,
    VALIDATE_RANGE_FLOAT("memory.category_threshold", config->memory.category_threshold, 0.05f,
                         0.95f);
 
+   /* ===== Memory Extraction Recovery ===== */
+   VALIDATE_RANGE_INT("memory.recovery.idle_threshold_seconds",
+                      config->memory.recovery_idle_threshold_seconds, 60, 30 * 86400);
+   VALIDATE_RANGE_INT("memory.recovery.max_attempts", config->memory.recovery_max_attempts, 0, 100);
+   if (config->memory.recovery_recurring_interval_seconds != 0) {
+      VALIDATE_RANGE_INT("memory.recovery.recurring_interval_seconds",
+                         config->memory.recovery_recurring_interval_seconds, 60, 30 * 86400);
+   }
+
    /* ===== Port Numbers (1 - 65535) ===== */
    VALIDATE_RANGE_INT("mqtt.port", config->mqtt.port, 1, 65535);
 

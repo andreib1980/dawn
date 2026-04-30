@@ -1335,6 +1335,14 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_double(config->memory.category_threshold));
    json_object_object_add(memory, "embedding_backfill_on_startup",
                           json_object_new_boolean(config->memory.embedding_backfill_on_startup));
+   json_object_object_add(memory, "recovery_enabled",
+                          json_object_new_boolean(config->memory.recovery_enabled));
+   json_object_object_add(memory, "recovery_idle_threshold_seconds",
+                          json_object_new_int(config->memory.recovery_idle_threshold_seconds));
+   json_object_object_add(memory, "recovery_max_attempts",
+                          json_object_new_int(config->memory.recovery_max_attempts));
+   json_object_object_add(memory, "recovery_recurring_interval_seconds",
+                          json_object_new_int(config->memory.recovery_recurring_interval_seconds));
    json_object_object_add(root, "memory", memory);
 
    /* [shutdown] */
@@ -1883,6 +1891,13 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "category_threshold = %.2f\n", config->memory.category_threshold);
    fprintf(fp, "backfill_on_startup = %s\n",
            config->memory.embedding_backfill_on_startup ? "true" : "false");
+
+   fprintf(fp, "\n[memory.recovery]\n");
+   fprintf(fp, "enabled = %s\n", config->memory.recovery_enabled ? "true" : "false");
+   fprintf(fp, "idle_threshold_seconds = %d\n", config->memory.recovery_idle_threshold_seconds);
+   fprintf(fp, "max_attempts = %d\n", config->memory.recovery_max_attempts);
+   fprintf(fp, "recurring_interval_seconds = %d\n",
+           config->memory.recovery_recurring_interval_seconds);
 
    fprintf(fp, "\n[debug]\n");
    fprintf(fp, "mic_record = %s\n", config->debug.mic_record ? "true" : "false");

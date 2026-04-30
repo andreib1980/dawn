@@ -626,6 +626,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_similarity.c
     src/memory/memory_filter.c
     src/memory/memory_maintenance.c
+    src/memory/memory_recovery.c
     src/memory/memory_embeddings.c
     src/memory/memory_recategorize.c
     src/memory/memory_embed_onnx.c

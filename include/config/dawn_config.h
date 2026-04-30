@@ -455,6 +455,15 @@ typedef struct {
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */
    float category_threshold;
+
+   /* Extraction recovery — re-runs memory extraction on conversations whose
+    * `last_extracted_msg_count` < `message_count` after the configured idle
+    * window.  Catches sessions left unconsolidated by daemon crashes or
+    * extraction failures.  Runs once at startup and on a recurring interval. */
+   bool recovery_enabled;
+   int recovery_idle_threshold_seconds;     /* Min seconds since updated_at (default 3600) */
+   int recovery_max_attempts;               /* Per-conversation cap (default 2, 0=unlimited) */
+   int recovery_recurring_interval_seconds; /* 0=startup only (default 86400 = 24h) */
 } memory_config_t;
 
 /* =============================================================================

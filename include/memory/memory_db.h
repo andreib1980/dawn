@@ -971,6 +971,11 @@ int memory_db_get_last_extracted(int64_t conversation_id, int *count_out);
 /**
  * @brief Set last extracted message count for a conversation
  *
+ * Atomically also clears the recovery counters
+ * (`extraction_attempts = 0`, `extraction_last_attempt_at = 0`) so that future
+ * activity on this conversation gets a fresh recovery budget.  Both updates
+ * happen in a single SQL statement.
+ *
  * @param conversation_id Conversation ID
  * @param message_count Message count to record
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE

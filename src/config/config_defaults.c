@@ -289,6 +289,12 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.temporal_weight = 0.20f;
    config->memory.category_threshold = 0.25f;
 
+   /* Extraction recovery: re-extract conversations stuck idle past the threshold. */
+   config->memory.recovery_enabled = true;
+   config->memory.recovery_idle_threshold_seconds = 3600; /* 1 hour */
+   config->memory.recovery_max_attempts = 2;
+   config->memory.recovery_recurring_interval_seconds = 86400; /* daily */
+
    /* Shutdown - disabled by default for security */
    config->shutdown.enabled = false;
    config->shutdown.passphrase[0] = '\0';

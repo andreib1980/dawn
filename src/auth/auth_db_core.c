@@ -166,6 +166,8 @@ static const char *SCHEMA_SQL =
     "   thinking_mode TEXT DEFAULT NULL,"
     "   reasoning_effort TEXT DEFAULT NULL,"
     "   last_extracted_msg_count INTEGER DEFAULT 0,"
+    "   extraction_attempts INTEGER DEFAULT 0,"
+    "   extraction_last_attempt_at INTEGER DEFAULT 0,"
     "   is_private INTEGER DEFAULT 0,"
     "   title_locked INTEGER DEFAULT 0,"
     "   origin TEXT DEFAULT 'webui',"
@@ -1758,6 +1760,36 @@ static int create_schema(const char *db_path) {
       OLOG_INFO("auth_db: created summary_nodes table (v38)");
    }
 
+   /* v39 migration: extraction recovery tracking on conversations.
+    * extraction_attempts: incremented before each recovery trigger, reset on success.
+    *   Capped by config max_attempts to prevent poison-pill loops.
+    * extraction_last_attempt_at: unix timestamp of last recovery attempt (0 = never).
+    * The `>= 1` guard mirrors v3-v17 — fresh installs (current_version == 0) get
+    * the columns from SCHEMA_SQL and don't need the ALTER. */
+   if (current_version >= 1 && current_version < 39) {
+      const char *v39_attempts =
+          "ALTER TABLE conversations ADD COLUMN extraction_attempts INTEGER DEFAULT 0";
+      rc = sqlite3_exec(s_db.db, v39_attempts, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v39 migration (extraction_attempts) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      const char *v39_last =
+          "ALTER TABLE conversations ADD COLUMN extraction_last_attempt_at INTEGER DEFAULT 0";
+      rc = sqlite3_exec(s_db.db, v39_last, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v39 migration (extraction_last_attempt_at) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      OLOG_INFO("auth_db: added extraction recovery columns (v39)");
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2691,9 +2723,13 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Successful extraction also clears recovery counters so that future
+    * activity on this conversation is allowed past the per-conv attempt cap. */
    rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE conversations SET last_extracted_msg_count = ? WHERE id = ?", -1,
-                           &s_db.stmt_conv_set_last_extracted, NULL);
+                           "UPDATE conversations SET last_extracted_msg_count = ?, "
+                           "extraction_attempts = 0, extraction_last_attempt_at = 0 "
+                           "WHERE id = ?",
+                           -1, &s_db.stmt_conv_set_last_extracted, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_set_last_extracted failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
