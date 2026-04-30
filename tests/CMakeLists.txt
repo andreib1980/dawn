@@ -268,6 +268,12 @@ dawn_add_unit_test(test_text_filter
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_iso8601
+   SOURCES test_iso8601.c
+           ${SRC_ROOT}/src/core/iso8601.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_similarity
    SOURCES test_memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_similarity.c

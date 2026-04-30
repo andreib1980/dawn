@@ -32,6 +32,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/iso8601.h"
 #include "core/session_manager.h"
 #include "logging.h"
 #include "tools/calendar_service.h"
@@ -76,100 +77,6 @@ static bool json_get_bool(struct json_object *obj, const char *key, bool def) {
    if (!json_object_object_get_ex(obj, key, &val))
       return def;
    return json_object_get_boolean(val);
-}
-
-/* =============================================================================
- * ISO 8601 Parser (matches scheduler_tool.c — uses process-wide TZ)
- * ============================================================================= */
-
-/** Parse timezone suffix: 'Z', '+HH:MM', '-HH:MM' */
-static bool parse_tz_offset(const char *suffix, int *offset_sec) {
-   if (!suffix || !suffix[0])
-      return false;
-
-   if (suffix[0] == 'Z' || suffix[0] == 'z') {
-      *offset_sec = 0;
-      return true;
-   }
-
-   if (suffix[0] == '+' || suffix[0] == '-') {
-      int tz_h = 0, tz_m = 0;
-      if (sscanf(suffix + 1, "%d:%d", &tz_h, &tz_m) >= 1) {
-         *offset_sec = (tz_h * 3600 + tz_m * 60);
-         if (suffix[0] == '-')
-            *offset_sec = -*offset_sec;
-         return true;
-      }
-   }
-
-   return false;
-}
-
-static time_t parse_iso8601(const char *iso_str) {
-   if (!iso_str || !iso_str[0])
-      return -1;
-
-   struct tm tm_info;
-   memset(&tm_info, 0, sizeof(tm_info));
-   tm_info.tm_isdst = -1;
-
-   /* Time-only format (HH:MM) — assume today */
-   if (strlen(iso_str) <= 5 && strchr(iso_str, ':')) {
-      int hour = 0, min = 0;
-      if (sscanf(iso_str, "%d:%d", &hour, &min) != 2)
-         return -1;
-      if (hour < 0 || hour > 23 || min < 0 || min > 59)
-         return -1;
-
-      time_t now = time(NULL);
-      localtime_r(&now, &tm_info);
-      tm_info.tm_hour = hour;
-      tm_info.tm_min = min;
-      tm_info.tm_sec = 0;
-
-      time_t result = mktime(&tm_info);
-      if (result <= now)
-         result += 86400;
-      return result;
-   }
-
-   /* Full ISO 8601 */
-   int year, month, day, hour = 0, min = 0, sec = 0;
-   int parsed = sscanf(iso_str, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
-   if (parsed < 3)
-      return -1;
-
-   tm_info.tm_year = year - 1900;
-   tm_info.tm_mon = month - 1;
-   tm_info.tm_mday = day;
-   tm_info.tm_hour = hour;
-   tm_info.tm_min = min;
-   tm_info.tm_sec = sec;
-
-   /* Find timezone suffix after the time portion */
-   const char *tz_start = iso_str;
-   const char *t_pos = strchr(iso_str, 'T');
-   if (t_pos) {
-      tz_start = t_pos + 1;
-      while (*tz_start && (*tz_start == ':' || (*tz_start >= '0' && *tz_start <= '9')))
-         tz_start++;
-   } else {
-      tz_start = iso_str + strlen(iso_str);
-   }
-
-   int tz_offset_sec = 0;
-   if (parse_tz_offset(tz_start, &tz_offset_sec)) {
-      /* Timezone-aware: convert from input timezone to local */
-      time_t local_result = mktime(&tm_info);
-      if (local_result == (time_t)-1)
-         return -1;
-      struct tm local_tm;
-      localtime_r(&local_result, &local_tm);
-      return local_result + (local_tm.tm_gmtoff - tz_offset_sec);
-   }
-
-   /* No timezone — interpret as local (uses process-wide TZ) */
-   return mktime(&tm_info);
 }
 
 /* =============================================================================
@@ -324,13 +231,13 @@ static char *handle_range(struct json_object *details, int user_id) {
       return strdup("Error: 'start' is required for range query (ISO 8601 datetime)");
    }
 
-   time_t start = parse_iso8601(start_str);
+   time_t start = iso8601_parse(start_str);
    if (start == (time_t)-1)
       return strdup("Error: invalid 'start' datetime format");
 
    time_t end;
    if (end_str) {
-      end = parse_iso8601(end_str);
+      end = iso8601_parse(end_str);
       if (end == (time_t)-1)
          return strdup("Error: invalid 'end' datetime format");
    } else {
@@ -437,14 +344,14 @@ static char *handle_add(struct json_object *details, int user_id) {
    if (!start_str)
       return strdup("Error: 'start' datetime is required (ISO 8601)");
 
-   time_t start = parse_iso8601(start_str);
+   time_t start = iso8601_parse(start_str);
    if (start == (time_t)-1)
       return strdup("Error: invalid 'start' datetime format");
 
    time_t end = 0;
    const char *end_str = json_get_str(details, "end");
    if (end_str) {
-      end = parse_iso8601(end_str);
+      end = iso8601_parse(end_str);
       if (end == (time_t)-1)
          return strdup("Error: invalid 'end' datetime format");
    }
@@ -501,8 +408,8 @@ static char *handle_update(struct json_object *details, int user_id) {
    const char *location = json_get_str(details, "location");
    const char *description = json_get_str(details, "description");
 
-   time_t start = start_str ? parse_iso8601(start_str) : 0;
-   time_t end = end_str ? parse_iso8601(end_str) : 0;
+   time_t start = start_str ? iso8601_parse(start_str) : 0;
+   time_t end = end_str ? iso8601_parse(end_str) : 0;
 
    int rc = calendar_service_update(user_id, uid, summary, start, end, location, description);
    if (rc == 2)

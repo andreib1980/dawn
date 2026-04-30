@@ -533,6 +533,7 @@ set(DAWN_SOURCES
     src/tools/url_fetcher.c
     src/tools/html_parser.c
     src/core/time_query_parser.c
+    src/core/iso8601.c
     src/tools/toml.c
 
     # Config subsystem

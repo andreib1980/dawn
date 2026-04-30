@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/iso8601.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
@@ -55,137 +56,6 @@
 static char *scheduler_tool_callback(const char *action, char *value, int *should_respond);
 static int scheduler_tool_init(void);
 static void scheduler_tool_cleanup(void);
-
-/* =============================================================================
- * ISO 8601 Parser
- * ============================================================================= */
-
-/**
- * @brief Parse timezone offset from ISO 8601 suffix
- *
- * Handles 'Z' (UTC), '+HH:MM', '-HH:MM' suffixes.
- *
- * @param suffix Pointer to the timezone part of the string (after seconds)
- * @param offset_sec Output: offset from UTC in seconds (e.g., -18000 for -05:00)
- * @return true if a timezone suffix was found and parsed, false if local time
- */
-static bool parse_tz_offset(const char *suffix, int *offset_sec) {
-   if (!suffix || !suffix[0])
-      return false;
-
-   if (suffix[0] == 'Z' || suffix[0] == 'z') {
-      *offset_sec = 0;
-      return true;
-   }
-
-   if (suffix[0] == '+' || suffix[0] == '-') {
-      int tz_h = 0, tz_m = 0;
-      if (sscanf(suffix + 1, "%d:%d", &tz_h, &tz_m) >= 1) {
-         *offset_sec = (tz_h * 3600 + tz_m * 60);
-         if (suffix[0] == '-')
-            *offset_sec = -*offset_sec;
-         return true;
-      }
-   }
-
-   return false;
-}
-
-/**
- * @brief Parse ISO 8601 datetime string to Unix timestamp (thread-safe)
- *
- * Supports formats:
- * - "2026-02-19T15:30:00"        (local time, uses process-wide TZ)
- * - "2026-02-19T15:30:00Z"       (UTC)
- * - "2026-02-19T15:30:00-05:00"  (with timezone offset)
- * - "15:30" or "07:00"           (time only, assume today or tomorrow)
- *
- * Thread-safe: relies on process-wide TZ set once at startup from
- * g_config.localization.timezone. Explicit timezone offsets are parsed
- * arithmetically.
- *
- * @param iso_str Input string
- * @return Unix timestamp, or -1 on error
- */
-static time_t parse_iso8601(const char *iso_str) {
-   if (!iso_str || !iso_str[0])
-      return -1;
-
-   struct tm tm_info;
-   memset(&tm_info, 0, sizeof(tm_info));
-   tm_info.tm_isdst = -1; /* Let mktime determine DST */
-
-   /* Check for time-only format (HH:MM) */
-   if (strlen(iso_str) <= 5 && strchr(iso_str, ':')) {
-      int hour = 0, min = 0;
-      if (sscanf(iso_str, "%d:%d", &hour, &min) != 2)
-         return -1;
-      if (hour < 0 || hour > 23 || min < 0 || min > 59)
-         return -1;
-
-      time_t now = time(NULL);
-      localtime_r(&now, &tm_info);
-      tm_info.tm_hour = hour;
-      tm_info.tm_min = min;
-      tm_info.tm_sec = 0;
-
-      time_t result = mktime(&tm_info);
-      /* If time already passed today, use tomorrow */
-      if (result <= now)
-         result += 86400;
-      return result;
-   }
-
-   /* Full ISO 8601 */
-   int year, month, day, hour = 0, min = 0, sec = 0;
-   int parsed = sscanf(iso_str, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &min, &sec);
-   if (parsed < 3)
-      return -1;
-
-   tm_info.tm_year = year - 1900;
-   tm_info.tm_mon = month - 1;
-   tm_info.tm_mday = day;
-   tm_info.tm_hour = hour;
-   tm_info.tm_min = min;
-   tm_info.tm_sec = sec;
-
-   /* Check for timezone suffix after the time portion */
-   const char *tz_start = iso_str;
-   /* Skip past the parsed datetime to find timezone suffix */
-   const char *t_pos = strchr(iso_str, 'T');
-   if (t_pos) {
-      tz_start = t_pos + 1;
-      /* Skip past HH:MM:SS digits */
-      while (*tz_start && (*tz_start == ':' || (*tz_start >= '0' && *tz_start <= '9')))
-         tz_start++;
-   } else {
-      tz_start = iso_str + strlen(iso_str); /* No T, no timezone */
-   }
-
-   int tz_offset_sec = 0;
-   if (parse_tz_offset(tz_start, &tz_offset_sec)) {
-      /* Timezone-aware: interpret as UTC + offset, convert to local */
-      /* First compute as if local time, then adjust */
-      time_t local_result = mktime(&tm_info);
-      if (local_result == (time_t)-1)
-         return -1;
-
-      /* Get the local timezone offset at this time */
-      struct tm local_tm;
-      localtime_r(&local_result, &local_tm);
-      long local_offset = local_tm.tm_gmtoff; /* seconds east of UTC */
-
-      /* The input time is at tz_offset_sec from UTC.
-       * Convert: utc_time = input_time - tz_offset_sec
-       *          local_time = utc_time + local_offset
-       *          result = mktime_result + (local_offset - tz_offset_sec)
-       * But mktime already assumed local, so adjust the difference. */
-      return local_result + (local_offset - tz_offset_sec);
-   }
-
-   /* No timezone suffix: interpret as local time (uses process TZ) */
-   return mktime(&tm_info);
-}
 
 /* =============================================================================
  * JSON Helpers
@@ -271,7 +141,7 @@ static char *handle_create(struct json_object *details,
       event.duration_sec = duration_min * 60;
    } else if (fire_at_str) {
       /* Absolute time via ISO 8601 */
-      time_t fire_time = parse_iso8601(fire_at_str);
+      time_t fire_time = iso8601_parse(fire_at_str);
       if (fire_time <= 0) {
          snprintf(result, sizeof(result), "Error: invalid fire_at format '%s'", fire_at_str);
          return strdup(result);

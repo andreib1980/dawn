@@ -23,7 +23,7 @@
  * Extracts facts, preferences, and summaries from conversation history.
  */
 
-#define _GNU_SOURCE /* strptime */
+#define _GNU_SOURCE /* strcasestr */
 
 #include "memory/memory_extraction.h"
 
@@ -36,6 +36,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
+#include "core/iso8601.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -390,32 +391,6 @@ static const char *validate_fact_category(const char *raw) {
    return "general";
 }
 
-/* Parse ISO-8601 date strings the LLM may emit.  Tries:
- *   YYYY-MM-DD  -> exact day at 00:00:00 UTC
- *   YYYY        -> Jan 1 of that year at 00:00:00 UTC
- * Returns 0 on parse failure (callers treat 0 as NULL/open-ended). */
-static int64_t parse_iso8601_date(const char *s) {
-   if (!s || !*s)
-      return 0;
-   struct tm tm = { 0 };
-   /* Try full date first. */
-   char *end = strptime(s, "%Y-%m-%d", &tm);
-   if (!end) {
-      /* Year-only fallback. */
-      memset(&tm, 0, sizeof(tm));
-      end = strptime(s, "%Y", &tm);
-      if (!end)
-         return 0;
-      tm.tm_mday = 1;
-      tm.tm_mon = 0;
-   }
-   /* Convert as UTC using timegm().  DAWN currently targets glibc; returning
-    * 0 on failure is sufficient — callers treat 0 as "no validity bound". */
-   time_t t = timegm(&tm);
-   if (t == (time_t)-1)
-      return 0;
-   return (int64_t)t;
-}
 
 /* =============================================================================
  * Fact map — tracks newly created facts for relation linkage
@@ -755,10 +730,10 @@ static void process_extraction_response(int user_id,
          int64_t valid_from = 0, valid_to = 0;
          struct json_object *vf_obj, *vt_obj;
          if (json_object_object_get_ex(rel, "valid_from", &vf_obj)) {
-            valid_from = parse_iso8601_date(json_object_get_string(vf_obj));
+            valid_from = iso8601_parse_date_utc(json_object_get_string(vf_obj));
          }
          if (json_object_object_get_ex(rel, "valid_to", &vt_obj)) {
-            valid_to = parse_iso8601_date(json_object_get_string(vt_obj));
+            valid_to = iso8601_parse_date_utc(json_object_get_string(vt_obj));
          }
          /* Sanity-check the range the LLM emitted.  An inverted or zero-length
           * window would never match as_of queries and interacts badly with the
