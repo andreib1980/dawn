@@ -295,7 +295,7 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    } else {
       // Error on AI response
       OLOG_ERROR("GPT error.\n");
-      text_to_speech("I'm sorry but I'm currently unavailable boss.");
+      text_to_speech("I'm sorry but I'm currently unavailable.");
    }
    free(pending_command_result);
    pending_command_result = NULL;

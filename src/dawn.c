@@ -223,9 +223,9 @@ static char *cancelWords[] = { "stop",      "stop it",        "cancel",        "
                                "zip it",    "enough already", "that's enough", "stop right there" };
 
 // Standard greeting messages based on the time of day.
-const char *morning_greeting = "Good morning boss.";
-const char *day_greeting = "Good day Sir.";
-const char *evening_greeting = "Good evening Sir.";
+const char *morning_greeting = "Good morning.";
+const char *day_greeting = "Good day.";
+const char *evening_greeting = "Good evening.";
 
 /* State machine enum defined in state_machine.h (dawn_state_t) */
 
@@ -644,7 +644,7 @@ char *setPcmPlaybackDevice(const char *actionName, char *value, int *should_resp
    OLOG_ERROR("  Hint: Set in dawn.toml [audio] playback_device or WebUI Settings > Audio");
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
-      snprintf(speech, MAX_COMMAND_LENGTH, "Sorry sir. A playback device called %s was not found.",
+      snprintf(speech, MAX_COMMAND_LENGTH, "Sorry. A playback device called %s was not found.",
                value);
       text_to_speech(speech);
       return NULL;
@@ -715,7 +715,7 @@ char *setPcmCaptureDevice(const char *actionName, char *value, int *should_respo
    OLOG_ERROR("  Hint: Set in dawn.toml [audio] capture_device or WebUI Settings > Audio");
 
    if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
-      snprintf(speech, MAX_COMMAND_LENGTH, "Sorry sir. A capture device called %s was not found.",
+      snprintf(speech, MAX_COMMAND_LENGTH, "Sorry. A capture device called %s was not found.",
                value);
       text_to_speech(speech);
       return NULL;
@@ -2559,7 +2559,7 @@ mqtt_disabled:
             pthread_mutex_unlock(&tts_mutex);
 
             OLOG_ERROR("LLM error - no response");
-            text_to_speech("I'm sorry but I'm currently unavailable boss.");
+            text_to_speech("I'm sorry but I'm currently unavailable.");
          }
       }
       prev_llm_processing = llm_processing;  // Update previous state
@@ -3147,7 +3147,7 @@ mqtt_disabled:
                         }
                         pthread_mutex_unlock(&tts_mutex);
 
-                        text_to_speech("Goodbye sir.");
+                        text_to_speech("Goodbye.");
 
                         quit = 1;
                      }
@@ -3246,7 +3246,7 @@ mqtt_disabled:
                         // No command after wake word - transition to DAWN_STATE_COMMAND_RECORDING
                         OLOG_WARNING("Wake word detected with no command, transitioning to "
                                      "COMMAND_RECORDING.\n");
-                        text_to_speech("Hello sir.");
+                        text_to_speech("Hello.");
 
                         commandTimeout = 0;
                         silenceNextState = DAWN_STATE_COMMAND_RECORDING;
@@ -3743,7 +3743,7 @@ mqtt_disabled:
                      }
                      pthread_mutex_unlock(&llm_mutex);
 
-                     text_to_speech("I'm sorry but I'm currently unavailable boss.");
+                     text_to_speech("I'm sorry but I'm currently unavailable.");
                   } else {
                      OLOG_INFO("LLM thread spawned - continuing audio processing");
                   }

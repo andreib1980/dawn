@@ -96,8 +96,8 @@ extern "C" {
  * @brief Minimum greeting duration for reliable calibration (milliseconds)
  *
  * Greetings shorter than this may not provide enough audio content for
- * reliable cross-correlation. Typical boot greetings ("Hello sir",
- * "Good morning sir") are 0.5-1.5 seconds.
+ * reliable cross-correlation. Typical boot greetings ("Hello",
+ * "Good morning") are 0.5-1.5 seconds.
  */
 #define AEC_CAL_MIN_GREETING_MS 500
 

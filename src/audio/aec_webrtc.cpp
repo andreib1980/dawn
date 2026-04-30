@@ -126,7 +126,7 @@ struct AudioFrame {
  * The delay infrastructure is preserved for future use with acoustic calibration.
  *
  * FUTURE: TTS Greeting Calibration
- * The opening TTS greeting ("Good morning boss") can be used to measure actual
+ * The opening TTS greeting ("Good morning") can be used to measure actual
  * acoustic delay by cross-correlating the reference signal with mic capture.
  * Once calibrated, pass the measured delay_samples to the constructor to help
  * AEC3 converge faster, or to support backends (like Speex) that need manual

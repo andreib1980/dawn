@@ -628,7 +628,7 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
 
          /* Play greeting TTS (matches local mic behavior) */
          if (conn->session && conn->tts_enabled) {
-            webui_sentence_audio_callback("Hello sir.", conn->session);
+            webui_sentence_audio_callback("Hello.", conn->session);
          }
       }
    } else {
