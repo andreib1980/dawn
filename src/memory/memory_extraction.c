@@ -1017,6 +1017,11 @@ static void *extraction_thread(void *arg) {
 
    json_object_put(extraction_history);
 
+   /* Recovery-triggered extractions process old, idle conversations the user
+    * has long since moved on from.  Surfacing a noisy "extraction failed"
+    * toast for those is just clutter — log only, don't notify. */
+   bool is_recovery_run = (strncmp(ctx->session_id, "recovery_", 9) == 0);
+
    if (response) {
       process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
                                   ctx->new_message_count, ctx->duration_seconds);
@@ -1031,7 +1036,9 @@ static void *extraction_thread(void *arg) {
                   ctx->fallback.model, model ? model : "(default)");
          OLOG_WARNING("memory_extraction: %s", notice);
 #ifdef ENABLE_WEBUI
-         webui_broadcast_memory_notice(ctx->user_id, "warning", notice);
+         if (!is_recovery_run) {
+            webui_broadcast_memory_notice(ctx->user_id, "warning", notice);
+         }
 #endif
       }
 
@@ -1056,14 +1063,14 @@ static void *extraction_thread(void *arg) {
          }
       }
    } else {
-      OLOG_WARNING("memory_extraction: LLM returned no response");
-      char notice[256];
-      snprintf(notice, sizeof(notice),
-               "Memory extraction failed — model \"%s\" unavailable. "
-               "Check extraction_model in Settings.",
-               model ? model : "(default)");
+      OLOG_WARNING("memory_extraction: LLM returned no response (model=%s, conv=%ld)",
+                   model ? model : "(default)", (long)ctx->conversation_id);
 #ifdef ENABLE_WEBUI
-      webui_broadcast_memory_notice(ctx->user_id, "error", notice);
+      if (!is_recovery_run) {
+         webui_broadcast_memory_notice(ctx->user_id, "error",
+                                       "Memory extraction failed for this session — see daemon "
+                                       "logs for details.");
+      }
 #endif
    }
 
@@ -1118,9 +1125,15 @@ int memory_trigger_extraction(int user_id,
    }
 #endif
 
-   /* Skip if too few messages */
+   /* Skip if too few messages.  Mark the conversation as up-to-date so
+    * recovery scans don't keep re-evaluating a structurally inextractable
+    * conversation forever.  If the user later adds a 2nd message the
+    * counter advances back to zero on the new live extraction. */
    if (message_count < 2) {
       OLOG_INFO("memory_extraction: skipping - too few messages (%d)", message_count);
+      if (conversation_id > 0) {
+         memory_db_set_last_extracted(conversation_id, message_count);
+      }
       return 0;
    }
 

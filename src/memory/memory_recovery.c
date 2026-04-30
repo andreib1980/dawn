@@ -54,6 +54,13 @@
  * remainder. */
 #define RECOVERY_PASS_LIMIT 500
 
+/* Minimum total plain-text characters across the conversation history (after
+ * stripping inline image data) for the LLM to have anything extractable.
+ * Below this we mark the conversation as up-to-date and skip the LLM call.
+ * 50 chars catches truly-empty conversations without rejecting short but
+ * substantive ones (e.g. "What is this?  →  Looks like a chair to me."). */
+#define RECOVERY_MIN_TEXT_CHARS 50
+
 /* Worker thread state */
 static pthread_t s_recovery_thread;
 static volatile bool s_running = false;
@@ -78,13 +85,61 @@ typedef struct {
 
 typedef struct {
    struct json_object *array;
+   size_t total_text_len; /* chars across all message contents post-image-strip */
 } history_build_ctx_t;
+
+/**
+ * @brief Strip inline base64 image markers from message text.
+ *
+ * DAWN encodes image attachments in stored messages as
+ * `[IMAGE:data:image/<fmt>;base64,<...>]` markers, sometimes hundreds of KB
+ * of base64 in a single message.  Feeding those raw to the extraction LLM
+ * blows past context windows and is unparseable text anyway.  This helper
+ * scans `src` and writes a copy to a newly-malloc'd buffer with each marker
+ * replaced by `[image]` (8 chars).  The base64 alphabet contains no `]`, so
+ * a linear scan terminates correctly.
+ *
+ * @return Owned NUL-terminated string (caller frees), or NULL on OOM.
+ */
+static char *strip_image_markers(const char *src) {
+   if (!src) {
+      return strdup("");
+   }
+   size_t in_len = strlen(src);
+   /* Worst case (no markers) keeps the source byte-for-byte. */
+   char *dst = malloc(in_len + 1);
+   if (!dst) {
+      return NULL;
+   }
+   const char *p = src;
+   char *q = dst;
+   while (*p) {
+      if (strncmp(p, "[IMAGE:", 7) == 0) {
+         const char *close = strchr(p + 7, ']');
+         if (close) {
+            memcpy(q, "[image]", 7);
+            q += 7;
+            p = close + 1;
+            continue;
+         }
+         /* Unterminated marker — copy the rest verbatim and stop. */
+      }
+      *q++ = *p++;
+   }
+   *q = '\0';
+   return dst;
+}
 
 /**
  * @brief json_object array assembler used as conv_db_get_messages callback.
  *
- * Returns non-zero on allocation failure to abort iteration — silently dropping
- * messages would feed a truncated history to extraction.
+ * Strips inline image markers from each message's content before adding it
+ * to the history, and accumulates the total post-strip text length so the
+ * caller can decide whether the history has enough substance to extract
+ * from.
+ *
+ * Returns non-zero on allocation failure to abort iteration — silently
+ * dropping messages would feed a truncated history to extraction.
  */
 static int append_message_to_history(const conversation_message_t *msg, void *ctx_ptr) {
    history_build_ctx_t *ctx = (history_build_ctx_t *)ctx_ptr;
@@ -92,9 +147,15 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
       return 0;
    }
 
+   char *stripped = strip_image_markers(msg->content);
+   if (!stripped) {
+      OLOG_WARNING("memory_recovery: OOM stripping message content; aborting iteration");
+      return 1;
+   }
+
    struct json_object *entry = json_object_new_object();
    struct json_object *role = json_object_new_string(msg->role);
-   struct json_object *content = json_object_new_string(msg->content ? msg->content : "");
+   struct json_object *content = json_object_new_string(stripped);
    if (!entry || !role || !content) {
       OLOG_WARNING("memory_recovery: OOM building history; aborting iteration");
       if (entry)
@@ -103,8 +164,12 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
          json_object_put(role);
       if (content)
          json_object_put(content);
+      free(stripped);
       return 1;
    }
+   ctx->total_text_len += strlen(stripped);
+   free(stripped);
+
    json_object_object_add(entry, "role", role);
    json_object_object_add(entry, "content", content);
    json_object_array_add(ctx->array, entry);
@@ -114,10 +179,17 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
 /**
  * @brief Reconstruct conversation history from the messages table.
  *
- * Returns a new json_object array; caller must call json_object_put().
+ * @param conv_id          conversation ID
+ * @param user_id          owning user ID
+ * @param text_len_out     (optional) total post-image-strip text length across
+ *                         all messages — used to decide if the conversation
+ *                         has enough substantive content to extract from.
+ * @return Owned json_object array (caller calls json_object_put), or NULL.
  */
-static struct json_object *load_history_from_db(int64_t conv_id, int user_id) {
-   history_build_ctx_t ctx = { .array = json_object_new_array() };
+static struct json_object *load_history_from_db(int64_t conv_id,
+                                                int user_id,
+                                                size_t *text_len_out) {
+   history_build_ctx_t ctx = { .array = json_object_new_array(), .total_text_len = 0 };
    if (!ctx.array) {
       return NULL;
    }
@@ -126,6 +198,9 @@ static struct json_object *load_history_from_db(int64_t conv_id, int user_id) {
    if (rc != AUTH_DB_SUCCESS) {
       json_object_put(ctx.array);
       return NULL;
+   }
+   if (text_len_out) {
+      *text_len_out = ctx.total_text_len;
    }
 
    return ctx.array;
@@ -241,7 +316,7 @@ static bool wait_for_user_extraction(int user_id) {
  * @brief Process one stuck conversation.  Returns true if extraction was
  *        actually triggered (regardless of outcome).
  */
-static bool process_stuck_conv(const stuck_conv_t *row) {
+static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
    /* Read pre-trigger counter so we can detect successful advancement. */
    int last_extracted_before = 0;
    memory_db_get_last_extracted(row->conv_id, &last_extracted_before);
@@ -254,7 +329,8 @@ static bool process_stuck_conv(const stuck_conv_t *row) {
       return false;
    }
 
-   struct json_object *history = load_history_from_db(row->conv_id, row->user_id);
+   size_t total_text_len = 0;
+   struct json_object *history = load_history_from_db(row->conv_id, row->user_id, &total_text_len);
    if (!history) {
       OLOG_WARNING("memory_recovery: failed to load history for conv %lld",
                    (long long)row->conv_id);
@@ -262,12 +338,29 @@ static bool process_stuck_conv(const stuck_conv_t *row) {
       return false;
    }
 
+   /* No-extractable-content gate: image-only or otherwise empty conversations
+    * have nothing the LLM can turn into facts.  Mark up-to-date so the
+    * recovery scan stops re-evaluating, and skip the LLM call. */
+   if (total_text_len < RECOVERY_MIN_TEXT_CHARS) {
+      OLOG_INFO("memory_recovery: conv %lld has %zu chars of text after image strip "
+                "(< %d threshold); marking as extracted (no-op)",
+                (long long)row->conv_id, total_text_len, RECOVERY_MIN_TEXT_CHARS);
+      memory_db_set_last_extracted(row->conv_id, row->message_count);
+      json_object_put(history);
+      return false;
+   }
+
    /* Stamp the attempt before triggering — if the daemon crashes during
     * extraction, the next pass sees the bumped counter and won't re-loop. */
    record_attempt(row->conv_id);
 
-   int rc = memory_trigger_extraction(row->user_id, row->conv_id, NULL, history, row->message_count,
-                                      0, NULL);
+   /* Recovery-tagged session_id lets extraction_thread recognise this as a
+    * background re-extraction and suppress user-facing failure toasts. */
+   char session_id[MEMORY_SESSION_ID_MAX];
+   snprintf(session_id, sizeof(session_id), "recovery_%lld", (long long)row->conv_id);
+
+   int rc = memory_trigger_extraction(row->user_id, row->conv_id, session_id, history,
+                                      row->message_count, 0, NULL);
    json_object_put(history);
 
    if (rc != SUCCESS) {
@@ -300,8 +393,20 @@ static bool process_stuck_conv(const stuck_conv_t *row) {
       OLOG_INFO("memory_recovery: extracted conv %lld (%d -> %d msgs)", (long long)row->conv_id,
                 last_extracted_before, last_extracted_after);
    } else {
-      OLOG_INFO("memory_recovery: conv %lld extraction completed without advancing counter",
-                (long long)row->conv_id);
+      /* Extraction ran but didn't produce a counter advance.  If this was the
+       * last permitted attempt, mark the conversation as extracted so it
+       * doesn't keep showing up as stuck. */
+      bool last_attempt = (max_attempts > 0 && row->extraction_attempts + 1 >= max_attempts);
+      if (last_attempt) {
+         OLOG_INFO("memory_recovery: conv %lld hit attempt cap (%d) without success; "
+                   "marking as extracted (give-up)",
+                   (long long)row->conv_id, max_attempts);
+         memory_db_set_last_extracted(row->conv_id, row->message_count);
+      } else {
+         OLOG_INFO("memory_recovery: conv %lld extraction completed without advancing counter "
+                   "(attempt %d/%d)",
+                   (long long)row->conv_id, row->extraction_attempts + 1, max_attempts);
+      }
    }
    return true;
 }
@@ -340,7 +445,7 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
    OLOG_INFO("memory_recovery: pass starting — %d stuck conversation(s) to process", list.count);
 
    for (int i = 0; i < list.count && s_running; i++) {
-      if (process_stuck_conv(&list.rows[i])) {
+      if (process_stuck_conv(&list.rows[i], max_attempts)) {
          triggered++;
       } else {
          skipped++;

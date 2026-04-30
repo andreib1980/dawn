@@ -169,6 +169,21 @@
          }
       });
 
+      // Post-pass: a setting-group's label rarely matches a query about a
+      // field inside it, so the group's own index entry would re-add
+      // search-hidden and hide its visible children.  Un-hide any group that
+      // still contains a visible field.
+      if (sectionsContainer) {
+         sectionsContainer.querySelectorAll('.setting-group').forEach((group) => {
+            const hasVisibleField = group.querySelector(
+               '.setting-item:not(.search-hidden), .setting-item-row:not(.search-hidden)'
+            );
+            if (hasVisibleField) {
+               group.classList.remove('search-hidden');
+            }
+         });
+      }
+
       // Show/hide sections based on whether they have matches
       if (sectionsContainer) {
          const sections = sectionsContainer.querySelectorAll('.settings-section');
