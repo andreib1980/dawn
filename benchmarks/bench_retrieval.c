@@ -70,6 +70,10 @@ extern auth_db_state_t s_db;
 /* When true, skip keyword boosting (pure cosine baseline) */
 static bool s_no_keyword_boost = false;
 
+/* Extra weight added to a keyword match when the query word starts with an
+ * uppercase letter (likely a proper noun / person name).  0 disables. */
+static float s_proper_noun_boost = 0.0f;
+
 /* Temporal-boost weight (v35).  When the query contains a parsed temporal
  * expression and a chunk has a non-zero created_at, the chunk's score gets
  * `s_temporal_weight * proximity` added.  proximity is Gaussian decay in
@@ -361,12 +365,16 @@ static float keyword_score(const char *text, const query_words_t *qw) {
    if (qw->count == 0)
       return 0.0f;
 
-   int matches = 0;
+   float score = 0.0f;
    for (int i = 0; i < qw->count; i++) {
-      if (contains_keyword(text, qw->words[i], qw->lengths[i]))
-         matches++;
+      if (contains_keyword(text, qw->words[i], qw->lengths[i])) {
+         float weight = 1.0f;
+         if (s_proper_noun_boost > 0.0f && isupper((unsigned char)qw->words[i][0]))
+            weight += s_proper_noun_boost;
+         score += weight;
+      }
    }
-   return (float)matches / (float)qw->count;
+   return score / (float)qw->count;
 }
 
 /* =============================================================================
@@ -773,6 +781,7 @@ int main(int argc, char *argv[]) {
       { "endpoint", required_argument, 0, 'e' },
       { "api-key", required_argument, 0, 'k' },
       { "no-keyword-boost", no_argument, 0, 'r' },
+      { "proper-noun-boost", required_argument, 0, 'N' },
       { "category-filter", required_argument, 0, 'c' },
       { "temporal-weight", required_argument, 0, 't' },
       { "now", required_argument, 0, 'n' },
@@ -781,7 +790,7 @@ int main(int argc, char *argv[]) {
    };
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:rh", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:rh", long_options, NULL)) != -1) {
       switch (opt) {
          case 'p':
             provider = optarg;
@@ -797,6 +806,9 @@ int main(int argc, char *argv[]) {
             break;
          case 'r':
             s_no_keyword_boost = true;
+            break;
+         case 'N':
+            s_proper_noun_boost = (float)atof(optarg);
             break;
          case 'c':
             snprintf(s_category_filter, sizeof(s_category_filter), "%s", optarg);

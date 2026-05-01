@@ -28,10 +28,23 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def split_sentences(text, min_len=15):
+   """Split text into sentences on .!? boundaries.
+   Keeps only sentences >= min_len chars to skip fragments like 'Yes.' or 'Oh!'."""
+   parts = re.split(r"(?<=[.!?])\s+", text.strip())
+   return [p.strip() for p in parts if len(p.strip()) >= min_len]
 
 
 # =============================================================================
@@ -51,6 +64,7 @@ class BenchRetrieval:
       api_key="",
       raw_mode=False,
       temporal_weight=0.0,
+      proper_noun_boost=0.0,
       now_override=None,
    ):
       cmd = [binary_path, "--provider", provider]
@@ -64,6 +78,8 @@ class BenchRetrieval:
          cmd += ["--no-keyword-boost"]
       if temporal_weight > 0.0:
          cmd += ["--temporal-weight", str(temporal_weight)]
+      if proper_noun_boost > 0.0:
+         cmd += ["--proper-noun-boost", str(proper_noun_boost)]
       if now_override is not None:
          cmd += ["--now", str(int(now_override))]
 
@@ -380,7 +396,7 @@ def parse_locomo_session_date(s):
       return 0
 
 
-def run_locomo(engine, dataset_path, limit=0, granularity="dialog"):
+def run_locomo(engine, dataset_path, limit=0, granularity="dialog", sentence_chunks=False, top_k=10):
    """Run LoCoMo benchmark. Returns metrics dict."""
    with open(dataset_path) as f:
       data = json.load(f)
@@ -433,8 +449,12 @@ def run_locomo(engine, dataset_path, limit=0, granularity="dialog"):
                dia_id = d.get("dia_id", f"D{sess['session_num']}:?")
                speaker = d.get("speaker", "?")
                text = d.get("text", "")
-               doc = f'{speaker} said, "{text}"'
-               engine.add(dia_id, doc, created_at=session_ts)
+               if sentence_chunks:
+                  sentences = split_sentences(text) or [text]
+                  for sent in sentences:
+                     engine.add(dia_id, f"[{speaker}] {sent}", created_at=session_ts)
+               else:
+                  engine.add(dia_id, f'{speaker} said, "{text}"', created_at=session_ts)
          else:
             texts = []
             for d in sess["dialogs"]:
@@ -454,7 +474,7 @@ def run_locomo(engine, dataset_path, limit=0, granularity="dialog"):
          if not question or not evidence:
             continue
 
-         result = engine.query(question, top_k=10)
+         result = engine.query(question, top_k=top_k)
          retrieved_ids = [r["id"] for r in result.get("results", [])]
 
          evidence_set = extract_locomo_evidence_ids(evidence, granularity)
@@ -689,6 +709,29 @@ def main():
       help="Pin 'now' (Unix seconds) for relative expressions in queries. For LoCoMo, "
       "use ~1707000000 (early 2024) to anchor 'last week'/'recently' to the dataset era.",
    )
+   parser.add_argument(
+      "--proper-noun-boost",
+      type=float,
+      default=0.0,
+      dest="proper_noun_boost",
+      help="Extra keyword-match weight for capitalized query words (proper nouns/names). "
+      "Try 0.5–2.0. Stacks with --temporal-weight.",
+   )
+   parser.add_argument(
+      "--sentence-chunks",
+      action="store_true",
+      dest="sentence_chunks",
+      help="Split dialog turns into individual sentences before indexing (LoCoMo only). "
+      "Reduces embedding dilution for single-fact turns.",
+   )
+   parser.add_argument(
+      "--top-k",
+      type=int,
+      default=10,
+      dest="top_k",
+      help="Number of results to retrieve per query (default: 10). Higher values help "
+      "diagnose whether evidence is present but poorly ranked (LoCoMo cat-3).",
+   )
 
    args = parser.parse_args()
 
@@ -703,6 +746,7 @@ def main():
       api_key=args.api_key,
       raw_mode=args.raw,
       temporal_weight=args.temporal_weight,
+      proper_noun_boost=args.proper_noun_boost,
       now_override=args.now,
    )
    print(
@@ -726,6 +770,8 @@ def main():
          args.dataset,
          limit=args.limit,
          granularity=args.granularity,
+         sentence_chunks=args.sentence_chunks,
+         top_k=args.top_k,
       )
    elif args.benchmark == "convomem":
       results = run_convomem(engine, args.dataset, limit=args.limit or 100)
