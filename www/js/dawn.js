@@ -537,6 +537,9 @@
             case 'import_memories_response':
                DawnMemory.handleImportResponse(msg.payload);
                break;
+            case 'get_memory_fact_source_response':
+               DawnMemory.handleFactSourceResponse(msg.payload);
+               break;
             // Contacts management responses
             case 'contacts_list_response':
                if (typeof DawnContacts !== 'undefined')

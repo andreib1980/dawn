@@ -243,10 +243,6 @@
    background: var(--accent-subtle);
 }
 
-.memory-item:hover .memory-item-delete {
-   opacity: 1;
-}
-
 .memory-item-header {
    display: flex;
    align-items: flex-start;
@@ -289,10 +285,26 @@
    opacity: 0.7;
 }
 
-/* Delete button (inline in header row) */
-.memory-item-delete {
+/* Action button cluster (delete + optional source button) */
+.memory-item-actions {
+   display: flex;
+   align-items: center;
+   gap: 4px;
    flex-shrink: 0;
    margin-left: auto;
+   opacity: 0;
+   transition: opacity var(--transition-fast);
+}
+
+.memory-item:hover .memory-item-actions,
+.memory-item:focus-within .memory-item-actions {
+   opacity: 1;
+}
+
+/* Shared style for all action icon buttons */
+.memory-item-delete,
+.memory-item-source-btn {
+   flex-shrink: 0;
    width: 24px;
    height: 24px;
    padding: 0;
@@ -301,9 +313,7 @@
    border-radius: 4px;
    color: var(--text-secondary);
    cursor: pointer;
-   opacity: 0;
    transition:
-      opacity var(--transition-fast),
       background var(--transition-fast),
       color var(--transition-fast);
    display: flex;
@@ -316,17 +326,19 @@
    color: var(--error);
 }
 
-.memory-item-delete:focus-visible {
-   opacity: 1;
+.memory-item-source-btn:hover {
+   background: var(--accent-hover);
+   color: var(--accent);
+}
+
+.memory-item-delete:focus-visible,
+.memory-item-source-btn:focus-visible {
    outline: 2px solid var(--accent);
    outline-offset: 2px;
 }
 
-.memory-item:focus-within .memory-item-delete {
-   opacity: 1;
-}
-
-.memory-item-delete svg {
+.memory-item-delete svg,
+.memory-item-source-btn svg {
    width: 14px;
    height: 14px;
 }
@@ -1169,8 +1181,12 @@
       max-height: calc(80vh - 220px);
    }
 
-   .memory-item-delete {
+   .memory-item-actions {
       opacity: 1;
+   }
+
+   .memory-item-delete,
+   .memory-item-source-btn {
       width: 44px;
       height: 44px;
    }
@@ -1272,4 +1288,57 @@
       opacity: 1;
       transform: translateX(-50%) translateY(0);
    }
+}
+
+/* =============================================================================
+ * Source modal (v40 memory provenance)
+ * ============================================================================= */
+
+.memory-source-modal {
+   max-width: 640px;
+   width: 100%;
+}
+
+.memory-source-body {
+   max-height: 60vh;
+   overflow-y: auto;
+   padding: 0.5rem 0;
+}
+
+.memory-source-message {
+   display: flex;
+   gap: 0.75rem;
+   padding: 0.5rem 0;
+   border-bottom: 1px solid var(--border-subtle);
+   font-size: 0.875rem;
+   line-height: 1.5;
+}
+
+.memory-source-message:last-child {
+   border-bottom: none;
+}
+
+.memory-source-role {
+   min-width: 72px;
+   flex-shrink: 0;
+   color: var(--text-muted);
+   font-weight: 500;
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.75rem;
+   padding-top: 2px;
+   text-transform: uppercase;
+   letter-spacing: 0.03em;
+}
+
+.memory-source-content {
+   color: var(--text-primary);
+   word-break: break-word;
+}
+
+.memory-source-unavailable,
+.memory-source-loading {
+   color: var(--text-muted);
+   font-style: italic;
+   text-align: center;
+   padding: 1.5rem 0;
 }

@@ -274,6 +274,13 @@ dawn_add_unit_test(test_iso8601
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_memory_provenance
+   SOURCES test_memory_provenance.c test_memory_provenance_stub.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+   LIBS    dawn_common unity sqlite3 pthread m
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_similarity
    SOURCES test_memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_similarity.c

@@ -129,6 +129,19 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "include_historical",
    },
+   /* v40 — source-linked recall.  Appends verbatim conversation excerpts for
+    * each fact so the caller can verify the extractor's paraphrase. */
+   {
+       .name = "with_source",
+       .description = "Set to true to include verbatim source excerpts for each fact returned "
+                      "by 'search' or 'recent'.  Excerpts are omitted for legacy facts (stored "
+                      "before v40) and for facts from private conversations.  A shared 16 KB "
+                      "budget applies; excess sources are noted with a pointer to context_expand.",
+       .type = TOOL_PARAM_TYPE_BOOL,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "with_source",
+   },
 };
 
 /* ========== Tool Metadata ========== */
@@ -157,9 +170,11 @@ static const tool_metadata_t memory_metadata = {
                   "Use 'delete_contact' to remove a contact record by ID. "
                   "Use 'merge_entities' to combine two entities that refer to the same "
                   "person/pet/place (query: source name to delete, target_name: entity to keep). "
+                  "Use with_source=true on 'search'/'recent' to include verbatim conversation "
+                  "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 7,
+   .param_count = 8,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,

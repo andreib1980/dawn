@@ -33,6 +33,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "logging.h"
@@ -45,6 +46,84 @@
 #include "mosquitto_comms.h"
 #include "tools/time_utils.h"
 #include "tools/tool_registry.h"
+
+/* Shared char budget for with_source verbatim excerpts in a single tool call.
+ * Must be less than the smallest result buffer (memory_action_recent: 4 KB)
+ * so the elision notice fires before snprintf truncation can occur. */
+#define MEMORY_SOURCE_BUDGET_CHARS 3072
+
+/* =============================================================================
+ * Helper: Append verbatim source excerpt for a single fact (with_source=true)
+ *
+ * Appends "[source: conv=N msgs=X-Y]\n<role>: <content>\n..." to buf.
+ * Respects the shared budget; returns chars appended (0 if skipped/budget gone).
+ * ============================================================================= */
+
+struct source_msg_ctx {
+   char *buf;
+   size_t buf_size;
+   size_t *offset;
+   int *budget;
+};
+
+static int source_msg_callback(const conversation_message_t *msg, void *ctx_ptr) {
+   struct source_msg_ctx *ctx = (struct source_msg_ctx *)ctx_ptr;
+   if (!msg || !msg->content || *ctx->budget <= 0)
+      return 1; /* stop */
+   /* Skip system/tool messages in verbatim excerpt */
+   if (strcmp(msg->role, "user") != 0 && strcmp(msg->role, "assistant") != 0)
+      return 0;
+   if (*ctx->offset >= ctx->buf_size)
+      return 1; /* stop: buffer full */
+   size_t remaining = ctx->buf_size - *ctx->offset;
+   int written = snprintf(ctx->buf + *ctx->offset, remaining, "%s: %.500s\n", msg->role,
+                          msg->content);
+   if (written < 0)
+      return 0;
+   /* written may exceed remaining (snprintf reports intended length, not actual).
+    * Advance only by actual bytes written; treat truncation as budget exhausted. */
+   if ((size_t)written >= remaining) {
+      *ctx->offset = ctx->buf_size;
+      *ctx->budget = 0;
+      return 1; /* stop */
+   }
+   *ctx->offset += (size_t)written;
+   *ctx->budget -= written;
+   return 0;
+}
+
+static int append_source_excerpt(int user_id,
+                                 int64_t fact_id,
+                                 char *buf,
+                                 size_t buf_size,
+                                 size_t *offset,
+                                 int *budget_remaining) {
+   if (*budget_remaining <= 0)
+      return 0;
+
+   int64_t conv_id = 0, start_id = 0, end_id = 0;
+   int rc = memory_db_fact_get_source(fact_id, user_id, &conv_id, &start_id, &end_id);
+   if (rc != MEMORY_DB_SUCCESS)
+      return 0; /* no provenance or private */
+
+   /* Header */
+   if (*offset >= buf_size)
+      return 0;
+   size_t hdr_remaining = buf_size - *offset;
+   int hdr = snprintf(buf + *offset, hdr_remaining, "[source: conv=%lld msgs=%lld-%lld]\n",
+                      (long long)conv_id, (long long)start_id, (long long)end_id);
+   if (hdr > 0 && (size_t)hdr < hdr_remaining) {
+      *offset += (size_t)hdr;
+      *budget_remaining -= hdr;
+   }
+
+   /* Verbatim messages — cap range at 500 messages per spec */
+   int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
+   struct source_msg_ctx msg_ctx = { buf, buf_size, offset, budget_remaining };
+   conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, source_msg_callback,
+                                 &msg_ctx);
+   return 1;
+}
 
 /* =============================================================================
  * Helper: Get user ID from current session
@@ -347,7 +426,8 @@ static char *memory_action_search(int user_id,
                                   time_t since_ts,
                                   const char *category,
                                   int64_t as_of_ts,
-                                  bool include_historical) {
+                                  bool include_historical,
+                                  bool with_source) {
    if (!keywords || strlen(keywords) == 0) {
       return strdup("Please provide search keywords.");
    }
@@ -434,6 +514,8 @@ static char *memory_action_search(int user_id,
 
    if (fact_count > 0) {
       offset += snprintf(result + offset, buf_size - offset, "FACTS (%d):\n", fact_count);
+      int source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+      int elided = 0;
       for (int i = 0; i < fact_count && offset < buf_size - 100; i++) {
          char time_str[32];
          format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
@@ -441,8 +523,21 @@ static char *memory_action_search(int user_id,
                             "- [ID:%lld] %s (confidence: %.0f%%, %s)\n", (long long)facts[i].id,
                             facts[i].fact_text, facts[i].confidence * 100, time_str);
 
+         if (with_source && source_budget > 0) {
+            if (!append_source_excerpt(user_id, facts[i].id, result, buf_size, &offset,
+                                       &source_budget)) {
+               /* no provenance — skip silently */
+            }
+         } else if (with_source && source_budget <= 0) {
+            elided++;
+         }
+
          /* Update access time */
          memory_db_fact_update_access(facts[i].id, user_id);
+      }
+      if (elided > 0 && offset < buf_size - 120) {
+         offset += snprintf(result + offset, buf_size - offset,
+                            "[%d more source(s) elided — call context_expand for full]\n", elided);
       }
    }
 
@@ -594,9 +689,10 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
       }
    }
 
-   /* No duplicates found - store the new fact */
+   /* No duplicates found - store the new fact (no provenance: user-initiated) */
    int64_t fact_id = 0;
-   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, &fact_id);
+   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, NULL,
+                                         &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup("Failed to store the fact. Please try again.");
@@ -668,7 +764,7 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
  * Returns facts and summaries created within a specified time period.
  * ============================================================================= */
 
-static char *memory_action_recent(int user_id, const char *period) {
+static char *memory_action_recent(int user_id, const char *period, bool with_source) {
    if (!period || strlen(period) == 0) {
       return strdup("Please specify a time period (e.g., '24h', '7d', '1w').");
    }
@@ -698,11 +794,22 @@ static char *memory_action_recent(int user_id, const char *period) {
 
    if (fact_count > 0) {
       offset += snprintf(result + offset, buf_size - offset, "RECENT FACTS:\n");
+      int source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+      int elided = 0;
       for (int i = 0; i < fact_count && offset < buf_size - 100; i++) {
          char time_str[32];
          format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
          offset += snprintf(result + offset, buf_size - offset, "- [ID:%lld] %s (%s, %s)\n",
                             (long long)facts[i].id, facts[i].fact_text, facts[i].source, time_str);
+         if (with_source && source_budget > 0) {
+            append_source_excerpt(user_id, facts[i].id, result, buf_size, &offset, &source_budget);
+         } else if (with_source && source_budget <= 0) {
+            elided++;
+         }
+      }
+      if (elided > 0 && offset < buf_size - 120) {
+         offset += snprintf(result + offset, buf_size - offset,
+                            "[%d more source(s) elided — call context_expand for full]\n", elided);
       }
    }
 
@@ -765,12 +872,13 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
 
    if (strcmp(actionName, "search") == 0) {
       /* Extract base keywords and optional time_range / category / as_of /
-       * include_historical from encoded value. */
+       * include_historical / with_source from encoded value. */
       char keywords[512] = "";
       time_t since_ts = 0;
       char category[MEMORY_CATEGORY_MAX] = "";
       int64_t as_of_ts = 0;
       bool include_historical = false;
+      bool with_source = false;
 
       if (value) {
          tool_param_extract_base(value, keywords, sizeof(keywords));
@@ -826,16 +934,30 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          if (tool_param_extract_custom(value, "include_historical", hist, sizeof(hist))) {
             include_historical = (strcmp(hist, "true") == 0);
          }
+
+         /* with_source: return verbatim excerpts for each fact. */
+         char wsrc[8] = "";
+         if (tool_param_extract_custom(value, "with_source", wsrc, sizeof(wsrc))) {
+            with_source = (strcmp(wsrc, "true") == 0);
+         }
       }
 
       return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts,
-                                  category[0] ? category : NULL, as_of_ts, include_historical);
+                                  category[0] ? category : NULL, as_of_ts, include_historical,
+                                  with_source);
    } else if (strcmp(actionName, "remember") == 0) {
       return memory_action_remember(user_id, value);
    } else if (strcmp(actionName, "forget") == 0) {
       return memory_action_forget(user_id, value);
    } else if (strcmp(actionName, "recent") == 0) {
-      return memory_action_recent(user_id, value);
+      bool with_source = false;
+      if (value) {
+         char wsrc[8] = "";
+         if (tool_param_extract_custom(value, "with_source", wsrc, sizeof(wsrc))) {
+            with_source = (strcmp(wsrc, "true") == 0);
+         }
+      }
+      return memory_action_recent(user_id, value, with_source);
    } else if (strcmp(actionName, "save_contact") == 0) {
       /* value format: "entity_name::field_type::type::value::val::label::lbl" */
       if (!value || !value[0])

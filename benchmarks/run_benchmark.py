@@ -67,14 +67,22 @@ class BenchRetrieval:
       if now_override is not None:
          cmd += ["--now", str(int(now_override))]
 
+      # text=False / no bufsize: _read_json_line reads raw bytes via os.read
+      # off the stdout fd directly, doing line splitting in Python. Mixing
+      # select(fd) with TextIOWrapper.readline() deadlocks when the C side
+      # flushes multiple lines at once. stdin stays binary too — _send
+      # encodes JSON to bytes before writing.
+      # stderr=DEVNULL so a never-drained pipe can't fill up and block the
+      # child on a stderr write. Anything bench_retrieval logs that we care
+      # about goes to stdout (OLOG INFO/WARN target stdout).
       self.proc = subprocess.Popen(
          cmd,
          stdin=subprocess.PIPE,
          stdout=subprocess.PIPE,
-         stderr=subprocess.PIPE,
-         text=True,
-         bufsize=1,
+         stderr=subprocess.DEVNULL,
+         bufsize=0,
       )
+      self._stdout_buf = b""
 
       # Read ready message — skip OLOG preamble lines (logging is on stdout).
       # Time-based so verbose startup logging never exhausts a fixed line cap.
@@ -84,27 +92,47 @@ class BenchRetrieval:
 
    def _read_json_line(self, timeout, what):
       """Read lines from bench stdout until one parses as JSON or we time out.
-      Handles arbitrary amounts of interleaved OLOG output without a line cap."""
-      import select, time
+      Handles arbitrary amounts of interleaved OLOG output without a line cap.
+
+      Uses raw os.read() rather than self.proc.stdout.readline(), because
+      Python's BufferedReader/TextIOWrapper has its own user-space buffer:
+      mixing select() on the raw fd with readline() on the wrapper causes
+      a deadlock when the C side flushes multiple lines at once (the first
+      readline pulls all bytes into the wrapper, then select reports the
+      kernel pipe as empty until the deadline)."""
+      import os, select, time
       deadline = time.monotonic() + timeout
       fd = self.proc.stdout.fileno()
-      while time.monotonic() < deadline:
+      buf = self._stdout_buf  # bytes buffer carried across calls
+      while True:
+         # Serve any complete line already in our buffer first.
+         nl = buf.find(b"\n")
+         while nl >= 0:
+            raw, buf = buf[:nl], buf[nl + 1:]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line.startswith("{"):
+               self._stdout_buf = buf
+               return json.loads(line)
+            # else: OLOG preamble line — discard and look for another.
+            nl = buf.find(b"\n")
+
          remaining = deadline - time.monotonic()
+         if remaining <= 0:
+            self._stdout_buf = buf
+            raise RuntimeError(f"bench_retrieval: timed out waiting for {what}")
          ready, _, _ = select.select([fd], [], [], remaining)
          if not ready:
-            break  # timeout
-         line = self.proc.stdout.readline()
-         if not line:
+            self._stdout_buf = buf
+            raise RuntimeError(f"bench_retrieval: timed out waiting for {what}")
+         chunk = os.read(fd, 65536)
+         if not chunk:
+            self._stdout_buf = buf
             raise RuntimeError(f"bench_retrieval exited before sending {what}")
-         line = line.strip()
-         if line.startswith("{"):
-            return json.loads(line)
-         # else: OLOG preamble, keep reading
-      raise RuntimeError(f"bench_retrieval: timed out waiting for {what}")
+         buf += chunk
 
    def _send(self, obj):
       """Send a JSON command and read the response, skipping OLOG preamble lines."""
-      self.proc.stdin.write(json.dumps(obj) + "\n")
+      self.proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
       self.proc.stdin.flush()
       return self._read_json_line(timeout=120.0, what=f"response to {obj.get('cmd')}")
 
@@ -122,7 +150,7 @@ class BenchRetrieval:
       return self._send({"cmd": "reset"})
 
    def quit(self):
-      self.proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
+      self.proc.stdin.write((json.dumps({"cmd": "quit"}) + "\n").encode("utf-8"))
       self.proc.stdin.flush()
       self.proc.wait(timeout=5)
 

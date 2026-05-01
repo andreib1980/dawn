@@ -854,6 +854,14 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload);
  */
 void handle_import_memories(ws_connection_t *conn, struct json_object *payload);
 
+/**
+ * @brief Return verbatim source messages for a fact (v40 memory provenance)
+ *
+ * Returns the conversation messages that produced the fact during extraction.
+ * Returns not_available if: fact is legacy (no provenance), private, or deleted.
+ */
+void handle_get_memory_fact_source(ws_connection_t *conn, struct json_object *payload);
+
 /* =============================================================================
  * Document Library Handler Functions (defined in webui_doc_library.c)
  * ============================================================================= */

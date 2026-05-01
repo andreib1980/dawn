@@ -430,7 +430,8 @@ static void process_extraction_response(int user_id,
                                         const char *session_id,
                                         const char *response_text,
                                         int message_count,
-                                        int duration_seconds) {
+                                        int duration_seconds,
+                                        const memory_provenance_t *prov) {
    if (!response_text) {
       OLOG_WARNING("memory_extraction: NULL response from LLM");
       return;
@@ -487,7 +488,7 @@ static void process_extraction_response(int user_id,
 
             if (similar_count == 0) {
                int64_t fact_id = 0;
-               memory_db_fact_create(user_id, text, confidence, source, category, &fact_id);
+               memory_db_fact_create(user_id, text, confidence, source, category, prov, &fact_id);
                OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
                /* Embed the new fact for semantic search */
                if (fact_id > 0 && memory_embeddings_available()) {
@@ -545,7 +546,7 @@ static void process_extraction_response(int user_id,
                continue;
             }
 
-            memory_db_pref_upsert(user_id, category, value, confidence, "inferred");
+            memory_db_pref_upsert(user_id, category, value, confidence, "inferred", prov);
             OLOG_INFO("memory_extraction: stored preference: %s=%s", category, value);
          }
       }
@@ -577,7 +578,7 @@ static void process_extraction_response(int user_id,
             if (similar_count > 0) {
                /* Create new fact and supersede old one */
                int64_t new_id = 0;
-               memory_db_fact_create(user_id, new_fact, 0.9f, "explicit", NULL, &new_id);
+               memory_db_fact_create(user_id, new_fact, 0.9f, "explicit", NULL, prov, &new_id);
                if (new_id > 0) {
                   memory_db_fact_supersede(similar[0].id, new_id);
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
@@ -758,7 +759,7 @@ static void process_extraction_response(int user_id,
          int64_t old_fact_id = 0;
          int rel_rc = memory_db_relation_supersede(user_id, subj_id, rel_type, obj_entity_id,
                                                    (obj_entity_id == 0) ? obj_name : NULL,
-                                                   rel_fact_id, 0.8f, valid_from, valid_to,
+                                                   rel_fact_id, 0.8f, valid_from, valid_to, prov,
                                                    &old_fact_id);
          if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
             if (memory_db_fact_supersede(old_fact_id, rel_fact_id) == MEMORY_DB_SUCCESS) {
@@ -811,7 +812,7 @@ static void process_extraction_response(int user_id,
          OLOG_WARNING("memory_extraction: blocked injection in summary");
       } else {
          memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
-                                  duration_seconds, NULL);
+                                  duration_seconds, prov, NULL);
          OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
       }
    }
@@ -997,9 +998,25 @@ static void *extraction_thread(void *arg) {
     * toast for those is just clutter — log only, don't notify. */
    bool is_recovery_run = (strncmp(ctx->session_id, "recovery_", 9) == 0);
 
+   /* Compute source range for provenance: (last_extracted_msg_id + 1, MAX(messages.id)).
+    * Queried here — after LLM returns — to avoid a race with concurrent inserts. */
+   memory_provenance_t prov = { 0 }; /* zeroed = no provenance */
+   if (ctx->conversation_id > 0 && response) {
+      int64_t last_id = 0;
+      memory_db_get_last_extracted_msg_id(ctx->conversation_id, &last_id);
+      int64_t max_id = 0;
+      conv_db_get_max_msg_id(ctx->conversation_id, ctx->user_id, &max_id);
+      if (max_id > 0 && max_id >= last_id) {
+         prov.conv_id = ctx->conversation_id;
+         prov.msg_id_start = last_id + 1;
+         prov.msg_id_end = max_id;
+      }
+   }
+
    if (response) {
       process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
-                                  ctx->new_message_count, ctx->duration_seconds);
+                                  ctx->new_message_count, ctx->duration_seconds,
+                                  prov.conv_id > 0 ? &prov : NULL);
       free(response);
 
       /* Notify user if we had to fall back */
@@ -1017,11 +1034,13 @@ static void *extraction_thread(void *arg) {
 #endif
       }
 
-      /* Update extraction high-water mark on success */
+      /* Update extraction high-water mark on success.  Pass prov.msg_id_end so
+       * the cursor is set to the value captured *before* LLM inference, not a
+       * re-queried MAX that may have advanced during the call. */
       if (ctx->conversation_id > 0) {
-         memory_db_set_last_extracted(ctx->conversation_id, ctx->message_count);
-         OLOG_INFO("memory_extraction: updated high-water mark to %d for conversation %ld",
-                   ctx->message_count, (long)ctx->conversation_id);
+         memory_db_set_last_extracted(ctx->conversation_id, ctx->message_count, prov.msg_id_end);
+         OLOG_INFO("memory_extraction: updated high-water mark to %d (msg_id=%lld) for conv %ld",
+                   ctx->message_count, (long long)prov.msg_id_end, (long)ctx->conversation_id);
       }
 
       /* Run fact pruning if enabled */
@@ -1107,7 +1126,8 @@ int memory_trigger_extraction(int user_id,
    if (message_count < 2) {
       OLOG_INFO("memory_extraction: skipping - too few messages (%d)", message_count);
       if (conversation_id > 0) {
-         memory_db_set_last_extracted(conversation_id, message_count);
+         memory_db_set_last_extracted(conversation_id, message_count,
+                                      0); /* 0 = leave msg_id cursor unchanged */
       }
       return 0;
    }

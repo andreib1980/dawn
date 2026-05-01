@@ -47,6 +47,7 @@
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "core/time_query_parser.h"
+#include "dawn_error.h"
 #include "tools/document_db.h"
 
 /* =============================================================================
@@ -438,8 +439,8 @@ static int handle_add(struct json_object *cmd) {
    char chunk_text[DOC_CHUNK_TEXT_MAX];
    snprintf(chunk_text, sizeof(chunk_text), "%s", text);
 
-   int64_t doc_id = document_db_create(BENCH_USER_ID, id, id, "bench", hash, 1, false);
-   if (doc_id < 0) {
+   int64_t doc_id = 0;
+   if (document_db_create(BENCH_USER_ID, id, id, "bench", hash, 1, false, &doc_id) != SUCCESS) {
       free(embedding);
       fprintf(stdout, "{\"status\":\"error\",\"message\":\"db create failed\"}\n");
       fflush(stdout);
@@ -462,11 +463,12 @@ static int handle_add(struct json_object *cmd) {
       created_at = (int64_t)json_object_get_int64(ts_obj);
    }
 
-   int64_t chunk_id = document_db_chunk_create(doc_id, 0, chunk_text, embedding, out_dims, norm,
-                                               created_at);
+   int64_t chunk_id = 0;
+   int chunk_rc = document_db_chunk_create(doc_id, 0, chunk_text, embedding, out_dims, norm,
+                                           created_at, &chunk_id);
    free(embedding);
 
-   if (chunk_id < 0) {
+   if (chunk_rc != SUCCESS) {
       fprintf(stdout, "{\"status\":\"error\",\"message\":\"chunk create failed\"}\n");
       fflush(stdout);
       return -1;
@@ -528,8 +530,11 @@ static int handle_query(struct json_object *cmd) {
       return -1;
    }
 
-   int chunk_count = document_db_chunk_search_load(BENCH_USER_ID, chunks, emb_buf, dims,
-                                                   max_chunks);
+   int chunk_count = 0;
+   if (document_db_chunk_search_load(BENCH_USER_ID, chunks, emb_buf, dims, max_chunks,
+                                     &chunk_count) != SUCCESS) {
+      chunk_count = 0;
+   }
    if (chunk_count <= 0) {
       free(query_vec);
       free(chunks);
@@ -752,6 +757,11 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
+   /* Line-buffer stdout/stderr so OLOG output streams through pipes immediately
+    * rather than waiting for the libc full-buffer to fill. */
+   setvbuf(stdout, NULL, _IOLBF, 0);
+   setvbuf(stderr, NULL, _IONBF, 0);
+
    const char *provider = "onnx";
    const char *model = "";
    const char *endpoint = "";

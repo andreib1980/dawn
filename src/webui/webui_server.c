@@ -3122,6 +3122,10 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (payload) {
          handle_import_memories(conn, payload);
       }
+   } else if (strcmp(type, "get_memory_fact_source") == 0) {
+      if (payload) {
+         handle_get_memory_fact_source(conn, payload);
+      }
    }
    /* Contacts management */
    else if (strcmp(type, "contacts_list") == 0) {

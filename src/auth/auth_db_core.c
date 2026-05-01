@@ -166,6 +166,7 @@ static const char *SCHEMA_SQL =
     "   thinking_mode TEXT DEFAULT NULL,"
     "   reasoning_effort TEXT DEFAULT NULL,"
     "   last_extracted_msg_count INTEGER DEFAULT 0,"
+    "   last_extracted_msg_id    INTEGER NOT NULL DEFAULT 0,"
     "   extraction_attempts INTEGER DEFAULT 0,"
     "   extraction_last_attempt_at INTEGER DEFAULT 0,"
     "   is_private INTEGER DEFAULT 0,"
@@ -274,8 +275,12 @@ static const char *SCHEMA_SQL =
     "   normalized_hash INTEGER DEFAULT 0,"
     "   embedding BLOB DEFAULT NULL,"
     "   embedding_norm REAL DEFAULT NULL,"
+    "   source_conversation_id INTEGER DEFAULT NULL,"
+    "   source_msg_id_start    INTEGER DEFAULT NULL,"
+    "   source_msg_id_end      INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
-    "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL"
+    "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_user ON memory_facts(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_confidence ON "
@@ -296,7 +301,11 @@ static const char *SCHEMA_SQL =
     "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "   reinforcement_count INTEGER DEFAULT 1,"
+    "   source_conversation_id INTEGER DEFAULT NULL,"
+    "   source_msg_id_start    INTEGER DEFAULT NULL,"
+    "   source_msg_id_end      INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   UNIQUE(user_id, category)"
     ");"
 
@@ -311,7 +320,11 @@ static const char *SCHEMA_SQL =
     "   message_count INTEGER,"
     "   duration_seconds INTEGER,"
     "   consolidated INTEGER DEFAULT 0,"
-    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    "   source_conversation_id INTEGER DEFAULT NULL,"
+    "   source_msg_id_start    INTEGER DEFAULT NULL,"
+    "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_summaries_user ON "
     "memory_summaries(user_id, created_at DESC);"
@@ -334,8 +347,9 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_entities_user ON memory_entities(user_id);"
 
-    /* memory_relations: valid_from/valid_to added in v33.  NULL = open-ended (no bound).
-     * "currently true" predicate: valid_to IS NULL OR valid_to > now() */
+    /* memory_relations: valid_from/valid_to added in v33.  source_* added in v40.
+     * NULL = open-ended (no bound).  "currently true" predicate:
+     * valid_to IS NULL OR valid_to > now() */
     "CREATE TABLE IF NOT EXISTS memory_relations ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  user_id INTEGER NOT NULL,"
@@ -348,10 +362,14 @@ static const char *SCHEMA_SQL =
     "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "  valid_from INTEGER DEFAULT NULL,"
     "  valid_to INTEGER DEFAULT NULL,"
+    "  source_conversation_id INTEGER DEFAULT NULL,"
+    "  source_msg_id_start    INTEGER DEFAULT NULL,"
+    "  source_msg_id_end      INTEGER DEFAULT NULL,"
     "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
-    "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE SET NULL"
+    "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE SET NULL,"
+    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject ON "
     "memory_relations(subject_entity_id);"
@@ -1790,6 +1808,59 @@ static int create_schema(const char *db_path) {
       OLOG_INFO("auth_db: added extraction recovery columns (v39)");
    }
 
+   /* v40 migration: memory provenance + ID-based extraction cursor.
+    * source_conversation_id / source_msg_id_start / source_msg_id_end link
+    * each extracted item back to the message range that produced it.
+    * last_extracted_msg_id is the role-agnostic extraction cursor (replaces
+    * the count-based cursor on fresh paths going forward; count retained for
+    * back-compat one release cycle).
+    * Note: migrated DBs omit the FK clause — SQLite cannot add FKs retroactively.
+    * Fresh installs get the FK via SCHEMA_SQL. */
+   if (current_version >= 1 && current_version < 40) {
+      /* Wrap in a transaction so a crash mid-migration leaves the schema clean.
+       * Each ALTER is idempotent via duplicate-column check on re-run. */
+      rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v40 migration BEGIN failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         static const char *const v40_alters[] = {
+            "ALTER TABLE memory_facts       ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_facts       ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_facts       ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_relations   ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_relations   ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_relations   ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_summaries   ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_summaries   ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_summaries   ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_preferences ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_preferences ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_preferences ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE conversations      ADD COLUMN last_extracted_msg_id  INTEGER NOT NULL "
+            "DEFAULT 0",
+            NULL,
+         };
+         for (int ai = 0; v40_alters[ai]; ai++) {
+            char *v40_err = NULL;
+            int v40_rc = sqlite3_exec(s_db.db, v40_alters[ai], NULL, NULL, &v40_err);
+            if (v40_rc != SQLITE_OK && !(v40_err && strstr(v40_err, "duplicate column"))) {
+               OLOG_WARNING("auth_db: v40 migration ALTER failed: %s",
+                            v40_err ? v40_err : "unknown");
+            }
+            sqlite3_free(v40_err);
+         }
+         rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_WARNING("auth_db: v40 migration COMMIT failed: %s", errmsg ? errmsg : "unknown");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+         }
+         OLOG_INFO("auth_db: added memory provenance columns + last_extracted_msg_id (v40)");
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2397,11 +2468,13 @@ static int prepare_statements(void) {
    }
 
    /* Memory fact statements.  category column appended last in all SELECTs (column 9)
-    * to preserve existing column indices in populate_fact_from_row. */
+    * to preserve existing column indices in populate_fact_from_row.
+    * source_* columns (v40) are always bound last — NULL when no provenance. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
-                           "category, created_at, normalized_hash) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           "category, created_at, normalized_hash, "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -2567,13 +2640,18 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Memory preference statements */
+   /* Memory preference statements.  source_* columns updated on every upsert
+    * (latest-source-wins — mirrors the value/confidence overwrite). */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_preferences (user_id, category, value, confidence, source, created_at, "
-       "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+       "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
        "ON CONFLICT(user_id, category) DO UPDATE SET "
        "value=excluded.value, confidence=excluded.confidence, updated_at=excluded.updated_at, "
+       "source_conversation_id=excluded.source_conversation_id, "
+       "source_msg_id_start=excluded.source_msg_id_start, "
+       "source_msg_id_end=excluded.source_msg_id_end, "
        "reinforcement_count=reinforcement_count+1",
        -1, &s_db.stmt_memory_pref_upsert, NULL);
    if (rc != SQLITE_OK) {
@@ -2622,11 +2700,13 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Memory summary statements */
+   /* Memory summary statements.  source_* appended (v40). */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_summaries (user_id, session_id, summary, topics, sentiment, "
-       "created_at, message_count, duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       "created_at, message_count, duration_seconds, "
+       "source_conversation_id, source_msg_id_start, source_msg_id_end) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_memory_summary_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_summary_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -2723,13 +2803,17 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Successful extraction also clears recovery counters so that future
-    * activity on this conversation is allowed past the per-conv attempt cap. */
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "UPDATE conversations SET last_extracted_msg_count = ?, "
-                           "extraction_attempts = 0, extraction_last_attempt_at = 0 "
-                           "WHERE id = ?",
-                           -1, &s_db.stmt_conv_set_last_extracted, NULL);
+   /* Advances last_extracted_msg_id from the caller-supplied value rather than
+    * re-querying MAX(id) at commit time — avoids TOCTOU when new messages arrive
+    * during LLM inference.  CASE guard preserves the existing cursor when the
+    * caller passes 0 (early-skip paths with no prov). */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE conversations SET last_extracted_msg_count = ?, "
+       "last_extracted_msg_id = CASE WHEN ? > 0 THEN ? ELSE last_extracted_msg_id END, "
+       "extraction_attempts = 0, extraction_last_attempt_at = 0 "
+       "WHERE id = ?",
+       -1, &s_db.stmt_conv_set_last_extracted, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_set_last_extracted failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
@@ -2845,12 +2929,14 @@ static int prepare_statements(void) {
    }
 
    /* Memory relation statements.  valid_from/valid_to appended last in all SELECTs
-    * (columns 6, 7) to preserve existing column indices in populate_relation_from_row. */
+    * (columns 6, 7) to preserve existing column indices in populate_relation_from_row.
+    * source_* columns (v40) appended at bind positions 10, 11, 12. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
-                           "valid_from, valid_to) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?)",
+                           "valid_from, valid_to, "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?)",
                            -1, &s_db.stmt_memory_relation_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare relation_create failed: %s", sqlite3_errmsg(s_db.db));

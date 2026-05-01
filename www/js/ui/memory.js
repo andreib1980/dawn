@@ -581,15 +581,29 @@
       const dateStr = formatDate(fact.created_at);
       const confidencePercent = Math.round(confidence * 100);
 
+      // Show "show source" button only when provenance is recorded (v40+)
+      const hasSource = !!fact.source_conversation_id;
+      const sourceBtn = hasSource
+         ? `<button class="memory-item-source-btn" data-fact-id="${fact.id}"
+               title="Show source conversation" aria-label="Show source">
+               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+               </svg>
+            </button>`
+         : '';
+
       return `
          <div class="memory-item fact" data-fact-id="${fact.id}">
             <div class="memory-item-header">
                <div class="memory-item-text">${escapeHtml(fact.fact_text)}</div>
-               <button class="memory-item-delete" data-fact-id="${fact.id}" title="Delete this fact" aria-label="Delete fact">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                     <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
-                  </svg>
-               </button>
+               <div class="memory-item-actions">
+                  ${sourceBtn}
+                  <button class="memory-item-delete" data-fact-id="${fact.id}" title="Delete this fact" aria-label="Delete fact">
+                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                     </svg>
+                  </button>
+               </div>
             </div>
             <div class="memory-item-meta">
                <span class="memory-item-confidence ${confidenceClass}">${confidencePercent}%</span>
@@ -598,6 +612,59 @@
             </div>
          </div>
       `;
+   }
+
+   function handleFactSourceResponse(payload) {
+      const modal = document.getElementById('memory-source-modal');
+      const body = document.getElementById('memory-source-body');
+      if (!modal || !body) return;
+
+      if (!payload.success) {
+         body.innerHTML = '<p class="memory-source-unavailable">Source no longer available.</p>';
+      } else {
+         const msgs = payload.messages || [];
+         if (msgs.length === 0) {
+            body.innerHTML =
+               '<p class="memory-source-unavailable">No messages in source range.</p>';
+         } else {
+            body.innerHTML = msgs
+               .map(
+                  (m) => `
+               <div class="memory-source-message memory-source-${escapeHtml(m.role)}">
+                  <span class="memory-source-role">${escapeHtml(m.role)}</span>
+                  <span class="memory-source-content">${escapeHtml(m.content || '')}</span>
+               </div>
+            `
+               )
+               .join('');
+         }
+      }
+      modal.classList.remove('hidden');
+   }
+
+   let sourceModalTrigger = null;
+
+   function openSourceModal(factId) {
+      const modal = document.getElementById('memory-source-modal');
+      const body = document.getElementById('memory-source-body');
+      if (!modal || !body) return;
+      sourceModalTrigger = document.activeElement;
+      body.innerHTML = '<p class="memory-source-loading">Loading…</p>';
+      modal.classList.remove('hidden');
+      const closeBtn = document.getElementById('memory-source-close');
+      if (closeBtn) closeBtn.focus();
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({ type: 'get_memory_fact_source', payload: { fact_id: factId } });
+      }
+   }
+
+   function closeSourceModal() {
+      const modal = document.getElementById('memory-source-modal');
+      if (modal) modal.classList.add('hidden');
+      if (sourceModalTrigger && typeof sourceModalTrigger.focus === 'function') {
+         sourceModalTrigger.focus();
+         sourceModalTrigger = null;
+      }
    }
 
    function renderPreferencesList() {
@@ -892,6 +959,14 @@
             }
             return;
          }
+      }
+
+      // "show source" button
+      const sourceBtn = e.target.closest('.memory-item-source-btn');
+      if (sourceBtn) {
+         e.stopPropagation();
+         openSourceModal(parseInt(sourceBtn.dataset.factId, 10));
+         return;
       }
 
       const btn = e.target.closest('.memory-item-delete');
@@ -1889,6 +1964,22 @@
       initImportModal();
       initExportModal();
 
+      // Source modal close button, overlay click, and ESC key
+      const srcClose = document.getElementById('memory-source-close');
+      if (srcClose) srcClose.addEventListener('click', closeSourceModal);
+      const srcModal = document.getElementById('memory-source-modal');
+      if (srcModal) {
+         srcModal.addEventListener('click', (e) => {
+            if (e.target === srcModal) closeSourceModal();
+         });
+         srcModal.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+               e.stopPropagation();
+               closeSourceModal();
+            }
+         });
+      }
+
       // Initialize contacts module
       if (typeof DawnContacts !== 'undefined') DawnContacts.init();
 
@@ -1925,5 +2016,6 @@
       handleDeleteAllResponse,
       handleExportResponse,
       handleImportResponse,
+      handleFactSourceResponse,
    };
 })();

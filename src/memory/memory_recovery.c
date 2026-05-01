@@ -345,7 +345,7 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
       OLOG_INFO("memory_recovery: conv %lld has %zu chars of text after image strip "
                 "(< %d threshold); marking as extracted (no-op)",
                 (long long)row->conv_id, total_text_len, RECOVERY_MIN_TEXT_CHARS);
-      memory_db_set_last_extracted(row->conv_id, row->message_count);
+      memory_db_set_last_extracted(row->conv_id, row->message_count, 0);
       json_object_put(history);
       return false;
    }
@@ -401,7 +401,7 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
          OLOG_INFO("memory_recovery: conv %lld hit attempt cap (%d) without success; "
                    "marking as extracted (give-up)",
                    (long long)row->conv_id, max_attempts);
-         memory_db_set_last_extracted(row->conv_id, row->message_count);
+         memory_db_set_last_extracted(row->conv_id, row->message_count, 0);
       } else {
          OLOG_INFO("memory_recovery: conv %lld extraction completed without advancing counter "
                    "(attempt %d/%d)",

@@ -41,6 +41,20 @@ extern "C" {
 #define MEMORY_DB_DUPLICATE 3
 
 /* =============================================================================
+ * Provenance
+ *
+ * Coarse source linkage: every item produced by a single extraction call
+ * shares the same (conv_id, msg_id_start, msg_id_end) triple.  conv_id == 0
+ * means "no provenance" (voice-only path, import, or explicit remember).
+ * ============================================================================= */
+
+typedef struct {
+   int64_t conv_id; /* 0 = no provenance */
+   int64_t msg_id_start;
+   int64_t msg_id_end;
+} memory_provenance_t;
+
+/* =============================================================================
  * Fact Operations
  * ============================================================================= */
 
@@ -52,6 +66,7 @@ extern "C" {
  * @param confidence Confidence level (0.0-1.0)
  * @param source Source of fact ("explicit" or "inferred")
  * @param category One of MEMORY_FACT_CATEGORIES; NULL or empty defaults to "general" (v34)
+ * @param prov Provenance (source range in conversation); NULL or conv_id==0 = no provenance
  * @param id_out Output: fact ID on success (may be NULL if caller doesn't need it)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
@@ -60,6 +75,7 @@ int memory_db_fact_create(int user_id,
                           float confidence,
                           const char *source,
                           const char *category,
+                          const memory_provenance_t *prov,
                           int64_t *id_out);
 
 /**
@@ -420,20 +436,22 @@ int memory_db_summary_list_since(int user_id,
  *
  * If a preference with the same category exists for this user,
  * it will be updated with the new value and its reinforcement_count
- * will be incremented.
+ * will be incremented.  Latest-source-wins on upsert.
  *
  * @param user_id User ID
  * @param category Preference category
  * @param value Preference value
  * @param confidence Confidence level
  * @param source Source ("explicit" or "inferred")
+ * @param prov Provenance; NULL or conv_id==0 = no provenance
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_pref_upsert(int user_id,
                           const char *category,
                           const char *value,
                           float confidence,
-                          const char *source);
+                          const char *source,
+                          const memory_provenance_t *prov);
 
 /**
  * @brief Get a preference by category
@@ -500,6 +518,7 @@ int memory_db_pref_delete(int user_id, const char *category);
  * @param sentiment Overall sentiment
  * @param message_count Number of messages in conversation
  * @param duration_seconds Session duration
+ * @param prov Provenance; NULL or conv_id==0 = no provenance
  * @param id_out Output: summary ID on success (may be NULL)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
@@ -510,6 +529,7 @@ int memory_db_summary_create(int user_id,
                              const char *sentiment,
                              int message_count,
                              int duration_seconds,
+                             const memory_provenance_t *prov,
                              int64_t *id_out);
 
 /**
@@ -727,6 +747,7 @@ int memory_db_entity_update_embedding(int64_t entity_id,
  * @param object_value Literal value if no object entity
  * @param fact_id Associated fact ID (0 for none)
  * @param confidence Confidence score (0.0-1.0)
+ * @param prov Provenance; NULL or conv_id==0 = no provenance
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_relation_create(int user_id,
@@ -737,7 +758,8 @@ int memory_db_relation_create(int user_id,
                               int64_t fact_id,
                               float confidence,
                               int64_t valid_from,
-                              int64_t valid_to);
+                              int64_t valid_to,
+                              const memory_provenance_t *prov);
 
 /**
  * @brief Transactional close-and-create: auto-closes any existing open exclusive
@@ -759,6 +781,7 @@ int memory_db_relation_create(int user_id,
  * @param confidence Confidence (0.0-1.0)
  * @param valid_from Start of validity period (0 = open-ended/NULL)
  * @param valid_to End of validity period (0 = open-ended/NULL = currently true)
+ * @param prov Provenance; NULL or conv_id==0 = no provenance
  * @param out_old_fact_id If non-NULL and an existing open relation was closed
  *        (exclusive supersede or contradictory-pair close), receives that old
  *        relation's fact_id (0 if none was linked)
@@ -773,6 +796,7 @@ int memory_db_relation_supersede(int user_id,
                                  float confidence,
                                  int64_t valid_from,
                                  int64_t valid_to,
+                                 const memory_provenance_t *prov,
                                  int64_t *out_old_fact_id);
 
 /**
@@ -969,18 +993,75 @@ int memory_db_entity_get_embeddings(int user_id,
 int memory_db_get_last_extracted(int64_t conversation_id, int *count_out);
 
 /**
- * @brief Set last extracted message count for a conversation
+ * @brief Set last extracted message count and message-ID cursor for a conversation
  *
- * Atomically also clears the recovery counters
- * (`extraction_attempts = 0`, `extraction_last_attempt_at = 0`) so that future
- * activity on this conversation gets a fresh recovery budget.  Both updates
- * happen in a single SQL statement.
+ * Atomically clears the recovery counters (`extraction_attempts = 0`,
+ * `extraction_last_attempt_at = 0`) and advances `last_extracted_msg_id`
+ * to the caller-supplied value (0 = leave unchanged, used on early-skip paths).
+ * Passing the cursor value captured *before* LLM inference avoids the TOCTOU
+ * race of re-querying MAX(id) at commit time.
  *
  * @param conversation_id Conversation ID
- * @param message_count Message count to record
+ * @param message_count Message count to record (legacy count-based cursor)
+ * @param last_msg_id Highest message ID processed; 0 = do not advance cursor
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_set_last_extracted(int64_t conversation_id, int message_count);
+int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int64_t last_msg_id);
+
+/**
+ * @brief Get the last-extracted message ID cursor for a conversation (v40).
+ *
+ * Returns the highest message.id that was included in the most recent successful
+ * extraction.  0 = never extracted.  Role-agnostic (counts all message types).
+ *
+ * @param conversation_id Conversation ID
+ * @param msg_id_out Output: last extracted message ID (0 if never extracted)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_get_last_extracted_msg_id(int64_t conversation_id, int64_t *msg_id_out);
+
+/**
+ * @brief Batch-fetch provenance for up to `n` facts in a single lock cycle (v40).
+ *
+ * Replaces N sequential calls to `memory_db_fact_get_source()` in list paths.
+ * Outputs are indexed to match the input `fact_ids[]` array; entries with no
+ * provenance (legacy rows, NULL source, or private conversation) have out_conv_ids[i] = 0.
+ *
+ * @param user_id Requesting user (ownership + privacy filter applied in SQL)
+ * @param fact_ids Array of fact IDs to look up
+ * @param n Length of fact_ids (and output arrays)
+ * @param out_conv_ids Output: source conversation ID per fact (0 = none)
+ * @param out_starts Output: source_msg_id_start per fact
+ * @param out_ends Output: source_msg_id_end per fact
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_facts_get_sources(int user_id,
+                                const int64_t *fact_ids,
+                                int n,
+                                int64_t *out_conv_ids,
+                                int64_t *out_starts,
+                                int64_t *out_ends);
+
+/**
+ * @brief Return the source range for a fact (v40).
+ *
+ * Leaf function — must NOT be called while holding the auth_db mutex.
+ * Returns MEMORY_DB_NOT_FOUND if: source columns are NULL, the fact does not
+ * exist, the fact belongs to a different user, the source conversation is private,
+ * or the source conversation has been deleted.
+ *
+ * @param fact_id Fact ID to look up
+ * @param user_id Requesting user (ownership check)
+ * @param conv_id_out Output: source conversation ID
+ * @param start_out Output: first message ID in source range
+ * @param end_out Output: last message ID in source range
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_get_source(int64_t fact_id,
+                              int user_id,
+                              int64_t *conv_id_out,
+                              int64_t *start_out,
+                              int64_t *end_out);
 
 #ifdef __cplusplus
 }

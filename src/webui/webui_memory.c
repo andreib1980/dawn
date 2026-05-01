@@ -28,6 +28,7 @@
 
 #include <string.h>
 
+#include "auth/auth_db.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
@@ -125,6 +126,16 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
    int list_rc = memory_db_fact_list(conn->auth_user_id, facts, limit, offset, &count);
 
    if (list_rc == MEMORY_DB_SUCCESS) {
+      /* Batch-fetch provenance for all facts in one lock cycle. */
+      int64_t src_conv_ids[MAX_MEMORY_LIMIT] = { 0 };
+      int64_t src_starts[MAX_MEMORY_LIMIT] = { 0 };
+      int64_t src_ends[MAX_MEMORY_LIMIT] = { 0 };
+      int64_t fact_ids[MAX_MEMORY_LIMIT];
+      for (int k = 0; k < count; k++)
+         fact_ids[k] = facts[k].id;
+      memory_db_facts_get_sources(conn->auth_user_id, fact_ids, count, src_conv_ids, src_starts,
+                                  src_ends);
+
       json_object *facts_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
          json_object *fact_obj = json_object_new_object();
@@ -138,6 +149,16 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
                                 json_object_new_int64(facts[i].last_accessed));
          json_object_object_add(fact_obj, "access_count",
                                 json_object_new_int(facts[i].access_count));
+
+         if (src_conv_ids[i] > 0) {
+            json_object_object_add(fact_obj, "source_conversation_id",
+                                   json_object_new_int64(src_conv_ids[i]));
+            json_object_object_add(fact_obj, "source_msg_id_start",
+                                   json_object_new_int64(src_starts[i]));
+            json_object_object_add(fact_obj, "source_msg_id_end",
+                                   json_object_new_int64(src_ends[i]));
+         }
+
          json_object_array_add(facts_array, fact_obj);
       }
 
@@ -151,6 +172,81 @@ void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload
                              json_object_new_string("Failed to list memory facts"));
    }
 
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* Module-level callback for handle_get_memory_fact_source */
+static int source_msg_to_json(const conversation_message_t *msg, void *ctx) {
+   json_object *arr = (json_object *)ctx;
+   if (!msg || !msg->content)
+      return 0;
+   if (strcmp(msg->role, "system") == 0 || strcmp(msg->role, "tool") == 0)
+      return 0;
+   json_object *obj = json_object_new_object();
+   json_object_object_add(obj, "id", json_object_new_int64(msg->id));
+   json_object_object_add(obj, "role", json_object_new_string(msg->role));
+   json_object_object_add(obj, "content", json_object_new_string(msg->content));
+   json_object_object_add(obj, "created_at", json_object_new_int64((int64_t)msg->created_at));
+   json_object_array_add(arr, obj);
+   return 0;
+}
+
+/**
+ * @brief Return verbatim source messages for a fact (v40 memory provenance)
+ */
+void handle_get_memory_fact_source(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("get_memory_fact_source_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   int64_t fact_id = 0;
+   if (payload) {
+      json_object *id_obj;
+      if (json_object_object_get_ex(payload, "fact_id", &id_obj)) {
+         fact_id = json_object_get_int64(id_obj);
+      }
+   }
+   json_object_object_add(resp_payload, "fact_id", json_object_new_int64(fact_id));
+
+   if (fact_id <= 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "reason", json_object_new_string("not_available"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
+   int64_t conv_id = 0, start_id = 0, end_id = 0;
+   int rc = memory_db_fact_get_source(fact_id, conn->auth_user_id, &conv_id, &start_id, &end_id);
+   if (rc != MEMORY_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "reason", json_object_new_string("not_available"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(resp_payload, "msg_id_start", json_object_new_int64(start_id));
+   json_object_object_add(resp_payload, "msg_id_end", json_object_new_int64(end_id));
+
+   /* Cap range at 500 messages (matches tool-path budget) */
+   int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
+   json_object *messages_arr = json_object_new_array();
+   conv_db_get_messages_by_range(conv_id, conn->auth_user_id, start_id, capped_end,
+                                 source_msg_to_json, messages_arr);
+
+   json_object_object_add(resp_payload, "messages", messages_arr);
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -1206,7 +1302,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
 
             if (commit) {
                memory_db_fact_create(conn->auth_user_id, truncated, confidence, "import", NULL,
-                                     NULL);
+                                     NULL, NULL);
             }
             imported_facts++;
          }
@@ -1256,7 +1352,8 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             json_object_array_add(preview_arr, preview_item);
 
             if (commit) {
-               memory_db_pref_upsert(conn->auth_user_id, category, value, confidence, "import");
+               memory_db_pref_upsert(conn->auth_user_id, category, value, confidence, "import",
+                                     NULL);
             }
             imported_prefs++;
          }
@@ -1363,7 +1460,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_array_add(preview_arr, preview_item);
 
          if (commit) {
-            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import", NULL, NULL);
+            memory_db_fact_create(conn->auth_user_id, truncated, 0.7f, "import", NULL, NULL, NULL);
          }
          imported_facts++;
 

@@ -167,6 +167,7 @@ void log_message_v(log_level_t level, const char *file, int line, const char *fm
    } else {
       fprintf(output_stream, "%s%s%s%s\n", color_code, preamble, msg, ANSI_COLOR_RESET);
    }
+   fflush(output_stream);
 }
 
 void log_message(log_level_t level, const char *file, int line, const char *fmt, ...) {

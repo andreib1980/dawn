@@ -1430,6 +1430,19 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                                   message_callback_t callback,
                                   void *ctx);
 
+/**
+ * @brief Return MAX(messages.id) for a conversation (v40).
+ *
+ * Used by the extraction thread to compute the provenance source range.
+ * Returns 0 in max_id_out if the conversation has no messages.
+ *
+ * @param conv_id Conversation ID
+ * @param user_id User ID (for ownership check)
+ * @param max_id_out Output: highest message ID (0 if no messages)
+ * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ */
+int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out);
+
 /* =============================================================================
  * Summary Nodes (LCM Phase 4 — hierarchical summaries)
  * ============================================================================= */

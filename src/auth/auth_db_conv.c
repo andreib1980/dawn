@@ -1676,6 +1676,40 @@ int conv_db_get_messages_by_range(int64_t conv_id,
    return AUTH_DB_SUCCESS;
 }
 
+int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
+   if (conv_id <= 0 || !max_id_out)
+      return AUTH_DB_FAILURE;
+   *max_id_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Ownership check */
+   sqlite3_reset(s_db.stmt_conv_get);
+   sqlite3_bind_int64(s_db.stmt_conv_get, 1, conv_id);
+   sqlite3_bind_int(s_db.stmt_conv_get, 2, user_id);
+   int rc = sqlite3_step(s_db.stmt_conv_get);
+   sqlite3_reset(s_db.stmt_conv_get);
+   if (rc != SQLITE_ROW) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FORBIDDEN;
+   }
+
+   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?";
+   sqlite3_stmt *stmt = NULL;
+   rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      *max_id_out = sqlite3_column_int64(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
 /* =============================================================================
  * Summary Nodes (LCM Phase 4 — hierarchical summaries)
  * ============================================================================= */
