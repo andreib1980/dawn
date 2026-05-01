@@ -141,6 +141,12 @@ int config_validate(const dawn_config_t *config,
    VALIDATE_RANGE_FLOAT("memory.category_threshold", config->memory.category_threshold, 0.05f,
                         0.95f);
 
+   /* ===== Embedding Recomputation ===== */
+   VALIDATE_RANGE_INT("memory.embeddings.recompute_batch_size", config->memory.recompute_batch_size,
+                      1, 500);
+   VALIDATE_RANGE_INT("memory.embeddings.recompute_batch_sleep_ms",
+                      config->memory.recompute_batch_sleep_ms, 0, 5000);
+
    /* ===== Memory Extraction Recovery ===== */
    VALIDATE_RANGE_INT("memory.recovery.idle_threshold_seconds",
                       config->memory.recovery_idle_threshold_seconds, 60, 30 * 86400);

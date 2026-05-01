@@ -752,6 +752,14 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_DOUBLE(section, "category_threshold", config->memory.category_threshold);
       JSON_TO_CONFIG_BOOL(section, "embedding_backfill_on_startup",
                           config->memory.embedding_backfill_on_startup);
+      JSON_TO_CONFIG_STR(section, "model_id", config->memory.model_id);
+      JSON_TO_CONFIG_BOOL(section, "recompute_on_model_change",
+                          config->memory.recompute_on_model_change);
+      JSON_TO_CONFIG_INT(section, "recompute_batch_size", config->memory.recompute_batch_size);
+      JSON_TO_CONFIG_INT(section, "recompute_batch_sleep_ms",
+                         config->memory.recompute_batch_sleep_ms);
+      CONFIG_CLAMP(config->memory.recompute_batch_size, 1, 500);
+      CONFIG_CLAMP(config->memory.recompute_batch_sleep_ms, 0, 5000);
       CONFIG_CLAMP(config->memory.embedding_keyword_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.embedding_vector_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.temporal_weight, 0.0f, 1.0f);

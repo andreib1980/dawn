@@ -5618,9 +5618,11 @@ static void *text_worker_thread(void *arg) {
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
    bool saved_to_db = false;
    if (conn && conn->active_conversation_id > 0) {
-      if (conv_db_add_message(conn->active_conversation_id, conn->auth_user_id, "user", text) ==
-          AUTH_DB_SUCCESS) {
+      int64_t msg_id = 0;
+      if (conv_db_add_message_ex(conn->active_conversation_id, conn->auth_user_id, "user", text,
+                                 &msg_id) == AUTH_DB_SUCCESS) {
          saved_to_db = true;
+         session_stamp_last_message_id(session, "user", msg_id);
       }
    }
 

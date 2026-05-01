@@ -1132,15 +1132,21 @@ int memory_trigger_extraction(int user_id,
       return 0;
    }
 
-   /* Check incremental extraction: how many messages were already processed? */
+   /* ID-based incremental extraction cursor.
+    * Also maintain the count-based cursor for one release cycle (back-compat
+    * verification — lets spot-checking confirm both cursors agree). */
    int last_extracted = 0;
+   int64_t last_msg_id = 0;
    if (conversation_id > 0) {
       memory_db_get_last_extracted(conversation_id, &last_extracted);
+      memory_db_get_last_extracted_msg_id(conversation_id, &last_msg_id);
 
-      /* Skip if no new messages since last extraction */
-      if (message_count <= last_extracted) {
-         OLOG_INFO("memory_extraction: skipping - no new messages (count=%d, last=%d)",
-                   message_count, last_extracted);
+      /* ID-based early-skip: compare max DB row ID against cursor. */
+      int64_t max_msg_id = 0;
+      conv_db_get_max_msg_id(conversation_id, user_id, &max_msg_id);
+      if (max_msg_id > 0 && max_msg_id <= last_msg_id) {
+         OLOG_INFO("memory_extraction: skipping — no new messages (max_id=%lld, last=%lld)",
+                   (long long)max_msg_id, (long long)last_msg_id);
          return 0;
       }
    }
@@ -1189,33 +1195,25 @@ int memory_trigger_extraction(int user_id,
       ctx->fallback = *fallback;
    }
 
-   /* Serialize conversation history (skip system messages, only include new messages) */
+   /* ID-based filter: include messages where id > last_msg_id.
+    * Messages with missing or zero id (system messages, voice-only path,
+    * messages added before this feature shipped) are included unconditionally.
+    * System messages are always skipped by the role check. */
    size_t arr_len = json_object_array_length(conversation_history);
    struct json_object *filtered = json_object_new_array();
 
-   /* Calculate start index: skip already-extracted messages
-    * Account for the fact that arr_len includes system messages which we skip */
-   int skipped_system = 0;
-   int messages_seen = 0;
-
    for (size_t i = 0; i < arr_len; i++) {
       struct json_object *msg = json_object_array_get_idx(conversation_history, i);
-      struct json_object *role_obj;
-      if (json_object_object_get_ex(msg, "role", &role_obj)) {
-         const char *role = json_object_get_string(role_obj);
-         /* Skip system messages */
-         if (strcmp(role, "system") == 0) {
-            skipped_system++;
-            continue;
-         }
-
-         messages_seen++;
-
-         /* Only include messages after the last extraction point */
-         if (messages_seen > last_extracted) {
-            json_object_array_add(filtered, json_object_get(msg));
-         }
-      }
+      struct json_object *role_obj, *id_obj;
+      if (!json_object_object_get_ex(msg, "role", &role_obj))
+         continue;
+      if (strcmp(json_object_get_string(role_obj), "system") == 0)
+         continue;
+      int64_t msg_id = 0;
+      if (json_object_object_get_ex(msg, "id", &id_obj))
+         msg_id = json_object_get_int64(id_obj);
+      if (msg_id == 0 || msg_id > last_msg_id)
+         json_object_array_add(filtered, json_object_get(msg));
    }
 
    ctx->conversation_json = strdup(

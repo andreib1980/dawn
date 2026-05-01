@@ -1170,6 +1170,10 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                               "temporal_weight",
                                               "category_threshold",
                                               "backfill_on_startup",
+                                              "model_id",
+                                              "recompute_on_model_change",
+                                              "recompute_batch_size",
+                                              "recompute_batch_sleep_ms",
                                               NULL };
       warn_unknown_keys(embeddings, "memory.embeddings", emb_keys);
 
@@ -1181,6 +1185,10 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
+      PARSE_STRING(embeddings, "model_id", config->model_id);
+      PARSE_BOOL(embeddings, "recompute_on_model_change", config->recompute_on_model_change);
+      PARSE_INT(embeddings, "recompute_batch_size", config->recompute_batch_size);
+      PARSE_INT(embeddings, "recompute_batch_sleep_ms", config->recompute_batch_sleep_ms);
    }
 
    /* Clamp embedding weights to 0.0-1.0 */

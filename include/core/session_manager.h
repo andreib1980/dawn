@@ -485,6 +485,16 @@ void session_check_idle_conversations(void);
 void session_add_message(session_t *session, const char *role, const char *content);
 
 /**
+ * @brief Stamp a DB row ID onto the most recent unstamped history entry for role.
+ *
+ * Scans backward through conversation_history for the last entry with matching
+ * role that has no "id" field, then sets "id" = msg_id. Used after
+ * conv_db_add_message_ex() to link in-memory history entries to their DB row IDs
+ * so the extraction filter can use ID-based cursors.
+ */
+void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id);
+
+/**
  * @brief Add message with images to session's conversation history
  *
  * Creates a multi-part content message in OpenAI format:

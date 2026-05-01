@@ -1195,6 +1195,36 @@ void session_add_message(session_t *session, const char *role, const char *conte
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id) {
+   if (!session || !role || msg_id <= 0)
+      return;
+
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (!session->conversation_history)
+      goto unlock;
+
+   int len = (int)json_object_array_length(session->conversation_history);
+   for (int i = len - 1; i >= 0; i--) {
+      struct json_object *entry = json_object_array_get_idx(session->conversation_history, i);
+      if (!entry)
+         continue;
+      struct json_object *role_obj;
+      if (!json_object_object_get_ex(entry, "role", &role_obj))
+         continue;
+      if (strcmp(json_object_get_string(role_obj), role) != 0)
+         continue;
+      /* Skip entries that already have an ID stamped */
+      if (json_object_object_get_ex(entry, "id", NULL))
+         continue;
+      json_object_object_add(entry, "id", json_object_new_int64(msg_id));
+      break;
+   }
+
+unlock:
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
 void session_add_message_with_images(session_t *session,
                                      const char *role,
                                      const char *text,
@@ -1437,7 +1467,11 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
       const char *content = json_object_get_string(content_obj);
 
       if (role && content) {
-         conv_db_add_message(conv_id, user_id, role, content);
+         int64_t msg_id = 0;
+         if (conv_db_add_message_ex(conv_id, user_id, role, content, &msg_id) == AUTH_DB_SUCCESS &&
+             msg_id > 0) {
+            json_object_object_add(msg, "id", json_object_new_int64(msg_id));
+         }
       }
    }
 

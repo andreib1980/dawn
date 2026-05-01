@@ -172,6 +172,7 @@ static int append_message_to_history(const conversation_message_t *msg, void *ct
 
    json_object_object_add(entry, "role", role);
    json_object_object_add(entry, "content", content);
+   json_object_object_add(entry, "id", json_object_new_int64(msg->id));
    json_object_array_add(ctx->array, entry);
    return 0;
 }

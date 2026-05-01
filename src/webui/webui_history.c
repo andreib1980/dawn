@@ -1190,9 +1190,12 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
       pthread_mutex_unlock(&conn->session->tools_mutex);
    }
 
-   int result = conv_db_add_message(conv_id, conn->auth_user_id, role, content);
+   int64_t msg_id = 0;
+   int result = conv_db_add_message_ex(conv_id, conn->auth_user_id, role, content, &msg_id);
 
    if (result == AUTH_DB_SUCCESS) {
+      if (conn->session && msg_id > 0)
+         session_stamp_last_message_id(conn->session, role, msg_id);
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    } else if (result == AUTH_DB_FORBIDDEN) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));

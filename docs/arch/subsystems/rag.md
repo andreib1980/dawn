@@ -41,7 +41,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 - **embedding_engine.c/h** (`src/core/`): Shared embedding infrastructure
    - Extracted from `memory_embeddings.c` — used by both memory and document systems
-   - Multi-provider: ONNX local (`all-MiniLM-L6-v2`), Ollama, OpenAI-compatible
+   - Multi-provider: ONNX local (`bge-small-en-v1.5-int8`), Ollama, OpenAI-compatible
    - Thread-safe embed() with mutex protection
    - ARM NEON vectorized dot product for cosine similarity
    - `embedding_engine_init()`, `embedding_engine_embed()`, `embedding_engine_cosine()`

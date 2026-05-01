@@ -1346,6 +1346,19 @@ int conv_db_search_content(int user_id,
 int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const char *content);
 
 /**
+ * @brief Add a message and return its assigned row ID.
+ *
+ * Same as conv_db_add_message() but writes the inserted message's row ID to
+ * *msg_id_out on success (set to 0 on failure or when msg_id_out is NULL).
+ * Use this when the caller needs to stamp the ID into an in-memory history entry.
+ */
+int conv_db_add_message_ex(int64_t conv_id,
+                           int user_id,
+                           const char *role,
+                           const char *content,
+                           int64_t *msg_id_out);
+
+/**
  * @brief Get all messages in a conversation
  *
  * Messages are returned in chronological order.

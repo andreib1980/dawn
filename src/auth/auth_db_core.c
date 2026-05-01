@@ -81,7 +81,15 @@ static const char *SCHEMA_SQL =
     "   version INTEGER PRIMARY KEY"
     ");"
 
-    /* Users table (categories_backfilled_at added in v34 — gates lazy fact-category backfill) */
+    /* System-wide key/value metadata (v41).  Used to track daemon-level state
+     * that spans all users — e.g., embedding_model_id for recompute detection. */
+    "CREATE TABLE IF NOT EXISTS system_metadata ("
+    "   key   TEXT PRIMARY KEY,"
+    "   value TEXT NOT NULL"
+    ");"
+
+    /* Users table (categories_backfilled_at added in v34 — gates lazy fact-category backfill;
+     * embeddings_model_id added in v41 — per-user gate for embedding recomputation) */
     "CREATE TABLE IF NOT EXISTS users ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "   username TEXT UNIQUE NOT NULL,"
@@ -91,7 +99,8 @@ static const char *SCHEMA_SQL =
     "   last_login INTEGER,"
     "   failed_attempts INTEGER DEFAULT 0,"
     "   lockout_until INTEGER DEFAULT 0,"
-    "   categories_backfilled_at INTEGER DEFAULT 0"
+    "   categories_backfilled_at INTEGER DEFAULT 0,"
+    "   embeddings_model_id TEXT DEFAULT NULL"
     ");"
 
     /* Sessions table */
@@ -1859,6 +1868,41 @@ static int create_schema(const char *db_path) {
          }
          OLOG_INFO("auth_db: added memory provenance columns + last_extracted_msg_id (v40)");
       }
+   }
+
+   /* v41 migration: system_metadata table + users.embeddings_model_id.
+    * system_metadata is a generic key/value store for daemon-level state.
+    * embeddings_model_id mirrors the categories_backfilled_at pattern — NULL
+    * means the user's embeddings pre-date the current model and need recomputing. */
+   if (current_version >= 1 && current_version < 41) {
+      rc = sqlite3_exec(s_db.db,
+                        "BEGIN IMMEDIATE;"
+                        "CREATE TABLE IF NOT EXISTS system_metadata ("
+                        "   key   TEXT PRIMARY KEY,"
+                        "   value TEXT NOT NULL"
+                        ");"
+                        "COMMIT;",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v41 migration (system_metadata) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      } else {
+         OLOG_INFO("auth_db: created system_metadata table (v41)");
+      }
+
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE users ADD COLUMN embeddings_model_id TEXT DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v41 migration (embeddings_model_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+      OLOG_INFO("auth_db: added embeddings_model_id to users (v41)");
    }
 
    /* Create indexes that depend on migration-added columns.

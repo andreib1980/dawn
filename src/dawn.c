@@ -108,6 +108,7 @@
 #include "auth/auth_crypto.h"
 #include "auth/auth_maintenance.h"
 #include "image_store.h"
+#include "memory/memory_embed_recompute.h"
 #include "memory/memory_recovery.h"
 #endif
 #ifdef ENABLE_AEC
@@ -2352,8 +2353,16 @@ mqtt_disabled:
    if (g_config.memory.enabled && g_config.memory.embedding_provider[0] != '\0') {
       if (memory_embeddings_init() != 0) {
          OLOG_WARNING("Memory embeddings init failed - semantic search disabled");
-      } else if (g_config.memory.embedding_backfill_on_startup) {
-         memory_embeddings_start_backfill(g_config.memory.default_voice_user_id);
+      } else {
+         /* Recompute takes priority: if the model changed, re-index before backfilling.
+          * If no recompute is needed, fall through to the normal backfill. */
+         if (memory_embed_recompute_start() != 0) {
+            OLOG_WARNING("Embedding recompute worker failed to start");
+         }
+         if (!memory_embed_recompute_in_progress() &&
+             g_config.memory.embedding_backfill_on_startup) {
+            memory_embeddings_start_backfill(g_config.memory.default_voice_user_id);
+         }
       }
    }
 
@@ -3813,6 +3822,8 @@ server_shutdown:
    /* Shutdown auth subsystem in reverse initialization order */
    OLOG_INFO("Shutdown: memory_recovery_stop");
    memory_recovery_stop();
+   OLOG_INFO("Shutdown: memory_embed_recompute_stop");
+   memory_embed_recompute_stop();
    OLOG_INFO("Shutdown: auth_maintenance_stop");
    auth_maintenance_stop();
    OLOG_INFO("Shutdown: admin_socket_shutdown");

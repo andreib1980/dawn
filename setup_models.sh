@@ -318,20 +318,20 @@ setup_embeddings() {
     fi
 
     local emb_dir="$MODELS_DIR/embeddings"
-    local model_file="$emb_dir/all-MiniLM-L6-v2-int8.onnx"
+    local model_file="$emb_dir/bge-small-en-v1.5-int8.onnx"
     local vocab_file="$emb_dir/vocab.txt"
 
     mkdir -p "$emb_dir"
 
     if [ -f "$model_file" ] && [ -f "$vocab_file" ]; then
-        print_success "Embedding model already exists: all-MiniLM-L6-v2-int8.onnx"
+        print_success "Embedding model already exists: bge-small-en-v1.5-int8.onnx"
         return
     fi
 
-    print_step "Downloading all-MiniLM-L6-v2 embedding model (int8 quantized, ~23MB)..."
+    print_step "Downloading bge-small-en-v1.5 embedding model (int8 quantized, ~32MB)..."
 
-    local model_url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_qint8_arm64.onnx"
-    local vocab_url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/vocab.txt"
+    local model_url="https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx"
+    local vocab_url="https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/vocab.txt"
 
     if [ ! -f "$model_file" ]; then
         wget -q --show-progress -O "$model_file" "$model_url" || {
@@ -349,7 +349,7 @@ setup_embeddings() {
         }
     fi
 
-    print_success "Embedding model downloaded: all-MiniLM-L6-v2-int8.onnx"
+    print_success "Embedding model downloaded: bge-small-en-v1.5-int8.onnx"
 }
 
 verify_committed_models() {

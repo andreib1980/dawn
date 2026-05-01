@@ -287,6 +287,17 @@ dawn_add_unit_test(test_memory_similarity
    LIBS    unity m
    LABEL   ci)
 
+dawn_add_unit_test(test_memory_extraction
+   SOURCES test_memory_extraction.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+dawn_add_unit_test(test_embed_recompute
+   SOURCES test_embed_recompute.c test_embed_recompute_stub.c
+           ${SRC_ROOT}/src/memory/memory_embed_recompute.c
+   LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_rate_limiter
    SOURCES test_rate_limiter.c
            ${SRC_ROOT}/src/core/rate_limiter.c

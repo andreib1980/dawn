@@ -124,6 +124,13 @@ Memory extraction happens at session end, not during conversation. This adds zer
    - Reuses `memory_trigger_extraction()`. Successful extraction clears the recovery counters atomically through the existing `memory_db_set_last_extracted` UPDATE
    - Sequentially processes one stuck conversation at a time, blocking on `memory_extraction_in_progress()` (5-minute per-conv timeout) so the per-user extraction slot never queues
 
+- **memory_embed_recompute.c/h**: Embedding recomputation worker
+   - Detects model swaps via `system_metadata.embedding_model_id` vs `g_config.memory.model_id`
+   - On mismatch, launches a background thread (`nice 10`) that re-embeds all `memory_facts` then `memory_entities` per user, followed by a deferred `document_chunks` pass
+   - Per-user gate: `users.embeddings_model_id` is set only after both the facts and entities passes succeed — a crash between passes leaves it NULL and triggers a full retry on next start
+   - `system_metadata.embedding_model_id` is updated only after the chunks pass completes, so an interrupted chunk pass also retries cleanly
+   - Configured via `[memory.embeddings]` `model_id`, `recompute_on_model_change`, `recompute_batch_size`, `recompute_batch_sleep_ms`
+
 ## Database Schema
 
 Five tables in the auth database (`/var/lib/dawn/auth.db`):
@@ -185,12 +192,18 @@ provider = "local"        # "local", "openai", "claude", "ollama"
 model = "qwen2.5:7b"      # Model for extraction
 
 [memory.embeddings]
-provider = "ollama"       # "ollama", "openai", "onnx"
-model = "nomic-embed-text"  # Embedding model name
-endpoint = "http://localhost:11434"  # Provider endpoint
-dimensions = 768          # Embedding dimensions
-keyword_weight = 0.4      # Hybrid search: keyword component weight (0.0-1.0)
-semantic_weight = 0.6     # Hybrid search: semantic component weight (0.0-1.0)
+provider = "onnx"         # "onnx" (default), "ollama", "openai"
+# model = ""              # HTTP providers: model name (empty = provider default)
+# endpoint = ""           # HTTP providers: base URL
+keyword_weight = 0.30     # Hybrid search: keyword component weight (0.0-1.0)
+vector_weight = 0.70      # Hybrid search: semantic component weight (0.0-1.0)
+temporal_weight = 0.20    # Temporal proximity boost for date-anchored queries
+category_threshold = 0.25 # Cosine threshold for centroid-based category backfill
+backfill_on_startup = true
+model_id = "bge-small-en-v1.5-int8"  # Bump when MODEL_PATH changes to trigger recompute
+recompute_on_model_change = true      # Re-index all stored embeddings on model_id change
+recompute_batch_size = 50             # Rows per batch
+recompute_batch_sleep_ms = 100        # Sleep between batches (ms)
 
 [memory.decay]
 enabled = true            # Enable nightly confidence decay

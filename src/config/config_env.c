@@ -1335,6 +1335,13 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_double(config->memory.category_threshold));
    json_object_object_add(memory, "embedding_backfill_on_startup",
                           json_object_new_boolean(config->memory.embedding_backfill_on_startup));
+   json_object_object_add(memory, "model_id", json_object_new_string(config->memory.model_id));
+   json_object_object_add(memory, "recompute_on_model_change",
+                          json_object_new_boolean(config->memory.recompute_on_model_change));
+   json_object_object_add(memory, "recompute_batch_size",
+                          json_object_new_int(config->memory.recompute_batch_size));
+   json_object_object_add(memory, "recompute_batch_sleep_ms",
+                          json_object_new_int(config->memory.recompute_batch_sleep_ms));
    json_object_object_add(memory, "recovery_enabled",
                           json_object_new_boolean(config->memory.recovery_enabled));
    json_object_object_add(memory, "recovery_idle_threshold_seconds",
@@ -1891,6 +1898,15 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "category_threshold = %.2f\n", config->memory.category_threshold);
    fprintf(fp, "backfill_on_startup = %s\n",
            config->memory.embedding_backfill_on_startup ? "true" : "false");
+   if (config->memory.model_id[0]) {
+      char *escaped = toml_escape_string(config->memory.model_id);
+      fprintf(fp, "model_id = \"%s\"\n", escaped ? escaped : config->memory.model_id);
+      free(escaped);
+   }
+   fprintf(fp, "recompute_on_model_change = %s\n",
+           config->memory.recompute_on_model_change ? "true" : "false");
+   fprintf(fp, "recompute_batch_size = %d\n", config->memory.recompute_batch_size);
+   fprintf(fp, "recompute_batch_sleep_ms = %d\n", config->memory.recompute_batch_sleep_ms);
 
    fprintf(fp, "\n[memory.recovery]\n");
    fprintf(fp, "enabled = %s\n", config->memory.recovery_enabled ? "true" : "false");

@@ -446,6 +446,12 @@ typedef struct {
    float embedding_keyword_weight;     /* hybrid search keyword weight (0.0-1.0) */
    float embedding_vector_weight;      /* hybrid search vector weight (0.0-1.0) */
    bool embedding_backfill_on_startup; /* backfill existing facts on startup */
+   /* Embedding model identity — bump this string whenever MODEL_PATH changes so
+    * the recompute worker detects the swap and re-indexes stored embeddings. */
+   char model_id[64];
+   bool recompute_on_model_change; /* re-embed all stored vectors on model swap */
+   int recompute_batch_size;       /* rows per batch (default 50) */
+   int recompute_batch_sleep_ms;   /* sleep between batches in ms (default 100) */
    /* Temporal-query scoring.  When the query contains a parsed temporal
     * expression (e.g., "in 2020", "last week"), each candidate fact's score
     * gets `temporal_weight * gaussian_proximity(fact.created_at)` added.

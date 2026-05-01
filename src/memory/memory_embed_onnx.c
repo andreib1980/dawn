@@ -47,7 +47,7 @@
 #define ONNX_HIDDEN_DIM 384    /* MiniLM output dimension */
 #define VOCAB_HASH_SIZE 65536  /* Hash table size (~30K entries, 0.46 load factor) */
 #define VOCAB_MAX_WORD_LEN 128 /* Max token length in vocab */
-#define MODEL_PATH "models/embeddings/all-MiniLM-L6-v2-int8.onnx"
+#define MODEL_PATH "models/embeddings/bge-small-en-v1.5-int8.onnx"
 #define VOCAB_PATH "models/embeddings/vocab.txt"
 
 /* Special token IDs (standard BERT/MiniLM) */
@@ -305,8 +305,13 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
 
    memset(&s_onnx, 0, sizeof(s_onnx));
 
+   /* Allow env vars to override paths for benchmarking/experimentation. */
+   const char *vocab_path = getenv("DAWN_ONNX_VOCAB");
+   if (!vocab_path || *vocab_path == '\0')
+      vocab_path = VOCAB_PATH;
+
    /* Load vocabulary */
-   if (vocab_load(VOCAB_PATH) != 0) {
+   if (vocab_load(vocab_path) != 0) {
       return FAILURE;
    }
 
@@ -347,7 +352,10 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
 #pragma GCC diagnostic pop
 
    /* Load model */
-   status = s_onnx.ort->CreateSession(s_onnx.env, MODEL_PATH, opts, &s_onnx.session);
+   const char *model_path = getenv("DAWN_ONNX_MODEL");
+   if (!model_path || *model_path == '\0')
+      model_path = MODEL_PATH;
+   status = s_onnx.ort->CreateSession(s_onnx.env, model_path, opts, &s_onnx.session);
    s_onnx.ort->ReleaseSessionOptions(opts);
 
    if (status != NULL) {
@@ -372,7 +380,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
    }
 
    s_onnx.initialized = true;
-   OLOG_INFO("memory_embed_onnx: ONNX provider initialized (model: %s)", MODEL_PATH);
+   OLOG_INFO("memory_embed_onnx: ONNX provider initialized (model: %s)", model_path);
    return 0;
 }
 

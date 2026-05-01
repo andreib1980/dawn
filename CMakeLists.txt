@@ -633,6 +633,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_embed_onnx.c
     src/memory/memory_embed_ollama.c
     src/memory/memory_embed_openai.c
+    src/memory/memory_embed_recompute.c
 )
 
 # Auth subsystem (admin socket, user management, crypto — requires WebUI)

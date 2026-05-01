@@ -717,7 +717,11 @@ int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, con
 
    float norm = memory_embeddings_l2_norm(embedding, dims);
 
-   return memory_db_entity_update_embedding(entity_id, user_id, embedding, dims, norm);
+   rc = memory_db_entity_update_embedding(entity_id, user_id, embedding, dims, norm);
+   if (rc == MEMORY_DB_SUCCESS) {
+      memory_embeddings_invalidate_entity_cache();
+   }
+   return rc;
 }
 
 void memory_embeddings_invalidate_entity_cache(void) {

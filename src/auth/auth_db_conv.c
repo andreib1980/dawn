@@ -1156,7 +1156,14 @@ int conv_db_update_llm_settings(int64_t conv_id,
  * Message Operations
  * ============================================================================= */
 
-int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const char *content) {
+int conv_db_add_message_ex(int64_t conv_id,
+                           int user_id,
+                           const char *role,
+                           const char *content,
+                           int64_t *msg_id_out) {
+   if (msg_id_out)
+      *msg_id_out = 0;
+
    if (conv_id <= 0 || !role || !content) {
       return AUTH_DB_INVALID;
    }
@@ -1212,6 +1219,9 @@ int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const ch
       return result;
    }
 
+   if (msg_id_out)
+      *msg_id_out = sqlite3_last_insert_rowid(s_db.db);
+
    /* Update conversation metadata */
    sqlite3_reset(s_db.stmt_conv_update_meta);
    sqlite3_bind_int64(s_db.stmt_conv_update_meta, 1, (int64_t)now);
@@ -1223,6 +1233,10 @@ int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const ch
    AUTH_DB_UNLOCK();
 
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const char *content) {
+   return conv_db_add_message_ex(conv_id, user_id, role, content, NULL);
 }
 
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx) {
