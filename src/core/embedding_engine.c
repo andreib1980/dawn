@@ -171,12 +171,18 @@ int embedding_engine_init(void) {
 }
 
 void embedding_engine_cleanup(void) {
+   /* Hold s_embed_mutex so we don't race with an in-flight
+    * embedding_engine_embed() — provider cleanup releases the shared
+    * tokenizer, which would then UAF if a concurrent embed call were
+    * still reading the vocab table. */
+   pthread_mutex_lock(&s_embed_mutex);
    if (s_provider) {
       s_provider->cleanup();
       s_provider = NULL;
    }
    s_dims = 0;
    s_initialized = false;
+   pthread_mutex_unlock(&s_embed_mutex);
 }
 
 bool embedding_engine_available(void) {

@@ -46,6 +46,11 @@ static void set_valid_defaults(void) {
    s_config.memory.temporal_weight = 0.2f;
    s_config.memory.category_threshold = 0.25f;
    s_config.memory.extraction_timeout_ms = 30000;
+   s_config.memory.recompute_batch_size = 50;
+   s_config.memory.recompute_batch_sleep_ms = 100;
+   s_config.memory.recovery_idle_threshold_seconds = 3600;
+   s_config.memory.recovery_max_attempts = 2;
+   s_config.memory.recovery_recurring_interval_seconds = 86400;
    s_config.mqtt.port = 1883;
    s_config.network.workers = 4;
    s_config.network.session_timeout_sec = 3600;

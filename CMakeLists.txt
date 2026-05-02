@@ -630,6 +630,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_recovery.c
     src/memory/memory_embeddings.c
     src/memory/memory_recategorize.c
+    src/memory/memory_embed_tokenizer.c
     src/memory/memory_embed_onnx.c
     src/memory/memory_embed_ollama.c
     src/memory/memory_embed_openai.c

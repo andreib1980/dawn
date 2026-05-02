@@ -298,6 +298,12 @@ dawn_add_unit_test(test_embed_recompute
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_embed_tokenizer
+   SOURCES test_embed_tokenizer.c
+           ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_rate_limiter
    SOURCES test_rate_limiter.c
            ${SRC_ROOT}/src/core/rate_limiter.c
@@ -452,6 +458,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/tools/document_db.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
+           ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
            ${SRC_ROOT}/src/memory/memory_embed_onnx.c
            ${SRC_ROOT}/src/memory/memory_embed_ollama.c
            ${SRC_ROOT}/src/memory/memory_embed_openai.c
@@ -464,6 +471,7 @@ dawn_add_unit_test(bench_contradiction
    SOURCES ${SRC_ROOT}/benchmarks/bench_contradiction.c
            ${SRC_ROOT}/benchmarks/bench_contradiction_stub.c
            ${SRC_ROOT}/src/core/embedding_engine.c
+           ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
            ${SRC_ROOT}/src/memory/memory_embed_onnx.c
            ${SRC_ROOT}/src/memory/memory_embed_ollama.c
            ${SRC_ROOT}/src/memory/memory_embed_openai.c

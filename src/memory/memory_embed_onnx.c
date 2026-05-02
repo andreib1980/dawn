@@ -28,7 +28,6 @@
  *              models/embeddings/vocab.txt
  */
 
-#include <ctype.h>
 #include <math.h>
 #include <onnxruntime_c_api.h>
 #include <stdio.h>
@@ -37,250 +36,17 @@
 
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_embed_tokenizer.h"
 #include "memory/memory_embeddings.h"
 
 /* =============================================================================
  * Constants
  * ============================================================================= */
 
-#define ONNX_MAX_SEQ_LEN 256   /* Max tokens (MiniLM limit) */
-#define ONNX_HIDDEN_DIM 384    /* MiniLM output dimension */
-#define VOCAB_HASH_SIZE 65536  /* Hash table size (~30K entries, 0.46 load factor) */
-#define VOCAB_MAX_WORD_LEN 128 /* Max token length in vocab */
+#define ONNX_MAX_SEQ_LEN 256 /* Max tokens (MiniLM limit) */
+#define ONNX_HIDDEN_DIM 384  /* MiniLM output dimension */
 #define MODEL_PATH "models/embeddings/bge-small-en-v1.5-int8.onnx"
 #define VOCAB_PATH "models/embeddings/vocab.txt"
-
-/* Special token IDs (standard BERT/MiniLM) */
-#define TOKEN_CLS 101
-#define TOKEN_SEP 102
-#define TOKEN_UNK 100
-
-/* =============================================================================
- * WordPiece Hash Table
- * ============================================================================= */
-
-typedef struct vocab_entry {
-   char word[VOCAB_MAX_WORD_LEN];
-   int token_id;
-   struct vocab_entry *next; /* Chain for collisions */
-} vocab_entry_t;
-
-static vocab_entry_t *s_vocab_table[VOCAB_HASH_SIZE];
-static int s_vocab_size = 0;
-
-/* FNV-1a hash */
-static uint32_t vocab_hash(const char *str) {
-   uint32_t h = 2166136261u;
-   for (; *str; str++) {
-      h ^= (uint8_t)*str;
-      h *= 16777619u;
-   }
-   return h & (VOCAB_HASH_SIZE - 1);
-}
-
-static int vocab_lookup(const char *word) {
-   uint32_t idx = vocab_hash(word);
-   vocab_entry_t *e = s_vocab_table[idx];
-   while (e) {
-      if (strcmp(e->word, word) == 0)
-         return e->token_id;
-      e = e->next;
-   }
-   return -1; /* Not found */
-}
-
-static int vocab_load(const char *path) {
-   FILE *fp = fopen(path, "r");
-   if (!fp) {
-      OLOG_ERROR("memory_embed_onnx: cannot open vocab: %s", path);
-      return FAILURE;
-   }
-
-   memset(s_vocab_table, 0, sizeof(s_vocab_table));
-
-   char line[VOCAB_MAX_WORD_LEN];
-   int id = 0;
-   while (fgets(line, sizeof(line), fp)) {
-      /* Strip newline */
-      size_t len = strlen(line);
-      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-         line[--len] = '\0';
-
-      if (len == 0) {
-         id++;
-         continue;
-      }
-
-      uint32_t idx = vocab_hash(line);
-      vocab_entry_t *entry = malloc(sizeof(vocab_entry_t));
-      if (!entry)
-         break;
-      strncpy(entry->word, line, VOCAB_MAX_WORD_LEN - 1);
-      entry->word[VOCAB_MAX_WORD_LEN - 1] = '\0';
-      entry->token_id = id;
-      entry->next = s_vocab_table[idx];
-      s_vocab_table[idx] = entry;
-      id++;
-   }
-
-   fclose(fp);
-   s_vocab_size = id;
-   OLOG_INFO("memory_embed_onnx: loaded vocab with %d entries", s_vocab_size);
-   return 0;
-}
-
-static void vocab_free(void) {
-   for (int i = 0; i < VOCAB_HASH_SIZE; i++) {
-      vocab_entry_t *e = s_vocab_table[i];
-      while (e) {
-         vocab_entry_t *next = e->next;
-         free(e);
-         e = next;
-      }
-      s_vocab_table[i] = NULL;
-   }
-   s_vocab_size = 0;
-}
-
-/* =============================================================================
- * WordPiece Tokenizer
- * ============================================================================= */
-
-/**
- * @brief Tokenize text using WordPiece algorithm
- *
- * 1. Lowercase and split on whitespace/punctuation
- * 2. For each word, greedily match longest prefix in vocab
- * 3. Subsequent pieces get ## prefix
- * 4. Prepend [CLS], append [SEP]
- *
- * @param text Input text
- * @param input_ids Output token IDs
- * @param attention_mask Output attention mask (1 for real tokens)
- * @param token_type_ids Output token type IDs (all 0 for single sentence)
- * @param max_len Maximum sequence length
- * @return Number of tokens produced
- */
-static int wordpiece_tokenize(const char *text,
-                              int64_t *input_ids,
-                              int64_t *attention_mask,
-                              int64_t *token_type_ids,
-                              int max_len) {
-   if (!text || !input_ids || !attention_mask || !token_type_ids || max_len < 3)
-      return 0;
-
-   /* Start with [CLS] */
-   int pos = 0;
-   input_ids[pos] = TOKEN_CLS;
-   attention_mask[pos] = 1;
-   token_type_ids[pos] = 0;
-   pos++;
-
-   /* Lowercase copy for tokenization */
-   size_t text_len = strlen(text);
-   if (text_len > 4096)
-      text_len = 4096;
-   char lower[4097];
-   for (size_t i = 0; i < text_len; i++) {
-      lower[i] = (char)tolower((unsigned char)text[i]);
-   }
-   lower[text_len] = '\0';
-
-   /* Split into words and tokenize each */
-   const char *p = lower;
-   while (*p && pos < max_len - 1) {
-      /* Skip whitespace */
-      while (*p && (isspace((unsigned char)*p) || *p == '\0'))
-         p++;
-      if (!*p)
-         break;
-
-      /* Find word boundary (split on whitespace and punctuation) */
-      const char *word_start = p;
-      while (*p && !isspace((unsigned char)*p)) {
-         /* Treat punctuation as separate tokens */
-         if (ispunct((unsigned char)*p) && p > word_start)
-            break;
-         if (ispunct((unsigned char)*p)) {
-            p++;
-            break;
-         }
-         p++;
-      }
-
-      int word_len = (int)(p - word_start);
-      if (word_len <= 0)
-         continue;
-
-      /* WordPiece: greedy longest-match */
-      int offset = 0;
-      bool is_first_piece = true;
-
-      while (offset < word_len && pos < max_len - 1) {
-         int best_len = 0;
-         int best_id = TOKEN_UNK;
-
-         /* Try decreasing lengths */
-         for (int try_len = word_len - offset; try_len > 0; try_len--) {
-            char piece[VOCAB_MAX_WORD_LEN];
-            int prefix_len = 0;
-
-            if (!is_first_piece) {
-               piece[0] = '#';
-               piece[1] = '#';
-               prefix_len = 2;
-            }
-
-            if (prefix_len + try_len >= VOCAB_MAX_WORD_LEN)
-               continue;
-
-            memcpy(piece + prefix_len, word_start + offset, (size_t)try_len);
-            piece[prefix_len + try_len] = '\0';
-
-            int id = vocab_lookup(piece);
-            if (id >= 0) {
-               best_len = try_len;
-               best_id = id;
-               break;
-            }
-         }
-
-         if (best_len == 0) {
-            /* No match — emit [UNK] for remaining word */
-            input_ids[pos] = TOKEN_UNK;
-            attention_mask[pos] = 1;
-            token_type_ids[pos] = 0;
-            pos++;
-            break;
-         }
-
-         input_ids[pos] = best_id;
-         attention_mask[pos] = 1;
-         token_type_ids[pos] = 0;
-         pos++;
-
-         offset += best_len;
-         is_first_piece = false;
-      }
-   }
-
-   /* Append [SEP] */
-   if (pos < max_len) {
-      input_ids[pos] = TOKEN_SEP;
-      attention_mask[pos] = 1;
-      token_type_ids[pos] = 0;
-      pos++;
-   }
-
-   /* Zero-pad remaining positions */
-   for (int i = pos; i < max_len; i++) {
-      input_ids[i] = 0;
-      attention_mask[i] = 0;
-      token_type_ids[i] = 0;
-   }
-
-   return pos;
-}
 
 /* =============================================================================
  * ONNX Runtime State
@@ -310,8 +76,8 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
    if (!vocab_path || *vocab_path == '\0')
       vocab_path = VOCAB_PATH;
 
-   /* Load vocabulary */
-   if (vocab_load(vocab_path) != 0) {
+   /* Load vocabulary via shared tokenizer (refcounted). */
+   if (memory_embed_tokenizer_acquire(vocab_path) != SUCCESS) {
       return FAILURE;
    }
 
@@ -319,7 +85,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
    s_onnx.ort = OrtGetApiBase()->GetApi(ORT_API_VERSION);
    if (!s_onnx.ort) {
       OLOG_ERROR("memory_embed_onnx: failed to get ONNX Runtime API");
-      vocab_free();
+      memory_embed_tokenizer_release();
       return FAILURE;
    }
 
@@ -329,7 +95,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
    if (status != NULL) {
       OLOG_ERROR("memory_embed_onnx: create env failed: %s", s_onnx.ort->GetErrorMessage(status));
       s_onnx.ort->ReleaseStatus(status);
-      vocab_free();
+      memory_embed_tokenizer_release();
       return FAILURE;
    }
 
@@ -341,7 +107,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
                  s_onnx.ort->GetErrorMessage(status));
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseEnv(s_onnx.env);
-      vocab_free();
+      memory_embed_tokenizer_release();
       return FAILURE;
    }
 
@@ -362,7 +128,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
       OLOG_ERROR("memory_embed_onnx: load model failed: %s", s_onnx.ort->GetErrorMessage(status));
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseEnv(s_onnx.env);
-      vocab_free();
+      memory_embed_tokenizer_release();
       return FAILURE;
    }
 
@@ -375,7 +141,7 @@ static int onnx_init(const char *endpoint, const char *model, const char *api_ke
       s_onnx.ort->ReleaseStatus(status);
       s_onnx.ort->ReleaseSession(s_onnx.session);
       s_onnx.ort->ReleaseEnv(s_onnx.env);
-      vocab_free();
+      memory_embed_tokenizer_release();
       return FAILURE;
    }
 
@@ -395,7 +161,7 @@ static void onnx_cleanup(void) {
    if (s_onnx.env)
       s_onnx.ort->ReleaseEnv(s_onnx.env);
 
-   vocab_free();
+   memory_embed_tokenizer_release();
    s_onnx.initialized = false;
    OLOG_INFO("memory_embed_onnx: cleanup complete");
 }
@@ -415,8 +181,8 @@ static int onnx_embed(const char *text, float *out, int max_dims, int *out_dims)
    int64_t attention_mask[ONNX_MAX_SEQ_LEN];
    int64_t token_type_ids[ONNX_MAX_SEQ_LEN];
 
-   int seq_len = wordpiece_tokenize(text, input_ids, attention_mask, token_type_ids,
-                                    ONNX_MAX_SEQ_LEN);
+   int seq_len = memory_embed_tokenizer_encode(text, input_ids, attention_mask, token_type_ids,
+                                               ONNX_MAX_SEQ_LEN);
    if (seq_len <= 2) {
       /* Only [CLS] and [SEP] — no real content */
       *out_dims = 0;

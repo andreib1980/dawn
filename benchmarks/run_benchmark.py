@@ -732,7 +732,6 @@ def main():
       help="Number of results to retrieve per query (default: 10). Higher values help "
       "diagnose whether evidence is present but poorly ranked (LoCoMo cat-3).",
    )
-
    args = parser.parse_args()
 
    # Start the C binary
