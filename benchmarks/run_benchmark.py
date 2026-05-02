@@ -66,6 +66,8 @@ class BenchRetrieval:
       temporal_weight=0.0,
       proper_noun_boost=0.0,
       now_override=None,
+      session_neighbor_window=0,
+      session_neighbor_boost=0.0,
    ):
       cmd = [binary_path, "--provider", provider]
       if model:
@@ -82,6 +84,9 @@ class BenchRetrieval:
          cmd += ["--proper-noun-boost", str(proper_noun_boost)]
       if now_override is not None:
          cmd += ["--now", str(int(now_override))]
+      if session_neighbor_window > 0 and session_neighbor_boost > 0.0:
+         cmd += ["--session-neighbor-window", str(session_neighbor_window),
+                 "--session-neighbor-boost", str(session_neighbor_boost)]
 
       # text=False / no bufsize: _read_json_line reads raw bytes via os.read
       # off the stdout fd directly, doing line splitting in Python. Mixing
@@ -732,6 +737,22 @@ def main():
       help="Number of results to retrieve per query (default: 10). Higher values help "
       "diagnose whether evidence is present but poorly ranked (LoCoMo cat-3).",
    )
+   parser.add_argument(
+      "--session-neighbor-window",
+      type=int,
+      default=0,
+      dest="session_neighbor_window",
+      help="Session-neighbor anchor window: top-N items by cosine become anchors. "
+      "Doc IDs split on ':'; chunks sharing an anchor's prefix get a boost. 0 = off. "
+      "Try 3–10. LoCoMo dialog only — datasets without ':' in IDs are no-ops.",
+   )
+   parser.add_argument(
+      "--session-neighbor-boost",
+      type=float,
+      default=0.0,
+      dest="session_neighbor_boost",
+      help="Additive score for chunks matching an anchor session prefix. Try 0.05–0.20.",
+   )
    args = parser.parse_args()
 
    # Start the C binary
@@ -747,6 +768,8 @@ def main():
       temporal_weight=args.temporal_weight,
       proper_noun_boost=args.proper_noun_boost,
       now_override=args.now,
+      session_neighbor_window=args.session_neighbor_window,
+      session_neighbor_boost=args.session_neighbor_boost,
    )
    print(
       f"  Ready: {engine.dims} dims, provider={engine.provider}, mode={engine.mode}",

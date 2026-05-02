@@ -85,6 +85,19 @@ static float s_temporal_weight = 0.0f;
  * queries' "now" should match the dataset's era, not the benchmark run time. */
 static int64_t s_now_override = 0;
 
+/* Session-neighbor boost.  Doc IDs of the form "PREFIX:SUFFIX" (e.g., LoCoMo
+ * "D7:5") share session "D7".  After cosine+temporal scoring we identify the
+ * top-N items by score, treat their session prefixes as anchors, and add an
+ * additive boost to every other chunk in those anchor sessions.  Then re-sort.
+ * Datasets without colon-separated IDs see no anchor matches → no-op.
+ *
+ * Window = anchor count (top-N by cosine).  0 disables the mechanism entirely.
+ * Boost = additive score for items whose session prefix matches an anchor. */
+static int s_session_neighbor_window = 0;
+static float s_session_neighbor_boost = 0.0f;
+#define BENCH_MAX_NEIGHBOR_ANCHORS 32
+#define BENCH_NEIGHBOR_PREFIX_MAX 64
+
 /* When set, restrict query results to chunks whose doc has this category (v34).
  * Empty = no filter (default).  Categories are supplied per-add via the optional
  * "category" field in the add command. */
@@ -622,6 +635,59 @@ static int handle_query(struct json_object *cmd) {
    /* Sort by cosine descending */
    qsort(scores, (size_t)chunk_count, sizeof(scored_chunk_t), score_compare);
 
+   /* Session-neighbor boost: identify the top-N anchor session prefixes (split
+    * doc_filename on first ':'), then additively boost every other chunk that
+    * shares an anchor prefix.  Applied BEFORE keyword scoring so promoted
+    * neighbors can enter the top-50 keyword window. */
+   if (s_session_neighbor_window > 0 && s_session_neighbor_boost > 0.0f) {
+      char anchors[BENCH_MAX_NEIGHBOR_ANCHORS][BENCH_NEIGHBOR_PREFIX_MAX];
+      int anchor_count = 0;
+      int anchor_n = s_session_neighbor_window < chunk_count ? s_session_neighbor_window
+                                                             : chunk_count;
+      for (int i = 0; i < anchor_n && anchor_count < BENCH_MAX_NEIGHBOR_ANCHORS; i++) {
+         const char *id = chunks[scores[i].index].doc_filename;
+         const char *colon = strchr(id, ':');
+         if (!colon)
+            continue;
+         size_t prefix_len = (size_t)(colon - id);
+         if (prefix_len == 0 || prefix_len >= BENCH_NEIGHBOR_PREFIX_MAX)
+            continue;
+         bool seen = false;
+         for (int j = 0; j < anchor_count; j++) {
+            if (strncmp(anchors[j], id, prefix_len) == 0 && anchors[j][prefix_len] == '\0') {
+               seen = true;
+               break;
+            }
+         }
+         if (!seen) {
+            memcpy(anchors[anchor_count], id, prefix_len);
+            anchors[anchor_count][prefix_len] = '\0';
+            anchor_count++;
+         }
+      }
+
+      if (anchor_count > 0) {
+         /* Boost any chunk (outside the anchor window — anchors are already on
+          * top) whose session prefix matches an anchor. */
+         for (int i = anchor_n; i < chunk_count; i++) {
+            const char *id = chunks[scores[i].index].doc_filename;
+            const char *colon = strchr(id, ':');
+            if (!colon)
+               continue;
+            size_t prefix_len = (size_t)(colon - id);
+            if (prefix_len == 0 || prefix_len >= BENCH_NEIGHBOR_PREFIX_MAX)
+               continue;
+            for (int j = 0; j < anchor_count; j++) {
+               if (strncmp(anchors[j], id, prefix_len) == 0 && anchors[j][prefix_len] == '\0') {
+                  scores[i].score += s_session_neighbor_boost;
+                  break;
+               }
+            }
+         }
+         qsort(scores, (size_t)chunk_count, sizeof(scored_chunk_t), score_compare);
+      }
+   }
+
    /* Apply keyword boosting to top 50 (skip in raw mode) */
    if (!s_no_keyword_boost) {
       query_words_t qw;
@@ -760,6 +826,10 @@ static void print_usage(const char *prog) {
            "  --now <unix_ts>                  Pin 'now' for relative expressions (yesterday,\n"
            "                                   last week). Useful when replaying historical\n"
            "                                   datasets — defaults to wall-clock time().\n"
+           "  --session-neighbor-window <int>  Treat the top-N items by cosine score as\n"
+           "                                   session anchors (split doc id on ':'). 0 = off.\n"
+           "  --session-neighbor-boost <float> Additive score for chunks sharing an anchor\n"
+           "                                   session prefix. Try 0.05–0.20.\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -785,12 +855,14 @@ int main(int argc, char *argv[]) {
       { "category-filter", required_argument, 0, 'c' },
       { "temporal-weight", required_argument, 0, 't' },
       { "now", required_argument, 0, 'n' },
+      { "session-neighbor-window", required_argument, 0, 'W' },
+      { "session-neighbor-boost", required_argument, 0, 'B' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:rh", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:rh", long_options, NULL)) != -1) {
       switch (opt) {
          case 'p':
             provider = optarg;
@@ -818,6 +890,12 @@ int main(int argc, char *argv[]) {
             break;
          case 'n':
             s_now_override = (int64_t)atoll(optarg);
+            break;
+         case 'W':
+            s_session_neighbor_window = atoi(optarg);
+            break;
+         case 'B':
+            s_session_neighbor_boost = (float)atof(optarg);
             break;
          case 'h':
             print_usage(argv[0]);
