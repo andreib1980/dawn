@@ -44,6 +44,8 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "bench_memory_pipeline.h"
+#include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "core/time_query_parser.h"
@@ -830,6 +832,15 @@ static void print_usage(const char *prog) {
            "                                   session anchors (split doc id on ':'). 0 = off.\n"
            "  --session-neighbor-boost <float> Additive score for chunks sharing an anchor\n"
            "                                   session prefix. Try 0.05–0.20.\n"
+           "  --memory-pipeline                Enable memory-pipeline mode (extraction +\n"
+           "                                   memory_facts retrieval). Replaces document\n"
+           "                                   retrieval; loads dawn.toml for extraction config.\n"
+           "  --smoke <locomo_json> <conv_idx> One-shot smoke test: ingest one LoCoMo conv,\n"
+           "                                   fire extraction at each session boundary, dump\n"
+           "                                   facts + provenance to stdout. Requires\n"
+           "                                   --memory-pipeline. Bypasses JSON protocol.\n"
+           "  --config <path>                  Path to dawn.toml (default: ./dawn.toml).\n"
+           "                                   Only relevant in --memory-pipeline mode.\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -857,12 +868,19 @@ int main(int argc, char *argv[]) {
       { "now", required_argument, 0, 'n' },
       { "session-neighbor-window", required_argument, 0, 'W' },
       { "session-neighbor-boost", required_argument, 0, 'B' },
+      { "memory-pipeline", no_argument, 0, 'M' },
+      { "smoke", no_argument, 0, 'S' },
+      { "config", required_argument, 0, 'C' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
 
+   bool memory_pipeline = false;
+   bool smoke = false;
+   const char *config_path = "./dawn.toml";
+
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:rh", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:MSrh", long_options, NULL)) != -1) {
       switch (opt) {
          case 'p':
             provider = optarg;
@@ -897,6 +915,15 @@ int main(int argc, char *argv[]) {
          case 'B':
             s_session_neighbor_boost = (float)atof(optarg);
             break;
+         case 'M':
+            memory_pipeline = true;
+            break;
+         case 'S':
+            smoke = true;
+            break;
+         case 'C':
+            config_path = optarg;
+            break;
          case 'h':
             print_usage(argv[0]);
             return 0;
@@ -906,19 +933,53 @@ int main(int argc, char *argv[]) {
       }
    }
 
-   /* Populate config for embedding engine */
-   memset(&g_config, 0, sizeof(g_config));
-   memset(&g_secrets, 0, sizeof(g_secrets));
+   /* In memory-pipeline mode load real dawn.toml so extraction gets the
+    * configured provider/model/timeout/embedding settings.  CLI args still
+    * override embedding fields below (default-mode behavior). */
+   if (memory_pipeline) {
+      memset(&g_config, 0, sizeof(g_config));
+      memset(&g_secrets, 0, sizeof(g_secrets));
+      if (config_load_from_search(config_path, &g_config) != 0) {
+         fprintf(stderr, "bench: failed to load config %s\n", config_path);
+         return 1;
+      }
+      if (config_load_secrets_from_search(&g_secrets) != 0) {
+         fprintf(stderr, "bench: warning: secrets.toml not loaded; cloud extractors will fail\n");
+      }
+      if (smoke) {
+         if (optind + 2 != argc) {
+            fprintf(stderr,
+                    "bench: --smoke requires <locomo_json> <conv_idx> as positional args\n");
+            return 1;
+         }
+      }
+   } else {
+      memset(&g_config, 0, sizeof(g_config));
+      memset(&g_secrets, 0, sizeof(g_secrets));
+   }
 
-   snprintf(g_config.memory.embedding_provider, sizeof(g_config.memory.embedding_provider), "%s",
-            provider);
-   snprintf(g_config.memory.embedding_model, sizeof(g_config.memory.embedding_model), "%s", model);
-   snprintf(g_config.memory.embedding_endpoint, sizeof(g_config.memory.embedding_endpoint), "%s",
-            endpoint);
-   snprintf(g_secrets.embedding_api_key, sizeof(g_secrets.embedding_api_key), "%s", api_key);
+   /* CLI-provided embedding override (always wins over toml in default mode;
+    * memory-pipeline mode also honors it for ablation work). */
+   if (provider && provider[0])
+      snprintf(g_config.memory.embedding_provider, sizeof(g_config.memory.embedding_provider), "%s",
+               provider);
+   if (model && model[0])
+      snprintf(g_config.memory.embedding_model, sizeof(g_config.memory.embedding_model), "%s",
+               model);
+   if (endpoint && endpoint[0])
+      snprintf(g_config.memory.embedding_endpoint, sizeof(g_config.memory.embedding_endpoint), "%s",
+               endpoint);
+   if (api_key && api_key[0])
+      snprintf(g_secrets.embedding_api_key, sizeof(g_secrets.embedding_api_key), "%s", api_key);
 
-   /* Initialize database */
-   setup_db();
+   /* Memory-pipeline mode uses BENCH_MEMORY_DDL; default mode uses bench's
+    * existing setup_db() which has an incompatible users-table schema. */
+   if (memory_pipeline) {
+      if (bench_mp_init() != 0)
+         return 1;
+   } else {
+      setup_db();
+   }
 
    /* Initialize embedding engine */
    if (embedding_engine_init() != 0) {
@@ -933,6 +994,17 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
+   /* Smoke mode short-circuits the JSON protocol: run one-shot extraction
+    * over a single LoCoMo conv and exit. */
+   if (memory_pipeline && smoke) {
+      const char *locomo_path = argv[optind];
+      int conv_idx = atoi(argv[optind + 1]);
+      int rc = bench_mp_run_smoke(locomo_path, conv_idx);
+      embedding_engine_cleanup();
+      bench_mp_teardown();
+      return rc;
+   }
+
    /* Signal readiness to orchestrator */
    fprintf(stdout,
            "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
@@ -945,6 +1017,9 @@ int main(int argc, char *argv[]) {
 
    /* Cleanup */
    embedding_engine_cleanup();
-   teardown_db();
+   if (memory_pipeline)
+      bench_mp_teardown();
+   else
+      teardown_db();
    return 0;
 }

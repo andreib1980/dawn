@@ -455,6 +455,7 @@ dawn_add_unit_test(bench_retrieval
    NO_TEST
    SOURCES ${SRC_ROOT}/benchmarks/bench_retrieval.c
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
+           ${SRC_ROOT}/benchmarks/bench_memory_pipeline.c
            ${SRC_ROOT}/src/tools/document_db.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
@@ -486,6 +487,11 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/core/iso8601.c
            ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/config/config_parser.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/src/config/config_validate.c
+           ${SRC_ROOT}/src/config/config_env.c
+           ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
    LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})

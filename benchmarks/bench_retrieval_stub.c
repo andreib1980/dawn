@@ -32,11 +32,11 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 
-dawn_config_t g_config;
-secrets_config_t g_secrets;
-
-/* s_db is now defined by src/auth/auth_db_core.c (linked into the bench for
- * memory-pipeline mode). Pre-memory-pipeline the bench used its own copy here. */
+/* g_config and g_secrets are now defined by src/config/config_defaults.c
+ * (linked into the bench for memory-pipeline mode). Pre-memory-pipeline the
+ * bench used its own copies here.
+ *
+ * s_db is now defined by src/auth/auth_db_core.c. */
 
 /* =============================================================================
  * Daemon-only stubs for memory-pipeline mode
@@ -122,10 +122,7 @@ int text_to_speech(const char *text) {
 
 /* is_vision_enabled_for_current_llm is provided by linked llm_command_parser.c */
 
-/* Config secrets accessor — return our global g_secrets */
-const secrets_config_t *config_get_secrets(void) {
-   return &g_secrets;
-}
+/* config_get / config_get_secrets are provided by config_defaults.c (linked) */
 
 /* =============================================================================
  * Second batch — symbols pulled in by llm_*.c TUs that the bench links but
@@ -227,27 +224,9 @@ char *command_execute_sync(const char *json) {
    return NULL;
 }
 
-/* TOML helpers — needed only by tool_registry config paths the bench skips */
-struct toml_table_t;
-struct toml_table_t *toml_parse_file(void *fp, char *errbuf, int errbufsz) {
-   (void)fp;
-   (void)errbuf;
-   (void)errbufsz;
-   return NULL;
-}
-void toml_free(struct toml_table_t *table) {
-   (void)table;
-}
-struct toml_table_t *toml_table_in(const struct toml_table_t *table, const char *key) {
-   (void)table;
-   (void)key;
-   return NULL;
-}
+/* TOML helpers are provided by linked src/tools/toml.c */
+/* config_get is provided by linked config_defaults.c */
 
-/* Misc daemon helpers */
-const dawn_config_t *config_get(void) {
-   return &g_config;
-}
 struct mosquitto;
 struct mosquitto *worker_pool_get_mosq(void) {
    return NULL;
