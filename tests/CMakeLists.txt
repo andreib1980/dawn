@@ -462,8 +462,32 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_embed_onnx.c
            ${SRC_ROOT}/src/memory/memory_embed_ollama.c
            ${SRC_ROOT}/src/memory/memory_embed_openai.c
+           # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_embeddings.c
+           ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_local_provider.c
+           ${SRC_ROOT}/src/llm/llm_claude.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_openai.c
+           ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+           ${SRC_ROOT}/src/llm/llm_rate_limit.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses.c
+           ${SRC_ROOT}/src/llm/llm_context.c
+           ${SRC_ROOT}/src/llm/llm_command_parser.c
+           ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/sse_parser.c
+           ${SRC_ROOT}/src/core/iso8601.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
    INCLUDES /usr/local/include/onnxruntime
-   LIBS    dawn_common sqlite3 pthread m onnxruntime
+   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
 
 dawn_add_unit_test(bench_contradiction
