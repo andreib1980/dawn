@@ -68,6 +68,8 @@ class BenchRetrieval:
       now_override=None,
       session_neighbor_window=0,
       session_neighbor_boost=0.0,
+      memory_pipeline=False,
+      config_path=None,
    ):
       cmd = [binary_path, "--provider", provider]
       if model:
@@ -87,6 +89,10 @@ class BenchRetrieval:
       if session_neighbor_window > 0 and session_neighbor_boost > 0.0:
          cmd += ["--session-neighbor-window", str(session_neighbor_window),
                  "--session-neighbor-boost", str(session_neighbor_boost)]
+      if memory_pipeline:
+         cmd += ["--memory-pipeline"]
+         if config_path:
+            cmd += ["--config", config_path]
 
       # text=False / no bufsize: _read_json_line reads raw bytes via os.read
       # off the stdout fd directly, doing line splitting in Python. Mixing
@@ -169,6 +175,37 @@ class BenchRetrieval:
 
    def reset(self):
       return self._send({"cmd": "reset"})
+
+   # =========================================================================
+   # Memory-pipeline mode commands
+   # =========================================================================
+
+   def _send_with_timeout(self, obj, timeout):
+      """Like _send but with a configurable timeout for slow operations
+      (extraction can take 5-30s per call on Claude Haiku/Sonnet/Opus)."""
+      self.proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
+      self.proc.stdin.flush()
+      return self._read_json_line(timeout=timeout, what=f"response to {obj.get('cmd')}")
+
+   def conv_create(self, title="bench"):
+      return self._send({"cmd": "conv_create", "title": title})
+
+   def add_message(self, conv_id, dia_id, role, content):
+      return self._send({"cmd": "add_message", "conv_id": conv_id, "dia_id": dia_id,
+                         "role": role, "content": content})
+
+   def extract(self, conv_id, session_id, timeout_ms=600000):
+      """Trigger extraction; can take seconds-to-minutes depending on model."""
+      return self._send_with_timeout(
+         {"cmd": "extract", "conv_id": conv_id, "session_id": session_id,
+          "timeout_ms": timeout_ms},
+         timeout=(timeout_ms / 1000.0) + 30.0)
+
+   def query_memory(self, text, top_k=10):
+      return self._send({"cmd": "query_memory", "text": text, "top_k": top_k})
+
+   def reset_memory(self):
+      return self._send({"cmd": "reset_memory", "user_id": 1})
 
    def quit(self):
       self.proc.stdin.write((json.dumps({"cmd": "quit"}) + "\n").encode("utf-8"))
@@ -522,6 +559,144 @@ def compute_fraction_recall(retrieved_ids, evidence_ids):
 
 
 # =============================================================================
+# LoCoMo Memory-Pipeline Benchmark (Phase 1)
+# =============================================================================
+#
+# Drives bench_retrieval through extraction + memory_facts retrieval instead of
+# raw-dialog cosine. Methodology:
+#
+#   - One DAWN conversation per LoCoMo conv (Option A — production-faithful).
+#   - Per LoCoMo session: ingest dialogs as messages, then trigger extraction.
+#     The high-water-mark cursor in memory_extraction.c filters new messages.
+#   - Per QA pair: query_memory and aggregate covered_dia_ids[] across the
+#     retrieved facts (each fact's provenance range maps to dia_ids via the
+#     bench's in-process dia_id<->msg_id table).
+#   - Recall metric: recall_reach = |gold_dia_ids ∩ retrieved_covered_dia_ids|
+#     / |gold_dia_ids|. Documented as "retrieval reach", NOT answer support.
+#     See atlas/dawn/archive/LOCOMO_CAT3_PROFILING.md "Outcome" section.
+
+
+def run_locomo_memory(engine, dataset_path, limit=0, top_k=10):
+   """Run LoCoMo through extraction + memory-fact retrieval. Returns metrics."""
+   with open(dataset_path) as f:
+      data = json.load(f)
+   if isinstance(data, dict):
+      entries = list(data.values())
+   else:
+      entries = data
+   if limit > 0:
+      entries = entries[:limit]
+
+   all_recall = []
+   per_category = {}
+   total_qa = 0
+   total_facts = 0
+   total_extractions = 0
+   total_extract_seconds = 0.0
+   t0 = time.time()
+
+   for conv_idx, entry in enumerate(entries):
+      conv = entry.get("conversation", entry)
+
+      # Reset per-conv: fresh facts & dia_id map
+      engine.reset_memory()
+
+      # Create DAWN conversation
+      cresp = engine.conv_create(title=f"locomo_{conv_idx}")
+      conv_id = cresp.get("conv_id")
+      if not conv_id:
+         print(f"  conv {conv_idx}: conv_create failed; skipping", file=sys.stderr)
+         continue
+
+      # Determine speakers (LoCoMo has two; first introduced -> user)
+      first_speaker = None
+
+      # Iterate sessions: ingest then extract
+      session_n = 0
+      while True:
+         session_n += 1
+         key = f"session_{session_n}"
+         if key not in conv:
+            break
+         dialogs = conv[key]
+         if not isinstance(dialogs, list):
+            continue
+
+         for d in dialogs:
+            dia_id = d.get("dia_id", "")
+            speaker = d.get("speaker", "?")
+            text = d.get("text", "")
+            if first_speaker is None:
+               first_speaker = speaker
+            role = "user" if speaker == first_speaker else "assistant"
+            content = f'{speaker} said, "{text}"'
+            engine.add_message(conv_id, dia_id, role, content)
+
+         eresp = engine.extract(conv_id, session_id=f"locomo_{conv_idx}_s{session_n}",
+                                timeout_ms=600000)
+         total_extractions += 1
+         total_extract_seconds += eresp.get("duration_ms", 0) / 1000.0
+         total_facts = eresp.get("facts_total", total_facts)
+
+         print(f"  [conv {conv_idx} sess {session_n}] facts={total_facts} "
+               f"+{eresp.get('facts_added', 0)} dur={eresp.get('duration_ms', 0)}ms",
+               file=sys.stderr)
+
+      # Score each QA pair via memory query + provenance->dia_id mapping
+      qa_pairs = entry.get("qa", entry.get("QA", entry.get("qa_pairs", [])))
+      for qa in qa_pairs:
+         question = qa.get("question", "")
+         evidence = qa.get("evidence", [])
+         category = str(qa.get("category", "unknown"))
+         if not question or not evidence:
+            continue
+
+         # Normalize evidence: split any space-separated multi-IDs (LoCoMo
+         # conv 8 has 'D9:1 D4:4 D4:6' as a single string in 3 cat-3 questions)
+         flat_evidence = []
+         for e in evidence:
+            flat_evidence.extend(e.split())
+         evidence_set = set(flat_evidence)
+
+         qresp = engine.query_memory(question, top_k=top_k)
+         retrieved = qresp.get("results", [])
+
+         # Aggregate covered dia_ids across all retrieved facts
+         covered = set()
+         for r in retrieved:
+            covered.update(r.get("covered_dia_ids", []))
+
+         recall = compute_fraction_recall(list(covered), evidence_set)
+         all_recall.append(recall)
+         per_category.setdefault(category, []).append(recall)
+         total_qa += 1
+
+      avg = sum(all_recall) / len(all_recall) if all_recall else 0
+      print(f"  [conv {conv_idx + 1}/{len(entries)}] QA={total_qa} avg_recall_reach={avg:.3f}",
+            file=sys.stderr)
+
+   elapsed = time.time() - t0
+   results = {
+      "mode": "memory-pipeline",
+      "granularity": "per_locomo_session",
+      "scoring": "recall_reach (retrieval reach via provenance overlap; NOT answer support)",
+      "extraction_provider": engine.ready_info.get("extraction_provider", ""),
+      "extraction_model": engine.ready_info.get("extraction_model", ""),
+      "avg_recall_reach": sum(all_recall) / len(all_recall) if all_recall else 0,
+      "total_qa": total_qa,
+      "conversations": len(entries),
+      "total_facts_extracted": total_facts,
+      "total_extractions": total_extractions,
+      "extraction_total_seconds": total_extract_seconds,
+      "elapsed_seconds": elapsed,
+      "per_category": {},
+   }
+   for cat, vals in sorted(per_category.items()):
+      results["per_category"][cat] = sum(vals) / len(vals) if vals else 0
+   return results
+
+
+# =============================================================================
 # ConvoMem Benchmark
 # =============================================================================
 
@@ -753,6 +928,22 @@ def main():
       dest="session_neighbor_boost",
       help="Additive score for chunks matching an anchor session prefix. Try 0.05–0.20.",
    )
+   parser.add_argument(
+      "--memory-pipeline",
+      action="store_true",
+      dest="memory_pipeline",
+      help="LoCoMo only: drive extraction + memory_facts retrieval instead of "
+      "raw-dialog cosine. Loads dawn.toml for extraction provider/model. "
+      "Reports recall_reach (retrieval reach via provenance overlap; NOT "
+      "answer support — see atlas/dawn/archive/LOCOMO_CAT3_PROFILING.md).",
+   )
+   parser.add_argument(
+      "--config",
+      default="./dawn.toml",
+      dest="config_path",
+      help="Path to dawn.toml (default ./dawn.toml). Used in --memory-pipeline mode "
+      "to load extraction_provider/extraction_model.",
+   )
    args = parser.parse_args()
 
    # Start the C binary
@@ -770,6 +961,8 @@ def main():
       now_override=args.now,
       session_neighbor_window=args.session_neighbor_window,
       session_neighbor_boost=args.session_neighbor_boost,
+      memory_pipeline=args.memory_pipeline,
+      config_path=args.config_path if args.memory_pipeline else None,
    )
    print(
       f"  Ready: {engine.dims} dims, provider={engine.provider}, mode={engine.mode}",
@@ -787,14 +980,22 @@ def main():
          turn_scoring=args.turn_scoring,
       )
    elif args.benchmark == "locomo":
-      results = run_locomo(
-         engine,
-         args.dataset,
-         limit=args.limit,
-         granularity=args.granularity,
-         sentence_chunks=args.sentence_chunks,
-         top_k=args.top_k,
-      )
+      if args.memory_pipeline:
+         results = run_locomo_memory(
+            engine,
+            args.dataset,
+            limit=args.limit,
+            top_k=args.top_k,
+         )
+      else:
+         results = run_locomo(
+            engine,
+            args.dataset,
+            limit=args.limit,
+            granularity=args.granularity,
+            sentence_chunks=args.sentence_chunks,
+            top_k=args.top_k,
+         )
    elif args.benchmark == "convomem":
       results = run_convomem(engine, args.dataset, limit=args.limit or 100)
 

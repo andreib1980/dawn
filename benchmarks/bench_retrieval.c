@@ -753,6 +753,8 @@ static int handle_reset(void) {
  * Command Loop
  * ============================================================================= */
 
+static bool s_memory_pipeline_mode = false;
+
 static void command_loop(void) {
    char *line = malloc(BENCH_MAX_LINE);
    if (!line) {
@@ -785,6 +787,14 @@ static void command_loop(void) {
       }
 
       const char *cmd_str = json_object_get_string(cmd_obj);
+
+      /* Memory-pipeline commands take priority when in that mode.  Falls
+       * through to the document-retrieval handlers below if the command
+       * isn't a memory-pipeline one (so quit etc still work). */
+      if (s_memory_pipeline_mode && bench_mp_dispatch(cmd)) {
+         json_object_put(cmd);
+         continue;
+      }
 
       if (strcmp(cmd_str, "add") == 0) {
          handle_add(cmd);
@@ -977,6 +987,7 @@ int main(int argc, char *argv[]) {
    if (memory_pipeline) {
       if (bench_mp_init() != 0)
          return 1;
+      s_memory_pipeline_mode = true;
    } else {
       setup_db();
    }
@@ -1005,11 +1016,22 @@ int main(int argc, char *argv[]) {
       return rc;
    }
 
-   /* Signal readiness to orchestrator */
-   fprintf(stdout,
-           "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
-           "\"mode\":\"%s\"}\n",
-           embedding_engine_dims(), provider, s_no_keyword_boost ? "raw" : "hybrid");
+   /* Signal readiness to orchestrator.  In memory-pipeline mode also echo the
+    * extraction config so the orchestrator can record it in the result JSON
+    * without re-parsing dawn.toml itself. */
+   if (memory_pipeline) {
+      fprintf(stdout,
+              "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
+              "\"mode\":\"memory-pipeline\","
+              "\"extraction_provider\":\"%s\",\"extraction_model\":\"%s\"}\n",
+              embedding_engine_dims(), provider, g_config.memory.extraction_provider,
+              g_config.memory.extraction_model);
+   } else {
+      fprintf(stdout,
+              "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
+              "\"mode\":\"%s\"}\n",
+              embedding_engine_dims(), provider, s_no_keyword_boost ? "raw" : "hybrid");
+   }
    fflush(stdout);
 
    /* Process commands */

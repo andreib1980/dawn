@@ -51,6 +51,7 @@
 #include "bench_memory_schema.h"
 #include "config/dawn_config.h"
 #include "memory/memory_db.h"
+#include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
 
 #define BENCH_MP_USER_ID 1
@@ -378,7 +379,8 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx) {
    printf("  \"fact_count\": %d,\n", fact_count);
    printf("  \"facts\": [\n");
    for (int i = 0; i < fact_count; i++) {
-      char *fact_text_esc = json_object_to_json_string(json_object_new_string(facts[i].fact_text));
+      const char *fact_text_esc = json_object_to_json_string(
+          json_object_new_string(facts[i].fact_text));
       printf("    {\"id\": %" PRId64 ", \"text\": %s, \"category\": \"%s\", "
              "\"conv_id\": %" PRId64 ", \"msg_start\": %" PRId64 ", \"msg_end\": %" PRId64 "}%s\n",
              facts[i].id, fact_text_esc, facts[i].category, prov_conv_ids[i], prov_starts[i],
@@ -393,5 +395,279 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx) {
    free(prov_starts);
    free(prov_ends);
    json_object_put(root);
+   return 0;
+}
+
+/* =============================================================================
+ * JSON-protocol dispatcher (Phase 1).
+ *
+ * Each handler reads its inputs from `cmd` and writes a single JSON line to
+ * stdout — same wire convention as handle_add/handle_query/handle_reset in
+ * bench_retrieval.c.  Returns 1 if the command was recognised, 0 otherwise.
+ * ============================================================================= */
+
+static void respond_error(const char *message) {
+   fprintf(stdout, "{\"status\":\"error\",\"message\":\"%s\"}\n", message ? message : "?");
+   fflush(stdout);
+}
+
+/* dia_id → msg_id lookup over the in-process map. */
+static int64_t dia_map_lookup(const char *dia_id) {
+   if (!dia_id)
+      return 0;
+   for (int i = 0; i < s_dia_map_count; i++) {
+      if (strcmp(s_dia_map[i].dia_id, dia_id) == 0)
+         return s_dia_map[i].msg_id;
+   }
+   return 0;
+}
+
+/* Reverse: msg_id → dia_id (used by query_memory to compute covered_dia_ids
+ * for retrieved facts whose provenance range covers stored msg_ids). */
+static const char *dia_map_reverse(int64_t msg_id) {
+   for (int i = 0; i < s_dia_map_count; i++) {
+      if (s_dia_map[i].msg_id == msg_id)
+         return s_dia_map[i].dia_id;
+   }
+   return NULL;
+}
+
+static int handle_conv_create(struct json_object *cmd) {
+   const char *title = "bench";
+   struct json_object *title_obj = NULL;
+   if (json_object_object_get_ex(cmd, "title", &title_obj))
+      title = json_object_get_string(title_obj);
+
+   int64_t conv_id = 0;
+   if (conv_db_create_with_origin(BENCH_MP_USER_ID, title, "voice", &conv_id) != AUTH_DB_SUCCESS) {
+      respond_error("conv_db_create_with_origin failed");
+      return 1;
+   }
+   fprintf(stdout, "{\"status\":\"ok\",\"conv_id\":%" PRId64 "}\n", conv_id);
+   fflush(stdout);
+   return 1;
+}
+
+static int handle_add_message(struct json_object *cmd) {
+   struct json_object *conv_obj = NULL, *dia_obj = NULL, *role_obj = NULL, *content_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "conv_id", &conv_obj) ||
+       !json_object_object_get_ex(cmd, "dia_id", &dia_obj) ||
+       !json_object_object_get_ex(cmd, "role", &role_obj) ||
+       !json_object_object_get_ex(cmd, "content", &content_obj)) {
+      respond_error("add_message: missing conv_id/dia_id/role/content");
+      return 1;
+   }
+   int64_t conv_id = json_object_get_int64(conv_obj);
+   const char *dia_id = json_object_get_string(dia_obj);
+   const char *role = json_object_get_string(role_obj);
+   const char *content = json_object_get_string(content_obj);
+
+   int64_t msg_id = 0;
+   if (conv_db_add_message_ex(conv_id, BENCH_MP_USER_ID, role, content, &msg_id) !=
+       AUTH_DB_SUCCESS) {
+      respond_error("conv_db_add_message_ex failed");
+      return 1;
+   }
+   dia_map_add(dia_id, msg_id);
+   fprintf(stdout, "{\"status\":\"ok\",\"msg_id\":%" PRId64 ",\"dia_id\":\"%s\"}\n", msg_id,
+           dia_id);
+   fflush(stdout);
+   return 1;
+}
+
+/* Lightweight COUNT(*) helper — memory_db_fact_list with max=0 evaluates as
+ * SQL LIMIT 0 and always returns count=0, so we can't use it for counting. */
+static int count_table_for_user(const char *table, int user_id) {
+   char sql[128];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM %s WHERE user_id = ?", table);
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+      return 0;
+   sqlite3_bind_int(stmt, 1, user_id);
+   int count = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      count = sqlite3_column_int(stmt, 0);
+   sqlite3_finalize(stmt);
+   return count;
+}
+
+static int handle_extract(struct json_object *cmd) {
+   struct json_object *conv_obj = NULL, *sess_obj = NULL, *to_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "conv_id", &conv_obj) ||
+       !json_object_object_get_ex(cmd, "session_id", &sess_obj)) {
+      respond_error("extract: missing conv_id/session_id");
+      return 1;
+   }
+   int64_t conv_id = json_object_get_int64(conv_obj);
+   const char *session_id = json_object_get_string(sess_obj);
+   int timeout_sec = BENCH_MP_TIMEOUT_SEC;
+   if (json_object_object_get_ex(cmd, "timeout_ms", &to_obj)) {
+      int ms = json_object_get_int(to_obj);
+      if (ms > 0)
+         timeout_sec = ms / 1000;
+   }
+
+   int facts_before = count_table_for_user("memory_facts", BENCH_MP_USER_ID);
+   int entities_before = count_table_for_user("memory_entities", BENCH_MP_USER_ID);
+
+   int message_count = 0;
+   struct json_object *history = build_history_for_conv(conv_id, &message_count);
+   if (!history) {
+      respond_error("build_history_for_conv failed");
+      return 1;
+   }
+
+   time_t t_start = time(NULL);
+   int rc = memory_trigger_extraction(BENCH_MP_USER_ID, conv_id, session_id, history, message_count,
+                                      0, NULL);
+   json_object_put(history);
+
+   if (rc != 0) {
+      /* Skip codes are benign (no new messages, too few). Report 0/0/0 deltas. */
+      fprintf(stdout,
+              "{\"status\":\"ok\",\"duration_ms\":0,\"facts_added\":0,"
+              "\"entities_added\":0,\"trigger_rc\":%d}\n",
+              rc);
+      fflush(stdout);
+      return 1;
+   }
+
+   if (wait_for_extraction(BENCH_MP_USER_ID, timeout_sec) != 0) {
+      respond_error("extraction timed out");
+      return 1;
+   }
+
+   int facts_after = count_table_for_user("memory_facts", BENCH_MP_USER_ID);
+   int entities_after = count_table_for_user("memory_entities", BENCH_MP_USER_ID);
+
+   long duration_ms = (long)(time(NULL) - t_start) * 1000;
+   fprintf(stdout,
+           "{\"status\":\"ok\",\"duration_ms\":%ld,\"facts_added\":%d,"
+           "\"entities_added\":%d,\"facts_total\":%d,\"entities_total\":%d}\n",
+           duration_ms, facts_after - facts_before, entities_after - entities_before, facts_after,
+           entities_after);
+   fflush(stdout);
+   return 1;
+}
+
+static int handle_query_memory(struct json_object *cmd) {
+   struct json_object *text_obj = NULL, *topk_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "text", &text_obj)) {
+      respond_error("query_memory: missing text");
+      return 1;
+   }
+   const char *query_text = json_object_get_string(text_obj);
+   int top_k = 10;
+   if (json_object_object_get_ex(cmd, "top_k", &topk_obj))
+      top_k = json_object_get_int(topk_obj);
+   if (top_k <= 0)
+      top_k = 10;
+   if (top_k > BENCH_MP_FACT_LIST_CAP)
+      top_k = BENCH_MP_FACT_LIST_CAP;
+
+   /* Hybrid search.  Pass NULL keyword inputs since LoCoMo questions are
+    * typically full sentences — pure cosine + temporal works as a clean Phase 1
+    * baseline; pre-keyword scoring can be added later if the orchestrator
+    * benefits from it. */
+   embedding_search_result_t *results = calloc((size_t)top_k, sizeof(*results));
+   if (!results) {
+      respond_error("alloc failed");
+      return 1;
+   }
+   int n_results = memory_embeddings_hybrid_search(BENCH_MP_USER_ID, query_text, NULL, NULL, 0, 0,
+                                                   results, top_k);
+   if (n_results < 0)
+      n_results = 0;
+
+   /* Batch-load provenance + per-fact text */
+   int64_t *fact_ids = calloc((size_t)n_results, sizeof(int64_t));
+   int64_t *prov_convs = calloc((size_t)n_results, sizeof(int64_t));
+   int64_t *prov_starts = calloc((size_t)n_results, sizeof(int64_t));
+   int64_t *prov_ends = calloc((size_t)n_results, sizeof(int64_t));
+   if (n_results > 0 && (!fact_ids || !prov_convs || !prov_starts || !prov_ends)) {
+      free(results);
+      free(fact_ids);
+      free(prov_convs);
+      free(prov_starts);
+      free(prov_ends);
+      respond_error("alloc failed");
+      return 1;
+   }
+   for (int i = 0; i < n_results; i++)
+      fact_ids[i] = results[i].fact_id;
+   if (n_results > 0)
+      memory_db_facts_get_sources(BENCH_MP_USER_ID, fact_ids, n_results, prov_convs, prov_starts,
+                                  prov_ends);
+
+   /* Emit results.  covered_dia_ids[]: for each retrieved fact, every dia_id
+    * whose msg_id is in [msg_start, msg_end].  Empty list if range is zeroed. */
+   fprintf(stdout, "{\"status\":\"ok\",\"results\":[");
+   for (int i = 0; i < n_results; i++) {
+      memory_fact_t fact = { 0 };
+      memory_db_fact_get(results[i].fact_id, &fact);
+      struct json_object *text_str = json_object_new_string(fact.fact_text);
+      const char *text_json = json_object_to_json_string(text_str);
+
+      fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"score\":%.6f,\"text\":%s,", i ? "," : "",
+              results[i].fact_id, (double)results[i].score, text_json);
+      fprintf(stdout, "\"conv_id\":%" PRId64 ",\"msg_start\":%" PRId64 ",\"msg_end\":%" PRId64 ",",
+              prov_convs[i], prov_starts[i], prov_ends[i]);
+      fprintf(stdout, "\"covered_dia_ids\":[");
+      bool first = true;
+      if (prov_starts[i] > 0 && prov_ends[i] >= prov_starts[i]) {
+         for (int64_t mid = prov_starts[i]; mid <= prov_ends[i]; mid++) {
+            const char *did = dia_map_reverse(mid);
+            if (!did)
+               continue;
+            fprintf(stdout, "%s\"%s\"", first ? "" : ",", did);
+            first = false;
+         }
+      }
+      fprintf(stdout, "]}");
+      json_object_put(text_str);
+   }
+   fprintf(stdout, "]}\n");
+   fflush(stdout);
+
+   free(results);
+   free(fact_ids);
+   free(prov_convs);
+   free(prov_starts);
+   free(prov_ends);
+   return 1;
+}
+
+static int handle_reset_memory(struct json_object *cmd) {
+   (void)cmd;
+   /* Drop facts/preferences/relations/entities/summaries for the bench user.
+    * Conversations are kept for the run; orchestrator drives reset between
+    * LoCoMo conversations by creating new conv_ids — that's cheap and avoids
+    * having to mass-delete via raw SQL. */
+   int rc = memory_db_delete_user_memories(BENCH_MP_USER_ID);
+   dia_map_clear();
+   fprintf(stdout, "{\"status\":\"ok\",\"rc\":%d}\n", rc);
+   fflush(stdout);
+   return 1;
+}
+
+int bench_mp_dispatch(struct json_object *cmd) {
+   struct json_object *cmd_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "cmd", &cmd_obj))
+      return 0;
+   const char *cmd_str = json_object_get_string(cmd_obj);
+   if (!cmd_str)
+      return 0;
+
+   if (strcmp(cmd_str, "conv_create") == 0)
+      return handle_conv_create(cmd);
+   if (strcmp(cmd_str, "add_message") == 0)
+      return handle_add_message(cmd);
+   if (strcmp(cmd_str, "extract") == 0)
+      return handle_extract(cmd);
+   if (strcmp(cmd_str, "query_memory") == 0)
+      return handle_query_memory(cmd);
+   if (strcmp(cmd_str, "reset_memory") == 0)
+      return handle_reset_memory(cmd);
+
    return 0;
 }
