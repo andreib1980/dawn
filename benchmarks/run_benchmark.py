@@ -590,7 +590,8 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10):
    all_recall = []
    per_category = {}
    total_qa = 0
-   total_facts = 0
+   total_facts_added = 0  # cumulative across all convs (facts_total resets per conv via reset_memory)
+   last_conv_facts = 0    # facts in the most-recently-extracted conv
    total_extractions = 0
    total_extract_seconds = 0.0
    t0 = time.time()
@@ -636,9 +637,10 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10):
                                 timeout_ms=600000)
          total_extractions += 1
          total_extract_seconds += eresp.get("duration_ms", 0) / 1000.0
-         total_facts = eresp.get("facts_total", total_facts)
+         total_facts_added += eresp.get("facts_added", 0)
+         last_conv_facts = eresp.get("facts_total", last_conv_facts)
 
-         print(f"  [conv {conv_idx} sess {session_n}] facts={total_facts} "
+         print(f"  [conv {conv_idx} sess {session_n}] facts={last_conv_facts} "
                f"+{eresp.get('facts_added', 0)} dur={eresp.get('duration_ms', 0)}ms",
                file=sys.stderr)
 
@@ -685,7 +687,7 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10):
       "avg_recall_reach": sum(all_recall) / len(all_recall) if all_recall else 0,
       "total_qa": total_qa,
       "conversations": len(entries),
-      "total_facts_extracted": total_facts,
+      "total_facts_extracted": total_facts_added,
       "total_extractions": total_extractions,
       "extraction_total_seconds": total_extract_seconds,
       "elapsed_seconds": elapsed,
