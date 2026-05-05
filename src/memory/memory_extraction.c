@@ -112,8 +112,14 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "- When the prompt provides a \"Conversation anchor\" date, treat it as the "
     "present moment.  Resolve relative temporal phrases (\"yesterday\", \"last week\", "
     "\"five years ago\", \"next month\") against the anchor when emitting valid_from / "
-    "valid_to and when phrasing fact text.  Preserve the original phrase in fact text "
-    "as well — both forms are useful.\n"
+    "valid_to.  When a fact describes a time-bounded event, include both the resolved "
+    "date AND the original phrase in fact_text (e.g., \"Caroline gave a school talk "
+    "last Friday (2023-05-19)\").\n"
+    "- ALWAYS name the subject of each fact explicitly.  Do NOT write facts in "
+    "first-person diary style (\"Attended X\", \"Has children\") — always name the "
+    "person the fact is about (\"Caroline attended X\", \"Melanie has children\").  "
+    "This is critical for multi-speaker conversations where dropping the subject "
+    "loses who-did-what attribution.\n"
     "- IMPORTANT: Reuse entity names from EXISTING USER PROFILE exactly as listed. "
     "Do NOT create alternate names for the same entity (e.g., use \"Kris\" not \"Kris Kersey\" "
     "if \"Kris\" is already known)\n"
@@ -894,7 +900,9 @@ static void *extraction_thread(void *arg) {
       }
    }
 
-   /* Build extraction prompt */
+   /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
+    * three "%s" format specifiers plus a small safety margin; expand if more
+    * placeholders are added to EXTRACTION_PROMPT_TEMPLATE. */
    size_t prompt_size = strlen(EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
                         strlen(ctx->conversation_json) + strlen(existing_profile) + 100;
    char *prompt = malloc(prompt_size);

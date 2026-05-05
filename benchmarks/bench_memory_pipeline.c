@@ -675,6 +675,9 @@ static int handle_reset_memory(struct json_object *cmd) {
     * LoCoMo conversations by creating new conv_ids — that's cheap and avoids
     * having to mass-delete via raw SQL. */
    int rc = memory_db_delete_user_memories(BENCH_MP_USER_ID);
+   /* delete_user_memories now invalidates the embedding caches itself, so no
+    * separate call here.  dia_map is bench-side state with no production
+    * analogue. */
    dia_map_clear();
    fprintf(stdout, "{\"status\":\"ok\",\"rc\":%d}\n", rc);
    fflush(stdout);
@@ -858,6 +861,12 @@ static int handle_snapshot_load(struct json_object *cmd) {
       respond_error("snapshot_load: auth_db_init failed");
       return 1;
    }
+
+   /* Invalidate in-memory fact + entity embedding caches.  Without this,
+    * hybrid_search uses the previous snapshot's cached embeddings even though
+    * the SQLite tables now hold the newly-loaded snapshot's facts — every
+    * post-first-snapshot query returns stale results and recall collapses. */
+   memory_embeddings_invalidate_all();
 
    /* Restore dia_map. */
    dia_map_clear();

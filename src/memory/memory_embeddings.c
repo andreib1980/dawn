@@ -728,6 +728,11 @@ void memory_embeddings_invalidate_entity_cache(void) {
    atomic_store(&s_entity_cache.dirty, true);
 }
 
+void memory_embeddings_invalidate_all(void) {
+   memory_embeddings_invalidate_cache();
+   memory_embeddings_invalidate_entity_cache();
+}
+
 int memory_embeddings_entity_search(int user_id,
                                     const char *query,
                                     const char *type_filter,

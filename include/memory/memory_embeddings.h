@@ -150,6 +150,16 @@ int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, con
 void memory_embeddings_invalidate_entity_cache(void);
 
 /**
+ * @brief Invalidate both fact and entity embedding caches in one call.
+ *
+ * Helper for paths that drop or replace memory state in bulk
+ * (delete_user_memories, snapshot reload, bench reset).  Safer than calling
+ * the two cache-specific invalidators separately — adding a third cache later
+ * only requires updating this helper, not every call site.
+ */
+void memory_embeddings_invalidate_all(void);
+
+/**
  * @brief Search entities by semantic similarity
  *
  * @param user_id User ID

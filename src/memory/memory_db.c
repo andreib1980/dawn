@@ -33,6 +33,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "memory/memory_embeddings.h"
 #include "memory/memory_similarity.h"
 
 /* Forward declarations for helpers used across sections */
@@ -1244,6 +1245,13 @@ int memory_db_delete_user_memories(int user_id) {
    }
 
    AUTH_DB_UNLOCK();
+
+   /* Drop in-memory embedding caches.  Without this, hybrid_search keeps
+    * returning the deleted facts/entities until another invalidation fires
+    * (e.g., a fresh embed_and_store).  Acquired *after* releasing the auth_db
+    * lock — embedding_cache mutex is a leaf lock per ARCHITECTURE.md. */
+   memory_embeddings_invalidate_all();
+
    OLOG_INFO("memory_db: deleted all memories for user %d", user_id);
    return MEMORY_DB_SUCCESS;
 }
