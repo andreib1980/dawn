@@ -34,6 +34,7 @@
 
 #include "bench_memory_pipeline.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <json-c/json.h>
@@ -43,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -443,6 +445,18 @@ static int handle_conv_create(struct json_object *cmd) {
       respond_error("conv_db_create_with_origin failed");
       return 1;
    }
+
+   /* Optional anchor_date override (v42).  When the bench passes a LoCoMo
+    * session_X_date_time epoch, the extraction prompt resolves relative
+    * temporal phrases against it instead of bench wall-clock. */
+   struct json_object *anchor_obj = NULL;
+   if (json_object_object_get_ex(cmd, "anchor_date", &anchor_obj)) {
+      int64_t anchor_ts = json_object_get_int64(anchor_obj);
+      if (anchor_ts > 0) {
+         conv_db_force_anchor_date_unsafe(conv_id, BENCH_MP_USER_ID, anchor_ts);
+      }
+   }
+
    fprintf(stdout, "{\"status\":\"ok\",\"conv_id\":%" PRId64 "}\n", conv_id);
    fflush(stdout);
    return 1;
@@ -505,6 +519,23 @@ static int handle_extract(struct json_object *cmd) {
       int ms = json_object_get_int(to_obj);
       if (ms > 0)
          timeout_sec = ms / 1000;
+   }
+
+   /* Optional per-session anchor override (v42).  LoCoMo conversations span
+    * months across sessions, so each session's extraction needs its own anchor
+    * for relative-phrase resolution.  Bench harness sends session_X_date_time
+    * here; we update the conversation row before triggering extraction.
+    *
+    * Note: this overwrites the row's anchor_date per session — the value is
+    * NOT preserved across sessions in the row.  A bench abort mid-conversation
+    * leaves anchor_date set to the last-completed session.  Cache-miss reruns
+    * recreate the conversation cleanly so this is benign in practice. */
+   struct json_object *anchor_obj = NULL;
+   if (json_object_object_get_ex(cmd, "anchor_date", &anchor_obj)) {
+      int64_t anchor_ts = json_object_get_int64(anchor_obj);
+      if (anchor_ts > 0) {
+         conv_db_force_anchor_date_unsafe(conv_id, BENCH_MP_USER_ID, anchor_ts);
+      }
    }
 
    int facts_before = count_table_for_user("memory_facts", BENCH_MP_USER_ID);
@@ -650,6 +681,217 @@ static int handle_reset_memory(struct json_object *cmd) {
    return 1;
 }
 
+/* =============================================================================
+ * Snapshot save / load (Phase 2.1).
+ *
+ * Caches the post-extraction memory state (facts, entities, relations,
+ * summaries, preferences, conversations, messages) plus the in-process
+ * dia_id<->msg_id map.  Lets a re-run skip the expensive extraction LLM calls
+ * and jump straight to query_memory.
+ *
+ * snapshot_save  {db_path, map_path}  → VACUUM INTO db_path; write map_path JSON
+ * snapshot_load  {db_path, map_path}  → shutdown DB, copy db_path over bench
+ *                                       tmpfile, re-init, load map_path JSON
+ *
+ * The orchestrator (Python) is responsible for choosing the cache key and
+ * paths so we don't have to plumb hashing into C.  We just save/restore.
+ * ============================================================================= */
+
+static int file_exists(const char *path) {
+   struct stat st;
+   return path && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* messages table has no user_id column; count via join on conversations. */
+static int count_messages_for_user(int user_id) {
+   const char *sql = "SELECT COUNT(*) FROM messages m "
+                     "JOIN conversations c ON c.id = m.conversation_id "
+                     "WHERE c.user_id = ?";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+      return 0;
+   sqlite3_bind_int(stmt, 1, user_id);
+   int count = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      count = sqlite3_column_int(stmt, 0);
+   sqlite3_finalize(stmt);
+   return count;
+}
+
+/* Counts per BENCH_MP_USER_ID.  Used in snapshot responses for the orchestrator
+ * to verify a cache load actually populated the expected tables. */
+static void counts_for_response(int *facts_out, int *entities_out, int *convs_out, int *msgs_out) {
+   if (facts_out)
+      *facts_out = count_table_for_user("memory_facts", BENCH_MP_USER_ID);
+   if (entities_out)
+      *entities_out = count_table_for_user("memory_entities", BENCH_MP_USER_ID);
+   if (convs_out)
+      *convs_out = count_table_for_user("conversations", BENCH_MP_USER_ID);
+   if (msgs_out)
+      *msgs_out = count_messages_for_user(BENCH_MP_USER_ID);
+}
+
+/* Copy file via streaming read/write.  Used by snapshot_load to overwrite the
+ * bench tmpfile with the cached snapshot before re-initializing auth_db.
+ * Returns 0 on success, 1 on failure. */
+static int copy_file(const char *src, const char *dst) {
+   FILE *in = fopen(src, "rb");
+   if (!in)
+      return 1;
+   FILE *out = fopen(dst, "wb");
+   if (!out) {
+      fclose(in);
+      return 1;
+   }
+   char buf[64 * 1024];
+   size_t n;
+   int rc = 0;
+   while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+      if (fwrite(buf, 1, n, out) != n) {
+         rc = 1;
+         break;
+      }
+   }
+   if (ferror(in))
+      rc = 1;
+   fclose(in);
+   if (fclose(out) != 0)
+      rc = 1;
+   return rc;
+}
+
+static int handle_snapshot_save(struct json_object *cmd) {
+   struct json_object *db_obj = NULL, *map_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "db_path", &db_obj) ||
+       !json_object_object_get_ex(cmd, "map_path", &map_obj)) {
+      respond_error("snapshot_save: missing db_path/map_path");
+      return 1;
+   }
+   const char *db_path = json_object_get_string(db_obj);
+   const char *map_path = json_object_get_string(map_obj);
+   if (!db_path || !*db_path || !map_path || !*map_path) {
+      respond_error("snapshot_save: empty db_path/map_path");
+      return 1;
+   }
+
+   /* VACUUM INTO is atomic and produces a clean single-file DB (no -wal/-shm
+    * sidecars).  Force overwrite by unlinking first; SQLite returns
+    * SQLITE_ERROR if the destination exists. */
+   unlink(db_path);
+
+   /* SQL-quote the path: bind args aren't allowed in VACUUM INTO. */
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "VACUUM INTO ?";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      respond_error("snapshot_save: prepare VACUUM INTO failed");
+      return 1;
+   }
+   sqlite3_bind_text(stmt, 1, db_path, -1, SQLITE_STATIC);
+   int step_rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+   if (step_rc != SQLITE_DONE) {
+      char err[256];
+      snprintf(err, sizeof(err), "snapshot_save: VACUUM INTO failed: %s", sqlite3_errmsg(s_db.db));
+      respond_error(err);
+      return 1;
+   }
+
+   /* Persist dia_map alongside.  JSON: [{dia_id, msg_id}, ...] */
+   struct json_object *arr = json_object_new_array();
+   for (int i = 0; i < s_dia_map_count; i++) {
+      struct json_object *e = json_object_new_object();
+      json_object_object_add(e, "dia_id", json_object_new_string(s_dia_map[i].dia_id));
+      json_object_object_add(e, "msg_id", json_object_new_int64(s_dia_map[i].msg_id));
+      json_object_array_add(arr, e);
+   }
+   int wrote = json_object_to_file_ext(map_path, arr, JSON_C_TO_STRING_PLAIN);
+   json_object_put(arr);
+   if (wrote != 0) {
+      unlink(db_path);
+      respond_error("snapshot_save: write map_path failed");
+      return 1;
+   }
+
+   int facts = 0, entities = 0, convs = 0, msgs = 0;
+   counts_for_response(&facts, &entities, &convs, &msgs);
+   fprintf(stdout,
+           "{\"status\":\"ok\",\"facts\":%d,\"entities\":%d,\"conversations\":%d,"
+           "\"messages\":%d,\"dia_count\":%d}\n",
+           facts, entities, convs, msgs, s_dia_map_count);
+   fflush(stdout);
+   return 1;
+}
+
+static int handle_snapshot_load(struct json_object *cmd) {
+   struct json_object *db_obj = NULL, *map_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "db_path", &db_obj) ||
+       !json_object_object_get_ex(cmd, "map_path", &map_obj)) {
+      respond_error("snapshot_load: missing db_path/map_path");
+      return 1;
+   }
+   const char *db_path = json_object_get_string(db_obj);
+   const char *map_path = json_object_get_string(map_obj);
+   if (!db_path || !*db_path || !map_path || !*map_path) {
+      respond_error("snapshot_load: empty db_path/map_path");
+      return 1;
+   }
+   if (!file_exists(db_path) || !file_exists(map_path)) {
+      respond_error("snapshot_load: snapshot files not found");
+      return 1;
+   }
+
+   /* Tear down current DB cleanly (finalizes all 43 prepared statements,
+    * checkpoints WAL, closes the handle).  s_db.initialized goes false. */
+   auth_db_shutdown();
+
+   /* Replace the bench tmpfile with the cached snapshot. */
+   unlink(s_bench_db_path);
+   if (copy_file(db_path, s_bench_db_path) != 0) {
+      respond_error("snapshot_load: copy snapshot failed");
+      return 1;
+   }
+
+   /* Re-init auth_db.  This restores all prepared statements pointing at the
+    * loaded data and re-applies any forward schema migrations (the cached DB
+    * may be from an older bench commit). */
+   if (auth_db_init(s_bench_db_path) != AUTH_DB_SUCCESS) {
+      respond_error("snapshot_load: auth_db_init failed");
+      return 1;
+   }
+
+   /* Restore dia_map. */
+   dia_map_clear();
+   struct json_object *arr = json_object_from_file(map_path);
+   if (!arr || !json_object_is_type(arr, json_type_array)) {
+      if (arr)
+         json_object_put(arr);
+      respond_error("snapshot_load: parse map_path failed");
+      return 1;
+   }
+   size_t n = json_object_array_length(arr);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *e = json_object_array_get_idx(arr, i);
+      struct json_object *did = NULL, *mid = NULL;
+      if (!json_object_object_get_ex(e, "dia_id", &did) ||
+          !json_object_object_get_ex(e, "msg_id", &mid))
+         continue;
+      const char *dia_id = json_object_get_string(did);
+      int64_t msg_id = json_object_get_int64(mid);
+      if (dia_id && *dia_id)
+         dia_map_add(dia_id, msg_id);
+   }
+   json_object_put(arr);
+
+   int facts = 0, entities = 0, convs = 0, msgs = 0;
+   counts_for_response(&facts, &entities, &convs, &msgs);
+   fprintf(stdout,
+           "{\"status\":\"ok\",\"facts\":%d,\"entities\":%d,\"conversations\":%d,"
+           "\"messages\":%d,\"dia_count\":%d}\n",
+           facts, entities, convs, msgs, s_dia_map_count);
+   fflush(stdout);
+   return 1;
+}
+
 int bench_mp_dispatch(struct json_object *cmd) {
    struct json_object *cmd_obj = NULL;
    if (!json_object_object_get_ex(cmd, "cmd", &cmd_obj))
@@ -668,6 +910,10 @@ int bench_mp_dispatch(struct json_object *cmd) {
       return handle_query_memory(cmd);
    if (strcmp(cmd_str, "reset_memory") == 0)
       return handle_reset_memory(cmd);
+   if (strcmp(cmd_str, "snapshot_save") == 0)
+      return handle_snapshot_save(cmd);
+   if (strcmp(cmd_str, "snapshot_load") == 0)
+      return handle_snapshot_load(cmd);
 
    return 0;
 }

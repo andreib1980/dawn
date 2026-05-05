@@ -51,6 +51,7 @@
 
 static const char *EXTRACTION_PROMPT_TEMPLATE =
     "Analyze this conversation and extract user information in JSON format.\n\n"
+    "%s" /* Optional "Conversation anchor: YYYY-MM-DD\n\n" line — empty when no anchor known */
     "CONVERSATION:\n%s\n\n"
     "EXISTING USER PROFILE:\n%s\n\n"
     "Extract the following and respond ONLY with valid JSON:\n"
@@ -108,6 +109,11 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "- For relations with time bounds (e.g., \"worked at Google 2018-2022\"), include "
     "valid_from and/or valid_to. Year-only is OK — emit YYYY-01-01 (e.g., \"2018-01-01\"). "
     "Omit fields when no time information is given.\n"
+    "- When the prompt provides a \"Conversation anchor\" date, treat it as the "
+    "present moment.  Resolve relative temporal phrases (\"yesterday\", \"last week\", "
+    "\"five years ago\", \"next month\") against the anchor when emitting valid_from / "
+    "valid_to and when phrasing fact text.  Preserve the original phrase in fact text "
+    "as well — both forms are useful.\n"
     "- IMPORTANT: Reuse entity names from EXISTING USER PROFILE exactly as listed. "
     "Do NOT create alternate names for the same entity (e.g., use \"Kris\" not \"Kris Kersey\" "
     "if \"Kris\" is already known)\n"
@@ -869,16 +875,35 @@ static void *extraction_thread(void *arg) {
    /* Build existing profile */
    char *existing_profile = build_existing_profile(ctx->user_id);
 
+   /* Build conversation anchor line (v42).  Empty when no anchor recorded so legacy
+    * conversations and non-conversation extractions (conv_id == 0) continue to work
+    * as before.  Buffer sizing: "Conversation anchor: " (21) + "YYYY-MM-DD" (10) +
+    * "\n\n" (2) + NUL (1) = 34 bytes — 64 leaves slack for any future prefix change. */
+   char anchor_line[64] = "";
+   if (ctx->conversation_id > 0) {
+      int64_t anchor_ts = ANCHOR_DATE_NONE;
+      if (conv_db_get_anchor_date(ctx->conversation_id, &anchor_ts) == AUTH_DB_SUCCESS &&
+          anchor_ts != ANCHOR_DATE_NONE) {
+         struct tm tm_utc;
+         time_t ts = (time_t)anchor_ts;
+         if (gmtime_r(&ts, &tm_utc)) {
+            char date_buf[16]; /* "YYYY-MM-DD\0" needs 11; 16 is conventional. */
+            strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
+            snprintf(anchor_line, sizeof(anchor_line), "Conversation anchor: %s\n\n", date_buf);
+         }
+      }
+   }
+
    /* Build extraction prompt */
-   size_t prompt_size = strlen(EXTRACTION_PROMPT_TEMPLATE) + strlen(ctx->conversation_json) +
-                        strlen(existing_profile) + 100;
+   size_t prompt_size = strlen(EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
+                        strlen(ctx->conversation_json) + strlen(existing_profile) + 100;
    char *prompt = malloc(prompt_size);
    if (!prompt) {
       OLOG_ERROR("memory_extraction: failed to allocate prompt");
       goto cleanup;
    }
 
-   snprintf(prompt, prompt_size, EXTRACTION_PROMPT_TEMPLATE, ctx->conversation_json,
+   snprintf(prompt, prompt_size, EXTRACTION_PROMPT_TEMPLATE, anchor_line, ctx->conversation_json,
             existing_profile);
 
    /* Call LLM for extraction using configured provider/model */

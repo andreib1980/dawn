@@ -181,6 +181,13 @@ static const char *SCHEMA_SQL =
     "   is_private INTEGER DEFAULT 0,"
     "   title_locked INTEGER DEFAULT 0,"
     "   origin TEXT DEFAULT 'webui',"
+    /* anchor_date (v42): logical "now" timestamp in epoch seconds.  Production
+     * writes time(NULL) at insert; bench overrides per-session.  The 0 default
+     * is the ANCHOR_DATE_NONE sentinel — extraction omits the prompt anchor
+     * line when this is 0.  KEEP DEFAULT AS A LITERAL CONSTANT (not strftime
+     * or CURRENT_TIMESTAMP): SQLite's fast ALTER TABLE ADD COLUMN path requires
+     * a literal default, otherwise migration becomes a full table rewrite. */
+    "   anchor_date INTEGER NOT NULL DEFAULT 0,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
@@ -1905,6 +1912,32 @@ static int create_schema(const char *db_path) {
       OLOG_INFO("auth_db: added embeddings_model_id to users (v41)");
    }
 
+   /* v42 migration: conversations.anchor_date for cat-2 temporal extraction.
+    * Holds the conversation's logical anchor timestamp (epoch seconds).  Production
+    * conv_db_create_* writers populate at insert with time(NULL); the bench harness
+    * passes session_X_date_time so LoCoMo's synthetic anchors flow through.  Read by
+    * memory_extraction.c when building the prompt so the LLM can resolve relative
+    * temporal phrases ("yesterday", "last month", "five years ago") against it.
+    *
+    * Default 0 (= ANCHOR_DATE_NONE) for legacy rows; the extraction prompt omits
+    * the anchor line when this is 0.  The literal-constant default is required for
+    * SQLite's O(1) metadata-only ALTER path — switching to strftime() or
+    * CURRENT_TIMESTAMP would silently regress this to a full-table rewrite under
+    * the auth_db lock at startup.  See docs/CAT2_TEMPORAL_DIAGNOSIS.md L1+L5. */
+   if (current_version >= 1 && current_version < 42) {
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE conversations ADD COLUMN anchor_date INTEGER NOT NULL DEFAULT 0",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v42 migration (anchor_date) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added anchor_date to conversations (v42)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2171,11 +2204,14 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Conversation statements */
+   /* Conversation statements.  anchor_date (v42) carries the conversation's
+    * logical anchor timestamp so memory_extraction.c can resolve relative
+    * temporal phrases.  Production passes time(NULL); bench passes session date. */
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", -1,
-       &s_db.stmt_conv_create, NULL);
+       "INSERT INTO conversations (user_id, title, created_at, updated_at, anchor_date) "
+       "VALUES (?, ?, ?, ?, ?)",
+       -1, &s_db.stmt_conv_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_create failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
@@ -2328,8 +2364,8 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "INSERT INTO conversations (user_id, title, created_at, updated_at, origin) "
-       "VALUES (?, ?, ?, ?, ?)",
+       "INSERT INTO conversations (user_id, title, created_at, updated_at, origin, anchor_date) "
+       "VALUES (?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_conv_create_origin, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_create_origin failed: %s", sqlite3_errmsg(s_db.db));

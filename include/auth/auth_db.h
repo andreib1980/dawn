@@ -1200,6 +1200,54 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private);
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
 
 /**
+ * Sentinel value for "no anchor recorded" on conversations.anchor_date.
+ * Legacy rows pre-v42, non-conversation extraction paths, and any code path
+ * that hasn't recorded an anchor all surface as this value.  Extraction code
+ * skips the "Conversation anchor:" prompt line when the value equals this.
+ */
+#define ANCHOR_DATE_NONE ((int64_t)0)
+
+/**
+ * @brief Get the conversation's anchor date (v42)
+ *
+ * The anchor_date column carries the conversation's logical "now" timestamp —
+ * what the LLM treats as the present moment when resolving relative temporal
+ * phrases ("yesterday", "last month", "five years ago") during memory
+ * extraction.  Production writers populate it at insert time with
+ * time(NULL); the bench harness passes parsed session dates.
+ *
+ * @param conv_id Conversation ID
+ * @param anchor_out Output: epoch seconds, or ANCHOR_DATE_NONE if no anchor recorded
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out);
+
+/**
+ * @brief Force-set the conversation's anchor date (v42; bench-only, unsafe)
+ *
+ * Production must NEVER call this — anchor_date is populated once at insert
+ * time and is meant to remain immutable thereafter.  Calling this after
+ * extraction has already run against the conversation will desync extracted
+ * facts (which were resolved against the prior anchor) from the new anchor.
+ *
+ * Authorization: requires user_id and verifies ownership in the WHERE clause,
+ * matching conv_db_is_private's pattern.  This guards against the future-misuse
+ * case where this function is wired to a user-facing endpoint by a contributor
+ * who didn't read the doxygen warnings.
+ *
+ * The only legitimate caller is the bench harness, which uses this to override
+ * the default time(NULL) anchor with a LoCoMo session_X_date_time value before
+ * triggering extraction.
+ *
+ * @param conv_id Conversation ID
+ * @param user_id User ID (must own the conversation)
+ * @param anchor Epoch seconds; pass ANCHOR_DATE_NONE to clear (extraction will
+ *               then omit the prompt anchor line)
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ */
+int conv_db_force_anchor_date_unsafe(int64_t conv_id, int user_id, int64_t anchor);
+
+/**
  * @brief Auto-title a conversation (atomic check-and-set)
  *
  * Sets the title only if title_locked = 0 (first extraction or never manually renamed).

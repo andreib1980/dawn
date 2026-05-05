@@ -123,6 +123,7 @@ int conv_db_create(int user_id, const char *title, int64_t *conv_id_out) {
    sqlite3_bind_text(s_db.stmt_conv_create, 2, safe_title, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int64(s_db.stmt_conv_create, 3, (int64_t)now);
    sqlite3_bind_int64(s_db.stmt_conv_create, 4, (int64_t)now);
+   sqlite3_bind_int64(s_db.stmt_conv_create, 5, (int64_t)now); /* anchor_date = now (v42) */
 
    int rc = sqlite3_step(s_db.stmt_conv_create);
    sqlite3_reset(s_db.stmt_conv_create);
@@ -187,6 +188,7 @@ int conv_db_create_with_origin(int user_id,
    sqlite3_bind_int64(s_db.stmt_conv_create_origin, 3, (int64_t)now);
    sqlite3_bind_int64(s_db.stmt_conv_create_origin, 4, (int64_t)now);
    sqlite3_bind_text(s_db.stmt_conv_create_origin, 5, safe_origin, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_conv_create_origin, 6, (int64_t)now); /* anchor_date = now (v42) */
 
    int rc = sqlite3_step(s_db.stmt_conv_create_origin);
    sqlite3_reset(s_db.stmt_conv_create_origin);
@@ -455,11 +457,18 @@ int conv_db_create_continuation(int user_id,
    }
    sqlite3_finalize(stmt);
 
-   /* Create continuation conversation with inherited LLM settings */
+   /* Create continuation conversation with inherited LLM settings.
+    * anchor_date (v42) is set to now() rather than inherited — relative phrases
+    * in the continuation should resolve against the continuation's start, not
+    * the parent's.  In the dominant case (compaction-driven continuation in the
+    * same session) the choice is functionally equivalent to inheriting because
+    * both anchors fall on the same calendar day; the divergence matters only
+    * for forks resumed days+ later, where time(NULL) is unambiguously correct. */
    const char *sql_create =
        "INSERT INTO conversations (user_id, title, created_at, updated_at, continued_from, "
-       "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode, "
+       "anchor_date) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
    rc = sqlite3_prepare_v2(s_db.db, sql_create, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_continuation: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -483,6 +492,7 @@ int conv_db_create_continuation(int user_id,
    sqlite3_bind_text(stmt, 9, parent_model, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 10, parent_tools_mode, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 11, parent_thinking_mode, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 12, (int64_t)now);
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -795,6 +805,78 @@ int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    AUTH_DB_UNLOCK();
 
    return AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
+   if (conv_id <= 0 || !anchor_out) {
+      return AUTH_DB_FAILURE;
+   }
+
+   *anchor_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   const char *sql = "SELECT anchor_date FROM conversations WHERE id = ?";
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, conv_id);
+
+   rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *anchor_out = sqlite3_column_int64(stmt, 0);
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_SUCCESS;
+   }
+
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_force_anchor_date_unsafe(int64_t conv_id, int user_id, int64_t anchor) {
+   if (conv_id <= 0 || user_id <= 0 || anchor < 0) {
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Surface accidental production calls in the log.  Bench is the only
+    * legitimate caller; if this fires from anywhere else, the convention has
+    * been violated and extracted facts may desync from the new anchor. */
+   OLOG_WARNING("conv_db_force_anchor_date_unsafe: bench-only API invoked for conv %lld user %d",
+                (long long)conv_id, user_id);
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   const char *sql = "UPDATE conversations SET anchor_date = ? WHERE id = ? AND user_id = ?";
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, anchor);
+   sqlite3_bind_int64(stmt, 2, conv_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+
+   rc = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+   if (changes == 0) {
+      /* Either conv doesn't exist or user doesn't own it. */
+      return AUTH_DB_NOT_FOUND;
+   }
+   return AUTH_DB_SUCCESS;
 }
 
 int conv_db_delete(int64_t conv_id, int user_id) {
