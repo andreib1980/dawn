@@ -133,7 +133,7 @@ LOG_ERROR("I2C communication failed: %d", error);
 2. **Implement** — task tracking for multi-step work. Build + format + unit tests after each logical chunk.
 3. **Review** — run relevant review agents in parallel on the diff. Consolidate findings, triage (fix / skip / ask), apply fixes, re-verify.
 4. **Test** — developer tests manually and reports. Fix issues found; adjacent bugs may warrant their own mini cycle.
-5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/archive/`) for significant features. Have architecture-reviewer verify the doc against code.
+5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/`) for significant features. Memory-subsystem docs land under `atlas/dawn/memory/`; everything else flat under `atlas/dawn/archive/`. Have architecture-reviewer verify the doc against code.
 6. **Update planning docs** — move the item from `docs/TODO.md` active to shipped; remove any `§N` detail section.
 7. **Commit** — run `./format_code.sh --check` once more. Provide a single `git add` command and a commit message. **Developer runs `git add`/`commit`/`push`.** Wait for confirmation.
 
@@ -152,7 +152,7 @@ Trigger phrases: "code review", "review my changes", "run the agents", "run the 
 ## Design Docs
 
 - **Active planning**: @docs/TODO.md (master), plus per-feature docs in `docs/` (e.g., `PHONE_SMS_DESIGN.md`, `SPEAKER_IDENTIFICATION_PLAN.md`).
-- **Archived designs**: [atlas/dawn/archive](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive) — shipped-feature design docs kept for historical reference (memory system, RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.).
+- **Archived designs**: [atlas/dawn](https://github.com/The-OASIS-Project/atlas/tree/main/dawn) — shipped-feature design docs kept for historical reference. Memory subsystem under [`memory/`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory) (system design, injection filter, cat-2 temporal, reranker investigation, LoCoMo cat-3 profiling). Everything else flat under [`archive/`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive) — RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.
 
 ## License
 

@@ -1065,7 +1065,7 @@ def compute_fraction_recall(retrieved_ids, evidence_ids):
 #     bench's in-process dia_id<->msg_id table).
 #   - Recall metric: recall_reach = |gold_dia_ids ∩ retrieved_covered_dia_ids|
 #     / |gold_dia_ids|. Documented as "retrieval reach", NOT answer support.
-#     See atlas/dawn/archive/LOCOMO_CAT3_PROFILING.md "Outcome" section.
+#     See atlas/dawn/memory/LOCOMO_CAT3_PROFILING.md "Outcome" section.
 
 
 def _locomo_conv_content_hash(conv):
@@ -1682,7 +1682,7 @@ def main():
       help="LoCoMo only: drive extraction + memory_facts retrieval instead of "
       "raw-dialog cosine. Loads dawn.toml for extraction provider/model. "
       "Reports recall_reach (retrieval reach via provenance overlap; NOT "
-      "answer support — see atlas/dawn/archive/LOCOMO_CAT3_PROFILING.md).",
+      "answer support — see atlas/dawn/memory/LOCOMO_CAT3_PROFILING.md).",
    )
    parser.add_argument(
       "--config",

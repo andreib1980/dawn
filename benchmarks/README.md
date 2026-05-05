@@ -246,7 +246,7 @@ LLM (`extraction_provider` / `extraction_model` from `dawn.toml`) is fired at
 each session boundary, and the resulting `memory_facts` (with v40 provenance
 back-links) become the retrieval corpus.  The orchestrator scores
 `recall_reach` via provenance overlap — see
-[atlas/dawn/archive/LOCOMO_CAT3_PROFILING.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/LOCOMO_CAT3_PROFILING.md)
+[atlas/dawn/memory/LOCOMO_CAT3_PROFILING.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/LOCOMO_CAT3_PROFILING.md)
 for what that does and doesn't measure.
 
 Extraction is the slow part (hundreds of cloud LLM calls per LoCoMo run).  The
@@ -490,7 +490,7 @@ python3 benchmarks/run_benchmark.py \
 When results change meaningfully (>0.5 pp on any benchmark):
 
 1. **Atlas design doc** — update the results tables in
-   `~/code/The-OASIS-Project/atlas/dawn/archive/MEMORY_SYSTEM_DESIGN.md` §14.3:
+   `~/code/The-OASIS-Project/atlas/dawn/memory/SYSTEM_DESIGN.md` §14.3:
    - Session-level results table
    - Turn-level results table
    - Comparison-to-published-baselines table (update the DAWN row and SOTA margin)

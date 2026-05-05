@@ -1923,7 +1923,7 @@ static int create_schema(const char *db_path) {
     * the anchor line when this is 0.  The literal-constant default is required for
     * SQLite's O(1) metadata-only ALTER path — switching to strftime() or
     * CURRENT_TIMESTAMP would silently regress this to a full-table rewrite under
-    * the auth_db lock at startup.  See docs/CAT2_TEMPORAL_DIAGNOSIS.md L1+L5. */
+    * the auth_db lock at startup.  See atlas/dawn/memory/CAT2_TEMPORAL.md L1+L5. */
    if (current_version >= 1 && current_version < 42) {
       rc = sqlite3_exec(
           s_db.db, "ALTER TABLE conversations ADD COLUMN anchor_date INTEGER NOT NULL DEFAULT 0",
