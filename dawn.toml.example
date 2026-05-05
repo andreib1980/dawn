@@ -370,6 +370,12 @@
 # context_budget_tokens = 800     # Max tokens for memory context in system prompt
 # extraction_provider = "local"   # LLM provider for fact extraction: "local", "openai", "claude"
 # extraction_model = "qwen2.5:7b" # Model for memory extraction
+                                  # Recommended: claude-haiku-4-5 (validated by the four-model
+                                  # LoCoMo sweep — see benchmarks/README.md "four-model extraction
+                                  # sweep results"). Sonnet only beats Haiku by +1.7 pp on
+                                  # recall_generation; Opus is *worse* than Haiku (entity over-
+                                  # fragmentation). Going to a larger Claude tier is not a free
+                                  # win for extraction.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
 # pruning_enabled = true          # Automatically remove old superseded and stale facts

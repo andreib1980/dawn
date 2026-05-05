@@ -2,6 +2,9 @@ build*/
 libvosk.so
 vosk-model*/
 
+# Benchmark extraction snapshots (memory-pipeline cache; rebuilt on demand)
+benchmarks/snapshots*/
+
 # Runtime config files (user-specific, may contain secrets)
 dawn.toml
 secrets.toml

@@ -851,6 +851,12 @@ static void print_usage(const char *prog) {
            "                                   --memory-pipeline. Bypasses JSON protocol.\n"
            "  --config <path>                  Path to dawn.toml (default: ./dawn.toml).\n"
            "                                   Only relevant in --memory-pipeline mode.\n"
+           "  --extraction-provider <name>     Override extraction LLM provider (claude,\n"
+           "                                   openai, ollama, etc.) for memory-pipeline.\n"
+           "                                   Used by the four-model sweep.\n"
+           "  --extraction-model <name>        Override extraction model (e.g.,\n"
+           "                                   claude-haiku-4-5, claude-sonnet-4-6).\n"
+           "                                   Used by the four-model sweep.\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -881,6 +887,8 @@ int main(int argc, char *argv[]) {
       { "memory-pipeline", no_argument, 0, 'M' },
       { "smoke", no_argument, 0, 'S' },
       { "config", required_argument, 0, 'C' },
+      { "extraction-provider", required_argument, 0, 'X' },
+      { "extraction-model", required_argument, 0, 'Y' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
@@ -888,9 +896,12 @@ int main(int argc, char *argv[]) {
    bool memory_pipeline = false;
    bool smoke = false;
    const char *config_path = "./dawn.toml";
+   const char *extraction_provider_override = NULL;
+   const char *extraction_model_override = NULL;
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:MSrh", long_options, NULL)) != -1) {
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:MSrh", long_options, NULL)) !=
+          -1) {
       switch (opt) {
          case 'p':
             provider = optarg;
@@ -934,6 +945,12 @@ int main(int argc, char *argv[]) {
          case 'C':
             config_path = optarg;
             break;
+         case 'X':
+            extraction_provider_override = optarg;
+            break;
+         case 'Y':
+            extraction_model_override = optarg;
+            break;
          case 'h':
             print_usage(argv[0]);
             return 0;
@@ -956,6 +973,17 @@ int main(int argc, char *argv[]) {
       if (config_load_secrets_from_search(&g_secrets) != 0) {
          fprintf(stderr, "bench: warning: secrets.toml not loaded; cloud extractors will fail\n");
       }
+      /* Post-load extraction overrides for the four-model sweep.  Applied
+       * after config_load so dawn.toml stays the source of truth for every
+       * other field; only the model/provider tier swaps. */
+      if (extraction_provider_override && extraction_provider_override[0]) {
+         snprintf(g_config.memory.extraction_provider, sizeof(g_config.memory.extraction_provider),
+                  "%s", extraction_provider_override);
+      }
+      if (extraction_model_override && extraction_model_override[0]) {
+         snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
+                  extraction_model_override);
+      }
       if (smoke) {
          if (optind + 2 != argc) {
             fprintf(stderr,
@@ -966,6 +994,10 @@ int main(int argc, char *argv[]) {
    } else {
       memset(&g_config, 0, sizeof(g_config));
       memset(&g_secrets, 0, sizeof(g_secrets));
+      if (extraction_provider_override || extraction_model_override) {
+         fprintf(stderr, "bench: --extraction-provider/--extraction-model require "
+                         "--memory-pipeline; ignored in default mode\n");
+      }
    }
 
    /* CLI-provided embedding override (always wins over toml in default mode;

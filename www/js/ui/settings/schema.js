@@ -546,7 +546,9 @@
             compact_model: {
                type: 'text',
                label: 'Compaction Model',
-               hint: 'Model name for compaction (e.g., claude-haiku-4-5). Leave empty for provider default.',
+               hint:
+                  'Model name for compaction (e.g., claude-haiku-4-5 — the same ' +
+                  'tier validated for memory extraction). Leave empty for provider default.',
                advanced: true,
                showWhen: { key: 'llm.compact_use_session', value: false },
             },
@@ -742,7 +744,10 @@
             extraction_model: {
                type: 'dynamic_select',
                label: 'Extraction Model',
-               hint: 'Model for memory extraction (populated based on provider)',
+               hint:
+                  'Model for memory extraction (populated based on provider). ' +
+                  'Haiku-tier validated as the sweet spot — larger Claude models do ' +
+                  'not produce better extraction (see benchmarks/README.md).',
                dynamicKey: 'memory_extraction_models',
                id: 'memory-extraction-model',
                advanced: true,
