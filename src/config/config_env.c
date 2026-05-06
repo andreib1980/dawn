@@ -1773,13 +1773,11 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "engine = \"%s\"\n", config->search.engine);
    fprintf(fp, "endpoint = \"%s\"\n", config->search.endpoint);
 
-   fprintf(fp, "\n[search.summarizer]\n");
-   fprintf(fp, "backend = \"%s\"\n", config->search.summarizer.backend);
-   fprintf(fp, "threshold_bytes = %zu\n", config->search.summarizer.threshold_bytes);
-   fprintf(fp, "target_words = %zu\n", config->search.summarizer.target_words);
-   fprintf(fp, "target_ratio = %.2f\n", config->search.summarizer.target_ratio);
-
-   /* Write title_filters if any are configured */
+   /* Write title_filters under [search] BEFORE [search.summarizer] so TOML
+    * attaches the array to the right table.  Any key emitted after a sub-
+    * table header binds to that sub-table (TOML §3.3); writing this block
+    * after [search.summarizer] silently produced [search.summarizer]
+    * .title_filters, which the parser doesn't recognize. */
    if (config->search.title_filters_count > 0) {
       fprintf(fp, "\n# Exclude search results with these terms in title (case-insensitive)\n");
       fprintf(fp, "title_filters = [\n");
@@ -1791,6 +1789,12 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       }
       fprintf(fp, "]\n");
    }
+
+   fprintf(fp, "\n[search.summarizer]\n");
+   fprintf(fp, "backend = \"%s\"\n", config->search.summarizer.backend);
+   fprintf(fp, "threshold_bytes = %zu\n", config->search.summarizer.threshold_bytes);
+   fprintf(fp, "target_words = %zu\n", config->search.summarizer.target_words);
+   fprintf(fp, "target_ratio = %.2f\n", config->search.summarizer.target_ratio);
 
    if (config->url_fetcher.whitelist_count > 0 || config->url_fetcher.flaresolverr.enabled) {
       fprintf(fp, "\n[url_fetcher]\n");

@@ -1008,6 +1008,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "pruning",
                                              "decay",
                                              "embeddings",
+                                             "recovery",
                                              NULL };
    warn_unknown_keys(table, "memory", known_keys);
 
