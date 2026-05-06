@@ -31,6 +31,7 @@
 #include "audio/music_db.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
+#include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
@@ -1532,23 +1533,27 @@ int webui_music_execute_tool(ws_connection_t *conn,
          return 0;
       }
 
-      /* Build queue list */
-      size_t buf_size = 1024 + (uq->queue_length * 128);
-      char *buf = malloc(buf_size);
-      if (buf) {
-         int offset = snprintf(buf, buf_size, "Queue (%d tracks, currently #%d):\n",
-                               uq->queue_length, state->queue_index + 1);
-         for (int i = 0; i < uq->queue_length && offset < (int)buf_size - 128; i++) {
-            const char *marker = (i == state->queue_index) ? "▶ " : "  ";
-            offset += snprintf(buf + offset, buf_size - offset, "%s%d. %s - %s\n", marker, i + 1,
-                               uq->queue[i].artist[0] ? uq->queue[i].artist : "Unknown",
-                               uq->queue[i].title[0] ? uq->queue[i].title : "Unknown");
-         }
-         if (result_out) {
-            *result_out = buf;
-         } else {
-            free(buf);
-         }
+      /* Build queue list — strbuf so a long queue cannot silently truncate
+       * mid-row the way the prior fixed sizing did when artist/title strings
+       * exceeded the per-row estimate. */
+      strbuf_t sb;
+      strbuf_init(&sb, 1024 + (size_t)uq->queue_length * 64);
+      strbuf_appendf(&sb, "Queue (%d tracks, currently #%d):\n", uq->queue_length,
+                     state->queue_index + 1);
+      for (int i = 0; i < uq->queue_length; i++) {
+         const char *marker = (i == state->queue_index) ? "\xE2\x96\xB6 " : "  ";
+         if (strbuf_appendf(&sb, "%s%d. %s - %s\n", marker, i + 1,
+                            uq->queue[i].artist[0] ? uq->queue[i].artist : "Unknown",
+                            uq->queue[i].title[0] ? uq->queue[i].title : "Unknown") < 0)
+            break;
+      }
+      if (result_out) {
+         char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
+         *result_out = out;
+         if (!out)
+            strbuf_free(&sb);
+      } else {
+         strbuf_free(&sb);
       }
       pthread_mutex_unlock(&uq->queue_mutex);
       return 0;

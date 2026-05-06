@@ -274,6 +274,12 @@ dawn_add_unit_test(test_iso8601
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_strbuf
+   SOURCES test_strbuf.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_provenance
    SOURCES test_memory_provenance.c test_memory_provenance_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
@@ -457,6 +463,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
            ${SRC_ROOT}/benchmarks/bench_memory_pipeline.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/time_query_parser.c
            ${SRC_ROOT}/src/core/embedding_engine.c
            ${SRC_ROOT}/src/memory/memory_embed_tokenizer.c
@@ -465,6 +472,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_embed_openai.c
            # Memory-pipeline mode TUs (dormant unless --memory-pipeline is passed)
            ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_callback.c
+           ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
            ${SRC_ROOT}/src/memory/memory_extraction.c

@@ -28,6 +28,26 @@
  * Phase 0 entry point. The full --memory-pipeline JSON protocol (conv_create,
  * add_message, extract, query_memory, reset_memory, snapshot_*) lands in
  * Phase 1; this file provides only the smoke-test path for now.
+ *
+ * =====================================================================
+ *  CONTRACT: bench-only handlers MUST scope by BENCH_MP_USER_ID
+ * =====================================================================
+ *
+ * This file links memory_callback.c, contacts_db.c, and other Layer 2
+ * modules so the bench can drive the production retrieval path
+ * faithfully.  That same statically-linked code can also mutate contacts
+ * / entities / facts for ANY user_id — so any new handler added to this
+ * file MUST pass user_id = BENCH_MP_USER_ID (or a const derived from it)
+ * to every memory_*, conv_db_*, contacts_* call.  Handlers that accept
+ * user_id from the JSON command would let an attacker (or a careless
+ * test) exercise other users' memory stores.
+ *
+ * The DAWN_DAEMON_BUILD guard below catches the worst case (this file
+ * being linked into the daemon binary), but it does NOT catch
+ * inside-bench misuse.  When adding a handler, audit it against this
+ * rule.  If a handler legitimately needs a different user_id (for
+ * future multi-user bench scenarios), introduce an explicit
+ * BENCH_MP_AUX_USER_ID constant, do NOT take it from the wire.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -52,9 +72,16 @@
 #include "auth/auth_db_internal.h"
 #include "bench_memory_schema.h"
 #include "config/dawn_config.h"
+#include "memory/memory_callback_internal.h"
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
+
+#ifdef DAWN_DAEMON_BUILD
+#error "bench_memory_pipeline.c is a benchmark harness — do NOT link into the dawn daemon. \
+The query_memory_callback handler exposes the production memory path with BENCH_MP_USER_ID; \
+linking into the daemon would let any caller exercise user 1's full memory store."
+#endif
 
 #define BENCH_MP_USER_ID 1
 #define BENCH_MP_POLL_USEC 250000 /* 250 ms */
@@ -668,6 +695,56 @@ static int handle_query_memory(struct json_object *cmd) {
    return 1;
 }
 
+/* query_memory_callback {query, with_source, source_budget}
+ * Calls the production memory_action_search() path so the bench measures what
+ * voice DAWN users actually receive when the LLM tool fires.  source_budget=0
+ * uses the production default (MEMORY_SOURCE_BUDGET_CHARS); >0 overrides it
+ * for sweep passes.  Returns the formatted memory tool output as a JSON
+ * string under "text". */
+static int handle_query_memory_callback(struct json_object *cmd) {
+   struct json_object *query_obj = NULL, *ws_obj = NULL, *budget_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "query", &query_obj)) {
+      respond_error("query_memory_callback: missing query");
+      return 1;
+   }
+   const char *query_text = json_object_get_string(query_obj);
+   if (!query_text || !*query_text) {
+      respond_error("query_memory_callback: empty query");
+      return 1;
+   }
+
+   bool with_source = false;
+   if (json_object_object_get_ex(cmd, "with_source", &ws_obj))
+      with_source = json_object_get_boolean(ws_obj);
+
+   int source_budget = 0;
+   if (json_object_object_get_ex(cmd, "source_budget", &budget_obj))
+      source_budget = json_object_get_int(budget_obj);
+   if (source_budget < 0)
+      source_budget = 0;
+
+   /* Production path: same call as memoryCallback("search", ...) takes after
+    * value-string parsing.  No since_ts / category / as_of / include_historical
+    * for the LoCoMo bench questions — bench uses the simplest production flow. */
+   char *text = memory_action_search(BENCH_MP_USER_ID, query_text,
+                                     /* since_ts */ 0,
+                                     /* category */ NULL,
+                                     /* as_of_ts */ 0,
+                                     /* include_historical */ false, with_source, source_budget);
+   if (!text) {
+      respond_error("query_memory_callback: memory_action_search returned NULL");
+      return 1;
+   }
+
+   struct json_object *text_str = json_object_new_string(text);
+   const char *text_json = json_object_to_json_string(text_str);
+   fprintf(stdout, "{\"status\":\"ok\",\"text\":%s}\n", text_json);
+   fflush(stdout);
+   json_object_put(text_str);
+   free(text);
+   return 1;
+}
+
 static int handle_reset_memory(struct json_object *cmd) {
    (void)cmd;
    /* Drop facts/preferences/relations/entities/summaries for the bench user.
@@ -915,6 +992,9 @@ int bench_mp_dispatch(struct json_object *cmd) {
       return handle_add_message(cmd);
    if (strcmp(cmd_str, "extract") == 0)
       return handle_extract(cmd);
+   if (strcmp(cmd_str, "query_memory_callback") == 0)
+      return handle_query_memory_callback(cmd);
+
    if (strcmp(cmd_str, "query_memory") == 0)
       return handle_query_memory(cmd);
    if (strcmp(cmd_str, "reset_memory") == 0)

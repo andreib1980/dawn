@@ -412,6 +412,15 @@ typedef struct {
 typedef struct {
    bool enabled;                 /* Enable memory system */
    int context_budget_tokens;    /* Max tokens for memory context (~800) */
+   int source_budget_chars;      /* Max chars of verbatim source excerpts per
+                                  * memory_callback "search"/"recent" call when
+                                  * with_source=true.  Default 3072 (~768 tokens).
+                                  * Bench validation (May 2026, LoCoMo Haiku):
+                                  * 0=baseline 0.368, 1024=+3.5pp, 3072=+7.7pp,
+                                  * 6144=+9.5pp, 12288=+TBD recall_generation.
+                                  * Tune up for higher answer quality, down for
+                                  * lower per-call token cost.  Hard-clamped at
+                                  * MEMORY_SOURCE_BUDGET_MAX (32 KiB). */
    char extraction_provider[16]; /* LLM provider for extraction */
    char extraction_model[64];    /* Model for extraction */
    int extraction_timeout_ms;    /* LLM timeout for fact extraction (default 120s) */

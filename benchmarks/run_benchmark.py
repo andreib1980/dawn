@@ -226,6 +226,15 @@ class BenchRetrieval:
    def query_memory(self, text, top_k=10):
       return self._send({"cmd": "query_memory", "text": text, "top_k": top_k})
 
+   def query_memory_callback(self, text, with_source=False, source_budget=0):
+      """Production-faithful retrieval through memory_callback's memory_action_search.
+      Returns the formatted memory tool string (what voice DAWN users see when the
+      LLM tool fires).  source_budget=0 uses MEMORY_SOURCE_BUDGET_CHARS (3072);
+      >0 overrides per call for sweep passes."""
+      return self._send({"cmd": "query_memory_callback", "query": text,
+                         "with_source": bool(with_source),
+                         "source_budget": int(source_budget)})
+
    def reset_memory(self):
       return self._send({"cmd": "reset_memory", "user_id": 1})
 
@@ -534,6 +543,15 @@ Memory facts:
 
 Question: {question}"""
 
+# Production-faithful template: the bench passes the formatted memory_callback
+# output (facts + verbatim source excerpts + entity graph block) verbatim,
+# matching what voice DAWN users see when the LLM tool fires.
+GENERATOR_USER_TEMPLATE_FROM_MEMORY = """\
+Memory tool output:
+{memory_text}
+
+Question: {question}"""
+
 CORRECTNESS_SYSTEM = (
    "You judge whether a generated answer is factually equivalent to a "
    "correct answer. Focus on the substantive content — date, name, number, "
@@ -609,6 +627,41 @@ class AnswerGenerator:
          # Cache empty raw so reruns short-circuit cleanly through the
          # correctness judge's empty-generation fast-path; the diagnostic
          # error message is logged above.
+         self.cache.put(key, 0.0, "")
+         return "", False
+
+      self.calls_made += 1
+      self.cache.put(key, 0.0, raw)
+      return raw, False
+
+   def generate_from_memory_text(self, question, memory_text):
+      """Production-faithful variant: generator consumes the formatted
+      memory_callback output (facts + source excerpts + entity graph) instead
+      of the numbered-fact list.  Cache key folds memory_text into the
+      'fact_texts' slot so different source budgets / source toggles produce
+      distinct cache entries naturally."""
+      # Cache key: feed memory_text as a single-element fact_texts list so any
+      # change to the formatted output (different source budget, with_source
+      # toggle, etc.) yields a fresh key.  Bumps GENERATOR_PROMPT_VERSION on
+      # any future template change to invalidate stale entries cleanly.
+      key = JudgeCache.make_key(
+         self.model, GENERATOR_PROMPT_VERSION, question, "", [memory_text])
+      cached = self.cache.get(key)
+      if cached is not None:
+         self.cache_hits += 1
+         return cached.get("raw", ""), True
+
+      user_prompt = GENERATOR_USER_TEMPLATE_FROM_MEMORY.format(
+         question=question,
+         memory_text=memory_text if memory_text else "(no memories returned)")
+      try:
+         raw = _anthropic_call(
+            self.model, GENERATOR_SYSTEM, user_prompt, self.api_key,
+            temperature=self.temperature, max_tokens=self.max_tokens)
+      except Exception as exc:
+         self.errors += 1
+         print(f"  generator(from_memory): API error ({exc}); empty answer",
+               file=sys.stderr)
          self.cache.put(key, 0.0, "")
          return "", False
 
@@ -1123,7 +1176,8 @@ def _snapshot_cache_paths(cache_dir, engine, conv_idx, conv):
 
 def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                       no_cache=False, judge=None, generator=None,
-                      correctness_judge=None):
+                      correctness_judge=None,
+                      with_source=False, source_budget=0):
    """Run LoCoMo through extraction + memory-fact retrieval. Returns metrics.
 
    If cache_dir is set and no_cache is False, per-conversation extraction state
@@ -1319,16 +1373,29 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
          # Build fact texts once — both entailment and generator consume them.
          fact_texts = [r.get("text", "") for r in retrieved if r.get("text")]
 
-         # Entailment judge — strict YES/NO over (question, gold, fact texts)
+         # Entailment judge — strict YES/NO over (question, gold, fact texts).
+         # Always uses raw fact list (not source-augmented) so entailment metric
+         # measures retrieval quality, independent of source-budget sweep.
          if judge is not None and gold_answer:
             ent_score, _ = judge.judge(question, gold_answer, fact_texts)
             all_entailment.append(ent_score)
             per_category_entailment.setdefault(category, []).append(ent_score)
 
-         # Generate-and-judge — the leader-comparable metric.  Generator
-         # synthesizes an answer from facts; correctness judge compares to gold.
+         # Generate-and-judge — the leader-comparable metric.
+         # When with_source=True (production-faithful path), the generator
+         # consumes the formatted memory_callback output (facts + source
+         # excerpts + entity graph block) instead of just numbered fact texts.
+         # source_budget=0 uses the production default (3072 chars).
          if gen_and_judge and gold_answer:
-            generated, _ = generator.generate(question, fact_texts)
+            if with_source:
+               cbresp = engine.query_memory_callback(question,
+                                                    with_source=True,
+                                                    source_budget=source_budget)
+               memory_text = cbresp.get("text", "")
+               generated, _ = generator.generate_from_memory_text(
+                  question, memory_text)
+            else:
+               generated, _ = generator.generate(question, fact_texts)
             corr_score, _ = correctness_judge.judge(
                question, gold_answer, generated)
             all_generation.append(corr_score)
@@ -1395,6 +1462,8 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
             sum(vals) / len(vals) if vals else 0)
    if gen_and_judge:
       results["generator_model"] = generator.model
+      results["with_source"] = bool(with_source)
+      results["source_budget"] = int(source_budget)
       results["generator_calls_made"] = generator.calls_made
       results["generator_cache_hits"] = generator.cache_hits
       results["generator_errors"] = generator.errors
@@ -1777,6 +1846,27 @@ def main():
       "are typically a phrase or short sentence).",
    )
    parser.add_argument(
+      "--with-source",
+      action="store_true",
+      dest="with_source",
+      help="Memory-pipeline LoCoMo only: route the generator through the "
+      "production memory_callback path with with_source=true.  The generator "
+      "consumes the formatted memory tool output (facts + verbatim source "
+      "excerpts + entity graph block) instead of just numbered fact texts.  "
+      "Use to validate Phase A of the provenance plan.  Cache keys differ "
+      "from the default path so caches don't collide.",
+   )
+   parser.add_argument(
+      "--source-budget",
+      type=int,
+      default=0,
+      dest="source_budget",
+      help="Memory-pipeline LoCoMo only: char budget for verbatim source "
+      "excerpts in the memory tool output.  Default 0 = use production "
+      "MEMORY_SOURCE_BUDGET_CHARS (3072).  Set non-zero to sweep budget "
+      "values.  Requires --with-source.",
+   )
+   parser.add_argument(
       "--sweep-extraction-models",
       default="",
       dest="sweep_extraction_models",
@@ -1878,11 +1968,16 @@ def _run_one(args, extraction_provider, extraction_model):
                      file=sys.stderr)
                generator = None
                correctness_judge = None
+            if args.source_budget != 0 and not args.with_source:
+               print("  --source-budget requires --with-source; ignoring",
+                     file=sys.stderr)
             results = run_locomo_memory(
                engine, args.dataset, limit=args.limit, top_k=args.top_k,
                cache_dir=args.cache_dir, no_cache=args.no_cache,
                judge=judge, generator=generator,
-               correctness_judge=correctness_judge)
+               correctness_judge=correctness_judge,
+               with_source=args.with_source,
+               source_budget=args.source_budget)
          else:
             results = run_locomo(
                engine, args.dataset, limit=args.limit,

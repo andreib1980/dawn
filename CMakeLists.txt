@@ -471,6 +471,7 @@ set(DAWN_SOURCES
     src/core/device_types.c
     src/core/ocp_helpers.c
     src/core/path_utils.c
+    src/core/strbuf.c
     src/core/wake_word.c
 
     # ASR subsystem

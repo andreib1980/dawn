@@ -995,6 +995,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
 
    static const char *const known_keys[] = { "enabled",
                                              "context_budget_tokens",
+                                             "source_budget_chars",
                                              "extraction_provider",
                                              "extraction_model",
                                              "extraction_timeout_ms",
@@ -1012,6 +1013,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
 
    PARSE_BOOL(table, "enabled", config->enabled);
    PARSE_INT(table, "context_budget_tokens", config->context_budget_tokens);
+   PARSE_INT(table, "source_budget_chars", config->source_budget_chars);
    PARSE_STRING(table, "extraction_provider", config->extraction_provider);
    PARSE_STRING(table, "extraction_model", config->extraction_model);
    PARSE_INT(table, "extraction_timeout_ms", config->extraction_timeout_ms);
@@ -1043,6 +1045,17 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       config->context_budget_tokens = 100;
    } else if (config->context_budget_tokens > 2000) {
       config->context_budget_tokens = 2000;
+   }
+
+   /* Clamp source_budget_chars.  0 in config means "use compile-time default";
+    * otherwise clamp to the same MEMORY_SOURCE_BUDGET_MAX (32 KiB) the runtime
+    * applies in memory_action_search/_recent.  Lower bound of 0 (disabled —
+    * no source excerpts at all) is allowed so deployments can opt out of
+    * verbatim-source token cost entirely. */
+   if (config->source_budget_chars < 0) {
+      config->source_budget_chars = 0;
+   } else if (config->source_budget_chars > 32768) {
+      config->source_budget_chars = 32768;
    }
 
    /* Clamp pruning days to sensible values */

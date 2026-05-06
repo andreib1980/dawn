@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/strbuf.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
@@ -995,9 +996,46 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       int pref_count = 0;
       memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0, &pref_count);
 
-      /* Build text output: one line per memory */
-      size_t buf_size = (size_t)(fact_count + pref_count + 10) * 600;
-      char *text_buf = malloc(buf_size);
+      /* Build text output: one line per memory.  Use strbuf (growable) so a
+       * dense profile can't silently truncate facts/prefs the way the prior
+       * fixed-size buffer did.  Initial cap sized to a reasonable per-row
+       * estimate; will grow if rows are larger. */
+      strbuf_t sb;
+      strbuf_init(&sb, (size_t)(fact_count + pref_count + 10) * 200);
+
+      strbuf_append(&sb, "# My Memories\n\n");
+
+      if (fact_count > 0) {
+         strbuf_append(&sb, "## Facts\n");
+         for (int i = 0; i < fact_count; i++) {
+            if (strbuf_appendf(&sb, "- %s\n", facts[i].fact_text) < 0)
+               break;
+         }
+         strbuf_append(&sb, "\n");
+      }
+
+      if (pref_count > 0) {
+         strbuf_append(&sb, "## Preferences\n");
+         for (int i = 0; i < pref_count; i++) {
+            if (strbuf_appendf(&sb, "- %s: %s\n", prefs[i].category, prefs[i].value) < 0)
+               break;
+         }
+      }
+
+      if (strbuf_oom(&sb)) {
+         strbuf_free(&sb);
+         free(facts);
+         free(prefs);
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error",
+                                json_object_new_string("Export buffer exceeded safety cap"));
+         json_object_object_add(response, "payload", resp_payload);
+         send_json_response(conn, response);
+         json_object_put(response);
+         return;
+      }
+
+      char *text_buf = strbuf_steal(&sb);
       if (!text_buf) {
          free(facts);
          free(prefs);
@@ -1008,25 +1046,6 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          send_json_response(conn, response);
          json_object_put(response);
          return;
-      }
-
-      size_t off = 0;
-      off += snprintf(text_buf + off, buf_size - off, "# My Memories\n\n");
-
-      if (fact_count > 0) {
-         off += snprintf(text_buf + off, buf_size - off, "## Facts\n");
-         for (int i = 0; i < fact_count && off < buf_size - 128; i++) {
-            off += snprintf(text_buf + off, buf_size - off, "- %s\n", facts[i].fact_text);
-         }
-         off += snprintf(text_buf + off, buf_size - off, "\n");
-      }
-
-      if (pref_count > 0) {
-         off += snprintf(text_buf + off, buf_size - off, "## Preferences\n");
-         for (int i = 0; i < pref_count && off < buf_size - 128; i++) {
-            off += snprintf(text_buf + off, buf_size - off, "- %s: %s\n", prefs[i].category,
-                            prefs[i].value);
-         }
       }
 
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));

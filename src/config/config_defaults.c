@@ -253,6 +253,9 @@ void config_set_defaults(dawn_config_t *config) {
    /* Memory - persistent user memory system */
    config->memory.enabled = true;
    config->memory.context_budget_tokens = 800; /* ~3200 chars for memory context */
+   /* Default = 3072 (~768 tokens of verbatim source per memory tool call).
+    * See dawn_config.h source_budget_chars for the bench-validated lift table. */
+   config->memory.source_budget_chars = 3072;
    SAFE_COPY(config->memory.extraction_provider, "local");
    SAFE_COPY(config->memory.extraction_model, "qwen2.5:7b");
    config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */

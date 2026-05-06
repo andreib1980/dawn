@@ -36,8 +36,10 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
+#include "memory/memory_callback_internal.h"
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_filter.h"
@@ -48,9 +50,21 @@
 #include "tools/tool_registry.h"
 
 /* Shared char budget for with_source verbatim excerpts in a single tool call.
- * Must be less than the smallest result buffer (memory_action_recent: 4 KB)
- * so the elision notice fires before snprintf truncation can occur. */
+ * The response buffer is now growable (strbuf, capped at STRBUF_DEFAULT_MAX_CAP =
+ * 256 KiB) so this is no longer a "stay under buffer size" invariant — it is
+ * a soft cap on how much verbatim source text any one memory_callback call
+ * can inject into the LLM context.  3072 chars ≈ 768 tokens; bench validation
+ * (May 2026) showed 6144 / 12288 lift answer quality further but cost more
+ * context window per call.  Tune via dawn.toml [memory] source_budget_chars
+ * when production telemetry justifies it. */
 #define MEMORY_SOURCE_BUDGET_CHARS 3072
+
+/* Hard upper bound on per-call source_budget — prevents a misconfigured
+ * caller (LLM tool param escape, future admin path, etc.) from injecting
+ * an arbitrary amount of verbatim source text and dominating the LLM
+ * context.  Defense-in-depth — the bench legitimately needs values up to
+ * ~12 KiB for the budget sweep, so the cap is set well above that. */
+#define MEMORY_SOURCE_BUDGET_MAX (32 * 1024)
 
 /* =============================================================================
  * Helper: Append verbatim source excerpt for a single fact (with_source=true)
@@ -60,9 +74,7 @@
  * ============================================================================= */
 
 struct source_msg_ctx {
-   char *buf;
-   size_t buf_size;
-   size_t *offset;
+   strbuf_t *sb;
    int *budget;
 };
 
@@ -73,30 +85,22 @@ static int source_msg_callback(const conversation_message_t *msg, void *ctx_ptr)
    /* Skip system/tool messages in verbatim excerpt */
    if (strcmp(msg->role, "user") != 0 && strcmp(msg->role, "assistant") != 0)
       return 0;
-   if (*ctx->offset >= ctx->buf_size)
-      return 1; /* stop: buffer full */
-   size_t remaining = ctx->buf_size - *ctx->offset;
-   int written = snprintf(ctx->buf + *ctx->offset, remaining, "%s: %.500s\n", msg->role,
-                          msg->content);
-   if (written < 0)
-      return 0;
-   /* written may exceed remaining (snprintf reports intended length, not actual).
-    * Advance only by actual bytes written; treat truncation as budget exhausted. */
-   if ((size_t)written >= remaining) {
-      *ctx->offset = ctx->buf_size;
+   int written = strbuf_appendf(ctx->sb, "%s: %.500s\n", msg->role, msg->content);
+   if (written < 0) {
+      /* STRBUF_E_OOM — buffer cap exhausted.  Drain budget so the caller's
+       * outer loop also bails (memory_action_search checks strbuf_oom after
+       * each excerpt, but zeroing budget short-circuits any other consumers
+       * that watch budget rather than oom). */
       *ctx->budget = 0;
-      return 1; /* stop */
+      return 1;
    }
-   *ctx->offset += (size_t)written;
    *ctx->budget -= written;
    return 0;
 }
 
 static int append_source_excerpt(int user_id,
                                  int64_t fact_id,
-                                 char *buf,
-                                 size_t buf_size,
-                                 size_t *offset,
+                                 strbuf_t *sb,
                                  int *budget_remaining) {
    if (*budget_remaining <= 0)
       return 0;
@@ -107,19 +111,14 @@ static int append_source_excerpt(int user_id,
       return 0; /* no provenance or private */
 
    /* Header */
-   if (*offset >= buf_size)
-      return 0;
-   size_t hdr_remaining = buf_size - *offset;
-   int hdr = snprintf(buf + *offset, hdr_remaining, "[source: conv=%lld msgs=%lld-%lld]\n",
-                      (long long)conv_id, (long long)start_id, (long long)end_id);
-   if (hdr > 0 && (size_t)hdr < hdr_remaining) {
-      *offset += (size_t)hdr;
+   int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]\n", (long long)conv_id,
+                            (long long)start_id, (long long)end_id);
+   if (hdr > 0)
       *budget_remaining -= hdr;
-   }
 
    /* Verbatim messages — cap range at 500 messages per spec */
    int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
-   struct source_msg_ctx msg_ctx = { buf, buf_size, offset, budget_remaining };
+   struct source_msg_ctx msg_ctx = { sb, budget_remaining };
    conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, source_msg_callback,
                                  &msg_ctx);
    return 1;
@@ -303,13 +302,11 @@ static int tokenize_query(const char *keywords, char tokens[][64], int max_token
  * include_historical: when true, bypasses validity filter (returns all rows).
  * ============================================================================= */
 
-static size_t append_graph_context(int user_id,
-                                   const char *keywords,
-                                   int64_t as_of_ts,
-                                   bool include_historical,
-                                   char *buf,
-                                   size_t buf_size,
-                                   size_t offset) {
+static void append_graph_context(int user_id,
+                                 const char *keywords,
+                                 int64_t as_of_ts,
+                                 bool include_historical,
+                                 strbuf_t *sb) {
    /* Try semantic entity search first */
    int64_t entity_ids[5];
    char entity_names[5][MEMORY_ENTITY_NAME_MAX];
@@ -357,14 +354,13 @@ static size_t append_graph_context(int user_id,
    }
 
    if (entity_count == 0)
-      return offset;
+      return;
 
    /* Show top 3 entities with their relations (skip entities with no relations) */
    int show_count = entity_count > 3 ? 3 : entity_count;
-   size_t header_offset = offset; /* Save position before writing header */
    bool header_written = false;
 
-   for (int i = 0; i < show_count && offset < buf_size - 100; i++) {
+   for (int i = 0; i < show_count; i++) {
       /* Pre-fetch relations to check if entity has any.  When include_historical
        * is true, return all relations regardless of validity.  Otherwise apply
        * temporal filtering: relations valid at as_of_ts (0 = now). */
@@ -388,28 +384,23 @@ static size_t append_graph_context(int user_id,
 
       /* Write header on first entity that has relations */
       if (!header_written) {
-         if (offset > 0 && offset < buf_size - 20) {
-            offset += snprintf(buf + offset, buf_size - offset, "\n");
-         }
-         offset += snprintf(buf + offset, buf_size - offset, "ENTITIES:\n");
+         if (strbuf_len(sb) > 0)
+            strbuf_append(sb, "\n");
+         strbuf_append(sb, "ENTITIES:\n");
          header_written = true;
       }
 
-      offset += snprintf(buf + offset, buf_size - offset, "- %s (%s):\n", entity_names[i],
-                         entity_types[i]);
+      strbuf_appendf(sb, "- %s (%s):\n", entity_names[i], entity_types[i]);
 
-      for (int r = 0; r < rel_count && offset < buf_size - 80; r++) {
-         offset += snprintf(buf + offset, buf_size - offset, "  %s: %s\n", rels[r].relation,
-                            rels[r].object_name);
+      for (int r = 0; r < rel_count; r++) {
+         strbuf_appendf(sb, "  %s: %s\n", rels[r].relation, rels[r].object_name);
       }
 
-      for (int r = 0; r < in_count && offset < buf_size - 80; r++) {
-         offset += snprintf(buf + offset, buf_size - offset, "  %s %s %s\n", in_rels[r].object_name,
-                            in_rels[r].relation, entity_names[i]);
+      for (int r = 0; r < in_count; r++) {
+         strbuf_appendf(sb, "  %s %s %s\n", in_rels[r].object_name, in_rels[r].relation,
+                        entity_names[i]);
       }
    }
-
-   return offset;
 }
 
 /* =============================================================================
@@ -421,25 +412,25 @@ static size_t append_graph_context(int user_id,
  *   recency for now — combinable in a follow-up if useful).
  * as_of_ts (v33): timestamp for relation validity in entity recall (0 = now).
  * include_historical (v33): bypass relation validity filter entirely. */
-static char *memory_action_search(int user_id,
-                                  const char *keywords,
-                                  time_t since_ts,
-                                  const char *category,
-                                  int64_t as_of_ts,
-                                  bool include_historical,
-                                  bool with_source) {
+char *memory_action_search(int user_id,
+                           const char *keywords,
+                           time_t since_ts,
+                           const char *category,
+                           int64_t as_of_ts,
+                           bool include_historical,
+                           bool with_source,
+                           int source_budget) {
    if (!keywords || strlen(keywords) == 0) {
       return strdup("Please provide search keywords.");
    }
 
-   /* Allocate result buffer (8KB for entity graph output) */
-   size_t buf_size = 8192;
-   char *result = malloc(buf_size);
-   if (!result) {
-      return strdup("Memory search failed: out of memory.");
-   }
-   result[0] = '\0';
-   size_t offset = 0;
+   /* Growable response buffer.  8KB initial sizes for the typical case (small
+    * source budget, modest entity graph); strbuf doubles as needed so neither
+    * a higher source_budget nor a denser conversation can silently truncate
+    * facts/prefs/summaries the way the previous fixed 8KB did.  Cap at the
+    * default (256 KiB) — well above any realistic memory tool response. */
+   strbuf_t sb;
+   strbuf_init(&sb, 8192);
 
    /* Tokenize query for per-word matching */
    char tokens[MAX_SEARCH_TOKENS][64];
@@ -513,31 +504,42 @@ static char *memory_action_search(int user_id,
    }
 
    if (fact_count > 0) {
-      offset += snprintf(result + offset, buf_size - offset, "FACTS (%d):\n", fact_count);
-      int source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+      strbuf_appendf(&sb, "FACTS (%d):\n", fact_count);
+      /* source_budget==0 from caller means "use default"; else honor caller's value
+       * (bench harness uses this to sweep budget values).  Cap at
+       * MEMORY_SOURCE_BUDGET_MAX so a misconfigured caller cannot inject an
+       * arbitrary amount of verbatim source text — defense-in-depth.  The
+       * bench is the only legitimate caller passing > 3072 today; if a
+       * future LLM-tool exposes the param to model output, the clamp here
+       * is the backstop. */
+      if (source_budget <= 0)
+         source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+      else if (source_budget > MEMORY_SOURCE_BUDGET_MAX)
+         source_budget = MEMORY_SOURCE_BUDGET_MAX;
       int elided = 0;
-      for (int i = 0; i < fact_count && offset < buf_size - 100; i++) {
+      for (int i = 0; i < fact_count; i++) {
          char time_str[32];
          format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-         offset += snprintf(result + offset, buf_size - offset,
-                            "- [ID:%lld] %s (confidence: %.0f%%, %s)\n", (long long)facts[i].id,
-                            facts[i].fact_text, facts[i].confidence * 100, time_str);
+         strbuf_appendf(&sb, "- [ID:%lld] %s (confidence: %.0f%%, %s)\n", (long long)facts[i].id,
+                        facts[i].fact_text, facts[i].confidence * 100, time_str);
 
          if (with_source && source_budget > 0) {
-            if (!append_source_excerpt(user_id, facts[i].id, result, buf_size, &offset,
-                                       &source_budget)) {
-               /* no provenance — skip silently */
-            }
+            append_source_excerpt(user_id, facts[i].id, &sb, &source_budget);
          } else if (with_source && source_budget <= 0) {
             elided++;
          }
 
          /* Update access time */
          memory_db_fact_update_access(facts[i].id, user_id);
+
+         /* Bail early if buffer max_cap was hit during source-excerpt
+          * rendering.  Otherwise we'd burn N-1 wasted SQLite round trips
+          * on no-op append_source_excerpt calls (embedded-review M4). */
+         if (strbuf_oom(&sb))
+            break;
       }
-      if (elided > 0 && offset < buf_size - 120) {
-         offset += snprintf(result + offset, buf_size - offset,
-                            "[%d more source(s) elided — call context_expand for full]\n", elided);
+      if (elided > 0) {
+         strbuf_appendf(&sb, "[%d more source(s) elided — call context_expand for full]\n", elided);
       }
    }
 
@@ -547,13 +549,12 @@ static char *memory_action_search(int user_id,
    memory_db_pref_search(user_id, keywords, prefs, 10, &pref_count);
 
    if (pref_count > 0) {
-      if (offset > 0 && offset < buf_size - 20) {
-         offset += snprintf(result + offset, buf_size - offset, "\n");
-      }
-      offset += snprintf(result + offset, buf_size - offset, "PREFERENCES:\n");
-      for (int i = 0; i < pref_count && offset < buf_size - 100; i++) {
-         offset += snprintf(result + offset, buf_size - offset, "- %s: %s (reinforced %d times)\n",
-                            prefs[i].category, prefs[i].value, prefs[i].reinforcement_count);
+      if (strbuf_len(&sb) > 0)
+         strbuf_append(&sb, "\n");
+      strbuf_append(&sb, "PREFERENCES:\n");
+      for (int i = 0; i < pref_count; i++) {
+         strbuf_appendf(&sb, "- %s: %s (reinforced %d times)\n", prefs[i].category, prefs[i].value,
+                        prefs[i].reinforcement_count);
       }
    }
 
@@ -596,29 +597,35 @@ static char *memory_action_search(int user_id,
       }
    }
 
-   if (summary_count > 0 && offset < buf_size - 100) {
-      if (offset > 0) {
-         offset += snprintf(result + offset, buf_size - offset, "\n");
-      }
-      offset += snprintf(result + offset, buf_size - offset, "CONVERSATION SUMMARIES (%d):\n",
-                         summary_count);
-      for (int i = 0; i < summary_count && offset < buf_size - 200; i++) {
+   if (summary_count > 0) {
+      if (strbuf_len(&sb) > 0)
+         strbuf_append(&sb, "\n");
+      strbuf_appendf(&sb, "CONVERSATION SUMMARIES (%d):\n", summary_count);
+      for (int i = 0; i < summary_count; i++) {
          char time_str[32];
          format_time_ago(summaries[i].created_at, time_str, sizeof(time_str));
-         offset += snprintf(result + offset, buf_size - offset, "- [%s] %s\n  Topics: %s\n",
-                            time_str, summaries[i].summary, summaries[i].topics);
+         strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
+                        summaries[i].topics);
       }
    }
 
    /* Append entity graph context */
-   offset = append_graph_context(user_id, keywords, as_of_ts, include_historical, result, buf_size,
-                                 offset);
+   append_graph_context(user_id, keywords, as_of_ts, include_historical, &sb);
 
-   if (offset == 0) {
-      snprintf(result, buf_size, "No memories found matching '%s'.", keywords);
+   /* Empty result: surface a friendly fallback (must not be NULL — callers
+    * expect a heap-allocated string). */
+   if (strbuf_len(&sb) == 0) {
+      strbuf_appendf(&sb, "No memories found matching '%s'.", keywords);
    }
 
-   return result;
+   /* OOM during build: return a sentinel; consumer (LLM) sees the failure. */
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("Memory search failed: response too large or out of memory.");
+   }
+
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Memory search failed: out of memory.");
 }
 
 /* =============================================================================
@@ -764,7 +771,7 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
  * Returns facts and summaries created within a specified time period.
  * ============================================================================= */
 
-static char *memory_action_recent(int user_id, const char *period, bool with_source) {
+char *memory_action_recent(int user_id, const char *period, bool with_source, int source_budget) {
    if (!period || strlen(period) == 0) {
       return strdup("Please specify a time period (e.g., '24h', '7d', '1w').");
    }
@@ -778,14 +785,9 @@ static char *memory_action_recent(int user_id, const char *period, bool with_sou
    if (since < 0)
       since = 0;
 
-   /* Allocate result buffer */
-   size_t buf_size = 4096;
-   char *result = malloc(buf_size);
-   if (!result) {
-      return strdup("Memory query failed: out of memory.");
-   }
-   result[0] = '\0';
-   size_t offset = 0;
+   /* Growable response buffer — see memory_action_search() for rationale. */
+   strbuf_t sb;
+   strbuf_init(&sb, 4096);
 
    /* Get recent facts — SQL-filtered by created_at, ordered by recency */
    memory_fact_t facts[20];
@@ -793,23 +795,29 @@ static char *memory_action_recent(int user_id, const char *period, bool with_sou
    memory_db_fact_list_since(user_id, since, facts, 20, &fact_count);
 
    if (fact_count > 0) {
-      offset += snprintf(result + offset, buf_size - offset, "RECENT FACTS:\n");
-      int source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+      strbuf_append(&sb, "RECENT FACTS:\n");
+      /* See memory_action_search for source_budget clamp rationale. */
+      if (source_budget <= 0)
+         source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+      else if (source_budget > MEMORY_SOURCE_BUDGET_MAX)
+         source_budget = MEMORY_SOURCE_BUDGET_MAX;
       int elided = 0;
-      for (int i = 0; i < fact_count && offset < buf_size - 100; i++) {
+      for (int i = 0; i < fact_count; i++) {
          char time_str[32];
          format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
-         offset += snprintf(result + offset, buf_size - offset, "- [ID:%lld] %s (%s, %s)\n",
-                            (long long)facts[i].id, facts[i].fact_text, facts[i].source, time_str);
+         strbuf_appendf(&sb, "- [ID:%lld] %s (%s, %s)\n", (long long)facts[i].id,
+                        facts[i].fact_text, facts[i].source, time_str);
          if (with_source && source_budget > 0) {
-            append_source_excerpt(user_id, facts[i].id, result, buf_size, &offset, &source_budget);
+            append_source_excerpt(user_id, facts[i].id, &sb, &source_budget);
          } else if (with_source && source_budget <= 0) {
             elided++;
          }
+         /* See memory_action_search for OOM-bail rationale (embedded M4). */
+         if (strbuf_oom(&sb))
+            break;
       }
-      if (elided > 0 && offset < buf_size - 120) {
-         offset += snprintf(result + offset, buf_size - offset,
-                            "[%d more source(s) elided — call context_expand for full]\n", elided);
+      if (elided > 0) {
+         strbuf_appendf(&sb, "[%d more source(s) elided — call context_expand for full]\n", elided);
       }
    }
 
@@ -818,29 +826,35 @@ static char *memory_action_recent(int user_id, const char *period, bool with_sou
    int summary_count = 0;
    memory_db_summary_list_since(user_id, since, summaries, 10, &summary_count);
 
-   if (summary_count > 0 && offset < buf_size - 200) {
-      if (offset > 0) {
-         offset += snprintf(result + offset, buf_size - offset, "\n");
-      }
-      offset += snprintf(result + offset, buf_size - offset, "RECENT CONVERSATIONS:\n");
-      for (int i = 0; i < summary_count && offset < buf_size - 200; i++) {
+   if (summary_count > 0) {
+      if (strbuf_len(&sb) > 0)
+         strbuf_append(&sb, "\n");
+      strbuf_append(&sb, "RECENT CONVERSATIONS:\n");
+      for (int i = 0; i < summary_count; i++) {
          char time_str[32];
          format_time_ago(summaries[i].created_at, time_str, sizeof(time_str));
-         offset += snprintf(result + offset, buf_size - offset, "- [%s] %s\n  Topics: %s\n",
-                            time_str, summaries[i].summary, summaries[i].topics);
+         if (strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
+                            summaries[i].topics) < 0)
+            break;
+         /* Mirror memory_action_search's OOM-bail pattern (Arch review M4). */
+         if (strbuf_oom(&sb))
+            break;
       }
    }
 
    if (fact_count == 0 && summary_count == 0) {
-      snprintf(result, buf_size, "No memories found in the past %s.", period);
+      strbuf_appendf(&sb, "No memories found in the past %s.", period);
    } else {
-      if (offset < buf_size - 50) {
-         offset += snprintf(result + offset, buf_size - offset,
-                            "\nTotal: %d facts, %d conversations", fact_count, summary_count);
-      }
+      strbuf_appendf(&sb, "\nTotal: %d facts, %d conversations", fact_count, summary_count);
    }
 
-   return result;
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("Memory query failed: response too large or out of memory.");
+   }
+
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Memory query failed: out of memory.");
 }
 
 /* =============================================================================
@@ -942,9 +956,12 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
          }
       }
 
+      /* source_budget from dawn.toml [memory] source_budget_chars; 0 falls
+       * back to MEMORY_SOURCE_BUDGET_CHARS inside the action.  Bench harness
+       * invokes memory_action_search() directly with its own override. */
       return memory_action_search(user_id, keywords[0] ? keywords : NULL, since_ts,
                                   category[0] ? category : NULL, as_of_ts, include_historical,
-                                  with_source);
+                                  with_source, g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "remember") == 0) {
       return memory_action_remember(user_id, value);
    } else if (strcmp(actionName, "forget") == 0) {
@@ -957,7 +974,7 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
             with_source = (strcmp(wsrc, "true") == 0);
          }
       }
-      return memory_action_recent(user_id, value, with_source);
+      return memory_action_recent(user_id, value, with_source, g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "save_contact") == 0) {
       /* value format: "entity_name::field_type::type::value::val::label::lbl" */
       if (!value || !value[0])

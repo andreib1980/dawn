@@ -38,6 +38,7 @@
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 
@@ -45,6 +46,10 @@
  * Constants
  * ============================================================================= */
 
+/* RESULT_BUF_SIZE is the stack buffer used by SHORT, FIXED-FORMAT response
+ * paths only (handle_create result, handle_cancel/dismiss/snooze status,
+ * error strings).  The unbounded handle_list path uses strbuf instead — it
+ * cannot silently truncate when the user has many active events. */
 #define RESULT_BUF_SIZE 2048
 #define MAX_DURATION_MINUTES 43200 /* 30 days */
 #define MAX_SNOOZE_MINUTES 120
@@ -342,12 +347,13 @@ static char *handle_list(struct json_object *details, int user_id) {
       return strdup("No active timers, alarms, or reminders.");
    }
 
-   /* Build response */
-   char result[RESULT_BUF_SIZE];
-   int pos = 0;
-   pos += snprintf(result + pos, sizeof(result) - (size_t)pos, "Active events (%d):\n", count);
+   /* Build response — strbuf so a long event list cannot silently truncate
+    * mid-row the way the prior fixed 2KB stack buffer did. */
+   strbuf_t sb;
+   strbuf_init(&sb, 1024);
+   strbuf_appendf(&sb, "Active events (%d):\n", count);
 
-   for (int i = 0; i < count && pos < (int)sizeof(result) - 100; i++) {
+   for (int i = 0; i < count; i++) {
       sched_event_t *e = &events[i];
       const char *type = sched_event_type_to_str(e->event_type);
 
@@ -358,24 +364,27 @@ static char *handle_list(struct json_object *details, int user_id) {
             remaining = 0;
          int rm = remaining / 60;
          int rs = remaining % 60;
-         pos += snprintf(result + pos, sizeof(result) - (size_t)pos,
-                         "- [%s] %s: %dm %ds remaining\n", type, e->name, rm, rs);
+         if (strbuf_appendf(&sb, "- [%s] %s: %dm %ds remaining\n", type, e->name, rm, rs) < 0)
+            break;
       } else {
          struct tm fire_tm;
          localtime_r(&e->fire_at, &fire_tm);
          char time_str[32];
          strftime(time_str, sizeof(time_str), "%I:%M %p %b %d", &fire_tm);
-         pos += snprintf(result + pos, sizeof(result) - (size_t)pos, "- [%s] %s: %s", type, e->name,
-                         time_str);
-         if (e->recurrence != SCHED_RECUR_ONCE) {
-            pos += snprintf(result + pos, sizeof(result) - (size_t)pos, " (%s)",
-                            sched_recurrence_to_str(e->recurrence));
-         }
-         pos += snprintf(result + pos, sizeof(result) - (size_t)pos, "\n");
+         if (strbuf_appendf(&sb, "- [%s] %s: %s", type, e->name, time_str) < 0)
+            break;
+         if (e->recurrence != SCHED_RECUR_ONCE)
+            strbuf_appendf(&sb, " (%s)", sched_recurrence_to_str(e->recurrence));
+         strbuf_append(&sb, "\n");
       }
    }
 
-   return strdup(result);
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("Error: response buffer exceeded safety cap.");
+   }
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Error: out of memory.");
 }
 
 static char *handle_cancel(struct json_object *details, int user_id) {

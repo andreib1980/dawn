@@ -1280,6 +1280,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(memory, "enabled", json_object_new_boolean(config->memory.enabled));
    json_object_object_add(memory, "context_budget_tokens",
                           json_object_new_int(config->memory.context_budget_tokens));
+   json_object_object_add(memory, "source_budget_chars",
+                          json_object_new_int(config->memory.source_budget_chars));
    json_object_object_add(memory, "extraction_provider",
                           json_object_new_string(config->memory.extraction_provider));
    json_object_object_add(memory, "extraction_model",
@@ -1852,6 +1854,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[memory]\n");
    fprintf(fp, "enabled = %s\n", config->memory.enabled ? "true" : "false");
    fprintf(fp, "context_budget_tokens = %d\n", config->memory.context_budget_tokens);
+   fprintf(fp, "source_budget_chars = %d\n", config->memory.source_budget_chars);
    fprintf(fp, "extraction_provider = \"%s\"\n", config->memory.extraction_provider);
    fprintf(fp, "extraction_model = \"%s\"\n", config->memory.extraction_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);

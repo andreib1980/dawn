@@ -34,6 +34,7 @@
 #include "config/dawn_config.h"
 #include "core/iso8601.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "logging.h"
 #include "tools/calendar_service.h"
 #include "tools/tool_registry.h"
@@ -42,7 +43,6 @@
  * Constants
  * ============================================================================= */
 
-#define RESULT_BUF_SIZE 4096
 #define MAX_EVENTS 20
 
 /* =============================================================================
@@ -96,12 +96,13 @@ static void format_time_speech(const struct tm *t, char *buf, size_t buf_len) {
       snprintf(buf, buf_len, "%d:%02d %s", hour, t->tm_min, ampm);
 }
 
-static int format_occurrence(const calendar_occurrence_t *occ, char *buf, size_t buf_len) {
-   int pos = 0;
-
+/* Append a single occurrence line to the strbuf.  Returns 0 on success or
+ * STRBUF_E_OOM if the buffer cap was reached (caller should bail). */
+static int format_occurrence_sb(const calendar_occurrence_t *occ, strbuf_t *sb) {
+   int rc;
    if (occ->all_day) {
-      pos = snprintf(buf, buf_len, "- %s (all day: %s)%s%s", occ->summary, occ->dtstart_date,
-                     occ->location[0] ? " @ " : "", occ->location);
+      rc = strbuf_appendf(sb, "- %s (all day: %s)%s%s", occ->summary, occ->dtstart_date,
+                          occ->location[0] ? " @ " : "", occ->location);
    } else {
       struct tm start_tm, end_tm;
       localtime_r(&occ->dtstart, &start_tm);
@@ -114,37 +115,47 @@ static int format_occurrence(const calendar_occurrence_t *occ, char *buf, size_t
       char date_str[32];
       strftime(date_str, sizeof(date_str), "%a %b %d", &start_tm);
 
-      /* Check if multi-day */
       if (start_tm.tm_yday != end_tm.tm_yday || start_tm.tm_year != end_tm.tm_year) {
          char date_end_str[32];
          strftime(date_end_str, sizeof(date_end_str), "%a %b %d", &end_tm);
-         pos = snprintf(buf, buf_len, "- %s (%s %s - %s %s)%s%s", occ->summary, date_str, start_str,
-                        date_end_str, end_str, occ->location[0] ? " @ " : "", occ->location);
+         rc = strbuf_appendf(sb, "- %s (%s %s - %s %s)%s%s", occ->summary, date_str, start_str,
+                             date_end_str, end_str, occ->location[0] ? " @ " : "", occ->location);
       } else {
-         pos = snprintf(buf, buf_len, "- %s (%s, %s - %s)%s%s", occ->summary, date_str, start_str,
-                        end_str, occ->location[0] ? " @ " : "", occ->location);
+         rc = strbuf_appendf(sb, "- %s (%s, %s - %s)%s%s", occ->summary, date_str, start_str,
+                             end_str, occ->location[0] ? " @ " : "", occ->location);
       }
    }
+   if (rc < 0)
+      return STRBUF_E_OOM;
 
-   if (occ->event_uid[0] && pos < (int)buf_len)
-      pos += snprintf(buf + pos, buf_len - pos, " [UID: %s]", occ->event_uid);
-
-   return pos;
+   if (occ->event_uid[0])
+      rc = strbuf_appendf(sb, " [UID: %s]", occ->event_uid);
+   return (rc < 0) ? STRBUF_E_OOM : 0;
 }
 
 /* =============================================================================
  * Access Summary Footer (appended to query results when read-only accounts exist)
  * ============================================================================= */
 
-static int append_access_summary(char *buf, int pos, size_t buf_len, int user_id) {
+static void append_access_summary_sb(strbuf_t *sb, int user_id) {
    char writable[512] = { 0 }, ro[512] = { 0 };
    if (calendar_service_get_access_summary(user_id, writable, sizeof(writable), ro, sizeof(ro)) >
        0) {
-      pos += snprintf(buf + pos, buf_len - pos,
-                      "\n\nWritable calendars: %s\nRead-only calendars (no AI edits): %s",
-                      writable[0] ? writable : "(none)", ro);
+      strbuf_appendf(sb, "\n\nWritable calendars: %s\nRead-only calendars (no AI edits): %s",
+                     writable[0] ? writable : "(none)", ro);
    }
-   return pos;
+}
+
+/* Helper: finalize a calendar tool response buffer.  Mirrors the pattern in
+ * memory_callback — return strbuf contents via strbuf_steal, falling back to
+ * a friendly error string on OOM.  Caller must free the returned heap pointer. */
+static char *finalize_calendar_response(strbuf_t *sb) {
+   if (strbuf_oom(sb)) {
+      strbuf_free(sb);
+      return strdup("Error: response buffer exceeded safety cap.");
+   }
+   char *out = strbuf_steal(sb);
+   return out ? out : strdup("Error: out of memory.");
 }
 
 /* =============================================================================
@@ -156,39 +167,36 @@ static char *handle_calendars(int user_id) {
    int acct_count = 0;
    calendar_db_account_list(user_id, accounts, 16, &acct_count);
 
-   char *buf = malloc(RESULT_BUF_SIZE);
-   if (!buf)
-      return strdup("Error: memory allocation failed");
+   if (acct_count <= 0)
+      return strdup("No calendar accounts configured.");
 
-   int pos = 0;
-   if (acct_count <= 0) {
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "No calendar accounts configured.");
-      return buf;
-   }
+   /* Use strbuf so a deeply-nested account/calendar list cannot silently
+    * truncate mid-row the way the prior fixed 4KB buffer did. */
+   strbuf_t sb;
+   strbuf_init(&sb, 2048);
+   strbuf_appendf(&sb, "Calendar accounts (%d):\n", acct_count);
 
-   pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "Calendar accounts (%d):\n", acct_count);
-
-   for (int a = 0; a < acct_count && pos < RESULT_BUF_SIZE - 256; a++) {
+   for (int a = 0; a < acct_count; a++) {
       const char *status = accounts[a].enabled ? "" : " [DISABLED]";
       const char *ro = accounts[a].read_only ? " [READ-ONLY]" : "";
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%s%s%s:\n", accounts[a].name, ro,
-                      status);
+      if (strbuf_appendf(&sb, "\n%s%s%s:\n", accounts[a].name, ro, status) < 0)
+         break;
 
       calendar_calendar_t cals[16];
       int cal_count = 0;
       calendar_db_calendar_list(accounts[a].id, cals, 16, &cal_count);
       if (cal_count <= 0) {
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "  (no calendars synced yet)\n");
+         strbuf_append(&sb, "  (no calendars synced yet)\n");
       } else {
-         for (int c = 0; c < cal_count && pos < RESULT_BUF_SIZE - 128; c++) {
+         for (int c = 0; c < cal_count; c++) {
             const char *active = cals[c].is_active ? "" : " [disabled]";
-            pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "  - %s%s\n", cals[c].display_name,
-                            active);
+            if (strbuf_appendf(&sb, "  - %s%s\n", cals[c].display_name, active) < 0)
+               break;
          }
       }
    }
 
-   return buf;
+   return finalize_calendar_response(&sb);
 }
 
 static char *handle_today(struct json_object *details, int user_id) {
@@ -198,28 +206,28 @@ static char *handle_today(struct json_object *details, int user_id) {
    calendar_occurrence_t events[MAX_EVENTS];
    int count = calendar_service_today(user_id, tz, calendar_name, events, MAX_EVENTS);
 
-   char *buf = malloc(RESULT_BUF_SIZE);
-   if (!buf)
-      return strdup("Error: memory allocation failed");
+   strbuf_t sb;
+   strbuf_init(&sb, 2048);
 
-   int pos = 0;
    if (count <= 0) {
       if (calendar_name)
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "No events scheduled for today on calendar '%s'. "
-                         "Use the 'calendars' action to list available calendars.",
-                         calendar_name);
+         strbuf_appendf(&sb,
+                        "No events scheduled for today on calendar '%s'. "
+                        "Use the 'calendars' action to list available calendars.",
+                        calendar_name);
       else
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "No events scheduled for today.");
+         strbuf_append(&sb, "No events scheduled for today.");
    } else {
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "Today's events (%d):\n", count);
-      for (int i = 0; i < count && pos < RESULT_BUF_SIZE - 256; i++) {
-         pos += format_occurrence(&events[i], buf + pos, RESULT_BUF_SIZE - pos);
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n");
+      strbuf_appendf(&sb, "Today's events (%d):\n", count);
+      for (int i = 0; i < count; i++) {
+         if (format_occurrence_sb(&events[i], &sb) != 0)
+            break;
+         if (strbuf_append(&sb, "\n") < 0)
+            break;
       }
    }
-   pos = append_access_summary(buf, pos, RESULT_BUF_SIZE, user_id);
-   return buf;
+   append_access_summary_sb(&sb, user_id);
+   return finalize_calendar_response(&sb);
 }
 
 static char *handle_range(struct json_object *details, int user_id) {
@@ -247,28 +255,28 @@ static char *handle_range(struct json_object *details, int user_id) {
    calendar_occurrence_t events[MAX_EVENTS];
    int count = calendar_service_range(user_id, start, end, calendar_name, events, MAX_EVENTS);
 
-   char *buf = malloc(RESULT_BUF_SIZE);
-   if (!buf)
-      return strdup("Error: memory allocation failed");
+   strbuf_t sb;
+   strbuf_init(&sb, 2048);
 
-   int pos = 0;
    if (count <= 0) {
       if (calendar_name)
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "No events in the specified range on calendar '%s'. "
-                         "Use the 'calendars' action to list available calendars.",
-                         calendar_name);
+         strbuf_appendf(&sb,
+                        "No events in the specified range on calendar '%s'. "
+                        "Use the 'calendars' action to list available calendars.",
+                        calendar_name);
       else
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "No events in the specified range.");
+         strbuf_append(&sb, "No events in the specified range.");
    } else {
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "Events in range (%d):\n", count);
-      for (int i = 0; i < count && pos < RESULT_BUF_SIZE - 256; i++) {
-         pos += format_occurrence(&events[i], buf + pos, RESULT_BUF_SIZE - pos);
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n");
+      strbuf_appendf(&sb, "Events in range (%d):\n", count);
+      for (int i = 0; i < count; i++) {
+         if (format_occurrence_sb(&events[i], &sb) != 0)
+            break;
+         if (strbuf_append(&sb, "\n") < 0)
+            break;
       }
    }
-   pos = append_access_summary(buf, pos, RESULT_BUF_SIZE, user_id);
-   return buf;
+   append_access_summary_sb(&sb, user_id);
+   return finalize_calendar_response(&sb);
 }
 
 static char *handle_next(struct json_object *details, int user_id) {
@@ -289,15 +297,12 @@ static char *handle_next(struct json_object *details, int user_id) {
       return strdup("No upcoming events found.");
    }
 
-   char *buf = malloc(RESULT_BUF_SIZE);
-   if (!buf)
-      return strdup("Error: memory allocation failed");
-
-   int pos = 0;
-   pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "Next event:\n");
-   pos += format_occurrence(&occ, buf + pos, RESULT_BUF_SIZE - pos);
-   pos = append_access_summary(buf, pos, RESULT_BUF_SIZE, user_id);
-   return buf;
+   strbuf_t sb;
+   strbuf_init(&sb, 1024);
+   strbuf_append(&sb, "Next event:\n");
+   format_occurrence_sb(&occ, &sb);
+   append_access_summary_sb(&sb, user_id);
+   return finalize_calendar_response(&sb);
 }
 
 static char *handle_search(struct json_object *details, int user_id) {
@@ -310,29 +315,28 @@ static char *handle_search(struct json_object *details, int user_id) {
    calendar_occurrence_t events[MAX_EVENTS];
    int count = calendar_service_search(user_id, query, calendar_name, events, 20);
 
-   char *buf = malloc(RESULT_BUF_SIZE);
-   if (!buf)
-      return strdup("Error: memory allocation failed");
+   strbuf_t sb;
+   strbuf_init(&sb, 2048);
 
-   int pos = 0;
    if (count <= 0) {
       if (calendar_name)
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos,
-                         "No events matching '%s' on calendar '%s'. "
-                         "Use the 'calendars' action to list available calendars.",
-                         query, calendar_name);
+         strbuf_appendf(&sb,
+                        "No events matching '%s' on calendar '%s'. "
+                        "Use the 'calendars' action to list available calendars.",
+                        query, calendar_name);
       else
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "No events matching '%s'.", query);
+         strbuf_appendf(&sb, "No events matching '%s'.", query);
    } else {
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "Search results for '%s' (%d):\n", query,
-                      count);
-      for (int i = 0; i < count && pos < RESULT_BUF_SIZE - 256; i++) {
-         pos += format_occurrence(&events[i], buf + pos, RESULT_BUF_SIZE - pos);
-         pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n");
+      strbuf_appendf(&sb, "Search results for '%s' (%d):\n", query, count);
+      for (int i = 0; i < count; i++) {
+         if (format_occurrence_sb(&events[i], &sb) != 0)
+            break;
+         if (strbuf_append(&sb, "\n") < 0)
+            break;
       }
    }
-   pos = append_access_summary(buf, pos, RESULT_BUF_SIZE, user_id);
-   return buf;
+   append_access_summary_sb(&sb, user_id);
+   return finalize_calendar_response(&sb);
 }
 
 static char *handle_add(struct json_object *details, int user_id) {

@@ -1657,15 +1657,16 @@ char *build_user_prompt(int user_id) {
 
    size_t base_len = strlen(base_prompt);
 
-   /* Build memory context if enabled */
-   char memory_ctx[4096] = { 0 };
+   /* Build memory context if enabled.  memory_build_context returns
+    * heap-allocated text bounded by context_budget_tokens × 4 chars; NULL
+    * when there are no memories to surface.  Caller frees after splicing
+    * into the system prompt below. */
+   char *memory_ctx = NULL;
    size_t memory_len = 0;
    if (g_config.memory.enabled) {
-      int ctx_len = memory_build_context(user_id, memory_ctx, sizeof(memory_ctx),
-                                         g_config.memory.context_budget_tokens);
-      if (ctx_len > 0) {
-         memory_len = (size_t)ctx_len;
-      }
+      memory_ctx = memory_build_context(user_id, g_config.memory.context_budget_tokens);
+      if (memory_ctx)
+         memory_len = strlen(memory_ctx);
    }
 
    /* Replace mode: Prepend custom persona with override instruction */
@@ -1705,6 +1706,7 @@ char *build_user_prompt(int user_id) {
       /* Allocate: prefix + base + suffix + memory */
       char *combined = malloc(prefix_len + base_len + suffix_len + memory_len + 1);
       if (!combined) {
+         free(memory_ctx);
          return base_prompt; /* fallback: transfer ownership of base copy */
       }
 
@@ -1719,6 +1721,7 @@ char *build_user_prompt(int user_id) {
       OLOG_INFO("Built REPLACE prompt for user_id=%d (%zu + %zu + %zu + %zu bytes)", user_id,
                 prefix_len, base_len, suffix_len, memory_len);
 
+      free(memory_ctx);
       free(base_prompt);
       return combined;
    }
@@ -1748,6 +1751,7 @@ char *build_user_prompt(int user_id) {
    size_t context_len = strlen(user_context);
    char *combined = malloc(base_len + context_len + memory_len + 1);
    if (!combined) {
+      free(memory_ctx);
       return base_prompt; /* fallback: transfer ownership of base copy */
    }
 
@@ -1761,6 +1765,7 @@ char *build_user_prompt(int user_id) {
    OLOG_INFO("Built APPEND prompt for user_id=%d (%zu + %zu + %zu bytes)", user_id, base_len,
              context_len, memory_len);
 
+   free(memory_ctx);
    free(base_prompt);
    return combined;
 }
