@@ -1845,10 +1845,33 @@ int memory_db_entity_update_embedding(int64_t entity_id,
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-/* Exclusive relations have at-most-one open instance per (subject, relation).
+/* =============================================================================
+ * Contradiction handling — lives in three coordinated locations:
+ *
+ *   (1) HERE: EXCLUSIVE_RELATIONS[] + CONTRADICTORY_PAIRS[] tables (compile-time
+ *       data) and memory_db_relation_supersede() (atomic close + create
+ *       transaction; out_old_fact_id surfaces the linked fact for the caller
+ *       to propagate).
+ *
+ *   (2) src/memory/memory_extraction.c — process_extracted_relation()
+ *       (around the fact_map build / find_fact_for_relation() call site,
+ *       ~line 765 in current tree): receives the old fact_id from (1) and
+ *       calls memory_db_fact_supersede() to mark the linked fact as stale,
+ *       so the structured-relation supersede also retires the natural-
+ *       language fact rendered from it.
+ *
+ * Adding a new exclusive relation or contradictory pair is a (1)-only edit.
+ * Changing the supersede-propagation mechanism is a (1)+(2) edit; if a
+ * fourth piece lands (e.g. inline LLM-based contradiction judgment for
+ * subtle quantity / negation cases — see dawn/docs/TODO.md "LLM-based
+ * contradiction judgment"), this whole cluster should move into a
+ * dedicated memory_contradiction.{c,h} module.
+ *
+ * Exclusive relations have at-most-one open instance per (subject, relation).
  * When extraction stores a new such relation with a different object,
  * memory_db_relation_supersede() auto-closes the prior open row.
- * Non-exclusive relations (likes, knows, has_pet) skip the close branch. */
+ * Non-exclusive relations (likes, knows, has_pet) skip the close branch.
+ * ============================================================================= */
 static const char *EXCLUSIVE_RELATIONS[] = {
    "works_at",      "lives_in",         "married_to", "attends_school",
    "owns_vehicle",  "born_in",          "born_on",    "favorite_color",
