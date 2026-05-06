@@ -35,6 +35,7 @@
 #include "auth/auth_db_internal.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_types.h"
 #include "unity.h"
 
@@ -131,6 +132,26 @@ static const char *DDL =
    "  message_count INTEGER,"
    "  duration_seconds INTEGER,"
    "  consolidated INTEGER DEFAULT 0,"
+   "  source_conversation_id INTEGER DEFAULT NULL,"
+   "  source_msg_id_start    INTEGER DEFAULT NULL,"
+   "  source_msg_id_end      INTEGER DEFAULT NULL,"
+   "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+   "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
+   ");"
+
+   /* Phase B: relations table (subset — entities/links not needed for source tests) */
+   "CREATE TABLE IF NOT EXISTS memory_relations ("
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+   "  user_id INTEGER NOT NULL,"
+   "  subject_entity_id INTEGER NOT NULL DEFAULT 0,"
+   "  relation TEXT NOT NULL,"
+   "  object_entity_id INTEGER DEFAULT 0,"
+   "  object_name TEXT,"
+   "  confidence REAL DEFAULT 1.0,"
+   "  fact_id INTEGER DEFAULT 0,"
+   "  valid_from INTEGER DEFAULT NULL,"
+   "  valid_to INTEGER DEFAULT NULL,"
+   "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
@@ -401,6 +422,237 @@ void test_conversations_have_last_extracted_msg_id_column(void) {
    sqlite3_finalize(stmt);
 }
 
+/* =============================================================================
+ * Phase B: batch source-reader tests for relations / summaries / preferences.
+ *
+ * Each record type gets four assertions:
+ *   - roundtrip: stored provenance comes back through the batch API.
+ *   - NULL provenance: row stored with NULL source columns → out_conv = 0.
+ *   - private-conv filter: row stored pointing at a private conversation →
+ *     out_conv = 0 (filtered in SQL via JOIN on is_private = 0).
+ *   - N=64 chunked succeeds: post-fold-in (HIGH-1/HIGH-2 from Phase B
+ *     architecture review), the public APIs accept any positive N and chunk
+ *     internally in MAX_PROVENANCE_BATCH-sized passes.  64 IDs land in 2
+ *     chunks; non-existent IDs yield out=0.  This test pins the new contract
+ *     and replaces the original "n>cap fails closed" test — fail-closed
+ *     semantics are still enforced at the inner SQL builder, just not at the
+ *     public surface.
+ * ============================================================================= */
+
+/* Helper: insert a memory_relations row with explicit provenance (or NULL). */
+static int64_t insert_relation(int user_id, int64_t conv_id, int64_t start, int64_t end) {
+   sqlite3_stmt *stmt = NULL;
+   const char *sql =
+       (conv_id > 0)
+           ? "INSERT INTO memory_relations (user_id, subject_entity_id, relation, object_name, "
+             "source_conversation_id, source_msg_id_start, source_msg_id_end) "
+             "VALUES (?, 1, 'is_a', 'literal', ?, ?, ?)"
+           : "INSERT INTO memory_relations (user_id, subject_entity_id, relation, object_name) "
+             "VALUES (?, 1, 'is_a', 'literal')";
+   sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, user_id);
+   if (conv_id > 0) {
+      sqlite3_bind_int64(stmt, 2, conv_id);
+      sqlite3_bind_int64(stmt, 3, start);
+      sqlite3_bind_int64(stmt, 4, end);
+   }
+   sqlite3_step(stmt);
+   int64_t id = sqlite3_last_insert_rowid(s_db.db);
+   sqlite3_finalize(stmt);
+   return id;
+}
+
+/* ------------------------------ relations ------------------------------ */
+
+void test_relations_get_sources_roundtrip(void) {
+   int64_t rid = insert_relation(1, 10, 100, 101);
+   int64_t conv[1] = { 0 }, start[1] = { 0 }, end[1] = { 0 };
+   int rc = memory_db_relations_get_sources(1, &rid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[0]);
+   TEST_ASSERT_EQUAL(100, start[0]);
+   TEST_ASSERT_EQUAL(101, end[0]);
+}
+
+void test_relations_get_sources_null_prov_returns_zero(void) {
+   int64_t rid = insert_relation(1, 0, 0, 0);
+   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
+   int rc = memory_db_relations_get_sources(1, &rid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   /* No provenance recorded — output should be zeroed by the API. */
+   TEST_ASSERT_EQUAL(0, conv[0]);
+   TEST_ASSERT_EQUAL(0, start[0]);
+   TEST_ASSERT_EQUAL(0, end[0]);
+}
+
+void test_relations_get_sources_private_conv_filter(void) {
+   int64_t rid = insert_relation(1, 20, 200, 200); /* conv 20 is is_private=1 */
+   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
+   int rc = memory_db_relations_get_sources(1, &rid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   /* Privacy JOIN should suppress the row → output zeroed. */
+   TEST_ASSERT_EQUAL(0, conv[0]);
+}
+
+void test_relations_get_sources_n_chunked_succeeds(void) {
+   /* Insert one relation with provenance; query with N=64 (2× the cap).
+    * Public API chunks internally — IDs without a row return out=0; the
+    * known ID is found regardless of which chunk it falls into. */
+   int64_t rid = insert_relation(1, 10, 100, 101);
+   int64_t ids[64];
+   int64_t conv[64] = { 0 }, start[64] = { 0 }, end[64] = { 0 };
+   for (int i = 0; i < 64; i++)
+      ids[i] = (i == 50) ? rid : (i + 1000); /* place the real ID in chunk 2 */
+   int rc = memory_db_relations_get_sources(1, ids, 64, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[50]);
+   TEST_ASSERT_EQUAL(100, start[50]);
+   TEST_ASSERT_EQUAL(101, end[50]);
+   /* Spot-check that other slots are 0. */
+   TEST_ASSERT_EQUAL(0, conv[0]);
+   TEST_ASSERT_EQUAL(0, conv[63]);
+}
+
+/* ------------------------------ summaries ------------------------------ */
+
+static int64_t insert_summary_with_prov(int user_id, int64_t conv_id, int64_t start, int64_t end) {
+   memory_provenance_t prov = { .conv_id = conv_id, .msg_id_start = start, .msg_id_end = end };
+   int64_t id = 0;
+   memory_db_summary_create(user_id, "sess", "summary text", "topics", "neutral", 1, 1,
+                            (conv_id > 0) ? &prov : NULL, &id);
+   return id;
+}
+
+void test_summaries_get_sources_roundtrip(void) {
+   int64_t sid = insert_summary_with_prov(1, 10, 100, 101);
+   TEST_ASSERT_GREATER_THAN(0, sid);
+   int64_t conv[1] = { 0 }, start[1] = { 0 }, end[1] = { 0 };
+   int rc = memory_db_summaries_get_sources(1, &sid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[0]);
+   TEST_ASSERT_EQUAL(100, start[0]);
+   TEST_ASSERT_EQUAL(101, end[0]);
+}
+
+void test_summaries_get_sources_null_prov_returns_zero(void) {
+   int64_t sid = insert_summary_with_prov(1, 0, 0, 0);
+   TEST_ASSERT_GREATER_THAN(0, sid);
+   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
+   int rc = memory_db_summaries_get_sources(1, &sid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(0, conv[0]);
+}
+
+void test_summaries_get_sources_private_conv_filter(void) {
+   int64_t sid = insert_summary_with_prov(1, 20, 200, 200); /* conv 20 private */
+   TEST_ASSERT_GREATER_THAN(0, sid);
+   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
+   int rc = memory_db_summaries_get_sources(1, &sid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(0, conv[0]);
+}
+
+void test_summaries_get_sources_n_chunked_succeeds(void) {
+   int64_t sid = insert_summary_with_prov(1, 10, 100, 101);
+   TEST_ASSERT_GREATER_THAN(0, sid);
+   int64_t ids[64];
+   int64_t conv[64] = { 0 }, start[64] = { 0 }, end[64] = { 0 };
+   for (int i = 0; i < 64; i++)
+      ids[i] = (i == 50) ? sid : (i + 1000);
+   int rc = memory_db_summaries_get_sources(1, ids, 64, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[50]);
+   TEST_ASSERT_EQUAL(100, start[50]);
+   TEST_ASSERT_EQUAL(101, end[50]);
+}
+
+/* ------------------------------ preferences ------------------------------ */
+
+/* memory_db_pref_upsert returns MEMORY_DB_SUCCESS but does not surface the row
+ * id; the test queries it back directly. */
+static int64_t pref_id_for_category(int user_id, const char *cat) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT id FROM memory_preferences WHERE user_id=? AND category=?",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, cat, -1, SQLITE_TRANSIENT);
+   int64_t id = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      id = sqlite3_column_int64(stmt, 0);
+   sqlite3_finalize(stmt);
+   return id;
+}
+
+void test_prefs_get_sources_roundtrip(void) {
+   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
+   memory_db_pref_upsert(1, "theme", "dark", 0.8f, "inferred", &prov);
+   int64_t pid = pref_id_for_category(1, "theme");
+   TEST_ASSERT_GREATER_THAN(0, pid);
+   int64_t conv[1] = { 0 }, start[1] = { 0 }, end[1] = { 0 };
+   int rc = memory_db_prefs_get_sources(1, &pid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[0]);
+   TEST_ASSERT_EQUAL(100, start[0]);
+   TEST_ASSERT_EQUAL(101, end[0]);
+}
+
+void test_prefs_get_sources_null_prov_returns_zero(void) {
+   memory_db_pref_upsert(1, "units", "metric", 0.8f, "inferred", NULL);
+   int64_t pid = pref_id_for_category(1, "units");
+   TEST_ASSERT_GREATER_THAN(0, pid);
+   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
+   int rc = memory_db_prefs_get_sources(1, &pid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(0, conv[0]);
+}
+
+void test_prefs_get_sources_private_conv_filter(void) {
+   memory_provenance_t prov = { .conv_id = 20, .msg_id_start = 200, .msg_id_end = 200 };
+   memory_db_pref_upsert(1, "secret_pref", "x", 0.8f, "inferred", &prov);
+   int64_t pid = pref_id_for_category(1, "secret_pref");
+   TEST_ASSERT_GREATER_THAN(0, pid);
+   int64_t conv[1] = { 99 }, start[1] = { 99 }, end[1] = { 99 };
+   int rc = memory_db_prefs_get_sources(1, &pid, 1, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(0, conv[0]);
+}
+
+void test_prefs_get_sources_n_chunked_succeeds(void) {
+   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
+   memory_db_pref_upsert(1, "chunked_test", "x", 0.8f, "inferred", &prov);
+   int64_t pid = pref_id_for_category(1, "chunked_test");
+   TEST_ASSERT_GREATER_THAN(0, pid);
+   int64_t ids[64];
+   int64_t conv[64] = { 0 }, start[64] = { 0 }, end[64] = { 0 };
+   for (int i = 0; i < 64; i++)
+      ids[i] = (i == 50) ? pid : (i + 1000);
+   int rc = memory_db_prefs_get_sources(1, ids, 64, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[50]);
+   TEST_ASSERT_EQUAL(100, start[50]);
+   TEST_ASSERT_EQUAL(101, end[50]);
+}
+
+/* Pin the existing facts batch reader against the same chunked-success
+ * contract.  (Pre-Phase-B this silently truncated past ~32 IDs; B.1
+ * introduced fail-closed; this fold-in re-expanded the public surface to any N
+ * via internal chunking.) */
+void test_facts_get_sources_n_chunked_succeeds(void) {
+   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 101 };
+   int64_t fid = 0;
+   memory_db_fact_create(1, "chunked fact", 0.9f, "inferred", "general", &prov, &fid);
+   TEST_ASSERT_GREATER_THAN(0, fid);
+   int64_t ids[64];
+   int64_t conv[64] = { 0 }, start[64] = { 0 }, end[64] = { 0 };
+   for (int i = 0; i < 64; i++)
+      ids[i] = (i == 50) ? fid : (i + 1000);
+   int rc = memory_db_facts_get_sources(1, ids, 64, conv, start, end);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(10, conv[50]);
+   TEST_ASSERT_EQUAL(100, start[50]);
+   TEST_ASSERT_EQUAL(101, end[50]);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_fact_create_with_source_roundtrip);
@@ -415,5 +667,22 @@ int main(void) {
    RUN_TEST(test_pref_upsert_null_provenance_sql_null);
    RUN_TEST(test_get_source_nonexistent_fact);
    RUN_TEST(test_conversations_have_last_extracted_msg_id_column);
+
+   /* Phase B batch readers (12 new tests) */
+   RUN_TEST(test_relations_get_sources_roundtrip);
+   RUN_TEST(test_relations_get_sources_null_prov_returns_zero);
+   RUN_TEST(test_relations_get_sources_private_conv_filter);
+   RUN_TEST(test_relations_get_sources_n_chunked_succeeds);
+   RUN_TEST(test_summaries_get_sources_roundtrip);
+   RUN_TEST(test_summaries_get_sources_null_prov_returns_zero);
+   RUN_TEST(test_summaries_get_sources_private_conv_filter);
+   RUN_TEST(test_summaries_get_sources_n_chunked_succeeds);
+   RUN_TEST(test_prefs_get_sources_roundtrip);
+   RUN_TEST(test_prefs_get_sources_null_prov_returns_zero);
+   RUN_TEST(test_prefs_get_sources_private_conv_filter);
+   RUN_TEST(test_prefs_get_sources_n_chunked_succeeds);
+
+   /* Pin the facts batch reader against the same chunked-success contract. */
+   RUN_TEST(test_facts_get_sources_n_chunked_succeeds);
    return UNITY_END();
 }

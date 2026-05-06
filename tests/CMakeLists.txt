@@ -283,8 +283,15 @@ dawn_add_unit_test(test_strbuf
 dawn_add_unit_test(test_memory_provenance
    SOURCES test_memory_provenance.c test_memory_provenance_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
    LIBS    dawn_common unity sqlite3 pthread m
+   LABEL   ci)
+
+dawn_add_unit_test(test_memory_source_dedup
+   SOURCES test_memory_source_dedup.c
+           ${SRC_ROOT}/src/memory/memory_source_dedup.c
+   LIBS    unity
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_similarity
@@ -475,6 +482,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_callback.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_source_dedup.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_filter.c

@@ -1711,6 +1711,7 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                                   int user_id,
                                   int64_t start_id,
                                   int64_t end_id,
+                                  bool include_private,
                                   message_callback_t callback,
                                   void *ctx) {
    if (conv_id <= 0 || !callback || start_id <= 0 || end_id <= 0)
@@ -1729,11 +1730,20 @@ int conv_db_get_messages_by_range(int64_t conv_id,
       return AUTH_DB_FORBIDDEN;
    }
 
-   const char *sql = "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                     "FROM messages m "
-                     "INNER JOIN conversations c ON m.conversation_id = c.id "
-                     "WHERE m.conversation_id = ? AND c.user_id = ? "
-                     "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC";
+   /* Defense-in-depth: when `include_private = false` (the memory/provenance
+    * default), suppress rows from private conversations in SQL itself.  Even
+    * if an upstream caller fails to filter, private content cannot leak. */
+   const char *sql = include_private
+                         ? "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                           "FROM messages m "
+                           "INNER JOIN conversations c ON m.conversation_id = c.id "
+                           "WHERE m.conversation_id = ? AND c.user_id = ? "
+                           "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC"
+                         : "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                           "FROM messages m "
+                           "INNER JOIN conversations c ON m.conversation_id = c.id "
+                           "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
+                           "AND m.id BETWEEN ? AND ? ORDER BY m.id ASC";
 
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);

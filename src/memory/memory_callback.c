@@ -41,7 +41,10 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+/* SOURCE_DEDUP_CAP / source_dedup_set_t / source_dedup_{seen,add} live in
+ * memory_callback_internal.h so the unit tests can exercise them directly. */
 #include "memory/memory_filter.h"
 #include "memory/memory_similarity.h"
 #include "memory/memory_types.h"
@@ -67,10 +70,17 @@
 #define MEMORY_SOURCE_BUDGET_MAX (32 * 1024)
 
 /* =============================================================================
- * Helper: Append verbatim source excerpt for a single fact (with_source=true)
+ * Helper: Append verbatim source excerpt for a (conv_id, msg-range) tuple
+ * (with_source=true).
  *
  * Appends "[source: conv=N msgs=X-Y]\n<role>: <content>\n..." to buf.
- * Respects the shared budget; returns chars appended (0 if skipped/budget gone).
+ * Respects the shared budget; returns 1 if anything rendered, 0 otherwise.
+ *
+ * Dedup: when a non-NULL source_dedup_set_t is passed, repeated ranges emit a
+ * single back-ref line ("[source: same as above ...]") instead of refetching
+ * the message body.  Triples are added to the set ONLY after a successful
+ * fetch through the privacy-filtered path — so a private upstream cannot
+ * leak its existence as a "same as above" marker on a later public record.
  * ============================================================================= */
 
 struct source_msg_ctx {
@@ -78,9 +88,12 @@ struct source_msg_ctx {
    int *budget;
 };
 
+/* source_dedup_seen / source_dedup_add live in memory_source_dedup.c so unit
+ * tests can link them without the full memory_callback dependency cone. */
+
 static int source_msg_callback(const conversation_message_t *msg, void *ctx_ptr) {
    struct source_msg_ctx *ctx = (struct source_msg_ctx *)ctx_ptr;
-   if (!msg || !msg->content || *ctx->budget <= 0)
+   if (!ctx || !ctx->sb || !ctx->budget || !msg || !msg->content || *ctx->budget <= 0)
       return 1; /* stop */
    /* Skip system/tool messages in verbatim excerpt */
    if (strcmp(msg->role, "user") != 0 && strcmp(msg->role, "assistant") != 0)
@@ -98,17 +111,36 @@ static int source_msg_callback(const conversation_message_t *msg, void *ctx_ptr)
    return 0;
 }
 
-static int append_source_excerpt(int user_id,
-                                 int64_t fact_id,
-                                 strbuf_t *sb,
-                                 int *budget_remaining) {
+/* Core renderer — caller passes a (conv_id, range) triple already filtered
+ * upstream (typically from a *_get_sources batch API which excludes private
+ * conversations in SQL).  Caller is responsible for passing conv_id > 0;
+ * conv_id = 0 means "no provenance" and we silently skip.
+ *
+ * `seen` may be NULL to disable dedup. */
+static int append_source_excerpt_from_range(int user_id,
+                                            int64_t conv_id,
+                                            int64_t start_id,
+                                            int64_t end_id,
+                                            strbuf_t *sb,
+                                            int *budget_remaining,
+                                            source_dedup_set_t *seen) {
+   if (!sb || !budget_remaining)
+      return 0;
    if (*budget_remaining <= 0)
       return 0;
+   if (conv_id <= 0)
+      return 0;
 
-   int64_t conv_id = 0, start_id = 0, end_id = 0;
-   int rc = memory_db_fact_get_source(fact_id, user_id, &conv_id, &start_id, &end_id);
-   if (rc != MEMORY_DB_SUCCESS)
-      return 0; /* no provenance or private */
+   /* Dedup: emit a one-line back-ref instead of refetching identical messages.
+    * `seen` is populated only with post-batch-filter triples (see Sec M1 in
+    * PROVENANCE.md) so this path cannot leak existence of a private upstream. */
+   if (source_dedup_seen(seen, conv_id, start_id, end_id)) {
+      int hdr = strbuf_appendf(sb, "[source: same as above (conv=%lld msgs=%lld-%lld)]\n",
+                               (long long)conv_id, (long long)start_id, (long long)end_id);
+      if (hdr > 0)
+         *budget_remaining -= hdr;
+      return 1;
+   }
 
    /* Header */
    int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]\n", (long long)conv_id,
@@ -119,10 +151,19 @@ static int append_source_excerpt(int user_id,
    /* Verbatim messages — cap range at 500 messages per spec */
    int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
    struct source_msg_ctx msg_ctx = { sb, budget_remaining };
-   conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, source_msg_callback,
-                                 &msg_ctx);
+   conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, /*include_private=*/false,
+                                 source_msg_callback, &msg_ctx);
+
+   /* Mark range as seen — only after a successful (privacy-filtered) fetch. */
+   source_dedup_add(seen, conv_id, start_id, end_id);
    return 1;
 }
+
+/* (Phase B fold-in removed the single-fact `append_source_excerpt` wrapper —
+ * all production paths batch-fetch sources via the `_get_sources` APIs and
+ * call `append_source_excerpt_from_range` directly.  The single-record
+ * `memory_db_fact_get_source` is still used by the WebUI memory panel
+ * endpoint in webui_memory.c, which doesn't render the excerpt itself.) */
 
 /* =============================================================================
  * Helper: Get user ID from current session
@@ -306,7 +347,10 @@ static void append_graph_context(int user_id,
                                  const char *keywords,
                                  int64_t as_of_ts,
                                  bool include_historical,
-                                 strbuf_t *sb) {
+                                 strbuf_t *sb,
+                                 bool with_source,
+                                 int *source_budget,
+                                 source_dedup_set_t *seen) {
    /* Try semantic entity search first */
    int64_t entity_ids[5];
    char entity_names[5][MEMORY_ENTITY_NAME_MAX];
@@ -360,6 +404,11 @@ static void append_graph_context(int user_id,
    int show_count = entity_count > 3 ? 3 : entity_count;
    bool header_written = false;
 
+   /* Hoisted out of the entity loop so we don't pay 3× zero-init cost per
+    * call.  reset to zeros only when we actually batch-fetch (embedded MED). */
+   int64_t out_conv[8], out_start[8], out_end[8];
+   int64_t rel_ids[8];
+
    for (int i = 0; i < show_count; i++) {
       /* Pre-fetch relations to check if entity has any.  When include_historical
        * is true, return all relations regardless of validity.  Otherwise apply
@@ -392,8 +441,30 @@ static void append_graph_context(int user_id,
 
       strbuf_appendf(sb, "- %s (%s):\n", entity_names[i], entity_types[i]);
 
+      /* Batch-fetch source ranges for this entity's outgoing relations so we
+       * can render verbatim excerpts inline.  Caller decides whether to render
+       * via with_source / *source_budget; we still skip the DB hit when
+       * source rendering is disabled. */
+      bool render_rel_source = with_source && source_budget && *source_budget > 0;
+      if (render_rel_source && rel_count > 0) {
+         /* Zero only the slots we'll consult for this entity. */
+         for (int r = 0; r < rel_count; r++) {
+            out_conv[r] = 0;
+            out_start[r] = 0;
+            out_end[r] = 0;
+            rel_ids[r] = rels[r].id;
+         }
+         memory_db_relations_get_sources(user_id, rel_ids, rel_count, out_conv, out_start, out_end);
+      }
+
       for (int r = 0; r < rel_count; r++) {
          strbuf_appendf(sb, "  %s: %s\n", rels[r].relation, rels[r].object_name);
+         if (render_rel_source && out_conv[r] > 0 && *source_budget > 0) {
+            append_source_excerpt_from_range(user_id, out_conv[r], out_start[r], out_end[r], sb,
+                                             source_budget, seen);
+            if (strbuf_oom(sb))
+               return;
+         }
       }
 
       for (int r = 0; r < in_count; r++) {
@@ -503,19 +574,39 @@ char *memory_action_search(int user_id,
       }
    }
 
+   /* source_budget==0 from caller means "use default"; else honor caller's value
+    * (bench harness uses this to sweep budget values).  Cap at
+    * MEMORY_SOURCE_BUDGET_MAX so a misconfigured caller cannot inject an
+    * arbitrary amount of verbatim source text — defense-in-depth.  The
+    * bench is the only legitimate caller passing > 3072 today; if a
+    * future LLM-tool exposes the param to model output, the clamp here
+    * is the backstop. */
+   if (source_budget <= 0)
+      source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+   else if (source_budget > MEMORY_SOURCE_BUDGET_MAX)
+      source_budget = MEMORY_SOURCE_BUDGET_MAX;
+
+   /* Source-fetch dedup set spans the whole call: same (conv, range) cited by
+    * a fact + a summary + a relation emits "same as above" after the first
+    * verbatim. */
+   source_dedup_set_t seen = { 0 };
+
    if (fact_count > 0) {
       strbuf_appendf(&sb, "FACTS (%d):\n", fact_count);
-      /* source_budget==0 from caller means "use default"; else honor caller's value
-       * (bench harness uses this to sweep budget values).  Cap at
-       * MEMORY_SOURCE_BUDGET_MAX so a misconfigured caller cannot inject an
-       * arbitrary amount of verbatim source text — defense-in-depth.  The
-       * bench is the only legitimate caller passing > 3072 today; if a
-       * future LLM-tool exposes the param to model output, the clamp here
-       * is the backstop. */
-      if (source_budget <= 0)
-         source_budget = MEMORY_SOURCE_BUDGET_CHARS;
-      else if (source_budget > MEMORY_SOURCE_BUDGET_MAX)
-         source_budget = MEMORY_SOURCE_BUDGET_MAX;
+
+      /* Batch-fetch fact provenance up front — one DB round-trip instead of
+       * N × _fact_get_source calls.  fact_conv[i] = 0 for facts with no
+       * provenance recorded or whose source is in a private conversation
+       * (privacy filtered in SQL). */
+      int64_t fact_conv[10] = { 0 }, fact_start[10] = { 0 }, fact_end[10] = { 0 };
+      if (with_source) {
+         int64_t fact_ids[10];
+         for (int i = 0; i < fact_count; i++)
+            fact_ids[i] = facts[i].id;
+         memory_db_facts_get_sources(user_id, fact_ids, fact_count, fact_conv, fact_start,
+                                     fact_end);
+      }
+
       int elided = 0;
       for (int i = 0; i < fact_count; i++) {
          char time_str[32];
@@ -523,8 +614,9 @@ char *memory_action_search(int user_id,
          strbuf_appendf(&sb, "- [ID:%lld] %s (confidence: %.0f%%, %s)\n", (long long)facts[i].id,
                         facts[i].fact_text, facts[i].confidence * 100, time_str);
 
-         if (with_source && source_budget > 0) {
-            append_source_excerpt(user_id, facts[i].id, &sb, &source_budget);
+         if (with_source && source_budget > 0 && fact_conv[i] > 0) {
+            append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i], &sb,
+                                             &source_budget, &seen);
          } else if (with_source && source_budget <= 0) {
             elided++;
          }
@@ -533,8 +625,8 @@ char *memory_action_search(int user_id,
          memory_db_fact_update_access(facts[i].id, user_id);
 
          /* Bail early if buffer max_cap was hit during source-excerpt
-          * rendering.  Otherwise we'd burn N-1 wasted SQLite round trips
-          * on no-op append_source_excerpt calls (embedded-review M4). */
+          * rendering.  Otherwise we'd burn N-1 wasted iterations on no-op
+          * append_source_excerpt_from_range calls (embedded-review M4). */
          if (strbuf_oom(&sb))
             break;
       }
@@ -552,9 +644,25 @@ char *memory_action_search(int user_id,
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
       strbuf_append(&sb, "PREFERENCES:\n");
+
+      int64_t pref_conv[10] = { 0 }, pref_start[10] = { 0 }, pref_end[10] = { 0 };
+      if (with_source) {
+         int64_t pref_ids[10];
+         for (int i = 0; i < pref_count; i++)
+            pref_ids[i] = prefs[i].id;
+         memory_db_prefs_get_sources(user_id, pref_ids, pref_count, pref_conv, pref_start,
+                                     pref_end);
+      }
+
       for (int i = 0; i < pref_count; i++) {
          strbuf_appendf(&sb, "- %s: %s (reinforced %d times)\n", prefs[i].category, prefs[i].value,
                         prefs[i].reinforcement_count);
+         if (with_source && source_budget > 0 && pref_conv[i] > 0) {
+            append_source_excerpt_from_range(user_id, pref_conv[i], pref_start[i], pref_end[i], &sb,
+                                             &source_budget, &seen);
+            if (strbuf_oom(&sb))
+               break;
+         }
       }
    }
 
@@ -601,16 +709,33 @@ char *memory_action_search(int user_id,
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
       strbuf_appendf(&sb, "CONVERSATION SUMMARIES (%d):\n", summary_count);
+
+      int64_t sum_conv[5] = { 0 }, sum_start[5] = { 0 }, sum_end[5] = { 0 };
+      if (with_source) {
+         int64_t sum_ids[5];
+         for (int i = 0; i < summary_count; i++)
+            sum_ids[i] = summaries[i].id;
+         memory_db_summaries_get_sources(user_id, sum_ids, summary_count, sum_conv, sum_start,
+                                         sum_end);
+      }
+
       for (int i = 0; i < summary_count; i++) {
          char time_str[32];
          format_time_ago(summaries[i].created_at, time_str, sizeof(time_str));
          strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
                         summaries[i].topics);
+         if (with_source && source_budget > 0 && sum_conv[i] > 0) {
+            append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i], &sb,
+                                             &source_budget, &seen);
+            if (strbuf_oom(&sb))
+               break;
+         }
       }
    }
 
-   /* Append entity graph context */
-   append_graph_context(user_id, keywords, as_of_ts, include_historical, &sb);
+   /* Append entity graph context (with relation source-rendering when enabled) */
+   append_graph_context(user_id, keywords, as_of_ts, include_historical, &sb, with_source,
+                        &source_budget, &seen);
 
    /* Empty result: surface a friendly fallback (must not be NULL — callers
     * expect a heap-allocated string). */
@@ -794,21 +919,39 @@ char *memory_action_recent(int user_id, const char *period, bool with_source, in
    int fact_count = 0;
    memory_db_fact_list_since(user_id, since, facts, 20, &fact_count);
 
+   /* See memory_action_search for source_budget clamp rationale. */
+   if (source_budget <= 0)
+      source_budget = MEMORY_SOURCE_BUDGET_CHARS;
+   else if (source_budget > MEMORY_SOURCE_BUDGET_MAX)
+      source_budget = MEMORY_SOURCE_BUDGET_MAX;
+
+   /* Dedup spans facts + summaries: same range cited by a fact and a summary
+    * emits "same as above" after the first verbatim. */
+   source_dedup_set_t seen = { 0 };
+
    if (fact_count > 0) {
       strbuf_append(&sb, "RECENT FACTS:\n");
-      /* See memory_action_search for source_budget clamp rationale. */
-      if (source_budget <= 0)
-         source_budget = MEMORY_SOURCE_BUDGET_CHARS;
-      else if (source_budget > MEMORY_SOURCE_BUDGET_MAX)
-         source_budget = MEMORY_SOURCE_BUDGET_MAX;
+
+      /* Batch-fetch fact provenance — caps batch at MAX_PROVENANCE_BATCH (32),
+       * which is above this loop's hard cap (20).  fact_count is always ≤20. */
+      int64_t fact_conv[20] = { 0 }, fact_start[20] = { 0 }, fact_end[20] = { 0 };
+      if (with_source) {
+         int64_t fact_ids[20];
+         for (int i = 0; i < fact_count; i++)
+            fact_ids[i] = facts[i].id;
+         memory_db_facts_get_sources(user_id, fact_ids, fact_count, fact_conv, fact_start,
+                                     fact_end);
+      }
+
       int elided = 0;
       for (int i = 0; i < fact_count; i++) {
          char time_str[32];
          format_time_ago(facts[i].created_at, time_str, sizeof(time_str));
          strbuf_appendf(&sb, "- [ID:%lld] %s (%s, %s)\n", (long long)facts[i].id,
                         facts[i].fact_text, facts[i].source, time_str);
-         if (with_source && source_budget > 0) {
-            append_source_excerpt(user_id, facts[i].id, &sb, &source_budget);
+         if (with_source && source_budget > 0 && fact_conv[i] > 0) {
+            append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i], &sb,
+                                             &source_budget, &seen);
          } else if (with_source && source_budget <= 0) {
             elided++;
          }
@@ -830,12 +973,26 @@ char *memory_action_recent(int user_id, const char *period, bool with_source, in
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
       strbuf_append(&sb, "RECENT CONVERSATIONS:\n");
+
+      int64_t sum_conv[10] = { 0 }, sum_start[10] = { 0 }, sum_end[10] = { 0 };
+      if (with_source) {
+         int64_t sum_ids[10];
+         for (int i = 0; i < summary_count; i++)
+            sum_ids[i] = summaries[i].id;
+         memory_db_summaries_get_sources(user_id, sum_ids, summary_count, sum_conv, sum_start,
+                                         sum_end);
+      }
+
       for (int i = 0; i < summary_count; i++) {
          char time_str[32];
          format_time_ago(summaries[i].created_at, time_str, sizeof(time_str));
          if (strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
                             summaries[i].topics) < 0)
             break;
+         if (with_source && source_budget > 0 && sum_conv[i] > 0) {
+            append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i], &sb,
+                                             &source_budget, &seen);
+         }
          /* Mirror memory_action_search's OOM-bail pattern (Arch review M4). */
          if (strbuf_oom(&sb))
             break;

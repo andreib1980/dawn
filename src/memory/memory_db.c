@@ -1339,66 +1339,7 @@ int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-int memory_db_facts_get_sources(int user_id,
-                                const int64_t *fact_ids,
-                                int n,
-                                int64_t *out_conv_ids,
-                                int64_t *out_starts,
-                                int64_t *out_ends) {
-   if (!fact_ids || !out_conv_ids || !out_starts || !out_ends || n <= 0)
-      return MEMORY_DB_FAILURE;
-
-   for (int i = 0; i < n; i++) {
-      out_conv_ids[i] = 0;
-      out_starts[i] = 0;
-      out_ends[i] = 0;
-   }
-
-   /* Build SQL with fact IDs embedded as literals.  IDs are int64 values from the
-    * DB's own AUTOINCREMENT column — no injection risk.  Privacy is filtered in SQL
-    * via JOIN on conversations.is_private, so no per-row privacy call is needed. */
-   char sql[1024];
-   int off = snprintf(sql, sizeof(sql),
-                      "SELECT f.id, f.source_conversation_id, "
-                      "f.source_msg_id_start, f.source_msg_id_end "
-                      "FROM memory_facts f "
-                      "JOIN conversations c ON f.source_conversation_id = c.id "
-                      "WHERE f.user_id = ? AND c.is_private = 0 "
-                      "AND f.source_conversation_id IS NOT NULL "
-                      "AND f.id IN (%lld",
-                      (long long)fact_ids[0]);
-   for (int i = 1; i < n && off < (int)sizeof(sql) - 4; i++) {
-      off += snprintf(sql + off, sizeof(sql) - (size_t)off, ",%lld", (long long)fact_ids[i]);
-   }
-   if (off < (int)sizeof(sql) - 2) {
-      sql[off++] = ')';
-      sql[off] = '\0';
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-
-   while (sqlite3_step(stmt) == SQLITE_ROW) {
-      int64_t fid = sqlite3_column_int64(stmt, 0);
-      for (int i = 0; i < n; i++) {
-         if (fact_ids[i] == fid) {
-            out_conv_ids[i] = sqlite3_column_int64(stmt, 1);
-            out_starts[i] = sqlite3_column_int64(stmt, 2);
-            out_ends[i] = sqlite3_column_int64(stmt, 3);
-            break;
-         }
-      }
-   }
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
-   return MEMORY_DB_SUCCESS;
-}
+/* memory_db_facts_get_sources moved to memory_db_provenance.c (Phase B). */
 
 int memory_db_get_last_extracted_msg_id(int64_t conversation_id, int64_t *msg_id_out) {
    if (!msg_id_out)
@@ -1424,71 +1365,7 @@ int memory_db_get_last_extracted_msg_id(int64_t conversation_id, int64_t *msg_id
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_get_source(int64_t fact_id,
-                              int user_id,
-                              int64_t *conv_id_out,
-                              int64_t *start_out,
-                              int64_t *end_out) {
-   if (!conv_id_out || !start_out || !end_out)
-      return MEMORY_DB_FAILURE;
-   *conv_id_out = 0;
-   *start_out = 0;
-   *end_out = 0;
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT user_id, source_conversation_id, "
-                               "       source_msg_id_start, source_msg_id_end "
-                               "FROM memory_facts WHERE id = ?",
-                               -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int64(stmt, 1, fact_id);
-   rc = sqlite3_step(stmt);
-
-   if (rc != SQLITE_ROW) {
-      sqlite3_finalize(stmt);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_NOT_FOUND;
-   }
-
-   int owner = sqlite3_column_int(stmt, 0);
-   int col1_type = sqlite3_column_type(stmt, 1);
-   int64_t conv_id = (col1_type != SQLITE_NULL) ? sqlite3_column_int64(stmt, 1) : 0;
-   int64_t msg_start = (sqlite3_column_type(stmt, 2) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 2)
-                                                                     : 0;
-   int64_t msg_end = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3)
-                                                                   : 0;
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
-
-   /* Ownership check */
-   if (owner != user_id)
-      return MEMORY_DB_NOT_FOUND;
-
-   /* No provenance recorded */
-   if (col1_type == SQLITE_NULL || conv_id <= 0)
-      return MEMORY_DB_NOT_FOUND;
-
-   /* Privacy check: auth_db mutex is NOT re-entrant, so we must release it before
-    * calling conv_db_is_private() which acquires the same mutex.  The race window
-    * between the unlock above and this re-acquire is benign: the ownership check
-    * already passed using the stored user_id column, and a concurrent privacy flip
-    * would affect at most one stale read — acceptable per the design doc. */
-   bool is_private = false;
-   conv_db_is_private(conv_id, user_id, &is_private);
-   if (is_private)
-      return MEMORY_DB_NOT_FOUND;
-
-   *conv_id_out = conv_id;
-   *start_out = msg_start;
-   *end_out = msg_end;
-   return MEMORY_DB_SUCCESS;
-}
+/* memory_db_fact_get_source moved to memory_db_provenance.c (Phase B). */
 
 /* =============================================================================
  * Decay and Maintenance Operations (Phase 5)

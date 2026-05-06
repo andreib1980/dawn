@@ -1020,48 +1020,10 @@ int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int
  */
 int memory_db_get_last_extracted_msg_id(int64_t conversation_id, int64_t *msg_id_out);
 
-/**
- * @brief Batch-fetch provenance for up to `n` facts in a single lock cycle (v40).
- *
- * Replaces N sequential calls to `memory_db_fact_get_source()` in list paths.
- * Outputs are indexed to match the input `fact_ids[]` array; entries with no
- * provenance (legacy rows, NULL source, or private conversation) have out_conv_ids[i] = 0.
- *
- * @param user_id Requesting user (ownership + privacy filter applied in SQL)
- * @param fact_ids Array of fact IDs to look up
- * @param n Length of fact_ids (and output arrays)
- * @param out_conv_ids Output: source conversation ID per fact (0 = none)
- * @param out_starts Output: source_msg_id_start per fact
- * @param out_ends Output: source_msg_id_end per fact
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_facts_get_sources(int user_id,
-                                const int64_t *fact_ids,
-                                int n,
-                                int64_t *out_conv_ids,
-                                int64_t *out_starts,
-                                int64_t *out_ends);
-
-/**
- * @brief Return the source range for a fact (v40).
- *
- * Leaf function — must NOT be called while holding the auth_db mutex.
- * Returns MEMORY_DB_NOT_FOUND if: source columns are NULL, the fact does not
- * exist, the fact belongs to a different user, the source conversation is private,
- * or the source conversation has been deleted.
- *
- * @param fact_id Fact ID to look up
- * @param user_id Requesting user (ownership check)
- * @param conv_id_out Output: source conversation ID
- * @param start_out Output: first message ID in source range
- * @param end_out Output: last message ID in source range
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
- */
-int memory_db_fact_get_source(int64_t fact_id,
-                              int user_id,
-                              int64_t *conv_id_out,
-                              int64_t *start_out,
-                              int64_t *end_out);
+/* memory_db_facts_get_sources / memory_db_fact_get_source — see
+ * memory/memory_db_provenance.h.  Phase B (May 2026) split provenance readers
+ * into their own module so future relation/summary/preference variants live
+ * alongside the fact variants. */
 
 #ifdef __cplusplus
 }

@@ -352,6 +352,67 @@ static void test_conversation_add_message(void) {
    conv_free(&conv);
 }
 
+/* Phase B defense-in-depth: conv_db_get_messages_by_range must suppress rows
+ * from private conversations when include_private=false, even though the
+ * caller passes ownership-correct user_id.  Rationale lives in PROVENANCE.md
+ * Sec H1 — closes the only gap where an upstream provenance fetch that
+ * forgot to filter could leak content. */
+
+struct mbr_count_ctx {
+   int count;
+   int64_t first_id;
+};
+
+static int mbr_count_cb(const conversation_message_t *msg, void *ctx_ptr) {
+   struct mbr_count_ctx *ctx = (struct mbr_count_ctx *)ctx_ptr;
+   ctx->count++;
+   if (ctx->count == 1)
+      ctx->first_id = msg->id;
+   return 0;
+}
+
+static void test_get_messages_by_range_filters_private_by_default(void) {
+   int user_id = create_and_get_id("priv_filter_user", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "Will become private", &conv_id);
+   conv_db_add_message(conv_id, user_id, "user", "secret one");
+   conv_db_add_message(conv_id, user_id, "assistant", "secret two");
+
+   /* Public first — confirm the harness can read messages. */
+   struct mbr_count_ctx pub_ctx = { 0, 0 };
+   int rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000,
+                                          /*include_private=*/false, mbr_count_cb, &pub_ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, pub_ctx.count);
+
+   /* Mark private — same call must now return 0 rows. */
+   rc = conv_db_set_private(conv_id, user_id, true);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+
+   struct mbr_count_ctx priv_ctx = { 0, 0 };
+   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*include_private=*/false,
+                                      mbr_count_cb, &priv_ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, priv_ctx.count);
+}
+
+static void test_get_messages_by_range_returns_private_when_opted_in(void) {
+   int user_id = create_and_get_id("priv_optin_user", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "Private session", &conv_id);
+   conv_db_add_message(conv_id, user_id, "user", "context_expand should still see this");
+   int rc = conv_db_set_private(conv_id, user_id, true);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+
+   /* include_private=true is the context_expand path — user expanding their
+    * own current-session COMPACTED block.  Ownership still enforced. */
+   struct mbr_count_ctx ctx = { 0, 0 };
+   rc = conv_db_get_messages_by_range(conv_id, user_id, 1, 1000000, /*include_private=*/true,
+                                      mbr_count_cb, &ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, ctx.count);
+}
+
 /* ============================================================================
  * User Settings Tests
  * ============================================================================ */
@@ -427,6 +488,8 @@ int main(void) {
    RUN_TEST(test_delete_conversation);
    RUN_TEST(test_conversation_user_isolation);
    RUN_TEST(test_conversation_add_message);
+   RUN_TEST(test_get_messages_by_range_filters_private_by_default);
+   RUN_TEST(test_get_messages_by_range_returns_private_when_opted_in);
 
    /* User Settings */
    RUN_TEST(test_user_settings_defaults);

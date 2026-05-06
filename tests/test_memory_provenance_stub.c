@@ -37,6 +37,11 @@ auth_db_state_t s_db = {
 
 dawn_config_t g_config;
 
+/* Stub: memory_db_delete_user_memories calls this after dropping rows.  Tests
+ * never exercise that path but the symbol must resolve at link time. */
+void memory_embeddings_invalidate_all(void) {
+}
+
 /* Stub: check is_private column directly via the existing s_db handle. */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    (void)user_id;

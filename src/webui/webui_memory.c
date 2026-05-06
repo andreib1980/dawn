@@ -33,6 +33,7 @@
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_filter.h"
 #include "memory/memory_similarity.h"
 #include "webui/webui_internal.h"
@@ -245,7 +246,7 @@ void handle_get_memory_fact_source(ws_connection_t *conn, struct json_object *pa
    int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
    json_object *messages_arr = json_object_new_array();
    conv_db_get_messages_by_range(conv_id, conn->auth_user_id, start_id, capped_end,
-                                 source_msg_to_json, messages_arr);
+                                 /*include_private=*/false, source_msg_to_json, messages_arr);
 
    json_object_object_add(resp_payload, "messages", messages_arr);
    json_object_object_add(response, "payload", resp_payload);

@@ -622,6 +622,8 @@ list(APPEND DAWN_SOURCES
 list(APPEND DAWN_SOURCES
     src/auth/auth_db_core.c
     src/memory/memory_db.c
+    src/memory/memory_db_provenance.c
+    src/memory/memory_source_dedup.c
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c

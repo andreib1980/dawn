@@ -74,6 +74,7 @@
 #include "config/dawn_config.h"
 #include "memory/memory_callback_internal.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
 

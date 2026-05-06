@@ -1471,15 +1471,26 @@ int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, voi
 int conv_db_get_message_ids(int64_t conv_id, int user_id, int64_t **ids_out, int *count_out);
 
 /**
- * @brief Get messages by ID range (for context expansion)
+ * @brief Get messages by ID range (for context expansion).
  *
  * Same as conv_db_get_messages but filtered to a specific ID range.
- * Used by the context_expand tool to retrieve compacted messages.
+ *
+ * Privacy: by default, the SQL JOIN excludes rows from `is_private = 1`
+ * conversations as defense-in-depth — even if an upstream caller forgets to
+ * filter (e.g. the provenance source-fetch path), private content cannot
+ * surface here.  Set `include_private = true` only when the caller is
+ * operating on the user's own active session (e.g. the context_expand tool
+ * resolving a `[COMPACTED ...]` block within a private conversation the
+ * user is currently chatting in).  Ownership (user_id match) is enforced
+ * regardless.
  *
  * @param conv_id Conversation ID
  * @param user_id User ID (for ownership check)
  * @param start_id First message ID (inclusive)
  * @param end_id Last message ID (inclusive)
+ * @param include_private If false (default for memory/provenance callers),
+ *                        rows whose conversation has `is_private = 1` are
+ *                        suppressed in SQL.  If true, ownership-only.
  * @param callback Function called for each message
  * @param ctx User context passed to callback
  * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
@@ -1488,6 +1499,7 @@ int conv_db_get_messages_by_range(int64_t conv_id,
                                   int user_id,
                                   int64_t start_id,
                                   int64_t end_id,
+                                  bool include_private,
                                   message_callback_t callback,
                                   void *ctx);
 

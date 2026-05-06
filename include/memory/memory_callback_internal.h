@@ -66,4 +66,37 @@ char *memory_action_search(int user_id,
  */
 char *memory_action_recent(int user_id, const char *period, bool with_source, int source_budget);
 
+/* =============================================================================
+ * Source-fetch dedup set (Phase B).
+ *
+ * Spans a single memory_action_search / memory_action_recent call so that the
+ * same `(conversation_id, msg_start, msg_end)` cited by multiple records
+ * (fact + summary + relation) emits a verbatim excerpt only on first mention
+ * and a one-line back-ref on subsequent mentions.  Saves both LLM context and
+ * SQLite round-trips.
+ *
+ * INVARIANT (Sec M1 in PROVENANCE.md): callers must add ONLY post-batch-filter
+ * triples — the `_get_sources` batch APIs return `out_conv_ids[i] = 0` for
+ * private-conversation rows, so a triple where conv_id > 0 is provably public.
+ * Adding a private triple here would cause a later public record sharing the
+ * same range to emit "[source: same as above]" which betrays existence of the
+ * upstream private record.  Helper functions enforce nothing on their own —
+ * the discipline lives at the call sites in memory_callback.c.
+ *
+ * Exposed in this internal header so unit tests can exercise the helpers
+ * directly without compiling the whole callback module.
+ * ============================================================================= */
+
+#define SOURCE_DEDUP_CAP 24
+
+typedef struct {
+   int64_t conv_ids[SOURCE_DEDUP_CAP];
+   int64_t starts[SOURCE_DEDUP_CAP];
+   int64_t ends[SOURCE_DEDUP_CAP];
+   int count;
+} source_dedup_set_t;
+
+bool source_dedup_seen(const source_dedup_set_t *set, int64_t conv, int64_t s, int64_t e);
+void source_dedup_add(source_dedup_set_t *set, int64_t conv, int64_t s, int64_t e);
+
 #endif /* MEMORY_CALLBACK_INTERNAL_H */
