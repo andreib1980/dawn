@@ -761,6 +761,26 @@
                hint: 'LLM timeout for memory fact extraction (default 120s)',
                advanced: true,
             },
+            silent_observe_provider: {
+               type: 'select',
+               label: 'Silent-Observe Provider',
+               options: ['local', 'ollama', 'openai', 'claude', 'anthropic', 'gemini'],
+               hint:
+                  'LLM provider for the Silent-Observe primitive (Phase 0 of ' +
+                  'Dynamic Context Injection). Background observations are non-streaming, ' +
+                  'no tools, no TTS. Defaults to local for cost.',
+               configPath: 'llm.silent_observe.provider',
+               advanced: true,
+            },
+            silent_observe_model: {
+               type: 'text',
+               label: 'Silent-Observe Model',
+               hint:
+                  'Model name for silent observations. Empty = let provider pick. ' +
+                  'A small/fast model is fine.',
+               configPath: 'llm.silent_observe.model',
+               advanced: true,
+            },
             pruning_enabled: {
                type: 'checkbox',
                label: 'Enable Pruning',

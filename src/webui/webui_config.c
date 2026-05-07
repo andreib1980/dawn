@@ -524,6 +524,22 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          JSON_TO_CONFIG_INT(thinking, "budget_xhigh", config->llm.thinking.budget_xhigh);
       }
 
+      struct json_object *silent_observe;
+      if (json_object_object_get_ex(section, "silent_observe", &silent_observe)) {
+         JSON_TO_CONFIG_STR(silent_observe, "provider", config->llm.silent_observe.provider);
+         JSON_TO_CONFIG_STR(silent_observe, "model", config->llm.silent_observe.model);
+         /* Single source of truth — see llm_silent_observe_provider_is_valid(). */
+         if (config->llm.silent_observe.provider[0] != '\0' &&
+             !llm_silent_observe_provider_is_valid(config->llm.silent_observe.provider)) {
+            OLOG_WARNING("WebUI: Invalid silent_observe.provider '%s', resetting to 'local'",
+                         config->llm.silent_observe.provider);
+            strncpy(config->llm.silent_observe.provider, "local",
+                    sizeof(config->llm.silent_observe.provider) - 1);
+            config->llm.silent_observe.provider[sizeof(config->llm.silent_observe.provider) - 1] =
+                '\0';
+         }
+      }
+
       /* Context management settings */
       JSON_TO_CONFIG_DOUBLE(section, "compact_soft_threshold", config->llm.compact_soft_threshold);
       JSON_TO_CONFIG_DOUBLE(section, "compact_hard_threshold", config->llm.compact_hard_threshold);
@@ -791,6 +807,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_BOOL(section, "asr_record", config->debug.asr_record);
       JSON_TO_CONFIG_BOOL(section, "aec_record", config->debug.aec_record);
       JSON_TO_CONFIG_STR(section, "record_path", config->debug.record_path);
+      JSON_TO_CONFIG_BOOL(section, "silent_observe_test_endpoint",
+                          config->debug.silent_observe_test_endpoint);
    }
 
    /* [paths] */

@@ -27,6 +27,52 @@
 #include <stddef.h>
 
 /**
+ * @brief LLM call mode
+ *
+ * Selects which call path is invoked.  Currently only the silent-observe path
+ * branches on this enum; the chat-completion path is the implicit default and
+ * does not dispatch on this value.
+ *
+ * Defined here so that future call paths can be enumerated without churn at
+ * call sites.
+ */
+typedef enum {
+   LLM_CALL_CHAT_COMPLETION, /**< User-facing chat completion (streaming or one-shot) */
+   LLM_CALL_SILENT_OBSERVE,  /**< Background observation — schema-validated, no tools, no TTS */
+} llm_call_mode_t;
+
+/**
+ * @brief Length of the source-category string in silent_observe_response_t
+ *
+ * The category is one of a fixed allowlist of 10 values; 32 bytes is comfortable
+ * headroom and aligns with neighboring fixed-size buffers in this file.
+ */
+#define LLM_SILENT_OBSERVE_CATEGORY_MAX 32
+
+/**
+ * @brief Length of the note string in silent_observe_response_t
+ *
+ * Capped at 256 chars per the design spec — longer notes are truncated and the
+ * call is logged as a schema-validation anomaly.
+ */
+#define LLM_SILENT_OBSERVE_NOTE_MAX 256
+
+/**
+ * @brief Strict response schema for silent observations
+ *
+ * Populated only on a SUCCESS return from llm_silent_observe().  Any of:
+ * malformed JSON, missing field, category outside the fixed allowlist, note
+ * length over LLM_SILENT_OBSERVE_NOTE_MAX, blocked-pattern match on input or
+ * note, unexpected tool_calls in the LLM response → call returns FAILURE and
+ * leaves *out untouched.
+ */
+typedef struct {
+   bool ack;                                       /**< Always true on a SUCCESS return */
+   char category[LLM_SILENT_OBSERVE_CATEGORY_MAX]; /**< One of the 10 allowlisted values */
+   char note[LLM_SILENT_OBSERVE_NOTE_MAX];         /**< LLM-generated note, filter-checked */
+} silent_observe_response_t;
+
+/**
  * @brief Cloud provider types
  *
  * Automatically detected based on API keys in secrets.toml.
@@ -541,5 +587,100 @@ int llm_get_effective_timeout_ms(void);
  * @param timeout_ms Timeout in milliseconds (0 to clear override)
  */
 void llm_set_timeout_override(int timeout_ms);
+
+/* ============================================================================
+ * Silent-Observe — hardened LLM call mode for background observations
+ * ============================================================================
+ *
+ * Phase 0 of the Dynamic Context Injection design (docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md).
+ *
+ * Architectural invariants (verified in CI / by inspection):
+ *   1. Non-streaming, single-shot — uses provider's non-streaming completion path
+ *      with empty tools array.  No streaming, no sentence callback, no TTS.
+ *   2. Never enters src/llm/llm_tool_loop.c.  Tool-call dispatch is
+ *      architecturally inaccessible.  Any tool_calls in the response → reject.
+ *   3. Never appends to conv_db_* or session_manager_append_* — silent calls
+ *      are not part of any user-facing conversation history.
+ *   4. Never invokes text_to_speech() directly or indirectly.
+ *   5. Tool-call rejection lives at this entry point, not inside any provider
+ *      implementation: tool_mode = "disabled" suppresses tools in the request,
+ *      and any leakage in the response is caught by schema validation.
+ *
+ * Hardening (mandatory, not optional):
+ *   - Input wrapped in OBSERVATION DATA delimiters (data, not instructions)
+ *   - Schema-validated JSON response (ack/category/note)
+ *   - memory_filter_check() on input AND on the LLM's output note
+ *   - Audit-log every call with tag prefix "silent_observe:"
+ */
+
+/**
+ * @brief Make a silent-observe LLM call
+ *
+ * Wraps @p input_text in data-marking delimiters, dispatches to the configured
+ * silent-observe provider with a non-streaming, no-tools, no-thinking request,
+ * validates the JSON response against silent_observe_response_t, and returns
+ * the structured ack on success.
+ *
+ * Caller does NOT need to filter @p input_text first — this function calls
+ * memory_filter_check() on both the input and the LLM's output note.
+ *
+ * @param input_text       Observation text to summarize (not NULL).
+ * @param source_category  Caller-supplied category for audit logging.  Free-form;
+ *                         distinct from the LLM-emitted category in the response.
+ * @param user_id          Owning user (for audit logging; may be 0 for system-scoped
+ *                         observations).
+ * @param out              Output: structured response on SUCCESS.  Untouched on
+ *                         FAILURE.
+ * @return SUCCESS (0) on validated, accepted observation.  FAILURE (1) on any
+ *         rejection path (filter match, schema fail, tool-call leakage, network
+ *         error, missing config).
+ */
+int llm_silent_observe(const char *input_text,
+                       const char *source_category,
+                       int user_id,
+                       silent_observe_response_t *out);
+
+/**
+ * @brief Listener callback for silent-observation events
+ *
+ * Layer-4 surfaces (e.g. WebUI) register a single listener via
+ * llm_silent_observe_set_event_listener().  The silent-observe primitive
+ * (Layer 2) invokes this callback for every observation outcome — accepted,
+ * schema-failed, or filter-rejected — without taking a direct dependency on
+ * Layer-4 code.
+ *
+ * @param category      Category — one of the allowlisted values, or
+ *                      "filtered" / "rejected" for non-success paths.
+ * @param note          LLM-generated note on accept; placeholder text on filter
+ *                      match (does not expose the offending content).
+ * @param user_id       Owning user (0 for system-scoped observations).
+ * @param filter_match  True when the call was rejected by the injection filter.
+ */
+typedef void (*silent_observe_event_fn)(const char *category,
+                                        const char *note,
+                                        int user_id,
+                                        bool filter_match);
+
+/**
+ * @brief Register a listener for silent-observation events
+ *
+ * Setting NULL clears the listener.  The listener is invoked synchronously from
+ * the thread that called llm_silent_observe().  Listeners must not block.
+ *
+ * @param fn Callback to register, or NULL to clear.
+ */
+void llm_silent_observe_set_event_listener(silent_observe_event_fn fn);
+
+/**
+ * @brief Check whether a provider name is valid for silent-observe.
+ *
+ * Single source of truth for the silent-observe provider allowlist —
+ * consumed by config_validate.c, webui_config.c, and the resolver inside
+ * llm_silent_observe.c so the list cannot drift between them.
+ *
+ * @param provider Provider string to check (case-sensitive).
+ * @return true if provider is one of the accepted values.
+ */
+bool llm_silent_observe_provider_is_valid(const char *provider);
 
 #endif  // LLM_INTERFACE_H

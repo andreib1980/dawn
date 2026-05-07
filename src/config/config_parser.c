@@ -654,6 +654,7 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
                                              "local",
                                              "tools",
                                              "thinking",
+                                             "silent_observe",
                                              NULL };
    warn_unknown_keys(table, "llm", known_keys);
 
@@ -714,6 +715,15 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
 
    toml_table_t *thinking = toml_table_in(table, "thinking");
    parse_llm_thinking(thinking, &config->thinking);
+
+   /* [llm.silent_observe] — Phase 0 of Dynamic Context Injection */
+   toml_table_t *silent = toml_table_in(table, "silent_observe");
+   if (silent) {
+      static const char *const silent_keys[] = { "provider", "model", NULL };
+      warn_unknown_keys(silent, "llm.silent_observe", silent_keys);
+      PARSE_STRING(silent, "provider", config->silent_observe.provider);
+      PARSE_STRING(silent, "model", config->silent_observe.model);
+   }
 }
 
 static void parse_summarizer(toml_table_t *table, summarizer_file_config_t *config) {
@@ -1241,14 +1251,16 @@ static void parse_debug(toml_table_t *table, debug_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "mic_record", "asr_record", "aec_record",
-                                             "record_path", NULL };
+   static const char *const known_keys[] = {
+      "mic_record", "asr_record", "aec_record", "record_path", "silent_observe_test_endpoint", NULL
+   };
    warn_unknown_keys(table, "debug", known_keys);
 
    PARSE_BOOL(table, "mic_record", config->mic_record);
    PARSE_BOOL(table, "asr_record", config->asr_record);
    PARSE_BOOL(table, "aec_record", config->aec_record);
    PARSE_STRING(table, "record_path", config->record_path);
+   PARSE_BOOL(table, "silent_observe_test_endpoint", config->silent_observe_test_endpoint);
 }
 
 static void parse_paths(toml_table_t *table, paths_config_t *config) {

@@ -128,6 +128,16 @@
    color: #000;
 }
 
+/* Soft variant — outline + subtle background, for persistent "needs attention"
+ * indicators where the solid amber would compete with the rest of the chrome.
+ * Used by the silent-observe filter-match chip; reusable for any future
+ * non-blocking warning that should stay visible without dominating. */
+.dawn-badge.warning.soft {
+   background: var(--warning-subtle);
+   color: var(--warning);
+   border: 1px solid var(--warning-border);
+}
+
 .dawn-badge.muted {
    background: var(--bg-secondary);
    color: var(--text-secondary);

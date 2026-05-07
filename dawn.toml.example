@@ -219,6 +219,17 @@
                                   # Env: DAWN_LLM_THINKING_BUDGET_XHIGH
                                   # NOTE: Budgets are clamped to 50% of model context size
 
+[llm.silent_observe]
+# Silent-Observe primitive (Phase 0 of Dynamic Context Injection).
+# Background observations DAWN makes about itself — calendar events, scheduled
+# tasks, satellite registrations, etc.  Calls are non-streaming, no tools, no
+# TTS, schema-validated, and audit-logged.  See
+# docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md.
+# provider = "local"              # "local" | "ollama" | "openai" | "claude" | "anthropic" | "gemini"
+                                  # Env: DAWN_LLM_SILENT_OBSERVE_PROVIDER
+# model = ""                      # Model name; empty = let provider pick a default
+                                  # Env: DAWN_LLM_SILENT_OBSERVE_MODEL
+
 # =============================================================================
 # Web Search (SearXNG)
 # =============================================================================
@@ -541,6 +552,10 @@
                                   # Env: DAWN_DEBUG_AEC_RECORD
 # record_path = "/tmp"            # Directory for debug recordings
                                   # Env: DAWN_DEBUG_RECORD_PATH
+# silent_observe_test_endpoint = false  # Expose POST /api/test/silent_observation
+                                  # Dev-only: lets developer fire a fake silent
+                                  # observation event from the WebUI.  Off by
+                                  # default — never enable in production.
 
 # =============================================================================
 # File Paths

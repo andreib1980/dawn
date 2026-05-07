@@ -196,6 +196,10 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    /* [llm.tools] */
    ENV_STRING("DAWN_LLM_TOOLS_MODE", config->llm.tools.mode);
 
+   /* [llm.silent_observe] */
+   ENV_STRING("DAWN_LLM_SILENT_OBSERVE_PROVIDER", config->llm.silent_observe.provider);
+   ENV_STRING("DAWN_LLM_SILENT_OBSERVE_MODEL", config->llm.silent_observe.model);
+
    /* [search] */
    ENV_STRING("DAWN_SEARCH_ENGINE", config->search.engine);
    ENV_STRING("DAWN_SEARCH_ENDPOINT", config->search.endpoint);
@@ -1137,6 +1141,14 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(tools, "mode", json_object_new_string(config->llm.tools.mode));
    json_object_object_add(llm, "tools", tools);
 
+   /* [llm.silent_observe] */
+   json_object *silent_observe = json_object_new_object();
+   json_object_object_add(silent_observe, "provider",
+                          json_object_new_string(config->llm.silent_observe.provider));
+   json_object_object_add(silent_observe, "model",
+                          json_object_new_string(config->llm.silent_observe.model));
+   json_object_object_add(llm, "silent_observe", silent_observe);
+
    /* [llm.thinking] */
    json_object *thinking = json_object_new_object();
    json_object_object_add(thinking, "mode", json_object_new_string(config->llm.thinking.mode));
@@ -1367,6 +1379,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(debug, "asr_record", json_object_new_boolean(config->debug.asr_record));
    json_object_object_add(debug, "aec_record", json_object_new_boolean(config->debug.aec_record));
    json_object_object_add(debug, "record_path", json_object_new_string(config->debug.record_path));
+   json_object_object_add(debug, "silent_observe_test_endpoint",
+                          json_object_new_boolean(config->debug.silent_observe_test_endpoint));
    json_object_object_add(root, "debug", debug);
 
    /* [paths] */
@@ -1769,6 +1783,10 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "budget_high = %d\n", config->llm.thinking.budget_high);
    fprintf(fp, "budget_xhigh = %d\n", config->llm.thinking.budget_xhigh);
 
+   fprintf(fp, "\n[llm.silent_observe]\n");
+   fprintf(fp, "provider = \"%s\"\n", config->llm.silent_observe.provider);
+   fprintf(fp, "model = \"%s\"\n", config->llm.silent_observe.model);
+
    fprintf(fp, "\n[search]\n");
    fprintf(fp, "engine = \"%s\"\n", config->search.engine);
    fprintf(fp, "endpoint = \"%s\"\n", config->search.endpoint);
@@ -1927,6 +1945,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "asr_record = %s\n", config->debug.asr_record ? "true" : "false");
    fprintf(fp, "aec_record = %s\n", config->debug.aec_record ? "true" : "false");
    fprintf(fp, "record_path = \"%s\"\n", config->debug.record_path);
+   fprintf(fp, "silent_observe_test_endpoint = %s\n",
+           config->debug.silent_observe_test_endpoint ? "true" : "false");
 
    fprintf(fp, "\n[paths]\n");
    if (config->paths.data_dir[0] != '\0') {

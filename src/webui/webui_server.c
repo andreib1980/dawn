@@ -156,6 +156,13 @@ static pthread_mutex_t s_conn_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Forward decl for early call sites (reconnect handler) — defined later in file. */
 static void deliver_missed_notifications(ws_connection_t *conn);
 
+/* Forward decl — silent_observe listener callback, registered in webui_server_init()
+ * but defined alongside the other broadcast helpers later in the file. */
+static void webui_broadcast_silent_observation(const char *category,
+                                               const char *note,
+                                               int user_id,
+                                               bool filter_match);
+
 static void register_connection(ws_connection_t *conn) {
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
@@ -3022,6 +3029,32 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
          handle_set_my_settings(conn, payload);
       }
    }
+   /* Dev-only: fires a fake silent_observation event so the WebUI can be
+    * exercised before Phase 1/2 producers exist.  Gated by the
+    * [debug] silent_observe_test_endpoint config flag (off by default) AND
+    * admin-only — non-admin users never reach the broadcast even when the
+    * flag is on. */
+   else if (strcmp(type, "test_silent_observation") == 0) {
+      if (g_config.debug.silent_observe_test_endpoint && conn_require_admin(conn) && payload) {
+         json_object *jcat = NULL, *jnote = NULL, *jfilter = NULL;
+         const char *cat = "system";
+         const char *note = "test event";
+         bool filter = false;
+         if (json_object_object_get_ex(payload, "category", &jcat))
+            cat = json_object_get_string(jcat);
+         if (json_object_object_get_ex(payload, "note", &jnote))
+            note = json_object_get_string(jnote);
+         if (json_object_object_get_ex(payload, "filter_match", &jfilter))
+            filter = json_object_get_boolean(jfilter);
+         OLOG_INFO(
+             "WebUI: test_silent_observation dispatched (user=%d, category=%s, filter_match=%d)",
+             conn->auth_user_id, cat, filter ? 1 : 0);
+         webui_broadcast_silent_observation(cat, note, conn->auth_user_id, filter);
+      } else if (!g_config.debug.silent_observe_test_endpoint) {
+         OLOG_WARNING("WebUI: test_silent_observation rejected — "
+                      "[debug] silent_observe_test_endpoint is disabled");
+      }
+   }
    /* Session management (authenticated users) */
    else if (strcmp(type, "list_my_sessions") == 0) {
       handle_list_my_sessions(conn);
@@ -4465,9 +4498,17 @@ int webui_server_init(int port, const char *www_path) {
    /* Register tool execution callback for debug display */
    llm_tools_set_execution_callback(webui_tool_execution_callback);
 
+   /* Wire silent-observe listener BEFORE spawning the server thread.  This
+    * avoids a startup-window race where another subsystem (scheduler, recovery
+    * worker, etc.) emits a silent observation in the few microseconds between
+    * pthread_create and the listener registration.  Pure pointer write under
+    * a mutex — safe to do at any point after llm_silent_observe.c is linked. */
+   llm_silent_observe_set_event_listener(webui_broadcast_silent_observation);
+
    /* Start server thread */
    if (pthread_create(&s_webui_thread, NULL, webui_thread_func, NULL) != 0) {
       OLOG_ERROR("WebUI: Failed to create server thread");
+      llm_silent_observe_set_event_listener(NULL);
       webui_music_cleanup();
 #ifdef ENABLE_WEBUI_AUDIO
       webui_audio_cleanup();
@@ -4503,6 +4544,11 @@ void webui_server_shutdown(void) {
    OLOG_INFO("WebUI: Shutting down server...");
    s_running = 0;
    pthread_mutex_unlock(&s_mutex);
+
+   /* Tear down silent-observe listener so post-shutdown calls don't dispatch
+    * into freed/closing connection state.  Pairs with the registration in
+    * webui_server_init(). */
+   llm_silent_observe_set_event_listener(NULL);
 
    /* Wait for satellite worker threads to finish (max 5 seconds) */
    {
@@ -6320,6 +6366,80 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
 /* =============================================================================
  * Memory Extraction Notice Broadcast
  * ============================================================================= */
+
+/**
+ * @brief Broadcast a silent-observation event to active WebUI sessions.
+ *
+ * Wired up as the listener for llm_silent_observe() — see webui_server_init().
+ * Called synchronously from the silent-observe call thread; copies into the
+ * per-connection response queue so the WebSocket service thread does the actual
+ * send on its own loop.
+ *
+ * Routing rules:
+ *   - user_id > 0 → only that user's authenticated sessions
+ *   - user_id == 0 → all authenticated sessions (system-scoped observation)
+ *
+ * @param category      Allowlisted category, or "filtered" for filter rejections.
+ * @param note          Sanitized note text or filter-match placeholder.
+ * @param user_id       Owning user (0 = system-wide).
+ * @param filter_match  True when this event represents a filter rejection.
+ */
+static void webui_broadcast_silent_observation(const char *category,
+                                               const char *note,
+                                               int user_id,
+                                               bool filter_match) {
+   if (!category || !note)
+      return;
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("silent_observation"));
+
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "ts", json_object_new_int64((int64_t)time(NULL)));
+   json_object_object_add(payload, "category", json_object_new_string(category));
+   json_object_object_add(payload, "note", json_object_new_string(note));
+   json_object_object_add(payload, "filter_match", json_object_new_boolean(filter_match));
+   json_object_object_add(root, "payload", payload);
+
+   /* Serialize ONCE into a heap buffer, drop the json_object, then strdup
+    * per connection from the cached canonical form.  The previous shape ran
+    * the json_object's internal serializer N times on identical data and
+    * held `root` alive for the duration of registry iteration. */
+   const char *json_view = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_canonical = json_view ? strdup(json_view) : NULL;
+   json_object_put(root);
+   if (!json_canonical)
+      return;
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+
+      char *json_copy = strdup(json_canonical);
+      if (!json_copy)
+         continue;
+
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free(json_canonical);
+
+   if (sent > 0) {
+      OLOG_INFO(
+          "WebUI: Broadcast silent_observation (category=%s, filter_match=%d) to %d client(s)",
+          category, filter_match ? 1 : 0, sent);
+   }
+}
 
 void webui_broadcast_memory_notice(int user_id, const char *level, const char *message) {
    if (user_id <= 0 || !level || !message)

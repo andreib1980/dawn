@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "llm/llm_interface.h"
+
 /* =============================================================================
  * Helper Macros
  * ============================================================================= */
@@ -286,6 +288,16 @@ int config_validate(const dawn_config_t *config,
                    "must be 'disabled', 'local', 'default', or 'tfidf' (got '%s')",
                    config->search.summarizer.backend);
       }
+   }
+
+   /* ===== Silent-Observe Provider (single allowlist owned by
+    * llm_silent_observe.c — see llm_silent_observe_provider_is_valid). ===== */
+   if (config->llm.silent_observe.provider[0] != '\0' &&
+       !llm_silent_observe_provider_is_valid(config->llm.silent_observe.provider)) {
+      ADD_ERROR("llm.silent_observe.provider",
+                "must be 'local', 'ollama', 'openai', 'claude', 'anthropic', or 'gemini' "
+                "(got '%s')",
+                config->llm.silent_observe.provider);
    }
 
    return error_count;

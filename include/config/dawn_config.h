@@ -260,13 +260,22 @@ typedef struct {
    int budget_xhigh;         /* Token budget for "xhigh" effort (default: 32768) */
 } llm_thinking_config_t;
 
+/* Silent-observe primitive (Phase 0 of Dynamic Context Injection).
+ * Provider config is dedicated so background observations can run on a cheap
+ * model without affecting user-facing chat.  See src/llm/llm_silent_observe.c. */
+typedef struct {
+   char provider[16]; /* "local" | "ollama" | "openai" | "claude" | "anthropic" | "gemini" */
+   char model[64];    /* Model name (provider-specific) */
+} llm_silent_observe_config_t;
+
 typedef struct {
    char type[16];  /* "cloud" or "local" */
    int max_tokens; /* Max response tokens */
    llm_cloud_config_t cloud;
    llm_local_config_t local;
-   llm_tools_config_t tools;       /* Native tool/function calling settings */
-   llm_thinking_config_t thinking; /* Extended thinking/reasoning settings */
+   llm_tools_config_t tools;                   /* Native tool/function calling settings */
+   llm_thinking_config_t thinking;             /* Extended thinking/reasoning settings */
+   llm_silent_observe_config_t silent_observe; /* Silent-observe call mode */
    float summarize_threshold; /* PARSER ONLY — legacy TOML key, derives compact_*. Do not read at
                                  runtime. */
    float compact_soft_threshold; /* Async compaction trigger (default: 0.60) */
@@ -489,6 +498,7 @@ typedef struct {
    bool asr_record;                   /* Record ASR input audio */
    bool aec_record;                   /* Record AEC processed audio */
    char record_path[CONFIG_PATH_MAX]; /* Directory for debug recordings */
+   bool silent_observe_test_endpoint; /* Expose POST /api/test/silent_observation (dev only) */
 } debug_config_t;
 
 /* =============================================================================

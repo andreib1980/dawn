@@ -153,6 +153,12 @@ void config_set_defaults(dawn_config_t *config) {
    /* LLM Tools */
    SAFE_COPY(config->llm.tools.mode, "native"); /* "native", "command_tags", or "disabled" */
 
+   /* LLM Silent-Observe (Phase 0 of Dynamic Context Injection)
+    * Default to local provider so background observations don't accrue cloud
+    * spend.  Operator can flip to a cloud provider with a configured key. */
+   SAFE_COPY(config->llm.silent_observe.provider, "local");
+   config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
+
    /* LLM Thinking/Reasoning */
    SAFE_COPY(config->llm.thinking.mode, "disabled");           /* "disabled", "enabled", "auto" */
    SAFE_COPY(config->llm.thinking.reasoning_effort, "medium"); /* Controls budget via dropdown */
@@ -311,6 +317,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->debug.asr_record = false;
    config->debug.aec_record = false;
    SAFE_COPY(config->debug.record_path, "/tmp");
+   config->debug.silent_observe_test_endpoint = false; /* Off by default — dev only */
 
    /* Paths */
    SAFE_COPY(config->paths.data_dir, "~/.local/share/dawn"); /* Database storage directory */

@@ -256,6 +256,15 @@ dawn_add_unit_test(test_memory_filter
    LIBS    dawn_common unity
    LABEL   ci)
 
+# Silent-observe primitive (Phase 0 of Dynamic Context Injection).
+# Stubs llm_chat_completion_with_config + memory_filter_check via
+# strong-symbol replacement in the test TU.
+dawn_add_unit_test(test_silent_observe
+   SOURCES test_silent_observe.c
+           ${SRC_ROOT}/src/llm/llm_silent_observe.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_word_to_number
    SOURCES test_word_to_number.c
            ${SRC_ROOT}/src/word_to_number.c

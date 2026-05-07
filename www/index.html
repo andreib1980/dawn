@@ -54,7 +54,59 @@
                <path d="M12 8v8M8 12h8" />
             </svg>
          </button>
+         <!-- DAWN Background — silent-observe surface (Phase 0).
+              Hidden by default; revealed once the first observation arrives. -->
+         <button
+            id="silent-observe-rail"
+            class="hidden"
+            title="DAWN Background"
+            aria-label="DAWN background observations"
+            aria-expanded="false"
+            aria-controls="silent-observe-peek"
+         >
+            <svg
+               width="20"
+               height="20"
+               viewBox="0 0 24 24"
+               fill="none"
+               stroke="currentColor"
+               stroke-width="2"
+               stroke-linecap="round"
+               stroke-linejoin="round"
+               aria-hidden="true"
+            >
+               <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+               <circle cx="12" cy="12" r="3" />
+            </svg>
+            <span id="silent-observe-badge" class="dawn-badge muted hidden">0</span>
+         </button>
       </nav>
+
+      <!-- Silent-Observe filter-match warning chip (Phase 0).
+           Lives OUTSIDE the peek so it persists across peek visibility changes —
+           filter rejections must remain visible until the user reviews them. -->
+      <div
+         id="silent-observe-warning-chip"
+         class="hidden dawn-badge warning soft"
+         role="status"
+         aria-live="polite"
+      ></div>
+
+      <!-- Silent-Observe peek popup (Phase 0). Hidden until rail icon clicked
+           or auto-expanded on filter-match.  role="region" rather than dialog
+           — it's a non-modal information surface. -->
+      <div
+         id="silent-observe-peek"
+         class="hidden"
+         role="region"
+         aria-label="DAWN background observations"
+      >
+         <div id="silent-observe-peek-header">
+            <span id="silent-observe-peek-title">DAWN Background</span>
+            <button id="silent-observe-peek-close" type="button" aria-label="Close">×</button>
+         </div>
+         <div id="silent-observe-peek-list"></div>
+      </div>
 
       <div id="app">
          <!-- Header -->
@@ -2631,6 +2683,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/export.js"></script>
       <script defer src="/js/ui/history.js"></script>
       <script defer src="/js/ui/memory.js"></script>
+      <script defer src="/js/ui/silent-observe.js"></script>
       <script defer src="/js/ui/contacts.js"></script>
       <script defer src="/js/ui/doc-library.js"></script>
       <script defer src="/js/ui/oauth.js"></script>

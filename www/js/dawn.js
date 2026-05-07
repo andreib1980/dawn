@@ -376,6 +376,14 @@
             case 'context_compacted':
                DawnHistory.handleContextCompacted(msg.payload);
                break;
+            case 'silent_observation':
+               // Phase 0 of Dynamic Context Injection — see
+               // docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md.  The DawnSilentObserve
+               // module owns the badge/peek/warning chip surface.
+               if (window.DawnSilentObserve) {
+                  window.DawnSilentObserve.handleEvent(msg.payload);
+               }
+               break;
             case 'get_metrics_response':
                DawnMetricsPanel.handleResponse(msg.payload);
                break;
