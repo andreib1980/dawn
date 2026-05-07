@@ -418,6 +418,46 @@ typedef struct {
 /* =============================================================================
  * Memory Configuration
  * ============================================================================= */
+
+/* Per-source weights consumed by the focus-injection ranker.  Fixed
+ * shape (no dynamic keys) for v1 — Phase 2 / 1d may add fields.  Future:
+ * a parallel-array shape may be needed if 1d introduces sub-weights
+ * (e.g., calendar "this hour" vs "this week", per-email-folder).  Don't
+ * redesign now — fixed shape is correct for 1b. */
+typedef struct {
+   float memory_fact;
+   float memory_entity;
+   float memory_relation;
+   float memory_summary;
+   float document_chunk;
+   float calendar_event;
+   float recent_email;
+   float dawn_background;
+} focus_source_weights_t;
+
+/* Dedup bookkeeping for per-turn focus.  Read by the parser into the
+ * struct in Phase 1b — actual per-session enforcement lives in 1f. */
+typedef struct {
+   int recent_window_turns;   /* Re-inject only if not seen in last N turns */
+   float score_uplift_factor; /* Re-inject if current score > previous * factor */
+} focus_dedup_config_t;
+
+typedef struct {
+   bool enabled;            /* Master enable; default false until 1c/1d ship */
+   int focus_budget_tokens; /* Token cap on the assembled focus block */
+   int top_k;               /* Maximum candidates retained after ranking */
+   float min_score;         /* Floor — anything below is dropped */
+   bool classifier_enabled; /* RAGRoute-style source classifier;
+                               default false (off, opt-in after probe) */
+   float weight_semantic;   /* Cross-source ranker weights — Generative
+                               Agents / CrewAI three-factor formula */
+   float weight_recency;
+   float weight_importance;
+   float weight_source; /* Multiplier on per-source weights below */
+   focus_source_weights_t source_weights;
+   focus_dedup_config_t dedup;
+} focus_injection_config_t;
+
 typedef struct {
    bool enabled;                 /* Enable memory system */
    int context_budget_tokens;    /* Max tokens for memory context (~800) */
@@ -488,6 +528,15 @@ typedef struct {
    int recovery_idle_threshold_seconds;     /* Min seconds since updated_at (default 3600) */
    int recovery_max_attempts;               /* Per-conversation cap (default 2, 0=unlimited) */
    int recovery_recurring_interval_seconds; /* 0=startup only (default 86400 = 24h) */
+
+   /* Per-turn focus injection — Phase 1 of Dynamic Context Injection.
+    * Per-turn hook that retrieves relevant facts/entities/relations/
+    * summaries/document chunks/calendar events/recent emails above a
+    * relevance threshold and injects them as a budget-bounded "current
+    * context" block.  Disabled by default until adapters land in 1c/1d
+    * and the prompt-builder integration ships in 1e.  See
+    * `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md` §"Phase 1 — Per-Turn Focus". */
+   focus_injection_config_t focus_injection;
 } memory_config_t;
 
 /* =============================================================================

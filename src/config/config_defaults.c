@@ -308,6 +308,30 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.recovery_max_attempts = 2;
    config->memory.recovery_recurring_interval_seconds = 86400; /* daily */
 
+   /* Per-turn focus injection (Phase 1 of Dynamic Context Injection) —
+    * disabled by default until adapters land in 1c/1d and the
+    * prompt-builder integration ships in 1e.  Defaults match the design
+    * doc §"Phase 1 — Per-Turn Focus" TOML block. */
+   config->memory.focus_injection.enabled = false;
+   config->memory.focus_injection.focus_budget_tokens = 1024;
+   config->memory.focus_injection.top_k = 8;
+   config->memory.focus_injection.min_score = 0.4f;
+   config->memory.focus_injection.classifier_enabled = false;
+   config->memory.focus_injection.weight_semantic = 1.0f;
+   config->memory.focus_injection.weight_recency = 0.3f;
+   config->memory.focus_injection.weight_importance = 0.2f;
+   config->memory.focus_injection.weight_source = 1.0f;
+   config->memory.focus_injection.source_weights.memory_fact = 1.0f;
+   config->memory.focus_injection.source_weights.memory_entity = 0.9f;
+   config->memory.focus_injection.source_weights.memory_relation = 0.85f;
+   config->memory.focus_injection.source_weights.memory_summary = 0.7f;
+   config->memory.focus_injection.source_weights.document_chunk = 0.7f;
+   config->memory.focus_injection.source_weights.calendar_event = 0.6f;
+   config->memory.focus_injection.source_weights.recent_email = 0.5f;
+   config->memory.focus_injection.source_weights.dawn_background = 0.8f;
+   config->memory.focus_injection.dedup.recent_window_turns = 8;
+   config->memory.focus_injection.dedup.score_uplift_factor = 1.5f;
+
    /* Shutdown - disabled by default for security */
    config->shutdown.enabled = false;
    config->shutdown.passphrase[0] = '\0';

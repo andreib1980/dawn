@@ -1364,6 +1364,53 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->memory.recovery_max_attempts));
    json_object_object_add(memory, "recovery_recurring_interval_seconds",
                           json_object_new_int(config->memory.recovery_recurring_interval_seconds));
+
+   /* [memory.focus_injection] — Phase 1 dynamic context injection */
+   {
+      const focus_injection_config_t *fi = &config->memory.focus_injection;
+      json_object *focus = json_object_new_object();
+      json_object_object_add(focus, "enabled", json_object_new_boolean(fi->enabled));
+      json_object_object_add(focus, "focus_budget_tokens",
+                             json_object_new_int(fi->focus_budget_tokens));
+      json_object_object_add(focus, "top_k", json_object_new_int(fi->top_k));
+      json_object_object_add(focus, "min_score", json_object_new_double(fi->min_score));
+      json_object_object_add(focus, "classifier_enabled",
+                             json_object_new_boolean(fi->classifier_enabled));
+      json_object_object_add(focus, "weight_semantic", json_object_new_double(fi->weight_semantic));
+      json_object_object_add(focus, "weight_recency", json_object_new_double(fi->weight_recency));
+      json_object_object_add(focus, "weight_importance",
+                             json_object_new_double(fi->weight_importance));
+      json_object_object_add(focus, "weight_source", json_object_new_double(fi->weight_source));
+
+      json_object *src = json_object_new_object();
+      json_object_object_add(src, "memory_fact",
+                             json_object_new_double(fi->source_weights.memory_fact));
+      json_object_object_add(src, "memory_entity",
+                             json_object_new_double(fi->source_weights.memory_entity));
+      json_object_object_add(src, "memory_relation",
+                             json_object_new_double(fi->source_weights.memory_relation));
+      json_object_object_add(src, "memory_summary",
+                             json_object_new_double(fi->source_weights.memory_summary));
+      json_object_object_add(src, "document_chunk",
+                             json_object_new_double(fi->source_weights.document_chunk));
+      json_object_object_add(src, "calendar_event",
+                             json_object_new_double(fi->source_weights.calendar_event));
+      json_object_object_add(src, "recent_email",
+                             json_object_new_double(fi->source_weights.recent_email));
+      json_object_object_add(src, "dawn_background",
+                             json_object_new_double(fi->source_weights.dawn_background));
+      json_object_object_add(focus, "source_weights", src);
+
+      json_object *dedup = json_object_new_object();
+      json_object_object_add(dedup, "recent_window_turns",
+                             json_object_new_int(fi->dedup.recent_window_turns));
+      json_object_object_add(dedup, "score_uplift_factor",
+                             json_object_new_double(fi->dedup.score_uplift_factor));
+      json_object_object_add(focus, "dedup", dedup);
+
+      json_object_object_add(memory, "focus_injection", focus);
+   }
+
    json_object_object_add(root, "memory", memory);
 
    /* [shutdown] */
@@ -1939,6 +1986,34 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_attempts = %d\n", config->memory.recovery_max_attempts);
    fprintf(fp, "recurring_interval_seconds = %d\n",
            config->memory.recovery_recurring_interval_seconds);
+
+   {
+      const focus_injection_config_t *fi = &config->memory.focus_injection;
+      fprintf(fp, "\n[memory.focus_injection]\n");
+      fprintf(fp, "enabled = %s\n", fi->enabled ? "true" : "false");
+      fprintf(fp, "focus_budget_tokens = %d\n", fi->focus_budget_tokens);
+      fprintf(fp, "top_k = %d\n", fi->top_k);
+      fprintf(fp, "min_score = %.2f\n", fi->min_score);
+      fprintf(fp, "classifier_enabled = %s\n", fi->classifier_enabled ? "true" : "false");
+      fprintf(fp, "weight_semantic = %.2f\n", fi->weight_semantic);
+      fprintf(fp, "weight_recency = %.2f\n", fi->weight_recency);
+      fprintf(fp, "weight_importance = %.2f\n", fi->weight_importance);
+      fprintf(fp, "weight_source = %.2f\n", fi->weight_source);
+
+      fprintf(fp, "\n[memory.focus_injection.source_weights]\n");
+      fprintf(fp, "memory_fact = %.2f\n", fi->source_weights.memory_fact);
+      fprintf(fp, "memory_entity = %.2f\n", fi->source_weights.memory_entity);
+      fprintf(fp, "memory_relation = %.2f\n", fi->source_weights.memory_relation);
+      fprintf(fp, "memory_summary = %.2f\n", fi->source_weights.memory_summary);
+      fprintf(fp, "document_chunk = %.2f\n", fi->source_weights.document_chunk);
+      fprintf(fp, "calendar_event = %.2f\n", fi->source_weights.calendar_event);
+      fprintf(fp, "recent_email = %.2f\n", fi->source_weights.recent_email);
+      fprintf(fp, "dawn_background = %.2f\n", fi->source_weights.dawn_background);
+
+      fprintf(fp, "\n[memory.focus_injection.dedup]\n");
+      fprintf(fp, "recent_window_turns = %d\n", fi->dedup.recent_window_turns);
+      fprintf(fp, "score_uplift_factor = %.2f\n", fi->dedup.score_uplift_factor);
+   }
 
    fprintf(fp, "\n[debug]\n");
    fprintf(fp, "mic_record = %s\n", config->debug.mic_record ? "true" : "false");

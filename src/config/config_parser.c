@@ -1234,6 +1234,66 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_INT(recovery, "recurring_interval_seconds",
                 config->recovery_recurring_interval_seconds);
    }
+
+   /* Parse [memory.focus_injection] sub-table — Phase 1 dynamic context
+    * injection.  Three nested layers: top-level scalars, [.source_weights]
+    * (fixed-shape per-source weights), [.dedup] (1f bookkeeping). */
+   toml_table_t *focus = toml_table_in(table, "focus_injection");
+   if (focus) {
+      static const char *const focus_keys[] = { "enabled",
+                                                "focus_budget_tokens",
+                                                "top_k",
+                                                "min_score",
+                                                "classifier_enabled",
+                                                "weight_semantic",
+                                                "weight_recency",
+                                                "weight_importance",
+                                                "weight_source",
+                                                "source_weights",
+                                                "dedup",
+                                                NULL };
+      warn_unknown_keys(focus, "memory.focus_injection", focus_keys);
+
+      focus_injection_config_t *fi = &config->focus_injection;
+      PARSE_BOOL(focus, "enabled", fi->enabled);
+      PARSE_INT(focus, "focus_budget_tokens", fi->focus_budget_tokens);
+      PARSE_INT(focus, "top_k", fi->top_k);
+      PARSE_DOUBLE(focus, "min_score", fi->min_score);
+      PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
+      PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);
+      PARSE_DOUBLE(focus, "weight_recency", fi->weight_recency);
+      PARSE_DOUBLE(focus, "weight_importance", fi->weight_importance);
+      PARSE_DOUBLE(focus, "weight_source", fi->weight_source);
+
+      toml_table_t *src = toml_table_in(focus, "source_weights");
+      if (src) {
+         static const char *const src_keys[] = {
+            "memory_fact",    "memory_entity",   "memory_relation",
+            "memory_summary", "document_chunk",  "calendar_event",
+            "recent_email",   "dawn_background", NULL
+         };
+         warn_unknown_keys(src, "memory.focus_injection.source_weights", src_keys);
+
+         PARSE_DOUBLE(src, "memory_fact", fi->source_weights.memory_fact);
+         PARSE_DOUBLE(src, "memory_entity", fi->source_weights.memory_entity);
+         PARSE_DOUBLE(src, "memory_relation", fi->source_weights.memory_relation);
+         PARSE_DOUBLE(src, "memory_summary", fi->source_weights.memory_summary);
+         PARSE_DOUBLE(src, "document_chunk", fi->source_weights.document_chunk);
+         PARSE_DOUBLE(src, "calendar_event", fi->source_weights.calendar_event);
+         PARSE_DOUBLE(src, "recent_email", fi->source_weights.recent_email);
+         PARSE_DOUBLE(src, "dawn_background", fi->source_weights.dawn_background);
+      }
+
+      toml_table_t *dedup = toml_table_in(focus, "dedup");
+      if (dedup) {
+         static const char *const dedup_keys[] = { "recent_window_turns", "score_uplift_factor",
+                                                   NULL };
+         warn_unknown_keys(dedup, "memory.focus_injection.dedup", dedup_keys);
+
+         PARSE_INT(dedup, "recent_window_turns", fi->dedup.recent_window_turns);
+         PARSE_DOUBLE(dedup, "score_uplift_factor", fi->dedup.score_uplift_factor);
+      }
+   }
 }
 
 static void parse_shutdown(toml_table_t *table, shutdown_config_t *config) {

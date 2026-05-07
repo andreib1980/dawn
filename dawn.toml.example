@@ -464,6 +464,46 @@
                                       # the startup pass.  0 = startup-only.
                                       # Default 86400 (daily).
 
+[memory.focus_injection]
+# Per-turn dynamic context injection (Phase 1 of the dynamic context
+# injection workstream).  When enabled, the daemon retrieves
+# memory facts, entities, relations, summaries, document chunks, calendar
+# events, and recent emails relevant to each user turn and injects them
+# as a budget-bounded "current context" block in the LLM prompt.
+# Currently disabled by default — adapters land in Phase 1c/1d.
+# enabled = false                     # Master enable
+# focus_budget_tokens = 1024          # Token cap on the assembled focus block.
+                                      # Range: 256 - 4096
+# top_k = 8                           # Maximum candidates retained after ranking.
+                                      # Range: 1 - 64
+# min_score = 0.4                     # Floor — anything below is dropped.
+                                      # Range: 0.0 - 1.0
+# classifier_enabled = false          # RAGRoute-style source classifier
+                                      # (default off — opt-in only after probe).
+# weight_semantic = 1.0               # Generative-Agents three-factor ranker
+# weight_recency = 0.3                # weights.  Range each: 0.0 - 5.0
+# weight_importance = 0.2
+# weight_source = 1.0                 # Multiplier on per-source weights below.
+
+[memory.focus_injection.source_weights]
+# Per-source contribution to the final score.  Default tuning matches
+# the design doc; tighten / loosen during 1j bench tuning.
+# memory_fact = 1.0
+# memory_entity = 0.9
+# memory_relation = 0.85
+# memory_summary = 0.7
+# document_chunk = 0.7
+# calendar_event = 0.6
+# recent_email = 0.5
+# dawn_background = 0.8               # Phase 2
+
+[memory.focus_injection.dedup]
+# Re-injection policy (consumed in Phase 1f — read but unused in 1b).
+# An item is re-injected only if it hasn't been injected in the last N
+# turns AND its current score exceeds the prior score by `score_uplift_factor`.
+# recent_window_turns = 8             # Range: 0 - 100
+# score_uplift_factor = 1.5           # Range: 1.0 - 5.0
+
 # =============================================================================
 # Scheduler (timers, alarms, reminders)
 # =============================================================================

@@ -256,6 +256,16 @@ dawn_add_unit_test(test_memory_filter
    LIBS    dawn_common unity
    LABEL   ci)
 
+# Focus-source framework (Phase 1b of dynamic context injection).  Links
+# the real memory_filter so filter-on-retrieval is exercised end-to-end;
+# the test provides g_config inline.
+dawn_add_unit_test(test_focus_source
+   SOURCES test_focus_source.c
+           ${SRC_ROOT}/src/memory/focus_source.c
+           ${SRC_ROOT}/src/memory/memory_filter.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Silent-observe primitive (Phase 0 of Dynamic Context Injection).
 # Stubs llm_chat_completion_with_config + memory_filter_check via
 # strong-symbol replacement in the test TU.

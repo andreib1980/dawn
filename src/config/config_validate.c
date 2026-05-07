@@ -158,6 +158,44 @@ int config_validate(const dawn_config_t *config,
                          config->memory.recovery_recurring_interval_seconds, 60, 30 * 86400);
    }
 
+   /* ===== Per-turn Focus Injection (Phase 1 of dynamic context injection) =====
+    * Float weights use the same [0, 5] band as memory.temporal_weight precedent;
+    * the band intentionally permits weights >1.0 so a stage can be deliberately
+    * over-emphasized during tuning without re-touching this file. */
+   VALIDATE_RANGE_INT("memory.focus_injection.focus_budget_tokens",
+                      config->memory.focus_injection.focus_budget_tokens, 256, 4096);
+   VALIDATE_RANGE_INT("memory.focus_injection.top_k", config->memory.focus_injection.top_k, 1, 64);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.min_score",
+                        config->memory.focus_injection.min_score, 0.0f, 1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_semantic",
+                        config->memory.focus_injection.weight_semantic, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_recency",
+                        config->memory.focus_injection.weight_recency, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_importance",
+                        config->memory.focus_injection.weight_importance, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_source",
+                        config->memory.focus_injection.weight_source, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.memory_fact",
+                        config->memory.focus_injection.source_weights.memory_fact, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.memory_entity",
+                        config->memory.focus_injection.source_weights.memory_entity, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.memory_relation",
+                        config->memory.focus_injection.source_weights.memory_relation, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.memory_summary",
+                        config->memory.focus_injection.source_weights.memory_summary, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.document_chunk",
+                        config->memory.focus_injection.source_weights.document_chunk, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.calendar_event",
+                        config->memory.focus_injection.source_weights.calendar_event, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.recent_email",
+                        config->memory.focus_injection.source_weights.recent_email, 0.0f, 5.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.source_weights.dawn_background",
+                        config->memory.focus_injection.source_weights.dawn_background, 0.0f, 5.0f);
+   VALIDATE_RANGE_INT("memory.focus_injection.dedup.recent_window_turns",
+                      config->memory.focus_injection.dedup.recent_window_turns, 0, 100);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.dedup.score_uplift_factor",
+                        config->memory.focus_injection.dedup.score_uplift_factor, 1.0f, 5.0f);
+
    /* ===== Port Numbers (1 - 65535) ===== */
    VALIDATE_RANGE_INT("mqtt.port", config->mqtt.port, 1, 65535);
 

@@ -793,6 +793,59 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (config->memory.recovery_recurring_interval_seconds != 0) {
          CONFIG_CLAMP(config->memory.recovery_recurring_interval_seconds, 60, 30 * 86400);
       }
+
+      /* [memory.focus_injection] — Phase 1 dynamic context injection.
+       * UI sends a flat object under the "memory" section; nested
+       * source_weights / dedup arrive as JSON sub-objects. */
+      json_object *focus_obj = NULL;
+      if (json_object_object_get_ex(section, "focus_injection", &focus_obj)) {
+         focus_injection_config_t *fi = &config->memory.focus_injection;
+         JSON_TO_CONFIG_BOOL(focus_obj, "enabled", fi->enabled);
+         JSON_TO_CONFIG_INT(focus_obj, "focus_budget_tokens", fi->focus_budget_tokens);
+         JSON_TO_CONFIG_INT(focus_obj, "top_k", fi->top_k);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "min_score", fi->min_score);
+         JSON_TO_CONFIG_BOOL(focus_obj, "classifier_enabled", fi->classifier_enabled);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_semantic", fi->weight_semantic);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_recency", fi->weight_recency);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_importance", fi->weight_importance);
+         JSON_TO_CONFIG_DOUBLE(focus_obj, "weight_source", fi->weight_source);
+
+         json_object *src_obj = NULL;
+         if (json_object_object_get_ex(focus_obj, "source_weights", &src_obj)) {
+            JSON_TO_CONFIG_DOUBLE(src_obj, "memory_fact", fi->source_weights.memory_fact);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "memory_entity", fi->source_weights.memory_entity);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "memory_relation", fi->source_weights.memory_relation);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "memory_summary", fi->source_weights.memory_summary);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "document_chunk", fi->source_weights.document_chunk);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "calendar_event", fi->source_weights.calendar_event);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "recent_email", fi->source_weights.recent_email);
+            JSON_TO_CONFIG_DOUBLE(src_obj, "dawn_background", fi->source_weights.dawn_background);
+         }
+
+         json_object *dedup_obj = NULL;
+         if (json_object_object_get_ex(focus_obj, "dedup", &dedup_obj)) {
+            JSON_TO_CONFIG_INT(dedup_obj, "recent_window_turns", fi->dedup.recent_window_turns);
+            JSON_TO_CONFIG_DOUBLE(dedup_obj, "score_uplift_factor", fi->dedup.score_uplift_factor);
+         }
+
+         CONFIG_CLAMP(fi->focus_budget_tokens, 256, 4096);
+         CONFIG_CLAMP(fi->top_k, 1, 64);
+         CONFIG_CLAMP(fi->min_score, 0.0f, 1.0f);
+         CONFIG_CLAMP(fi->weight_semantic, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->weight_recency, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->weight_importance, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->weight_source, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.memory_fact, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.memory_entity, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.memory_relation, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.memory_summary, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.document_chunk, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.calendar_event, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.recent_email, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->source_weights.dawn_background, 0.0f, 5.0f);
+         CONFIG_CLAMP(fi->dedup.recent_window_turns, 0, 100);
+         CONFIG_CLAMP(fi->dedup.score_uplift_factor, 1.0f, 5.0f);
+      }
    }
 
    /* [shutdown] */
