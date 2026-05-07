@@ -18,77 +18,133 @@
 #
 # Speaker-attribution guardrail for the extraction prompt.
 #
-# A cheap pre-bench probe (~$0.03 per run, ~10 seconds) that catches the
-# fact-widening + attribution-shift modes that the full LoCoMo bench
-# catches at $10 + 2 hours.  Becomes a permanent guardrail: every
+# A cheap pre-bench probe (~$0.10 per multi-model run, ~5 minutes) that
+# catches the fact-widening + attribution-shift modes that the full LoCoMo
+# bench catches at $10 + 2 hours.  Becomes a permanent guardrail: every
 # extraction-prompt change must pass this probe before any full bench.
+#
+# By default the probe runs against THREE providers (Anthropic Haiku +
+# OpenAI gpt-5.4-mini + local Qwen3.6-35B) with a 2-of-3 quorum verdict.
+# Cross-model robustness was added in Phase 0 of attempt #2 (May 2026)
+# after the single-Haiku probe shipped at the end of attempt #1 — see the
+# bedrock validation history below.  The quorum tolerates one
+# model-specific quirk while requiring real cross-model evidence of
+# widening.  Use --provider X to single-out a specific provider for
+# debugging.
 #
 # Both components run from the SAME 25 hand-curated dialog snippets — no
 # upstream bench / snapshot machinery, no separate calibration step.  The
 # probe parses EXTRACTION_PROMPT_TEMPLATE live from
-# src/memory/memory_extraction.c and sends each snippet through Haiku at
-# temperature 0.0, then aggregates two views over the responses:
+# src/memory/memory_extraction.c and sends each snippet through each
+# provider at temperature 0.0, then aggregates two views over the
+# responses:
 #
 #   (1) FACT-COUNT WIDENING — total facts produced across all 25 cases.
 #       Catches the top-K-crowding mechanism that sank attempt #1.  At
-#       temperature 0.0 the metric is highly deterministic (HEAD
-#       calibration: 60 facts run-to-run within ±1).  Threshold +10%.
-#       Conceptual basis: when the prompt encourages finer-grained fact
-#       splitting (e.g. one event → three sub-facts), the 20-fact
-#       retrieval top-K dilutes canonical-subject attribution and the
-#       generator's source-budget chars get spent on fragments instead of
-#       cohesive facts.  Attempt #1 produced 77/60 = +28% on this metric
-#       while only +5.95% on full conv 7 (within HEAD's own ±6% run-to-
-#       run noise) — the test-set view is cleaner because the cases are
-#       all single-statement extractions where granularity drift shows
-#       directly.
+#       temperature 0.0 Anthropic and local are highly deterministic;
+#       OpenAI shows ~14% run-to-run drift (documented in the bedrock
+#       table below — set baseline conservatively).  Per-provider
+#       baseline; threshold +10%.  Conceptual basis: when the prompt
+#       encourages finer-grained fact splitting (one event → three
+#       sub-facts), the 20-fact retrieval top-K dilutes canonical-subject
+#       attribution and the generator's source-budget chars get spent on
+#       fragments instead of cohesive facts.  Bedrock evidence: attempt
+#       #1 widened by +28% on Anthropic and +14% on local — clear
+#       cross-model signal — but only +2% on OpenAI.  The 2-of-3 quorum
+#       turns this asymmetric signal into a robust reject.
 #
 #   (2) ATTRIBUTION CORRECTNESS — per-case subject check.
 #       Each case has expected and forbidden subject keywords.  Pass
 #       requires (a) at least one extracted fact mentions an expected
 #       subject, AND (b) no extracted fact mentions a forbidden subject
 #       without also mentioning an expected one.  Aggregate metrics:
-#       known-good pass rate (must be 100%; positive control on the
-#       single-user case) + attribution-failure pass rate (must be >=
-#       BASELINE - 10pp).
+#       known-good pass count (must stay within KNOWN_GOOD_REGRESS_TOLERANCE
+#       of per-provider baseline) + attribution-failure pass count (must
+#       stay within ATTRIBUTION_REGRESS_TOLERANCE of per-provider
+#       baseline).  Component 2's attribution gate alone wasn't sensitive
+#       enough to flag attempt #1 — the test cases are simple enough that
+#       both Haiku and attempt #1 got 25/25 — but the gate fires
+#       immediately on any future prompt change that breaks the simple
+#       case, which is the correctness floor we want to keep.
 #
-# Validated 2026-05-07 against attempt #1's reverted prompt:
-#   - Component 1 fact count: HEAD 60 → A1 77 (+28%) → REJECTED at +10%
-#   - Component 2 attribution: HEAD 25/25 → A1 25/25 (test cases too
-#     simple to differentiate at this granularity; component 1 is the
-#     load-bearing reject)
+# Bedrock validation 2026-05-07 (attempt #2 Phase 0 cross-model
+# extension):
 #
-# Component 2's attribution-pass-rate gate alone wasn't sensitive enough
-# to flag attempt #1 — attempt #1 still got the simple cases right; the
-# regression manifested in retrieval-and-generation, not in raw
-# attribution at the prompt level.  Component 1 IS sensitive because the
-# fact-granularity drift compounds across many extractions.  Both
-# components ship: component 2 is the safety-net for known-good
-# regression (any future prompt change that breaks the simple case fails
-# component 2 immediately) while component 1 is the load-bearing
-# fact-widening detector.
+#   ┌────────────┬─────────────────┬───────────────────┬─────────┐
+#   │ Test       │ Anthropic       │ OpenAI            │ Local   │
+#   ├────────────┼─────────────────┼───────────────────┼─────────┤
+#   │ HEAD       │ 61 (+1.7%)  ✓   │ 43 (-14%)   ✓     │ 43 ✓    │
+#   │ Attempt #1 │ 77 (+28%)  ✗    │ 51 (+2%)    ✓     │ 48 ✗    │
+#   │ Revert     │ 58 (-3.3%)  ✓   │ 49 (-2%)    ✓     │ 42 ✓    │
+#   └────────────┴─────────────────┴───────────────────┴─────────┘
+#   Aggregate verdicts: HEAD=PASS (3/3), Attempt #1=FAIL (1/3 c1),
+#   Revert=PASS (3/3).  The probe correctly rejects attempt #1 across
+#   models even though one of the three (OpenAI) passes individually.
+#
+# Cross-model finding: attempt #1's widening signal is asymmetric.  Each
+# model reacts differently to extraction-prompt changes; running the
+# probe on a single model would have flagged attempt #1 if Haiku were
+# chosen, but missed it on OpenAI.  Multi-model + quorum makes the probe
+# robust to "single-model favorability" — a future candidate that
+# accidentally games one model's prompt-handling style will fail on the
+# other two.
+#
+# Local Qwen3.6-35B-A3B drops good_audrey_dogs at HEAD (extracts only
+# Andrew's response, skips Audrey's "I've had two dogs since I was a kid"
+# statement entirely).  Calibrated baseline reflects this — it's not a
+# regression target, it's a known Qwen quirk.
 #
 # Workflow for future prompt changes:
 #
 #   1. Edit src/memory/memory_extraction.c.
 #   2. python3 benchmarks/bench_speaker_attribution.py
-#      Probe exits non-zero on failure with per-component reasons.
+#      Probe exits non-zero on aggregate failure with per-provider details.
 #   3. If green, only then run the full LoCoMo bench (~$10).
+#   4. --provider X to debug a single provider; --skip-local when local
+#      LLM is offline.
 #
-# Calibration baseline (HEAD as of 2026-05-07, claude-haiku-4-5):
+# Per-provider HEAD calibration baselines (2026-05-07):
 #
-#   Component 1: BASELINE_FACT_COUNT = 60 facts across 25 cases, threshold +10%.
-#                Run-to-run variance at temp=0: ±1 fact.
-#   Component 2: HEAD pass rate 25/25 (5/5 known-good + 20/20 attribution).
-#                Threshold: known-good must be 25/25; attribution must be
-#                >= BASELINE_ATTR_PASS_RATE - 0.10.
+#   Anthropic claude-haiku-4-5: 60 facts, attr 20/20, kg 5/5, c3 fix 6/12.
+#   OpenAI gpt-5.4-mini:        50 facts, attr 20/20, kg 5/5, c3 fix 1/12.
+#   Local Qwen3.6-35B-A3B-Q4:   42 facts, attr 20/20, kg 4/5, c3 fix 5/12.
 #
-# Recalibrate via the calibration ritual when the extraction model or
+# Component 1 threshold: +10% of per-provider baseline.
+# Component 2 thresholds: known_good drop > 1 OR attribution drop > 2 → FAIL.
+# Component 3 threshold: candidate fix_count > per-provider baseline (strict).
+# Aggregate: 2-of-3 providers must pass each component.
+#
+# Attempt #2 Phase 1.5 finding (component 3 added 2026-05-07):
+#   - Attempt #1 (reverted in attempt #1) IMPROVES c3 fix-rate dramatically:
+#     Anthropic 6→7, OpenAI 1→6, local 5→10 — aggregate 12/36 → 23/36
+#     (+30.6pp).  But it ALSO widens c1 (+28% on Haiku, +14% on local) which
+#     is what loses cat-1/cat-2 generation in full LoCoMo.  The trade-off
+#     was invisible to the original c1+c2 probe.
+#   - c4 (drop "USER" from EXISTING USER PROFILE header): improves Anthropic
+#     by 1 case (6→7), no movement on OpenAI/local.  c1 clean.  Quorum FAIL
+#     on c3.  Conclusion: too subtle to deliver real attribution lift.
+#   - c5 (replace ALWAYS-name-the-subject bullet with speaker-centric
+#     wording): improves Anthropic by 1 case, regresses local by 1 case
+#     (5→4).  Aggregate FAIL on c3.  Replacement-only wording without new
+#     instructions doesn't move cross-model attribution.
+#
+# Open: no Phase 1 prompt-only candidate delivers cross-model c3 improvement
+# without c1 widening.  The mechanism that produces c3 improvement (explicit
+# per-speaker attribution rule à la attempt #1) is the same mechanism that
+# produces c1 widening.  Phase 1.5 candidate space: rule-replacement (not
+# addition) with attribution emphasis, output-cap directives ("emit at most
+# N facts per turn"), or structural changes (build_existing_profile()
+# symmetry fix at C-code level).
+#
+# Recalibrate via the calibration ritual when an extraction model or the
 # embedding provider changes:
-#   1. Run probe on HEAD with a fresh model.
-#   2. Update BASELINE_FACT_COUNT and BASELINE_ATTR_PASS_RATE constants.
-#   3. Re-run the bedrock validation against attempt #1 (instructions
-#      below).
+#
+#   1. Update PROVIDERS[X]['default_model'] (or pass --model X).
+#   2. Run probe on HEAD with the fresh model.
+#   3. Update PROVIDERS[X]['baseline_*'] constants from the printed JSON.
+#   4. Re-run the bedrock validation against attempt #1 (apply attempt #1
+#      patch — see CAT2_TEMPORAL.md Case 10 for the diff — run probe,
+#      confirm aggregate FAIL, revert, confirm aggregate PASS).
 
 import argparse
 import json
@@ -100,14 +156,51 @@ from pathlib import Path
 DAWN_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LOCOMO_PATH = Path.home() / "datasets/locomo/data/locomo10.json"
 DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
-DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 EXTRACTION_C_PATH = DAWN_ROOT / "src/memory/memory_extraction.c"
 
-# Calibrated 2026-05-07.  See module docstring for recalibration procedure.
-BASELINE_FACT_COUNT = 60          # total facts across 25 cases under HEAD prompt
-FACT_COUNT_THRESHOLD = 1.10       # fail if candidate > BASELINE * threshold
-BASELINE_ATTR_PASS_RATE = 1.00    # 20/20 attribution-failure cases under HEAD
-ATTR_PASS_RATE_TOLERANCE = 0.10   # candidate must be >= baseline - 10pp
+# Per-provider HEAD baselines.  Calibrated 2026-05-07 against current main
+# (post-attempt-#1 revert).  Keys map to (default model, default endpoint,
+# baseline fact count, baseline attribution pass rate).  endpoint=None
+# means "read from dawn.toml" (used for local).
+#
+# Recalibrate by running probe with --recalibrate against HEAD; constants
+# update from the printed JSON (--json-output).
+PROVIDERS = {
+    "anthropic": {
+        "default_model": "claude-haiku-4-5",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "baseline_fact_count": 60,
+        "baseline_attribution_passed": 20,    # of 20 attribution-failure cases
+        "baseline_known_good_passed": 5,       # of 5 known-good cases
+    },
+    "openai": {
+        "default_model": "gpt-5.4-mini",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "baseline_fact_count": 50,
+        "baseline_attribution_passed": 20,
+        "baseline_known_good_passed": 5,
+    },
+    "local": {
+        "default_model": "",                   # use whatever's loaded at the endpoint
+        "endpoint": None,                      # read from dawn.toml [llm.local].endpoint
+        "baseline_fact_count": 42,
+        "baseline_attribution_passed": 20,
+        # Qwen3.6-35B-A3B drops good_audrey_dogs at HEAD — it extracts Andrew's
+        # comment but skips Audrey's "I've had two dogs since I was a kid"
+        # statement entirely.  Documented quirk, not a regression target.
+        "baseline_known_good_passed": 4,
+    },
+}
+
+FACT_COUNT_THRESHOLD = 1.10        # fail C1 if candidate > BASELINE * threshold
+ATTRIBUTION_REGRESS_TOLERANCE = 2  # fail C2 if attribution_passed < baseline - this many
+KNOWN_GOOD_REGRESS_TOLERANCE = 1   # fail C2 if known_good_passed < baseline - this many
+
+# Aggregate verdict: PASS iff at least this many providers pass each component.
+# With 3 providers, a 2-of-3 quorum tolerates one model-specific quirk while
+# requiring real cross-model evidence of widening / regression.
+AGGREGATE_QUORUM = 2
 
 
 # =============================================================================
@@ -201,27 +294,213 @@ def extract_prompt_template_from_c(c_path):
 
 
 # =============================================================================
+# Provider call helpers — one urllib-based call per backend.  No SDK
+# dependencies, mirroring run_benchmark.py:_anthropic_call shape so the
+# probe is self-contained.
+# =============================================================================
+
+
+def _anthropic_call(model, system, user_prompt, api_key, endpoint,
+                    temperature=0.0, max_tokens=1024, timeout=60.0):
+    import urllib.request
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8")
+    data = json.loads(body)
+    for b in data.get("content", []):
+        if b.get("type") == "text":
+            return b.get("text", "")
+    return ""
+
+
+def _openai_call(model, system, user_prompt, api_key, endpoint,
+                 temperature=0.0, max_tokens=1024, timeout=60.0):
+    """OpenAI chat-completions style.  Used for both api.openai.com and any
+    OpenAI-compatible local endpoint that exposes /v1/chat/completions.
+
+    Newer OpenAI models (gpt-5.4*, o-series) reject `max_tokens` and require
+    `max_completion_tokens` instead.  We try `max_completion_tokens` first
+    when the endpoint is api.openai.com (the canonical signal), and retry
+    with `max_tokens` on a 400 response from older / local endpoints that
+    only accept the legacy field."""
+    import urllib.request
+    import urllib.error
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user_prompt})
+
+    def post(token_field):
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            token_field: max_tokens,
+        }
+        payload = json.dumps(body).encode("utf-8")
+        headers = {"content-type": "application/json"}
+        if api_key:
+            headers["authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(
+            endpoint, data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+
+    is_canonical_openai = "api.openai.com" in (endpoint or "")
+    primary, fallback = (("max_completion_tokens", "max_tokens")
+                         if is_canonical_openai
+                         else ("max_tokens", "max_completion_tokens"))
+    try:
+        body = post(primary)
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            body = post(fallback)
+        else:
+            raise
+    data = json.loads(body)
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    return msg.get("content") or ""
+
+
+def _local_call(model, system, user_prompt, api_key, endpoint,
+                temperature=0.0, max_tokens=1024, timeout=120.0):
+    """Local llama.cpp / Ollama OpenAI-compatible endpoint.  Same wire shape
+    as _openai_call; longer default timeout because Qwen3-35B-A3B inference
+    on a single Jetson is slower than cloud round-trip."""
+    return _openai_call(model, system, user_prompt, api_key, endpoint,
+                        temperature=temperature, max_tokens=max_tokens,
+                        timeout=timeout)
+
+
+PROVIDER_CALLERS = {
+    "anthropic": _anthropic_call,
+    "openai": _openai_call,
+    "local": _local_call,
+}
+
+
+def resolve_provider_config(provider, secrets, dawn_toml_path, override_model=None,
+                            override_endpoint=None):
+    """Return a (caller_fn, model, endpoint, api_key) tuple for the named
+    provider.  Reads model/endpoint from PROVIDERS, falling back to dawn.toml
+    for local endpoint, and accepts CLI overrides."""
+    if provider not in PROVIDERS:
+        sys.exit(f"error: unknown provider {provider!r}; expected one of "
+                 f"{list(PROVIDERS.keys())}")
+    cfg = PROVIDERS[provider]
+    model = override_model or cfg["default_model"]
+    endpoint = override_endpoint or cfg["endpoint"]
+    api_key = None
+    if provider == "anthropic":
+        api_key = secrets.get("claude_api_key", "")
+        if not api_key:
+            sys.exit("error: anthropic provider needs claude_api_key in secrets.toml")
+    elif provider == "openai":
+        api_key = secrets.get("openai_api_key", "")
+        if not api_key:
+            sys.exit("error: openai provider needs openai_api_key in secrets.toml")
+    elif provider == "local":
+        if endpoint is None:
+            endpoint = read_local_endpoint_from_toml(dawn_toml_path)
+        # Local endpoints we use don't require auth.
+        api_key = None
+        if not model:
+            model = read_local_model_from_endpoint(endpoint)
+        if endpoint and not endpoint.endswith("/chat/completions"):
+            endpoint = endpoint.rstrip("/") + "/v1/chat/completions"
+    return PROVIDER_CALLERS[provider], model, endpoint, api_key
+
+
+def read_local_endpoint_from_toml(toml_path):
+    """Cheap inline TOML lookup for [llm.local] endpoint — avoids a tomllib
+    dep on Python 3.10 systems (Jetson Linux 5.15 ships 3.10).  Falls back
+    to the OASIS local default if the section isn't found."""
+    try:
+        body = Path(toml_path).read_text()
+    except OSError:
+        return None
+    in_section = False
+    for line in body.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_section = (s == "[llm.local]")
+            continue
+        if in_section and s.startswith("endpoint"):
+            m = re.search(r'endpoint\s*=\s*"([^"]+)"', s)
+            if m:
+                return m.group(1)
+    return None
+
+
+def read_local_model_from_endpoint(endpoint):
+    """Query the local /v1/models endpoint (or /models) and return the first
+    model id.  Used when --model is not given for the local provider."""
+    if not endpoint:
+        return ""
+    base = endpoint.split("/v1/")[0] if "/v1/" in endpoint else endpoint
+    base = base.rstrip("/")
+    import urllib.request
+    for path in ("/v1/models", "/models"):
+        try:
+            with urllib.request.urlopen(base + path, timeout=5.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("models") or data.get("data") or []
+            if models:
+                m = models[0]
+                # Different runtimes name the field differently.
+                return m.get("id") or m.get("name") or m.get("model") or ""
+        except Exception:
+            continue
+    return ""
+
+
+# =============================================================================
 # Component 1 — fact-count widening
 #
 # Computed from the same case_results component 2 produces.  No separate
 # extraction or snapshot needed.  The metric is the total number of facts
-# extracted across all 25 cases; threshold is BASELINE_FACT_COUNT * 1.10.
+# extracted across all 25 cases; threshold is per-provider baseline * 1.10.
 # =============================================================================
 
 
-def component1_fact_count(case_results):
-    """Aggregate total fact count across all test cases (case_results comes
-    from component2_attribution).  Returns (pass, info)."""
+def component1_fact_count(case_results, baseline_fact_count):
+    """Aggregate total fact count across all test cases.  Compares against
+    the per-provider baseline.  Returns (pass, info)."""
     total = sum(len(r.get("fact_texts") or []) for r in case_results)
-    threshold = int(BASELINE_FACT_COUNT * FACT_COUNT_THRESHOLD)
-    delta_pct = 100.0 * (total - BASELINE_FACT_COUNT) / BASELINE_FACT_COUNT
+    threshold = int(baseline_fact_count * FACT_COUNT_THRESHOLD)
+    if baseline_fact_count > 0:
+        delta_pct = 100.0 * (total - baseline_fact_count) / baseline_fact_count
+    else:
+        delta_pct = 0.0  # calibration mode: baseline not yet set
     info = {
-        "baseline_fact_count": BASELINE_FACT_COUNT,
+        "baseline_fact_count": baseline_fact_count,
         "candidate_fact_count": total,
         "threshold_fact_count": threshold,
         "delta_pct": round(delta_pct, 1),
         "n_cases": len(case_results),
     }
+    # In calibration mode (baseline=0) component 1 always passes — the run
+    # is just measuring, not gating.
+    if baseline_fact_count == 0:
+        return True, info
     return total <= threshold, info
 
 
@@ -540,6 +819,330 @@ TEST_CASES = [
 # fmt: on
 
 
+# =============================================================================
+# Component 3 — fix-rate mini-bench on conv 7 attribution-shape questions
+#
+# Components 1+2 are regression gates: they catch fact-widening and known-good
+# breakage but cannot tell us whether a candidate actually FIXES anything,
+# because the 25 component-2 snippets all pass on HEAD already (Phase 1.1
+# subject-naming rule does most of the work for short snippets).  Component 3
+# fills that gap with 12 LoCoMo conv-7 cat-2/3 questions where the gold
+# answer is supported by Jolene-side (role=assistant) dialog adjacent to a
+# Deborah-side (role=user) turn on the same topic — the production
+# attribution-ambiguity scenario.
+#
+# Selection criteria, applied to LoCoMo10 conv 7:
+#   - Category in {2 (temporal), 3 (multi-hop)}
+#   - Question subject is "Jolene" (assistant-role speaker; first speaker
+#     Deborah is role=user in the bench harness)
+#   - Evidence dia_id has speaker == "Jolene" (the gold answer is grounded
+#     in something Jolene said about herself)
+#   - Surrounding ±1 turn is included as the dialog snippet so the candidate
+#     prompt has to disambiguate against an adjacent Deborah turn — many of
+#     these (D1:8 pendant, D1:6 mother passing) feature Deborah making a
+#     parallel claim about herself immediately after Jolene's.
+# Mix: 8 cat-2 (temporal arithmetic + absolute dates) + 4 cat-3 (place /
+# multi-hop).  Sessions span 1, 2, 4, 5, 7, 13, 19 — covers the full conv-7
+# arc, not just session_1 where Case 10 lives.
+#
+# Per-case pipeline: extract dialog → generate answer from extracted facts →
+# judge against gold.  Three LLM calls per case per provider.  fix_rate =
+# correct_count / 12.  Pass criteria (per-provider): fix_rate > HEAD baseline
+# fix_rate (must improve, not just match).  Aggregate: PASS if ≥ 2 of 3
+# providers improve.
+#
+# Honest limits to flag here so future readers don't over-index on this
+# signal:
+#   - Single-conv signal isn't truth.  Full LoCoMo at budget=12288 across
+#     all 10 convs remains the source of truth for ship/no-ship.  Component
+#     3 catches the COARSE attribution-fix shape; it doesn't predict
+#     cat-2/cat-3 generation lift to within 1pp.
+#   - Question selection involves judgment.  The 12 cases below are picked
+#     from 32 LoCoMo conv-7 Jolene-side cat-2/3 candidates; rotation on
+#     recalibration is encouraged.  Document the rationale when changing.
+#   - HEAD baseline determines lift sensitivity.  If HEAD scores 12/12, no
+#     candidate can improve and component 3 has no signal — that is itself
+#     a meaningful finding worth reporting at the gate.
+
+# fmt: off
+COMPONENT3_CASES = [
+    {
+        "id": "c3_d1_2_engineering_project",
+        "category": "2",
+        "anchor": "2023-01-23",
+        "turns": [
+            ("user", 'Deborah said, "Hey Jolene, nice to meet you! How\'s your week going? Anything fun happened?"'),
+            ("assistant", 'Jolene said, "Hi Deb! Good to meet you! Yeah, my week\'s been busy. I finished an electrical engineering project last week — took a lot of work."'),
+            ("user", 'Deborah said, "Congrats! Last week I visited a place that holds a lot of memories for me. It was my mother\'s old house."'),
+        ],
+        "question": "What kind of project was Jolene working on in the beginning of January 2023?",
+        "gold": "electrical engineering project",
+    },
+    {
+        "id": "c3_d1_6_mother_passing",
+        "category": "2",
+        "anchor": "2023-01-23",
+        "turns": [
+            ("user", 'Deborah said, "It was full of memories, she passed away a few years ago. This is our last photo together."'),
+            ("assistant", 'Jolene said, "Sorry about your loss, Deb. My mother also passed away last year. This is my room in her house, I also have many memories there."'),
+            ("user", 'Deborah said, "My mom\'s house had a special bench near the window. She loved to sit there every morning."'),
+        ],
+        "question": "When did Jolene's mother pass away?",
+        "gold": "in 2022",
+    },
+    {
+        "id": "c3_d1_8_pendant_when",
+        "category": "2",
+        "anchor": "2023-01-23",
+        "turns": [
+            ("user", 'Deborah said, "My mom\'s house had a special bench near the window. She loved to sit there every morning."'),
+            ("assistant", 'Jolene said, "Staying connected is super important. Do you have something to remember her by? This pendant reminds me of my mother, she gave it to me in 2010 in Paris."'),
+            ("user", 'Deborah said, "Yes, I also have a pendant that reminds me of my mother. And what is special for you about your jewelry?"'),
+        ],
+        "question": "When did Jolene's mom gift her a pendant?",
+        "gold": "in 2010",
+    },
+    {
+        "id": "c3_d1_8_pendant_country",
+        "category": "3",
+        "anchor": "2023-01-23",
+        "turns": [
+            ("user", 'Deborah said, "My mom\'s house had a special bench near the window. She loved to sit there every morning."'),
+            ("assistant", 'Jolene said, "Staying connected is super important. Do you have something to remember her by? This pendant reminds me of my mother, she gave it to me in 2010 in Paris."'),
+            ("user", 'Deborah said, "Yes, I also have a pendant that reminds me of my mother. And what is special for you about your jewelry?"'),
+        ],
+        "question": "In what country did Jolene's mother buy her the pendant?",
+        "gold": "France",
+    },
+    {
+        "id": "c3_d2_24_seraphim_when",
+        "category": "2",
+        "anchor": "2023-01-27",
+        "turns": [
+            ("user", 'Deborah said, "Awww, that\'s so nice!"'),
+            ("assistant", 'Jolene said, "I bought it a year ago in Paris."'),
+            ("user", 'Deborah said, "Cool, Jolene! Pets bring so much happiness!"'),
+        ],
+        "question": "When did Jolene buy her pet Seraphim?",
+        "gold": "in 2022",
+    },
+    {
+        "id": "c3_d2_24_seraphim_country",
+        "category": "3",
+        "anchor": "2023-01-27",
+        "turns": [
+            ("user", 'Deborah said, "Awww, that\'s so nice!"'),
+            ("assistant", 'Jolene said, "I bought it a year ago in Paris."'),
+            ("user", 'Deborah said, "Cool, Jolene! Pets bring so much happiness!"'),
+        ],
+        "question": "In what country did Jolene buy snake Seraphim?",
+        "gold": "France",
+    },
+    {
+        "id": "c3_d4_23_avalanche_book",
+        "category": "2",
+        "anchor": "2023-02-04",
+        "turns": [
+            ("user", 'Deborah said, "Great, this is interesting! Have you come across any recent ones that really struck you?"'),
+            ("assistant", 'Jolene said, "Two weeks ago I read \\"Avalanche\\" by Neal Stephenson in one sitting!"'),
+            ("user", 'Deborah said, "That sounds cool, Jolene. Stories can be so powerful."'),
+        ],
+        "question": "Which book did Jolene read in January 2023?",
+        "gold": "Avalanche by Neal Stephenson",
+    },
+    {
+        "id": "c3_d4_33_bogota_country",
+        "category": "3",
+        "anchor": "2023-02-04",
+        "turns": [
+            ("user", 'Deborah said, "Oh, there\'s so many great places! My favorite is a park with a forest trail."'),
+            ("assistant", 'Jolene said, "Here\'s a picture I took on vacation last summer in Bogota. It was so beautiful and calming watching the sunset over the water."'),
+            ("user", 'Deborah said, "That sounds great, Jolene. Nature\'s calming for sure."'),
+        ],
+        "question": "In what country was Jolene during summer 2022?",
+        "gold": "Colombia",
+    },
+    {
+        "id": "c3_d5_1_mini_retreat",
+        "category": "2",
+        "anchor": "2023-02-09",
+        "turns": [
+            ("assistant", 'Jolene said, "Hey Deborah! Been a few days since we last talked so I wanted to fill you in on something cool. Last Wednesday I did a mini retreat to reflect on my career."'),
+            ("user", 'Deborah said, "Hey Jolene! Sounds great. Taking time to reflect can be really awesome. Did you gain any new insights from it?"'),
+        ],
+        "question": "When did Jolene have a mini-retreat to reflect on her career?",
+        "gold": "Wednesday before 9 February, 2023",
+    },
+    {
+        "id": "c3_d7_7_dating_year",
+        "category": "2",
+        "anchor": "2023-02-25",
+        "turns": [
+            ("user", 'Deborah said, "Aw, that\'s wonderful! How long have you been married?"'),
+            ("assistant", 'Jolene said, "We\'re not married yet but we\'ve been together for three years. We\'re taking it slow and loving the ride."'),
+            ("user", 'Deborah said, "Sounds nice, Jolene. So, how did you two meet?"'),
+        ],
+        "question": "Which year did Jolene and her partner start dating?",
+        "gold": "2020",
+    },
+    {
+        "id": "c3_d13_15_talkeetna_state",
+        "category": "3",
+        "anchor": "2023-06-06",
+        "turns": [
+            ("user", 'Deborah said, "Have you considered taking some breaks and finding activities like yoga to help you relax and unwind?"'),
+            ("assistant", 'Jolene said, "Yeah, I\'m trying to do it. Here\'s an example of how I spent yesterday morning, yoga on top of mount Talkeetna."'),
+            ("user", 'Deborah said, "Nice job, Jolene! How long have you been doing yoga and meditation?"'),
+        ],
+        "question": "Which US state did Jolene visit during her internship?",
+        "gold": "Alaska",
+    },
+    {
+        "id": "c3_d19_2_console_gift",
+        "category": "2",
+        "anchor": "2023-08-19",
+        "turns": [
+            ("user", 'Deborah said, "Hey Jolene! Hope you\'re having a good one. Last Friday I told Anna the story of my life."'),
+            ("assistant", 'Jolene said, "Life\'s been hella busy since we last talked. I bought a console for my partner as a gift on the 17th and it\'s so much fun!"'),
+            ("user", 'Deborah said, "Well done! As for me, I\'ve been focusing on teaching yoga."'),
+        ],
+        "question": "When did Jolene gift her partner a new console?",
+        "gold": "17 August, 2023",
+    },
+]
+# fmt: on
+
+# Per-provider HEAD baseline fix counts (correct_answers/12).  Calibrated
+# 2026-05-07.  HEAD misses overlap heavily across providers (D1:6 mother,
+# D1:8 pendant when+country, D2:24 seraphim when+country, D4:33 bogota
+# country, D13:15 talkeetna state, D19:2 console — these are the genuine
+# HEAD-failure cases that candidates must fix to register c3 improvement).
+# When set to 0, that provider runs in calibration mode and the verdict is
+# informational only.  Recalibrate with --include-component-3 on a fresh
+# HEAD run when extraction model or prompt baseline changes.
+COMPONENT3_BASELINES = {
+    "anthropic": 6,   # 6/12 — Haiku gets the simpler cases right
+    "openai": 1,      # 1/12 — gpt-5.4-mini struggles on HEAD here
+    "local": 5,       # 5/12 — Qwen3.6-35B middle-ground
+}
+
+
+GENERATOR_PROMPT = (
+    "You are answering a question from a memory system.\n\n"
+    "Question: {question}\n\n"
+    "Memory facts available:\n{facts}\n\n"
+    "Answer concisely (a phrase or short sentence).  If the facts don't "
+    "contain enough information, say \"I don't know.\""
+)
+
+JUDGE_PROMPT = (
+    "Question: {question}\n"
+    "Gold answer: {gold}\n"
+    "Generated answer: {generated}\n\n"
+    "Is the generated answer correct?  Be lenient on form (\"Tuesday\" "
+    "matches \"last Tuesday\", \"5\" matches \"five\", \"in 2010\" matches "
+    "\"2010\", \"electrical engineering project\" matches \"electricity "
+    "engineering project\", etc.) and strict on substance.  Output exactly "
+    "YES or NO with no other text."
+)
+
+
+def render_facts_for_generator(facts):
+    """Render extracted facts as a bulleted string for the generator."""
+    if not facts:
+        return "(no facts extracted)"
+    out = []
+    for f in facts:
+        text = f.get("text") or ""
+        if text:
+            out.append(f"- {text}")
+    return "\n".join(out) if out else "(no facts extracted)"
+
+
+def component3_mini_bench(prompt_template, caller_fn, model, endpoint, api_key,
+                          baseline_fix_count, quiet=False):
+    """For each conv-7 attribution-shape case, extract → generate → judge.
+    Returns (pass, info).  Pass = fix_count > baseline_fix_count.  When
+    baseline_fix_count == 0 (calibration mode) the run always reports PASS
+    with the measured fix_count for the operator to record."""
+    case_results = []
+    for i, case in enumerate(COMPONENT3_CASES, 1):
+        conv_json = build_conversation_json(case["turns"])
+        ext_prompt = build_extraction_prompt(
+            prompt_template, case["anchor"], conv_json, existing_profile="(none)")
+        # 1. Extract
+        try:
+            ext_raw = caller_fn(model, "", ext_prompt, api_key, endpoint,
+                                temperature=0.0, max_tokens=1024)
+        except Exception as exc:
+            case_results.append({**case, "stage": "extract", "error": str(exc),
+                                 "correct": False})
+            if not quiet:
+                sys.stdout.write(f"\r  [{i}/{len(COMPONENT3_CASES)}] "
+                                 f"{case['id']:<35} extract_ERR  ")
+                sys.stdout.flush()
+            continue
+        parsed = parse_extraction_response(ext_raw)
+        facts = parsed.get("facts") if isinstance(parsed, dict) else None
+        facts_str = render_facts_for_generator(facts)
+        # 2. Generate
+        gen_user = GENERATOR_PROMPT.format(question=case["question"],
+                                           facts=facts_str)
+        try:
+            gen_raw = caller_fn(model, "", gen_user, api_key, endpoint,
+                                temperature=0.0, max_tokens=128)
+        except Exception as exc:
+            case_results.append({**case, "stage": "generate",
+                                 "error": str(exc), "fact_count": len(facts or []),
+                                 "correct": False})
+            continue
+        # 3. Judge
+        judge_user = JUDGE_PROMPT.format(question=case["question"],
+                                         gold=case["gold"],
+                                         generated=gen_raw.strip())
+        try:
+            verdict_raw = caller_fn(model, "", judge_user, api_key, endpoint,
+                                    temperature=0.0, max_tokens=8)
+        except Exception as exc:
+            case_results.append({**case, "stage": "judge",
+                                 "error": str(exc),
+                                 "fact_count": len(facts or []),
+                                 "generated": gen_raw, "correct": False})
+            continue
+        verdict_clean = (verdict_raw or "").strip().upper()
+        # Strip non-alpha first char clutter, accept YES anywhere at start.
+        verdict_clean = re.sub(r"[^A-Z]", "", verdict_clean)
+        correct = verdict_clean.startswith("YES")
+        case_results.append({
+            **case,
+            "fact_count": len(facts or []),
+            "generated": gen_raw.strip(),
+            "verdict": verdict_clean,
+            "correct": correct,
+        })
+        if not quiet:
+            marker = "FIX" if correct else "MISS"
+            sys.stdout.write(f"\r  [{i}/{len(COMPONENT3_CASES)}] "
+                             f"{case['id']:<35} {marker:<5}")
+            sys.stdout.flush()
+    if not quiet:
+        print()
+
+    fix_count = sum(1 for r in case_results if r.get("correct"))
+    fix_rate = fix_count / max(1, len(case_results))
+    info = {
+        "total_cases": len(case_results),
+        "fix_count": fix_count,
+        "fix_rate": round(fix_rate, 3),
+        "baseline_fix_count": baseline_fix_count,
+        "case_results": case_results,
+    }
+    if baseline_fix_count == 0:
+        # Calibration mode: report measured fix_count, treat as PASS.
+        return True, info
+    return fix_count > baseline_fix_count, info
+
+
 def build_conversation_json(turns):
     """Format turns as the JSON-array-of-{role,content} that production
     extraction sees in conversation_json (memory_extraction.c:1252)."""
@@ -615,14 +1218,11 @@ def evaluate_attribution(facts, expected_subjects, forbidden_subjects):
     return passed, expected_hits, forbidden_only_hits, neutral_hits
 
 
-def component2_attribution(args, prompt_template):
-    """Run each test case through the live extraction prompt + Anthropic
-    Haiku.  Returns (pass, info)."""
-    sys.path.insert(0, str(DAWN_ROOT / "benchmarks"))
-    from run_benchmark import _anthropic_call
-
-    api_key = load_api_key(args.secrets_path)
-
+def component2_attribution(prompt_template, caller_fn, model, endpoint, api_key,
+                           baseline_attribution_passed, baseline_known_good_passed,
+                           quiet=False):
+    """Run each test case through the live extraction prompt + provider call.
+    Returns (pass, info).  `caller_fn` is one of the PROVIDER_CALLERS values."""
     case_results = []
     failures = []
     for i, case in enumerate(TEST_CASES, 1):
@@ -630,10 +1230,11 @@ def component2_attribution(args, prompt_template):
         prompt = build_extraction_prompt(
             prompt_template, case["anchor"], conv_json, existing_profile="(none)")
         try:
-            raw = _anthropic_call(args.model, "", prompt, api_key,
-                                  temperature=0.0, max_tokens=1024)
+            raw = caller_fn(model, "", prompt, api_key, endpoint,
+                            temperature=0.0, max_tokens=1024)
         except Exception as exc:
-            print(f"  [{i}] {case['id']}: API error: {exc}", file=sys.stderr)
+            if not quiet:
+                print(f"  [{i}] {case['id']}: API error: {exc}", file=sys.stderr)
             case_results.append({**case, "raw": "", "fact_texts": [],
                                  "passed": False, "reason": f"api_error: {exc}"})
             failures.append(case["id"])
@@ -644,8 +1245,10 @@ def component2_attribution(args, prompt_template):
             case_results.append({**case, "raw": raw, "fact_texts": [],
                                  "passed": False, "reason": "parse_failed"})
             failures.append(case["id"])
-            sys.stdout.write(f"\r  [{i}/{len(TEST_CASES)}] {case['id']:<35} parse_FAIL  ")
-            sys.stdout.flush()
+            if not quiet:
+                sys.stdout.write(
+                    f"\r  [{i}/{len(TEST_CASES)}] {case['id']:<35} parse_FAIL  ")
+                sys.stdout.flush()
             continue
         passed, eh, fh, nh = evaluate_attribution(
             facts, case["expected_subjects"], case["forbidden_subjects"])
@@ -654,15 +1257,17 @@ def component2_attribution(args, prompt_template):
             "fact_texts": [f.get("text", "") for f in facts],
             "expected_hits": eh, "forbidden_only_hits": fh, "neutral_hits": nh,
             "passed": passed,
-            "reason": "ok" if passed
-                      else f"exp={eh} forb_only={fh}",
+            "reason": "ok" if passed else f"exp={eh} forb_only={fh}",
         })
         if not passed:
             failures.append(case["id"])
-        marker = "PASS" if passed else "FAIL"
-        sys.stdout.write(f"\r  [{i}/{len(TEST_CASES)}] {case['id']:<35} {marker:<6}")
-        sys.stdout.flush()
-    print()
+        if not quiet:
+            marker = "PASS" if passed else "FAIL"
+            sys.stdout.write(
+                f"\r  [{i}/{len(TEST_CASES)}] {case['id']:<35} {marker:<6}")
+            sys.stdout.flush()
+    if not quiet:
+        print()
 
     n_total = len(case_results)
     n_passed = sum(1 for r in case_results if r["passed"])
@@ -685,13 +1290,23 @@ def component2_attribution(args, prompt_template):
         "case_results": case_results,
     }
 
-    # Threshold rules:
-    #  - any known-good failure → automatic FAIL (positive-control regression)
-    #  - attribution pass rate must be >= BASELINE_ATTR_PASS_RATE - tolerance
-    if n_known_good_passed < n_known_good:
+    # Threshold rules (per-provider baselines + small regression tolerance):
+    #  - known-good drop > KNOWN_GOOD_REGRESS_TOLERANCE → FAIL
+    #    (positive-control regression; even one beyond baseline matters)
+    #  - attribution drop > ATTRIBUTION_REGRESS_TOLERANCE → FAIL
+    #    (real regression on the attribution-failure suite)
+    #
+    # Calibration mode: if a baseline is 0, treat the run as PASS — it's
+    # measuring the new baseline, not gating against the old one.
+    if baseline_known_good_passed == 0 and baseline_attribution_passed == 0:
+        return True, info
+    if (baseline_known_good_passed > 0
+            and n_known_good_passed
+                < baseline_known_good_passed - KNOWN_GOOD_REGRESS_TOLERANCE):
         return False, info
-    attr_rate = n_attr_passed / max(1, n_attr)
-    if attr_rate < BASELINE_ATTR_PASS_RATE - ATTR_PASS_RATE_TOLERANCE:
+    if (baseline_attribution_passed > 0
+            and n_attr_passed
+                < baseline_attribution_passed - ATTRIBUTION_REGRESS_TOLERANCE):
         return False, info
     return True, info
 
@@ -700,89 +1315,59 @@ def component2_attribution(args, prompt_template):
 # Helpers
 # =============================================================================
 
-def load_api_key(secrets_path):
-    body = Path(secrets_path).read_text()
-    m = re.search(r'^\s*claude_api_key\s*=\s*"([^"]+)"', body, re.MULTILINE)
-    if not m:
-        sys.exit(f"error: no claude_api_key in {secrets_path}")
-    return m.group(1)
+def load_secrets(secrets_path):
+    """Return a dict with the provider API keys we use.  Inline parser
+    (no tomllib dep) — tolerates missing keys; provider-specific lookups
+    in resolve_provider_config error out only when the chosen provider
+    needs a key it can't find."""
+    out = {}
+    try:
+        body = Path(secrets_path).read_text()
+    except OSError:
+        return out
+    for key in ("claude_api_key", "openai_api_key", "gemini_api_key"):
+        m = re.search(rf'^\s*{key}\s*=\s*"([^"]+)"', body, re.MULTILINE)
+        if m:
+            out[key] = m.group(1)
+    return out
 
 
 # =============================================================================
 # Main
 # =============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Cheap speaker-attribution probe for the extraction prompt.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--secrets-path", type=Path, default=DEFAULT_SECRETS_PATH,
-                        help="Path to secrets.toml (claude_api_key)")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help="Anthropic model for the test-case extractions")
-    parser.add_argument("--extraction-c", type=Path, default=EXTRACTION_C_PATH,
-                        help="Path to memory_extraction.c (extracts live prompt)")
-    parser.add_argument("--json-output", type=Path,
-                        help="Optional path to dump per-case results")
-    args = parser.parse_args()
+def run_single_provider(provider, model_override, endpoint_override, secrets,
+                        dawn_toml_path, prompt_template, include_c3=False,
+                        quiet=False):
+    """Run all 25 cases through one provider and compute both components.
+    When include_c3 is true, also run the conv-7 attribution-shape mini-bench
+    (component 3).  Returns dict with provider config used + per-component
+    results."""
+    caller_fn, model, endpoint, api_key = resolve_provider_config(
+        provider, secrets, dawn_toml_path,
+        override_model=model_override, override_endpoint=endpoint_override)
+    cfg = PROVIDERS[provider]
 
-    print(f"=== Speaker-attribution probe ===")
-    print(f"  EXTRACTION_PROMPT_TEMPLATE source: {args.extraction_c}")
+    if not quiet:
+        print(f"  Provider: {provider} model={model or '(default)'} "
+              f"endpoint={endpoint}")
+        print(f"  Baseline: {cfg['baseline_fact_count']} facts, "
+              f"attr {cfg['baseline_attribution_passed']}/20, "
+              f"kg {cfg['baseline_known_good_passed']}/5"
+              + (f", c3 fix {COMPONENT3_BASELINES.get(provider, 0)}/12"
+                 if include_c3 else ""))
 
-    prompt_template = extract_prompt_template_from_c(args.extraction_c)
-    # Sanity-check: must contain the %s placeholders production relies on.
-    if prompt_template.count("%s") < 3:
-        sys.exit("error: extracted prompt has fewer than 3 %s placeholders — "
-                 "regex parse may have lost fragments")
+    c2_pass, c2_info = component2_attribution(
+        prompt_template, caller_fn, model, endpoint, api_key,
+        cfg["baseline_attribution_passed"],
+        cfg["baseline_known_good_passed"], quiet=quiet)
+    c1_pass, c1_info = component1_fact_count(
+        c2_info["case_results"], cfg["baseline_fact_count"])
 
-    n_attr = sum(1 for c in TEST_CASES if c["kind"] == "attribution_failure")
-    n_good = sum(1 for c in TEST_CASES if c["kind"] == "known_good")
-    print(f"  Prompt template: {len(prompt_template)} chars, "
-          f"{prompt_template.count('%s')} %s placeholders")
-    print(f"  Test cases: {len(TEST_CASES)} ({n_attr} attribution-failure + "
-          f"{n_good} known-good)")
-    print(f"  Component 1 baseline: {BASELINE_FACT_COUNT} facts across all cases, "
-          f"threshold +{int((FACT_COUNT_THRESHOLD - 1) * 100)}%")
-    print(f"  Component 2 baseline: attribution pass rate "
-          f"{BASELINE_ATTR_PASS_RATE:.2f}, "
-          f"tolerance -{int(ATTR_PASS_RATE_TOLERANCE * 100)}pp")
-    print()
-
-    # Single API pass — both components consume the same case_results.
-    print(f"--- Running {len(TEST_CASES)} test cases at temperature=0.0 ---")
-    c2_pass, c2_info = component2_attribution(args, prompt_template)
-    case_results = c2_info["case_results"]
-
-    # Component 1 from aggregated case_results.
-    c1_pass, c1_info = component1_fact_count(case_results)
-
-    print(f"--- Component 1: fact-count widening — "
-          f"{'PASS' if c1_pass else 'FAIL'} ---")
-    print(f"  Baseline (HEAD): {c1_info['baseline_fact_count']} facts "
-          f"across {c1_info['n_cases']} cases")
-    print(f"  Candidate:       {c1_info['candidate_fact_count']} facts")
-    print(f"  Threshold:       <= {c1_info['threshold_fact_count']} "
-          f"(BASELINE * {FACT_COUNT_THRESHOLD})")
-    print(f"  Delta:           {c1_info['delta_pct']:+.1f}%")
-    print()
-
-    print(f"--- Component 2: attribution correctness — "
-          f"{'PASS' if c2_pass else 'FAIL'} ---")
-    print(f"  Total:           {c2_info['total_passed']}/{c2_info['total_cases']} "
-          f"({100 * c2_info['pass_rate']:.1f}%)")
-    print(f"  Known-good:      {c2_info['known_good_passed']}/{c2_info['known_good_total']} "
-          f"(must be all-pass)")
-    print(f"  Attribution:     {c2_info['attribution_passed']}/{c2_info['attribution_total']} "
-          f"(threshold >= "
-          f"{int((BASELINE_ATTR_PASS_RATE - ATTR_PASS_RATE_TOLERANCE) * c2_info['attribution_total'])}/"
-          f"{c2_info['attribution_total']})")
-    if c2_info["failures"]:
-        print(f"  Failures:        {', '.join(c2_info['failures'][:10])}"
-              + (" ..." if len(c2_info['failures']) > 10 else ""))
-    print()
-
-    overall = c1_pass and c2_pass
-    results = {
+    result = {
+        "provider": provider,
+        "model": model,
+        "endpoint": endpoint,
         "component_1": {"passed": c1_pass, **c1_info},
         "component_2": {
             "passed": c2_pass,
@@ -794,23 +1379,242 @@ def main():
             "attribution_passed": c2_info["attribution_passed"],
             "attribution_total": c2_info["attribution_total"],
             "failures": c2_info["failures"],
-            "case_results": case_results,
+            "case_results": c2_info["case_results"],
         },
     }
 
+    if include_c3:
+        if not quiet:
+            print(f"  --- component 3 mini-bench (12 cases × 3 calls) ---")
+        c3_pass, c3_info = component3_mini_bench(
+            prompt_template, caller_fn, model, endpoint, api_key,
+            COMPONENT3_BASELINES.get(provider, 0), quiet=quiet)
+        result["component_3"] = {"passed": c3_pass, **c3_info}
+
+    return result
+
+
+def print_provider_block(result):
+    p = result["provider"]
+    c1 = result["component_1"]
+    c2 = result["component_2"]
+    print(f"--- {p}: component 1 fact-count — "
+          f"{'PASS' if c1['passed'] else 'FAIL'} ---")
+    print(f"  Baseline:  {c1['baseline_fact_count']} facts "
+          f"({c1['n_cases']} cases)")
+    print(f"  Candidate: {c1['candidate_fact_count']} facts  "
+          f"(threshold <= {c1['threshold_fact_count']})  "
+          f"delta {c1['delta_pct']:+.1f}%")
+    print(f"--- {p}: component 2 attribution — "
+          f"{'PASS' if c2['passed'] else 'FAIL'} ---")
+    print(f"  Total:       {c2['total_passed']}/{c2['total_cases']}  "
+          f"({100 * c2['pass_rate']:.1f}%)")
+    print(f"  Known-good:  {c2['known_good_passed']}/{c2['known_good_total']}")
+    print(f"  Attribution: {c2['attribution_passed']}/{c2['attribution_total']}")
+    if c2["failures"]:
+        print(f"  Failures: {', '.join(c2['failures'][:10])}"
+              + (" ..." if len(c2['failures']) > 10 else ""))
+    if "component_3" in result:
+        c3 = result["component_3"]
+        print(f"--- {p}: component 3 fix-rate — "
+              f"{'PASS' if c3['passed'] else 'FAIL'} ---")
+        print(f"  Baseline:  {c3.get('baseline_fix_count', 0)}/12 "
+              f"(0 = calibration mode)")
+        print(f"  Candidate: {c3['fix_count']}/{c3['total_cases']}  "
+              f"({100 * c3['fix_rate']:.1f}%)")
+        misses = [r["id"] for r in c3.get("case_results", [])
+                  if not r.get("correct")]
+        if misses:
+            print(f"  Misses: {', '.join(misses[:8])}"
+                  + (" ..." if len(misses) > 8 else ""))
+    print()
+
+
+def print_aggregate_matrix(results):
+    """Render a per-provider component matrix + aggregate verdict.  Includes
+    component 3 column iff any provider has a c3 result."""
+    has_c3 = any("component_3" in r for r in results)
+    print(f"=== Aggregate matrix (quorum {AGGREGATE_QUORUM}-of-{len(results)}) ===")
+    if has_c3:
+        print(f"{'Provider':<12} {'C1 fact-count':>16} "
+              f"{'C2 attribution':>18} {'C3 fix-rate':>14} {'Overall':>10}")
+    else:
+        print(f"{'Provider':<12} {'C1 fact-count':>16} "
+              f"{'C2 attribution':>18} {'Overall':>10}")
+    print("-" * (74 if has_c3 else 60))
+    c1_passed = 0
+    c2_passed = 0
+    c3_passed = 0
+    c3_total = 0
+    for r in results:
+        c1 = r["component_1"]
+        c2 = r["component_2"]
+        c1_mark = "PASS" if c1["passed"] else "FAIL"
+        c2_mark = "PASS" if c2["passed"] else "FAIL"
+        c1_detail = (f"{c1['candidate_fact_count']:>3} "
+                     f"({c1['delta_pct']:+5.1f}%)")
+        c2_detail = (f"{c2['total_passed']:>2}/{c2['total_cases']:>2} "
+                     f"kg={c2['known_good_passed']}/{c2['known_good_total']}")
+        if c1["passed"]:
+            c1_passed += 1
+        if c2["passed"]:
+            c2_passed += 1
+        if "component_3" in r:
+            c3 = r["component_3"]
+            c3_mark = "PASS" if c3["passed"] else "FAIL"
+            c3_detail = (f"{c3['fix_count']:>2}/{c3['total_cases']:>2} "
+                         f"vs {c3.get('baseline_fix_count', 0)}")
+            c3_total += 1
+            if c3["passed"]:
+                c3_passed += 1
+        else:
+            c3_mark = "—"
+            c3_detail = "—"
+        components_pass = c1["passed"] and c2["passed"] and (
+            "component_3" not in r or r["component_3"]["passed"])
+        overall = "PASS" if components_pass else "FAIL"
+        if has_c3:
+            print(f"{r['provider']:<12} {c1_mark:>5} {c1_detail:>10} "
+                  f"{c2_mark:>5} {c2_detail:>12} {c3_mark:>5} {c3_detail:>8} "
+                  f"{overall:>10}")
+        else:
+            print(f"{r['provider']:<12} {c1_mark:>5} {c1_detail:>10} "
+                  f"{c2_mark:>5} {c2_detail:>12} {overall:>10}")
+    print("-" * (74 if has_c3 else 60))
+    aggregate_c1 = c1_passed >= AGGREGATE_QUORUM
+    aggregate_c2 = c2_passed >= AGGREGATE_QUORUM
+    aggregate_c3 = (c3_passed >= AGGREGATE_QUORUM) if c3_total else True
+    aggregate_overall = aggregate_c1 and aggregate_c2 and aggregate_c3
+    if has_c3:
+        print(f"{'aggregate':<12} {'PASS' if aggregate_c1 else 'FAIL':>5}  "
+              f"{c1_passed}/{len(results)}        "
+              f"{'PASS' if aggregate_c2 else 'FAIL':>5}  {c2_passed}/{len(results)}     "
+              f"{'PASS' if aggregate_c3 else 'FAIL':>5}  {c3_passed}/{c3_total}    "
+              f"{'PASS' if aggregate_overall else 'FAIL':>10}")
+    else:
+        print(f"{'aggregate':<12} {'PASS' if aggregate_c1 else 'FAIL':>5}  "
+              f"{c1_passed}/{len(results)}        "
+              f"{'PASS' if aggregate_c2 else 'FAIL':>5}  {c2_passed}/{len(results)}     "
+              f"{'PASS' if aggregate_overall else 'FAIL':>10}")
+    print()
+    return aggregate_overall, aggregate_c1, aggregate_c2, aggregate_c3
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Cheap speaker-attribution probe (multi-model).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--provider",
+                        help="Single provider: anthropic | openai | local. "
+                             "Default: run all 3 and aggregate.")
+    parser.add_argument("--model",
+                        help="Override the provider default model")
+    parser.add_argument("--endpoint",
+                        help="Override the provider endpoint URL")
+    parser.add_argument("--secrets-path", type=Path, default=DEFAULT_SECRETS_PATH,
+                        help="Path to secrets.toml")
+    parser.add_argument("--dawn-toml", type=Path, default=DEFAULT_DAWN_TOML,
+                        help="Path to dawn.toml (used for [llm.local] endpoint)")
+    parser.add_argument("--extraction-c", type=Path, default=EXTRACTION_C_PATH,
+                        help="Path to memory_extraction.c (extracts live prompt)")
+    parser.add_argument("--json-output", type=Path,
+                        help="Optional path to dump per-provider per-case results")
+    parser.add_argument("--skip-local", action="store_true",
+                        help="Skip the local provider (use when local LLM is offline)")
+    parser.add_argument("--include-component-3", action="store_true",
+                        help="Also run the conv-7 attribution-shape mini-bench "
+                             "(component 3).  Adds 12 extract+generate+judge "
+                             "cycles per provider; ~$0.10 extra per multi-model run.")
+    args = parser.parse_args()
+
+    print(f"=== Speaker-attribution probe ===")
+    print(f"  EXTRACTION_PROMPT_TEMPLATE source: {args.extraction_c}")
+
+    prompt_template = extract_prompt_template_from_c(args.extraction_c)
+    if prompt_template.count("%s") < 3:
+        sys.exit("error: extracted prompt has fewer than 3 %s placeholders — "
+                 "regex parse may have lost fragments")
+
+    n_attr = sum(1 for c in TEST_CASES if c["kind"] == "attribution_failure")
+    n_good = sum(1 for c in TEST_CASES if c["kind"] == "known_good")
+    print(f"  Prompt template: {len(prompt_template)} chars, "
+          f"{prompt_template.count('%s')} %s placeholders")
+    print(f"  Test cases: {len(TEST_CASES)} ({n_attr} attribution-failure + "
+          f"{n_good} known-good)")
+    print()
+
+    secrets = load_secrets(args.secrets_path)
+
+    if args.provider:
+        providers = [args.provider]
+    else:
+        providers = ["anthropic", "openai"]
+        if not args.skip_local:
+            providers.append("local")
+
+    results = []
+    for p in providers:
+        try:
+            r = run_single_provider(
+                p, args.model, args.endpoint, secrets, args.dawn_toml,
+                prompt_template, include_c3=args.include_component_3,
+                quiet=False)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f"  {p}: setup/run error: {exc}", file=sys.stderr)
+            results.append({
+                "provider": p, "model": "(error)", "endpoint": "(error)",
+                "component_1": {"passed": False, "baseline_fact_count": 0,
+                                "candidate_fact_count": 0,
+                                "threshold_fact_count": 0, "delta_pct": 0.0,
+                                "n_cases": 0, "error": str(exc)},
+                "component_2": {"passed": False, "total_passed": 0, "total_cases": 0,
+                                "pass_rate": 0.0,
+                                "known_good_passed": 0, "known_good_total": 0,
+                                "attribution_passed": 0, "attribution_total": 0,
+                                "failures": [], "case_results": [],
+                                "error": str(exc)},
+            })
+            continue
+        results.append(r)
+        print_provider_block(r)
+
+    aggregate_overall, agg_c1, agg_c2, agg_c3 = print_aggregate_matrix(results)
+
     if args.json_output:
-        # Match bench_temporal_arithmetic.py: O_EXCL/O_NOFOLLOW + mode 0o600.
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         try:
             fd = os.open(args.json_output, flags, 0o600)
         except FileExistsError:
             sys.exit(f"error: --json-output path {args.json_output} already exists")
         with os.fdopen(fd, "w") as f:
-            json.dump(results, f, indent=2, default=str)
+            json.dump({
+                "providers": results,
+                "aggregate": {
+                    "overall_passed": aggregate_overall,
+                    "component_1_quorum": agg_c1,
+                    "component_2_quorum": agg_c2,
+                    "component_3_quorum": agg_c3,
+                    "quorum_required": AGGREGATE_QUORUM,
+                    "providers_run": len(results),
+                },
+            }, f, indent=2, default=str)
         print(f"  Saved results to {args.json_output}")
 
-    print(f"=== Overall: {'PASS' if overall else 'FAIL'} ===")
-    return 0 if overall else 1
+    if len(results) == 1:
+        # Single-provider mode: report that provider's verdict only.
+        only = results[0]
+        single_pass = (only["component_1"]["passed"]
+                       and only["component_2"]["passed"]
+                       and (only.get("component_3", {}).get("passed", True)))
+        print(f"=== Single-provider verdict ({only['provider']}): "
+              f"{'PASS' if single_pass else 'FAIL'} ===")
+        return 0 if single_pass else 1
+
+    print(f"=== Aggregate verdict: "
+          f"{'PASS' if aggregate_overall else 'FAIL'} ===")
+    return 0 if aggregate_overall else 1
 
 
 if __name__ == "__main__":

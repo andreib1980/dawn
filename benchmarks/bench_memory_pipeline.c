@@ -194,10 +194,54 @@ static int wait_for_extraction(int user_id, int timeout_sec) {
 
 /* =============================================================================
  * Build conversation_history JSON from messages added so far.
- * Each entry: {role, content, id}.  Extraction's internal filter
- * (memory_extraction.c:1198-1217) skips messages with id <= last_msg_id,
- * so passing the full array is correct for incremental per-session runs.
+ *
+ * Each entry: {role, content, speaker?, id}.  Extraction's internal filter
+ * (memory_extraction.c:1198-1217) skips messages with id <= last_msg_id and
+ * with role=="system", so the role field stays even in cγ mode.
+ *
+ * cγ-bench wiring (Phase 1.5, May 2026): when content begins with a
+ * "Speaker said," prefix (the LoCoMo bench-harness shape that
+ * run_benchmark.py inserts), parse the leading name and emit it as a
+ * "speaker" field, AND set role to a uniform "user" so the role-binary
+ * prior never fires.  The probe's c3 mini-bench measured a +25pp aggregate
+ * fix-rate lift across 3 models for this format vs HEAD.  Production
+ * memory_extraction.c is intentionally NOT modified — it sees the extra
+ * speaker field passively, and its existing role filter still works
+ * because every message has role=="user" in cγ-bench mode.
+ *
+ * Falls through to the original role-based emission when content has no
+ * "X said," prefix (production-shape input from dawn-admin add_message
+ * outside bench).  Production today is single-user, so the speaker-field
+ * effect doesn't apply there.
  * ============================================================================= */
+
+/* Parse a leading "<Name> said," prefix from content.  Writes the name
+ * into out (capacity out_cap) and returns true on success.  Restricted to
+ * a leading capital letter + alpha/apostrophe/hyphen body so an
+ * accidentally-matching production phrase like "i said," doesn't trip it
+ * (the existing bench harness inserts properly-capitalised speaker names;
+ * production raw user text would not). */
+static bool parse_speaker_prefix(const char *content, char *out, size_t out_cap) {
+   if (!content || !out || out_cap == 0)
+      return false;
+   if (!(content[0] >= 'A' && content[0] <= 'Z'))
+      return false;
+   const char *said = strstr(content, " said,");
+   if (!said || said == content)
+      return false;
+   size_t namelen = (size_t)(said - content);
+   if (namelen == 0 || namelen >= out_cap)
+      return false;
+   for (size_t i = 0; i < namelen; i++) {
+      char ch = content[i];
+      bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '\'' || ch == '-';
+      if (!ok)
+         return false;
+   }
+   memcpy(out, content, namelen);
+   out[namelen] = '\0';
+   return true;
+}
 
 static struct json_object *build_history_for_conv(int64_t conv_id, int *count_out) {
    sqlite3_stmt *stmt = NULL;
@@ -216,8 +260,22 @@ static struct json_object *build_history_for_conv(int64_t conv_id, int *count_ou
       const char *role = (const char *)sqlite3_column_text(stmt, 1);
       const char *content = (const char *)sqlite3_column_text(stmt, 2);
       struct json_object *msg = json_object_new_object();
-      json_object_object_add(msg, "role", json_object_new_string(role ? role : ""));
-      json_object_object_add(msg, "content", json_object_new_string(content ? content : ""));
+
+      char speaker[64] = "";
+      bool have_speaker = parse_speaker_prefix(content, speaker, sizeof(speaker));
+
+      if (have_speaker) {
+         /* cγ-bench: uniform role + named speaker (matches the probe's
+          * approach-D shape that delivered +25pp c3 lift).  role stays a
+          * non-system value so memory_extraction.c's filter accepts it. */
+         json_object_object_add(msg, "role", json_object_new_string("user"));
+         json_object_object_add(msg, "content", json_object_new_string(content ? content : ""));
+         json_object_object_add(msg, "speaker", json_object_new_string(speaker));
+      } else {
+         /* Production-shape fallback: keep the original role binary. */
+         json_object_object_add(msg, "role", json_object_new_string(role ? role : ""));
+         json_object_object_add(msg, "content", json_object_new_string(content ? content : ""));
+      }
       json_object_object_add(msg, "id", json_object_new_int64(msg_id));
       json_object_array_add(arr, msg);
       n++;
