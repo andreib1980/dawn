@@ -31,3 +31,9 @@ auth_db_state_t s_db = {
    .mutex = PTHREAD_MUTEX_INITIALIZER,
    .initialized = false,
 };
+
+/* Embedding-cache invalidator called from memory_db_delete_user_memories;
+ * the embeddings module isn't linked into this standalone test, so the stub
+ * is a no-op (matches test_memory_provenance_stub.c). */
+void memory_embeddings_invalidate_all(void) {
+}

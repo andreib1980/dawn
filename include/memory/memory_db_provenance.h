@@ -35,7 +35,7 @@
 
 #include <stdint.h>
 
-#include "memory/memory_db.h"
+#include "memory/memory_types.h"
 
 #ifdef __cplusplus
 extern "C" {

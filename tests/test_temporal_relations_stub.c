@@ -32,3 +32,9 @@ auth_db_state_t s_db = {
 };
 
 dawn_config_t g_config;
+
+/* Embedding-cache invalidator called from memory_db_delete_user_memories;
+ * the embeddings module isn't linked into this standalone test, so the stub
+ * is a no-op. */
+void memory_embeddings_invalidate_all(void) {
+}

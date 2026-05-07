@@ -217,37 +217,37 @@ static int count_open_relations(int subject_id, const char *relation) {
 
 static void test_supersede_exclusive(void) {
    /* Insert: Alice works_at Google */
-   int rc = memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, 0, 0, NULL);
+   int rc = memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "works_at"));
 
    /* Now: Alice works_at Microsoft — must auto-close Google */
-   rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
+   rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(1, count_open_relations(10, "works_at"));
 }
 
 static void test_supersede_idempotent_same_object(void) {
    /* Insert: Alice works_at Microsoft */
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    int prior = count_open_relations(10, "works_at");
 
    /* Re-insert same target */
-   int rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
+   int rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(prior + 1, count_open_relations(10, "works_at"));
 }
 
 static void test_non_exclusive_does_not_close(void) {
-   memory_db_relation_supersede(1, 10, "likes", 20, NULL, 0, 0.7f, 0, 0, NULL);
-   memory_db_relation_supersede(1, 10, "likes", 21, NULL, 0, 0.7f, 0, 0, NULL);
-   memory_db_relation_supersede(1, 10, "likes", 22, NULL, 0, 0.7f, 0, 0, NULL);
+   memory_db_relation_supersede(1, 10, "likes", 20, NULL, 0, 0.7f, 0, 0, NULL, NULL);
+   memory_db_relation_supersede(1, 10, "likes", 21, NULL, 0, 0.7f, 0, 0, NULL, NULL);
+   memory_db_relation_supersede(1, 10, "likes", 22, NULL, 0, 0.7f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(3, count_open_relations(10, "likes"));
 }
 
 static void test_list_by_subject_at(void) {
-   memory_db_relation_create(1, 50, "lives_in", 60, NULL, 0, 0.9f, 1000, 2000);
-   memory_db_relation_create(1, 50, "lives_in", 61, NULL, 0, 0.9f, 2000, 0);
+   memory_db_relation_create(1, 50, "lives_in", 60, NULL, 0, 0.9f, 1000, 2000, NULL);
+   memory_db_relation_create(1, 50, "lives_in", 61, NULL, 0, 0.9f, 2000, 0, NULL);
 
    memory_relation_t out[10];
 
@@ -284,8 +284,8 @@ static void test_supersede_closes_at_new_valid_from(void) {
    int64_t t2018 = 1514764800;
    int64_t t2020 = 1577836800;
 
-   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0, NULL);
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0, NULL);
+   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, 0, NULL, NULL);
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, t2020, 0, NULL, NULL);
 
    /* As-of 2019: only Google should be valid */
    memory_relation_t out[10];
@@ -303,12 +303,12 @@ static void test_supersede_closes_at_new_valid_from(void) {
 
 static void test_supersede_skips_close_for_historical_insert(void) {
    /* Establish current reality: Alice works_at Microsoft, ongoing */
-   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL);
+   memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
 
    /* Ingest HISTORICAL: Alice worked at Google 2018-2020 */
    int64_t t2018 = 1514764800;
    int64_t t2020 = 1577836800;
-   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020, NULL);
+   memory_db_relation_supersede(1, 10, "works_at", 20, NULL, 0, 0.9f, t2018, t2020, NULL, NULL);
 
    /* Microsoft row should still be open */
    sqlite3_stmt *stmt = NULL;

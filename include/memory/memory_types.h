@@ -18,10 +18,14 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Memory System Type Definitions
+ * Memory System Type Definitions and DB Return Codes
  *
- * Defines data structures for the persistent memory system including
- * facts, preferences, and conversation summaries.
+ * Data structures for the persistent memory system (facts, preferences,
+ * summaries, entities, relations, provenance) plus the `MEMORY_DB_*` return
+ * codes shared by `memory_db.h` and its split sub-headers
+ * (`memory_db_entities.h`, `memory_db_embeddings.h`, `memory_db_provenance.h`).
+ * Centralizing the typedef + return codes here lets each sub-header reference
+ * them without depending on the umbrella `memory_db.h`.
  */
 
 #ifndef MEMORY_TYPES_H
@@ -34,6 +38,38 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* =============================================================================
+ * Memory DB return codes
+ *
+ * Defined here (rather than in memory_db.h) so that the split sub-headers
+ * memory_db_entities.h and memory_db_embeddings.h can reference these codes
+ * without pulling in the full memory_db.h umbrella.  Same logic applies to
+ * memory_provenance_t below.
+ * ============================================================================= */
+
+#define MEMORY_DB_SUCCESS 0
+#define MEMORY_DB_FAILURE 1
+#define MEMORY_DB_NOT_FOUND 2
+#define MEMORY_DB_DUPLICATE 3
+
+/* =============================================================================
+ * Provenance
+ *
+ * Coarse source linkage: every item produced by a single extraction call
+ * shares the same (conv_id, msg_id_start, msg_id_end) triple.  conv_id == 0
+ * means "no provenance" (voice-only path, import, or explicit remember).
+ *
+ * Lives here (not in memory_db.h) so the entity / embedding sub-headers and
+ * memory_db_provenance.h can declare provenance-aware function prototypes
+ * without depending on the memory_db.h umbrella.
+ * ============================================================================= */
+
+typedef struct {
+   int64_t conv_id; /* 0 = no provenance */
+   int64_t msg_id_start;
+   int64_t msg_id_end;
+} memory_provenance_t;
 
 /* =============================================================================
  * Buffer Size Constants

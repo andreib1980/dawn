@@ -23,6 +23,12 @@
  * Provides CRUD operations for memory facts, preferences, and summaries.
  * Uses the auth_db module's SQLite database and prepared statements.
  * All functions are thread-safe via auth_db's mutex protection.
+ *
+ * Phase 1a (May 2026) split this header for cohesion: the entity graph
+ * surface lives in memory_db_entities.h and fact-embedding storage lives
+ * in memory_db_embeddings.h.  Both are included transitively below so
+ * existing callers that `#include "memory/memory_db.h"` continue to
+ * compile unchanged.
  */
 
 #ifndef MEMORY_DB_H
@@ -34,25 +40,16 @@
 extern "C" {
 #endif
 
-/* Return codes */
-#define MEMORY_DB_SUCCESS 0
-#define MEMORY_DB_FAILURE 1
-#define MEMORY_DB_NOT_FOUND 2
-#define MEMORY_DB_DUPLICATE 3
-
-/* =============================================================================
- * Provenance
+/* Return codes — defined in memory_types.h so the split sub-headers can
+ * reference them without pulling in the memory_db.h umbrella.  Names
+ * preserved exactly:
+ *   MEMORY_DB_SUCCESS
+ *   MEMORY_DB_FAILURE
+ *   MEMORY_DB_NOT_FOUND
+ *   MEMORY_DB_DUPLICATE
  *
- * Coarse source linkage: every item produced by a single extraction call
- * shares the same (conv_id, msg_id_start, msg_id_end) triple.  conv_id == 0
- * means "no provenance" (voice-only path, import, or explicit remember).
- * ============================================================================= */
-
-typedef struct {
-   int64_t conv_id; /* 0 = no provenance */
-   int64_t msg_id_start;
-   int64_t msg_id_end;
-} memory_provenance_t;
+ * Provenance typedef (memory_provenance_t) likewise lives in memory_types.h.
+ */
 
 /* =============================================================================
  * Fact Operations
@@ -609,374 +606,6 @@ int memory_db_delete_user_memories(int user_id);
 int memory_db_get_stats(int user_id, memory_stats_t *out_stats);
 
 /* =============================================================================
- * Embedding Operations (Semantic Search)
- * ============================================================================= */
-
-/**
- * @brief Store an embedding vector for a fact
- *
- * @param fact_id Fact ID
- * @param embedding Float array of embedding values
- * @param dims Number of dimensions
- * @param norm Pre-computed L2 norm of the embedding
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_update_embedding(int user_id,
-                                    int64_t fact_id,
-                                    const float *embedding,
-                                    int dims,
-                                    float norm);
-
-/**
- * @brief Load all embeddings for a user (for in-memory cache)
- *
- * Returns fact IDs, embedding BLOBs, and pre-computed norms.
- * Skips rows where embedding dimensions don't match expected_dims.
- *
- * @param user_id User ID
- * @param expected_dims Expected embedding dimensions (for validation)
- * @param out_ids Output: array of fact IDs (caller allocates)
- * @param out_embeddings Output: flat float array (caller allocates, count * dims)
- * @param out_norms Output: array of norms (caller allocates)
- * @param max_count Maximum entries to return
- * @param count_out Output: number of embeddings loaded
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-/* out_created_ats: optional. Pass NULL when caller doesn't need per-fact
- * timestamps (temporal-query scoring is the only consumer). */
-int memory_db_fact_get_embeddings(int user_id,
-                                  int expected_dims,
-                                  int64_t *out_ids,
-                                  float *out_embeddings,
-                                  float *out_norms,
-                                  int64_t *out_created_ats,
-                                  int max_count,
-                                  int *count_out);
-
-/**
- * @brief List facts that need embedding (backfill)
- *
- * Returns facts with NULL embedding or mismatched dimensions.
- *
- * @param user_id User ID
- * @param expected_dims Expected embedding dimensions
- * @param out_ids Output: array of fact IDs
- * @param out_texts Output: array of fact text strings (caller allocates char[][512])
- * @param max_count Maximum entries to return
- * @param count_out Output: number of facts found
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_list_without_embedding(int user_id,
-                                          int expected_dims,
-                                          int64_t *out_ids,
-                                          char out_texts[][512],
-                                          int max_count,
-                                          int *count_out);
-
-/* =============================================================================
- * Entity Graph Operations (Phase S4)
- * ============================================================================= */
-
-/**
- * @brief Build a canonical (lowercase ASCII) version of an entity name
- *
- * Lowercases ASCII characters, preserves multibyte UTF-8 as-is,
- * and trims trailing spaces.
- *
- * @param name Input entity name
- * @param out Output buffer
- * @param size Size of output buffer
- */
-void memory_make_canonical_name(const char *name, char *out, size_t size);
-
-/**
- * @brief Upsert an entity (insert or increment mention_count)
- *
- * Uses INSERT ... ON CONFLICT ... RETURNING id, mention_count.
- *
- * @param user_id User who owns this entity
- * @param name Display name
- * @param entity_type Entity type (person, pet, place, org, thing)
- * @param canonical_name Lowercased canonical name
- * @param out_created Output: true if this was a new insert (mention_count == 1)
- * @param id_out Output: entity ID on success (may be NULL)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_entity_upsert(int user_id,
-                            const char *name,
-                            const char *entity_type,
-                            const char *canonical_name,
-                            bool *out_created,
-                            int64_t *id_out);
-
-/**
- * @brief Get an entity by exact canonical name
- *
- * @param user_id User ID
- * @param canonical_name Exact canonical name to look up
- * @param out_entity Output: populated entity structure
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
- */
-int memory_db_entity_get_by_name(int user_id,
-                                 const char *canonical_name,
-                                 memory_entity_t *out_entity);
-
-/**
- * @brief Update entity embedding vector
- *
- * @param entity_id Entity ID
- * @param user_id User ID (for ownership check)
- * @param embedding Float array of embedding values
- * @param dims Number of dimensions
- * @param norm Pre-computed L2 norm
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_entity_update_embedding(int64_t entity_id,
-                                      int user_id,
-                                      const float *embedding,
-                                      int dims,
-                                      float norm);
-
-/**
- * @brief Create a relation between entities
- *
- * @param user_id User ID
- * @param subject_entity_id Subject entity ID
- * @param relation Relation type (e.g., "is_a", "lives_in")
- * @param object_entity_id Object entity ID (0 for literal)
- * @param object_value Literal value if no object entity
- * @param fact_id Associated fact ID (0 for none)
- * @param confidence Confidence score (0.0-1.0)
- * @param prov Provenance; NULL or conv_id==0 = no provenance
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_relation_create(int user_id,
-                              int64_t subject_entity_id,
-                              const char *relation,
-                              int64_t object_entity_id,
-                              const char *object_value,
-                              int64_t fact_id,
-                              float confidence,
-                              int64_t valid_from,
-                              int64_t valid_to,
-                              const memory_provenance_t *prov);
-
-/**
- * @brief Transactional close-and-create: auto-closes any existing open exclusive
- * relation with a different object before inserting the new row.  All work happens
- * under a single BEGIN IMMEDIATE so other workers cannot observe an inconsistent
- * state.  Non-exclusive relations skip the close branch (multiple open rows valid).
- *
- * See EXCLUSIVE_RELATIONS[] and CONTRADICTORY_PAIRS[] in memory_db.c for the
- * full compile-time lists of auto-close relation types.
- *
- * Use this from extraction instead of memory_db_relation_create directly.
- *
- * @param user_id User ID
- * @param subject_entity_id Subject entity ID
- * @param relation Relation type (auto-close enabled if exclusive)
- * @param object_entity_id Object entity ID (0 for literal)
- * @param object_value Literal value if no object entity
- * @param fact_id Associated fact ID (0 for none)
- * @param confidence Confidence (0.0-1.0)
- * @param valid_from Start of validity period (0 = open-ended/NULL)
- * @param valid_to End of validity period (0 = open-ended/NULL = currently true)
- * @param prov Provenance; NULL or conv_id==0 = no provenance
- * @param out_old_fact_id If non-NULL and an existing open relation was closed
- *        (exclusive supersede or contradictory-pair close), receives that old
- *        relation's fact_id (0 if none was linked)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_relation_supersede(int user_id,
-                                 int64_t subject_entity_id,
-                                 const char *relation,
-                                 int64_t object_entity_id,
-                                 const char *object_value,
-                                 int64_t fact_id,
-                                 float confidence,
-                                 int64_t valid_from,
-                                 int64_t valid_to,
-                                 const memory_provenance_t *prov,
-                                 int64_t *out_old_fact_id);
-
-/**
- * @brief List relations where entity is subject (outgoing).  Returns ALL
- * relations regardless of validity period — use _list_by_subject_at for
- * temporal filtering.
- *
- * @param count_out Output: number of relations
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_relation_list_by_subject(int user_id,
-                                       int64_t subject_entity_id,
-                                       memory_relation_t *out,
-                                       int max,
-                                       int *count_out);
-
-/**
- * @brief List relations valid at a given timestamp (v33).
- *
- * Returns rows where (valid_from IS NULL OR valid_from <= as_of_ts)
- *                AND (valid_to IS NULL OR valid_to > as_of_ts).
- *
- * Pass as_of_ts = 0 for "currently valid" (now()).  Used by the entity-recall
- * block when building the LLM context.
- *
- * @param user_id User ID
- * @param subject_entity_id Subject entity ID
- * @param as_of_ts Timestamp to evaluate validity at (0 = now)
- * @param out Output array
- * @param max Maximum results
- * @param count_out Output: number of relations
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_relation_list_by_subject_at(int user_id,
-                                          int64_t subject_entity_id,
-                                          int64_t as_of_ts,
-                                          memory_relation_t *out,
-                                          int max,
-                                          int *count_out);
-
-/**
- * @brief List incoming relations where entity is the object
- *
- * Returns relations where the given entity is the target/object.
- * The object_name field contains the subject entity's resolved name.
- *
- * @param user_id User ID
- * @param object_entity_id Entity ID to find incoming relations for
- * @param out Output array
- * @param max Maximum results
- * @param count_out Output: number of relations
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_relation_list_by_object(int user_id,
-                                      int64_t object_entity_id,
-                                      memory_relation_t *out,
-                                      int max,
-                                      int *count_out);
-
-/**
- * @brief Bulk-load all relations for a user in a single query
- *
- * Returns outgoing relations sorted by subject_entity_id. Used by WebUI
- * to avoid N+1 queries when loading entities with their relations.
- *
- * @param user_id User ID
- * @param out Output array of relations
- * @param max Maximum relations to return
- * @param count_out Output: number of relations
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_relation_list_all_by_user(int user_id,
-                                        memory_relation_t *out,
-                                        int max,
-                                        int *count_out);
-
-/**
- * @brief List all entities for a user, ordered by mention count
- *
- * Used to feed existing entities into the extraction prompt so the
- * LLM reuses canonical names instead of creating variants.
- *
- * @param user_id User ID
- * @param out Output array of entities
- * @param max Maximum entities to return
- * @param offset Starting offset for pagination
- * @param count_out Output: number of entities found
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset, int *count_out);
-
-/**
- * @brief Search entities by keyword (LIKE on canonical_name)
- *
- * @param user_id User ID
- * @param keywords Search terms
- * @param out Output array of entities
- * @param max Maximum entities to return
- * @param count_out Output: number of entities found
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_entity_search(int user_id,
-                            const char *keywords,
-                            memory_entity_t *out,
-                            int max,
-                            int *count_out);
-
-/**
- * @brief Delete an entity and its relations
- *
- * @param entity_id Entity ID
- * @param user_id User ID (ownership check)
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
- */
-int memory_db_entity_delete(int64_t entity_id, int user_id);
-
-/**
- * @brief Set an entity's photo (image store reference).
- *
- * @param user_id User ID (ownership check)
- * @param entity_id Entity ID
- * @param photo_id Image store ID, or NULL to clear
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
- */
-int memory_db_entity_set_photo(int user_id, int64_t entity_id, const char *photo_id);
-
-/**
- * @brief Get an entity's photo ID.
- *
- * @param user_id User ID (ownership check)
- * @param entity_id Entity ID
- * @param out_photo_id Output buffer for photo ID
- * @param photo_id_size Size of output buffer
- * @return MEMORY_DB_SUCCESS (photo_id may be empty if none set),
- *         MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
- */
-int memory_db_entity_get_photo(int user_id,
-                               int64_t entity_id,
-                               char *out_photo_id,
-                               size_t photo_id_size);
-
-/**
- * @brief Merge source entity into target entity
- *
- * Reassigns all relations and contacts from source to target,
- * adds source mention_count to target, deduplicates self-referencing
- * relations, then deletes the source entity. All within a transaction.
- *
- * @param user_id User ID (ownership check on both entities)
- * @param source_id Entity to merge FROM (will be deleted)
- * @param target_id Entity to merge INTO (will absorb data)
- * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
- */
-int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id);
-
-/**
- * @brief Load all entity embeddings for a user (for cache)
- *
- * @param user_id User ID
- * @param expected_dims Expected embedding dimensions
- * @param out_ids Output: entity IDs
- * @param out_names Output: canonical names
- * @param out_types Output: entity types
- * @param out_embeddings Output: flat float array
- * @param out_norms Output: norms
- * @param max Maximum entries
- * @param count_out Output: number loaded
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_entity_get_embeddings(int user_id,
-                                    int expected_dims,
-                                    int64_t *out_ids,
-                                    char out_names[][MEMORY_ENTITY_NAME_MAX],
-                                    char out_types[][MEMORY_ENTITY_TYPE_MAX],
-                                    float *out_embeddings,
-                                    float *out_norms,
-                                    int max,
-                                    int *count_out);
-
-/* =============================================================================
  * Extraction Tracking
  * ============================================================================= */
 
@@ -1028,5 +657,19 @@ int memory_db_get_last_extracted_msg_id(int64_t conversation_id, int64_t *msg_id
 #ifdef __cplusplus
 }
 #endif
+
+/* Phase 1a (May 2026) sub-headers — pulled in transitively so existing
+ * callers that `#include "memory/memory_db.h"` see the full surface
+ * unchanged.  Sub-headers may also be included directly when a file
+ * uses only one slice (entity-graph or fact-embedding storage).
+ *
+ * Note: the includes deliberately sit OUTSIDE the `extern "C" { ... }` block
+ * above — each sub-header carries its own `extern "C"` linkage guard, so
+ * nesting them here would produce redundant (legal but noisy) extern blocks.
+ *
+ * `memory_db_provenance.h` is intentionally NOT in this umbrella — provenance
+ * readers are an opt-in module, not part of the core memory_db surface. */
+#include "memory/memory_db_embeddings.h"
+#include "memory/memory_db_entities.h"
 
 #endif /* MEMORY_DB_H */

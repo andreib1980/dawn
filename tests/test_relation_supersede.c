@@ -213,12 +213,13 @@ static void test_exclusive_supersede_returns_old_fact_id(void) {
    int64_t google = insert_entity(user_id, "google", "org");
    int64_t microsoft = insert_entity(user_id, "microsoft", "org");
 
-   memory_db_relation_supersede(user_id, alice, "works_at", google, NULL, fact_a, 0.9f, 0, 0, NULL);
+   memory_db_relation_supersede(user_id, alice, "works_at", google, NULL, fact_a, 0.9f, 0, 0, NULL,
+                                NULL);
 
    int64_t fact_b = insert_fact(user_id, "Alice works at Microsoft");
    int64_t old_fact_id = 0;
    int rc = memory_db_relation_supersede(user_id, alice, "works_at", microsoft, NULL, fact_b, 0.9f,
-                                         0, 0, &old_fact_id);
+                                         0, 0, NULL, &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
@@ -234,10 +235,10 @@ static void test_no_fact_id_on_old_relation(void) {
    int64_t nyc = insert_entity(user_id, "nyc", "place");
    int64_t sf = insert_entity(user_id, "sf", "place");
 
-   memory_db_relation_supersede(user_id, bob, "lives_in", nyc, NULL, 0, 0.8f, 0, 0, NULL);
+   memory_db_relation_supersede(user_id, bob, "lives_in", nyc, NULL, 0, 0.8f, 0, 0, NULL, NULL);
 
    int64_t old_fact_id = -1;
-   int rc = memory_db_relation_supersede(user_id, bob, "lives_in", sf, NULL, 0, 0.8f, 0, 0,
+   int rc = memory_db_relation_supersede(user_id, bob, "lives_in", sf, NULL, 0, 0.8f, 0, 0, NULL,
                                          &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
@@ -251,12 +252,13 @@ static void test_non_exclusive_skips(void) {
    int64_t cats = insert_entity(user_id, "cats", "thing");
    int64_t dogs = insert_entity(user_id, "dogs", "thing");
 
-   memory_db_relation_supersede(user_id, carol, "likes", cats, NULL, fact_a, 0.8f, 0, 0, NULL);
+   memory_db_relation_supersede(user_id, carol, "likes", cats, NULL, fact_a, 0.8f, 0, 0, NULL,
+                                NULL);
 
    int64_t fact_b = insert_fact(user_id, "Carol likes dogs");
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, carol, "likes", dogs, NULL, fact_b, 0.8f, 0, 0,
-                                         &old_fact_id);
+                                         NULL, &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
@@ -268,7 +270,7 @@ static void test_null_out_param(void) {
    int64_t mit = insert_entity(user_id, "mit", "org");
 
    int rc = memory_db_relation_supersede(user_id, dave, "attends_school", mit, NULL, 0, 0.8f, 0, 0,
-                                         NULL);
+                                         NULL, NULL);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
 }
@@ -279,11 +281,12 @@ static void test_same_object_idempotent(void) {
    int64_t eve = insert_entity(user_id, "eve", "person");
    int64_t apple = insert_entity(user_id, "apple", "org");
 
-   memory_db_relation_supersede(user_id, eve, "works_at", apple, NULL, fact_a, 0.9f, 0, 0, NULL);
+   memory_db_relation_supersede(user_id, eve, "works_at", apple, NULL, fact_a, 0.9f, 0, 0, NULL,
+                                NULL);
 
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, eve, "works_at", apple, NULL, fact_a, 0.9f, 0, 0,
-                                         &old_fact_id);
+                                         NULL, &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
@@ -295,12 +298,13 @@ static void test_contradictory_pair(void) {
    int64_t frank = insert_entity(user_id, "frank", "person");
    int64_t spiders = insert_entity(user_id, "spiders", "thing");
 
-   memory_db_relation_supersede(user_id, frank, "likes", spiders, NULL, fact_a, 0.8f, 0, 0, NULL);
+   memory_db_relation_supersede(user_id, frank, "likes", spiders, NULL, fact_a, 0.8f, 0, 0, NULL,
+                                NULL);
 
    int64_t fact_b = insert_fact(user_id, "Frank dislikes spiders");
    int64_t old_fact_id = 0;
    int rc = memory_db_relation_supersede(user_id, frank, "dislikes", spiders, NULL, fact_b, 0.9f, 0,
-                                         0, &old_fact_id);
+                                         0, NULL, &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
@@ -311,12 +315,13 @@ static void test_contradictory_pair_different_object(void) {
    int64_t fact_a = insert_fact(user_id, "Grace enjoys cooking");
    int64_t grace = insert_entity(user_id, "grace", "person");
 
-   memory_db_relation_supersede(user_id, grace, "enjoys", 0, "cooking", fact_a, 0.8f, 0, 0, NULL);
+   memory_db_relation_supersede(user_id, grace, "enjoys", 0, "cooking", fact_a, 0.8f, 0, 0, NULL,
+                                NULL);
 
    int64_t fact_b = insert_fact(user_id, "Grace hates gardening");
    int64_t old_fact_id = -1;
    int rc = memory_db_relation_supersede(user_id, grace, "hates", 0, "gardening", fact_b, 0.9f, 0,
-                                         0, &old_fact_id);
+                                         0, NULL, &old_fact_id);
 
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
