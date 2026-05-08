@@ -63,10 +63,19 @@ typedef struct {
 static pb_focus_compose_mock_t s_focus = { 0 };
 
 /* Per-call score override storage — see public functions further down
- * for the API.  Defined here so pb_focus_reset can scrub it. */
+ * for the API.  Defined here so pb_focus_reset can scrub it.
+ *
+ * 1g-i adds an independently overridable `final_score` so the
+ * uplift-base intent test can drive a case where final_score and
+ * semantic_score diverge.  When `final_override` is false the stub
+ * sets breakdowns[i].final_score = pb_focus_seed_score_for(i) (the
+ * legacy behavior — they track each other). */
 typedef struct {
    bool override;
-   float final_score;
+   float final_score; /* legacy seed value, used as semantic_score AND
+                         (when final_override is false) as final_score */
+   bool final_override;
+   float final_score_value; /* explicit final_score override for 1g-i tests */
 } pb_seed_score_t;
 
 static pb_seed_score_t s_seed_scores[8];
@@ -75,6 +84,7 @@ static pb_seed_score_t s_seed_scores[8];
  * use the seed-score override without re-ordering the public test
  * fixture functions. */
 float pb_focus_seed_score_for(int idx);
+float pb_focus_seed_final_score_for(int idx);
 
 void pb_focus_reset(void) {
    memset(&s_focus, 0, sizeof(s_focus));
@@ -135,13 +145,20 @@ int focus_compose(int user_id,
    focus_candidate_t *arr = calloc((size_t)s_focus.seeded_count, sizeof(*arr));
    if (arr == NULL)
       return FAILURE;
+   /* Phase 1g-i: stub allocates the parallel score_breakdowns array
+    * alongside candidates so build_focus_block can exercise the dedup-
+    * uplift formula against the real (final_score) field. */
+   focus_score_breakdown_t *breakdowns = calloc((size_t)s_focus.seeded_count, sizeof(*breakdowns));
+   if (breakdowns == NULL) {
+      free(arr);
+      return FAILURE;
+   }
    for (int i = 0; i < s_focus.seeded_count; i++) {
       arr[i].source_id = s_focus.seeded[i].source_id;
       arr[i].source_type = FOCUS_SOURCE_INTERNAL;
-      /* semantic_score is what apply_dedup_locked treats as the
-       * candidate's "current relevance" for the uplift compare.
-       * pb_focus_set_seed_score overrides this per-candidate; default
-       * 1.0 preserves pre-1f test expectations. */
+      /* semantic_score retained for back-compat (pre-1g-i tests read
+       * it).  pb_focus_set_seed_score overrides; default 1.0 preserves
+       * pre-1f test expectations. */
       arr[i].semantic_score = pb_focus_seed_score_for(i);
       arr[i].recency_score = 1.0f;
       arr[i].importance_score = 1.0f;
@@ -155,11 +172,24 @@ int focus_compose(int user_id,
             free(arr[j].item_id);
          }
          free(arr);
+         free(breakdowns);
          return FAILURE;
       }
+      /* Default breakdown: final_score == seed score; contributions
+       * default to the breakdown set by pb_focus_set_seed_breakdown
+       * if any, otherwise a flat single-component populated to match.
+       * The 1g-i intent test (final_score != semantic_score) overrides
+       * via pb_focus_set_seed_breakdown. */
+      breakdowns[i].semantic_contribution = pb_focus_seed_score_for(i);
+      breakdowns[i].recency_contribution = 0.0f;
+      breakdowns[i].importance_contribution = 0.0f;
+      breakdowns[i].source_contribution = 0.0f;
+      breakdowns[i].applied_source_weight = 1.0f;
+      breakdowns[i].final_score = pb_focus_seed_final_score_for(i);
    }
    out_result->candidates = arr;
    out_result->candidate_count = s_focus.seeded_count;
+   out_result->score_breakdowns = breakdowns;
    if (s_focus.rejection_count > 0) {
       out_result->rejection_count = 1;
       out_result->rejections[0].source_id = "memory_fact";
@@ -179,6 +209,11 @@ void focus_result_free(focus_compose_result_t *result) {
       free(result->candidates);
       result->candidates = NULL;
    }
+   /* Phase 1g-i: free the parallel array.  Plain floats — no per-element
+    * teardown.  Free unconditionally (paranoia: a path that allocated
+    * one without the other would still get cleaned up). */
+   free(result->score_breakdowns);
+   result->score_breakdowns = NULL;
    result->candidate_count = 0;
    result->rejection_count = 0;
 }
@@ -205,6 +240,16 @@ void pb_focus_set_seed_score(int idx, float score) {
    s_seed_scores[idx].final_score = score;
 }
 
+/* 1g-i: independent final_score override for the uplift-base intent
+ * test.  When unset, stub falls back to the legacy seed score so all
+ * pre-1g-i tests stay byte-stable. */
+void pb_focus_set_seed_final_score(int idx, float final_score) {
+   if (idx < 0 || idx >= (int)(sizeof(s_seed_scores) / sizeof(s_seed_scores[0])))
+      return;
+   s_seed_scores[idx].final_override = true;
+   s_seed_scores[idx].final_score_value = final_score;
+}
+
 void pb_focus_clear_seed_scores(void) {
    memset(s_seed_scores, 0, sizeof(s_seed_scores));
 }
@@ -215,11 +260,73 @@ float pb_focus_seed_score_for(int idx) {
    return s_seed_scores[idx].override ? s_seed_scores[idx].final_score : 1.0f;
 }
 
-/* ----- session_t test fixtures ------------------------------------------- */
+float pb_focus_seed_final_score_for(int idx) {
+   if (idx < 0 || idx >= (int)(sizeof(s_seed_scores) / sizeof(s_seed_scores[0])))
+      return 1.0f;
+   if (s_seed_scores[idx].final_override)
+      return s_seed_scores[idx].final_score_value;
+   /* Legacy behavior: final_score tracks the seed (raw) score. */
+   return s_seed_scores[idx].override ? s_seed_scores[idx].final_score : 1.0f;
+}
 
-/* Phase 1f tests need a real session_t with at least history_mutex
+/* ----- webui_broadcast_context_injection stub ----------------------------
+ *
+ * build_focus_block calls this when conv_id > 0; in unit tests we
+ * record the last-call args + a per-test counter so tests can assert
+ * "broadcast fired" / "broadcast skipped" / "args match expectation"
+ * without linking the full webui_server.c (which pulls auth_db, conv_db,
+ * libwebsockets, and the rest of the kitchen sink).
+ *
+ * The stub deliberately copies a SHALLOW snapshot — the result struct
+ * itself stays owned by the caller; we just remember (count, scores)
+ * for assertion purposes. */
+typedef struct {
+   int call_count;
+   int last_user_id;
+   int64_t last_conv_id;
+   int64_t last_turn_id;
+   int last_candidate_count;
+   float last_first_final_score; /* 0 when last call had zero candidates */
+   bool last_had_breakdowns;
+} pb_broadcast_mock_t;
+
+static pb_broadcast_mock_t s_broadcast = { 0 };
+
+void pb_broadcast_reset(void) {
+   memset(&s_broadcast, 0, sizeof(s_broadcast));
+}
+
+pb_broadcast_mock_t *pb_broadcast_state(void) {
+   return &s_broadcast;
+}
+
+void webui_broadcast_context_injection(int user_id,
+                                       int64_t conv_id,
+                                       int64_t turn_id,
+                                       const focus_compose_result_t *result) {
+   s_broadcast.call_count++;
+   s_broadcast.last_user_id = user_id;
+   s_broadcast.last_conv_id = conv_id;
+   s_broadcast.last_turn_id = turn_id;
+   s_broadcast.last_had_breakdowns = (result != NULL && result->score_breakdowns != NULL);
+   if (result != NULL) {
+      s_broadcast.last_candidate_count = result->candidate_count;
+      if (result->candidate_count > 0 && result->score_breakdowns != NULL)
+         s_broadcast.last_first_final_score = result->score_breakdowns[0].final_score;
+      else
+         s_broadcast.last_first_final_score = 0.0f;
+   } else {
+      s_broadcast.last_candidate_count = 0;
+      s_broadcast.last_first_final_score = 0.0f;
+   }
+}
+
+/* ----- session_t test fixtures -------------------------------------------
+ *
+ * Phase 1f+: tests need a real session_t with at least history_mutex
  * inited (session_dedup.c locks it via session_injected_set_clear).
  * Other session_t fields are zeroed and unused by build_focus_block. */
+
 void pb_session_init(session_t *s, uint32_t session_id) {
    memset(s, 0, sizeof(*s));
    s->session_id = session_id;

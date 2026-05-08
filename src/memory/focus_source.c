@@ -164,11 +164,29 @@ static float lookup_source_weight(const char *source_id, bool *out_unknown) {
    return 1.0f;
 }
 
-static float compute_final_score(const focus_candidate_t *c, float source_weight) {
+/**
+ * @brief Compute the per-candidate score breakdown (Phase 1g-i — was a
+ *        single `float` return in 1b/1c).
+ *
+ * Writes the 4 already-weighted contributions + the sum + the raw
+ * source_weight into `*out`.  Returns the sum (final_score) so the
+ * rank pass can use it in the comparator without re-summing.
+ *
+ * The four contributions sum to final_score by construction; UI
+ * consumers don't need the weights to interpret them.
+ */
+static float compute_score_breakdown(const focus_candidate_t *c,
+                                     float source_weight,
+                                     focus_score_breakdown_t *out) {
    const focus_injection_config_t *fi = &g_config.memory.focus_injection;
-   return fi->weight_semantic * score_or_zero(c->semantic_score) +
-          fi->weight_recency * score_or_zero(c->recency_score) +
-          fi->weight_importance * c->importance_score + fi->weight_source * source_weight;
+   out->semantic_contribution = fi->weight_semantic * score_or_zero(c->semantic_score);
+   out->recency_contribution = fi->weight_recency * score_or_zero(c->recency_score);
+   out->importance_contribution = fi->weight_importance * c->importance_score;
+   out->source_contribution = fi->weight_source * source_weight;
+   out->applied_source_weight = source_weight;
+   out->final_score = out->semantic_contribution + out->recency_contribution +
+                      out->importance_contribution + out->source_contribution;
+   return out->final_score;
 }
 
 /* Sort key bundle: keeps `focus_candidate_t` itself sortable in place
@@ -225,6 +243,7 @@ int focus_compose(int user_id,
    /* Initialize result first — caller may pass an uninitialized struct. */
    out_result->candidates = NULL;
    out_result->candidate_count = 0;
+   out_result->score_breakdowns = NULL;
    out_result->rejection_count = 0;
    memset(out_result->rejections, 0, sizeof(out_result->rejections));
 
@@ -372,9 +391,22 @@ int focus_compose(int user_id,
       free(pool_weights);
       return FAILURE;
    }
+   /* Phase 1g-i: parallel breakdowns array on the working pool — same
+    * shape pattern as `pool_weights[]`.  Populated at score time;
+    * survivors get copied to the output array alongside the candidates. */
+   focus_score_breakdown_t *pool_breakdowns = calloc((size_t)pool_count, sizeof(*pool_breakdowns));
+   if (pool_breakdowns == NULL) {
+      OLOG_ERROR("focus_source: OOM allocating pool_breakdowns (pool_count=%d)", pool_count);
+      free(order);
+      for (int i = 0; i < pool_count; i++)
+         candidate_release(&pool[i]);
+      free(pool);
+      free(pool_weights);
+      return FAILURE;
+   }
    for (int i = 0; i < pool_count; i++) {
       order[i].idx = i;
-      order[i].score = compute_final_score(&pool[i], pool_weights[i]);
+      order[i].score = compute_score_breakdown(&pool[i], pool_weights[i], &pool_breakdowns[i]);
       order[i].ts = pool[i].item_timestamp;
    }
    qsort(order, (size_t)pool_count, sizeof(*order), ranker_cmp);
@@ -392,6 +424,7 @@ int focus_compose(int user_id,
    if (keep == NULL) {
       OLOG_ERROR("focus_source: OOM allocating keep mask (pool_count=%d)", pool_count);
       free(order);
+      free(pool_breakdowns);
       for (int i = 0; i < pool_count; i++)
          candidate_release(&pool[i]);
       free(pool);
@@ -443,14 +476,31 @@ int focus_compose(int user_id,
    }
 
    /* Build the final ordered output array.  Walk `order[]` so the
-    * candidate array preserves rank order. */
+    * candidate array preserves rank order.  Phase 1g-i: allocate the
+    * breakdown array in lockstep — same length, populated by
+    * index-aligned copy from pool_breakdowns. */
    focus_candidate_t *out = NULL;
+   focus_score_breakdown_t *out_breakdowns = NULL;
    if (kept > 0) {
       out = calloc((size_t)kept, sizeof(*out));
       if (out == NULL) {
          OLOG_ERROR("focus_source: OOM allocating result candidates (kept=%d)", kept);
          free(keep);
          free(order);
+         free(pool_breakdowns);
+         for (int i = 0; i < pool_count; i++)
+            candidate_release(&pool[i]);
+         free(pool);
+         free(pool_weights);
+         return FAILURE;
+      }
+      out_breakdowns = calloc((size_t)kept, sizeof(*out_breakdowns));
+      if (out_breakdowns == NULL) {
+         OLOG_ERROR("focus_source: OOM allocating result breakdowns (kept=%d)", kept);
+         free(out);
+         free(keep);
+         free(order);
+         free(pool_breakdowns);
          for (int i = 0; i < pool_count; i++)
             candidate_release(&pool[i]);
          free(pool);
@@ -463,7 +513,9 @@ int focus_compose(int user_id,
    for (int rank = 0; rank < pool_count; rank++) {
       const int p = order[rank].idx;
       if (keep[p]) {
-         out[out_idx++] = pool[p];
+         out[out_idx] = pool[p];
+         out_breakdowns[out_idx] = pool_breakdowns[p];
+         out_idx++;
          /* Transfer ownership: zero the pool slot so the trim sweep
           * below skips it. */
          pool[p].text = NULL;
@@ -477,11 +529,13 @@ int focus_compose(int user_id,
 
    free(keep);
    free(order);
+   free(pool_breakdowns);
    free(pool);
    free(pool_weights);
 
    out_result->candidates = out;
    out_result->candidate_count = kept;
+   out_result->score_breakdowns = out_breakdowns;
 
    OLOG_DEBUG("focus_source: composed %d candidates (kept %d/%d after trim)", kept, kept,
               pool_count);
@@ -497,8 +551,13 @@ void focus_result_free(focus_compose_result_t *result) {
          candidate_release(&result->candidates[i]);
       free(result->candidates);
    }
+   /* Phase 1g-i: parallel breakdowns array.  Plain floats — no
+    * per-element teardown.  Free even if candidates was NULL (paranoia
+    * against any future path that allocates one without the other). */
+   free(result->score_breakdowns);
    result->candidates = NULL;
    result->candidate_count = 0;
+   result->score_breakdowns = NULL;
    memset(result->rejections, 0, sizeof(result->rejections));
    result->rejection_count = 0;
 }

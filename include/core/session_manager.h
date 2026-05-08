@@ -321,6 +321,14 @@ typedef struct session {
    // dies with it) and the never-hold-two-L4-locks rule keeps us out of a
    // dedicated lock here.  See injected_set_t above for the full contract.
    injected_set_t injected_set;
+
+   // Phase 1g-i: most-recently-stamped user-message DB id.  Set by
+   // session_stamp_last_message_id when role == "user"; read as `turn_id`
+   // by dawn_build_prompt to wire the WebSocket context_injection event
+   // to the user turn that triggered this prompt rebuild.  Protected by
+   // history_mutex (set under it from session_stamp_last_message_id;
+   // read via session_get_last_user_msg_id which acquires the lock).
+   int64_t last_user_msg_id;
 } session_t;
 
 // =============================================================================
@@ -702,6 +710,21 @@ void session_add_message(session_t *session, const char *role, const char *conte
  * so the extraction filter can use ID-based cursors.
  */
 void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id);
+
+/**
+ * @brief Get the DB id of the session's most recently stamped USER message.
+ *
+ * Phase 1g-i: returns `session->last_user_msg_id` under `history_mutex`.
+ * Returns 0 when no user message has been stamped on this session yet
+ * (fresh session, or pre-stamping caller path).  WebUI prompt builder
+ * uses this as the `turn_id` field of the `context_injection` WebSocket
+ * event — every user message that hits `conv_db_add_message_ex` and
+ * gets stamped is the "turn" that triggers the next prompt rebuild.
+ *
+ * @note Thread-safe — acquires `session->history_mutex`.
+ * @return msg_id (>0) or 0 if not set.
+ */
+int64_t session_get_last_user_msg_id(session_t *session);
 
 /**
  * @brief Add message with images to session's conversation history
@@ -1470,6 +1493,11 @@ static inline void session_set_dispatch_session(session_t *session) {
 
 static inline session_t *session_get_dispatch_session(void) {
    return NULL;
+}
+
+static inline int64_t session_get_last_user_msg_id(session_t *session) {
+   (void)session;
+   return 0;
 }
 
 #endif /* !ENABLE_MULTI_CLIENT */

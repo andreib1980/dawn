@@ -27,6 +27,8 @@
 #ifndef WEBUI_BUILD_FOCUS_BLOCK_H
 #define WEBUI_BUILD_FOCUS_BLOCK_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,6 +40,10 @@ extern "C" {
  *   1. Embed `user_turn_text` via memory_embeddings_embed.
  *   2. Call focus_compose with config-driven top_k.
  *   3. Render surviving candidates as multi-line "[<source_id>] <text>".
+ *   4. (Phase 1g-i) Broadcast `context_injection` WebSocket event to
+ *      every WebUI session matching (user_id, conv_id) — even on empty
+ *      result, even on filter-only-rejected turns.  Skipped only when
+ *      the feature gate is off.
  *
  * Short-circuits at the top with `*out_block = NULL, return SUCCESS`
  * when:
@@ -63,12 +69,24 @@ extern "C" {
  *   - LOG_WARNING per source with non-zero filter rejections.
  *
  * @param user_id        Authenticated user (must be > 0)
+ * @param conv_id        Active conversation id (used to scope the
+ *                       context_injection broadcast).  0 disables the
+ *                       broadcast for this call (SESSION_START path,
+ *                       no conversation pinned yet).
+ * @param turn_id        DB id of the user message that triggered this
+ *                       prompt rebuild (broadcast field).  0 when not
+ *                       known — broadcast still fires; clients should
+ *                       handle 0 as "turn id unavailable."
  * @param user_turn_text Raw user message text
  * @param[out] out_block Caller-owned heap string, or NULL on
  *                       SUCCESS-with-no-candidates.  Caller frees.
  * @return SUCCESS or FAILURE.  See contract above.
  */
-int build_focus_block(int user_id, const char *user_turn_text, char **out_block);
+int build_focus_block(int user_id,
+                      int64_t conv_id,
+                      int64_t turn_id,
+                      const char *user_turn_text,
+                      char **out_block);
 
 #ifdef __cplusplus
 }

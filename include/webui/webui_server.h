@@ -586,6 +586,62 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
  */
 void webui_broadcast_memory_notice(int user_id, const char *level, const char *message);
 
+/* Forward declare the focus result type so this header doesn't pull in
+ * memory/focus_source.h.  The broadcast helper takes a `const` pointer
+ * — caller still owns the struct and its heap. */
+struct focus_compose_result_s;
+typedef struct focus_compose_result_s focus_compose_result_t;
+
+/**
+ * @brief Broadcast a `context_injection` event to every WebUI session
+ *        matching (user_id, conv_id) — Phase 1g-i.
+ *
+ * Iterates `s_active_connections` under `s_conn_registry_mutex`,
+ * matching `auth_user_id == user_id` AND
+ * `webui_get_active_conversation_id(conn->session) == conv_id` AND
+ * `conn->session->type == SESSION_TYPE_WEBUI`.  Two browser tabs
+ * authenticated as the same user on the same conversation both
+ * receive the event; a different conversation (even on the same
+ * user) does NOT.
+ *
+ * Fires unconditionally when called — the feature-flag gate lives in
+ * the caller (`build_focus_block`).  Empty `result->candidate_count`
+ * is valid input: the empty `items[]` payload is the empty-state UX
+ * signal "DAWN looked, found nothing" — clients still render the
+ * (collapsed) frame.  When `candidate_count == 0`, `score_breakdowns`
+ * may be NULL — the helper handles the NULL case defensively.
+ *
+ * The JSON payload shape is the design-doc rev 3 §"UI surface" wire
+ * format: top-level `{type, user_id, conversation_id, turn_id,
+ * items[], filter_rejections[]}`.  Each `items[i]` has the candidate's
+ * source_id / source_type / text / score / score_breakdown /
+ * applied_source_weight; `provenance` is omitted (not zero-stub) when
+ * `provenance.conversation_id == 0`.  Per-text size cap of
+ * `FOCUS_TEXT_MAX_BYTES` (4096) is applied defensively before
+ * serialization.
+ *
+ * Thread safety: builds the JSON ONCE, drops the json_object, then
+ * `strdup`s the canonical string into each recipient's response queue
+ * — same pattern as `webui_broadcast_silent_observation`.
+ *
+ * No-op (with a single DEBUG log line) when:
+ *   - `result == NULL`
+ *   - `user_id <= 0`
+ *   - `conv_id <= 0`
+ *
+ * @param user_id    Target user (must be > 0)
+ * @param conv_id    Active conversation id (must be > 0 — 0 disables)
+ * @param turn_id    DB id of the user message that triggered this
+ *                   prompt rebuild (0 acceptable: clients render as
+ *                   "turn id unavailable")
+ * @param result     Caller-owned compose result; this helper reads
+ *                   from it and never frees it
+ */
+void webui_broadcast_context_injection(int user_id,
+                                       int64_t conv_id,
+                                       int64_t turn_id,
+                                       const focus_compose_result_t *result);
+
 #ifdef __cplusplus
 }
 #endif

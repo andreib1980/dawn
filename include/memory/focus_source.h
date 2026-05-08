@@ -220,13 +220,51 @@ typedef struct {
 } focus_filter_rejection_t;
 
 /* =============================================================================
- * Result of a `focus_compose()` call.  `focus_result_free()` releases
- * `candidates` (including each candidate's `text` + `item_id`).
- * `rejections[]` holds counts only — no heap state.
+ * Per-candidate score breakdown — Phase 1g-i.
+ *
+ * The ranker computes a final score from four contributions; the WebSocket
+ * `context_injection` event surfaces the breakdown so the UI can show
+ * users WHY each item appeared.  Lives in a parallel array on
+ * `focus_compose_result_t` rather than as fields on `focus_candidate_t`
+ * — adapters allocate candidates and the framework cannot inject extra
+ * fields into adapter-owned structs without breaking the L2 contract.
+ *
+ * Each `*_contribution` is the ALREADY-WEIGHTED contribution
+ * (`w_X * raw_score`), so the four sum to `final_score`.  UI consumers
+ * don't need to know the weights.
+ *
+ * `applied_source_weight` is the raw per-source weight (pre-`w_src`
+ * multiply) that the ranker looked up — useful for diagnostics ("why
+ * did calendar rank below memory_fact?").
+ *
  * ============================================================================= */
 typedef struct {
+   float semantic_contribution;   /* w_sem * candidate.semantic_score (NA→0) */
+   float recency_contribution;    /* w_rec * candidate.recency_score   (NA→0) */
+   float importance_contribution; /* w_imp * candidate.importance_score */
+   float source_contribution;     /* w_src * applied_source_weight */
+   float final_score;             /* sum of the four — what the ranker ordered by */
+   float applied_source_weight;   /* raw per-source weight, pre-w_src multiply */
+} focus_score_breakdown_t;
+
+/* =============================================================================
+ * Result of a `focus_compose()` call.  `focus_result_free()` releases
+ * `candidates` (including each candidate's `text` + `item_id`) AND the
+ * parallel `score_breakdowns` array.  `rejections[]` holds counts only
+ * — no heap state.
+ *
+ * INVARIANT (1g-i): `score_breakdowns[i]` describes `candidates[i]` for
+ * every i in [0, candidate_count).  The arrays MUST be compacted
+ * in lockstep by any consumer that drops candidates (e.g.,
+ * apply_dedup_locked).
+ * ============================================================================= */
+/* Tagged so a forward declaration in non-memory headers (e.g.,
+ * webui/webui_server.h's broadcast prototype) can refer to the type
+ * without dragging this file into them. */
+typedef struct focus_compose_result_s {
    focus_candidate_t *candidates; /* HEAP — sorted by final_score desc */
    int candidate_count;
+   focus_score_breakdown_t *score_breakdowns; /* HEAP — parallel to candidates[] */
    focus_filter_rejection_t rejections[MAX_FOCUS_SOURCES];
    int rejection_count;
 } focus_compose_result_t;

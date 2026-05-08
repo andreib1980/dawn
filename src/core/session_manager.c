@@ -1223,8 +1223,24 @@ void session_stamp_last_message_id(session_t *session, const char *role, int64_t
       break;
    }
 
+   /* Phase 1g-i: mirror the user-msg id into a session field so the
+    * WebUI prompt builder can read it without parsing JSON history.
+    * Other roles (assistant / tool / system) don't drive turn_id —
+    * focus injection rebuilds on USER turns only. */
+   if (strcmp(role, "user") == 0)
+      session->last_user_msg_id = msg_id;
+
 unlock:
    pthread_mutex_unlock(&session->history_mutex);
+}
+
+int64_t session_get_last_user_msg_id(session_t *session) {
+   if (!session)
+      return 0;
+   pthread_mutex_lock(&session->history_mutex);
+   int64_t id = session->last_user_msg_id;
+   pthread_mutex_unlock(&session->history_mutex);
+   return id;
 }
 
 void session_add_message_with_images(session_t *session,

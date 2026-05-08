@@ -627,6 +627,61 @@ static void test_entity_provenance_zeroed(void) {
    focus_result_free(&result);
 }
 
+/* ============================================================================
+ * Phase 1g-i: parallel score_breakdowns array — populated alongside
+ * candidates, freed alongside candidates, summed-equals-final_score.
+ * Exercises the real focus_source.c rank pass (this test file links it).
+ * ============================================================================ */
+
+static void test_score_breakdowns_aligned(void) {
+   seed_fact(0, 100, 1, "fact alpha", 0.9f);
+   seed_fact(1, 101, 1, "fact beta", 0.5f);
+   s_mock.fact_count = 2;
+   seed_entity(0, 1, 1, "alpha", "person", true, embed_e1, NULL);
+   s_mock.entity_count = 1;
+   s_mock.entity_dim = MOCK_DIMS;
+   s_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "alpha", embed_q_match_e1, MOCK_DIMS,
+                                                1700000000, 5, &result));
+
+   /* Both arrays must have the same shape: parallel, fully populated. */
+   TEST_ASSERT_TRUE_MESSAGE(result.candidate_count > 0,
+                            "test setup must produce at least one candidate");
+   TEST_ASSERT_NOT_NULL_MESSAGE(result.score_breakdowns,
+                                "score_breakdowns must be allocated when candidate_count > 0");
+
+   for (int i = 0; i < result.candidate_count; i++) {
+      const focus_score_breakdown_t *b = &result.score_breakdowns[i];
+      /* Sum of the four contributions must equal final_score (within
+       * float precision).  This is the parallel-array invariant — if a
+       * future refactor diverges the two, the catch goes here. */
+      const float sum = b->semantic_contribution + b->recency_contribution +
+                        b->importance_contribution + b->source_contribution;
+      char msg[128];
+      snprintf(msg, sizeof(msg), "candidate %d: sum=%.6f vs final_score=%.6f", i, sum,
+               b->final_score);
+      TEST_ASSERT_FLOAT_WITHIN_MESSAGE(1e-5f, b->final_score, sum, msg);
+      /* applied_source_weight is the raw lookup, must be non-negative. */
+      TEST_ASSERT_TRUE(b->applied_source_weight >= 0.0f);
+   }
+
+   /* Rank order: descending final_score. */
+   for (int i = 1; i < result.candidate_count; i++) {
+      TEST_ASSERT_TRUE_MESSAGE(result.score_breakdowns[i - 1].final_score >=
+                                   result.score_breakdowns[i].final_score,
+                               "score_breakdowns must inherit candidate's rank order");
+   }
+
+   focus_result_free(&result);
+   /* After free both arrays must be NULL.  (focus_result_free contract.) */
+   TEST_ASSERT_NULL(result.candidates);
+   TEST_ASSERT_NULL(result.score_breakdowns);
+   TEST_ASSERT_EQUAL_INT(0, result.candidate_count);
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -664,6 +719,9 @@ int main(void) {
    /* Shape invariants */
    RUN_TEST(test_item_id_format);
    RUN_TEST(test_entity_provenance_zeroed);
+
+   /* Phase 1g-i: parallel score_breakdowns */
+   RUN_TEST(test_score_breakdowns_aligned);
 
    return UNITY_END();
 }

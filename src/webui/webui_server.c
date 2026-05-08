@@ -42,6 +42,8 @@
 #include <sys/random.h>
 #include <unistd.h>
 
+#include "memory/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
+#include "memory/focus_source.h"            /* focus_compose_result_t */
 #include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
 
@@ -1782,8 +1784,22 @@ int dawn_build_prompt(int user_id,
     * focus_compose failure, we leave focus_block NULL and proceed —
     * a missing focus block is preferable to no LLM dispatch.  The
     * NULL guarantees the previous turn's content cannot leak (cross-
-    * turn isolation invariant). */
-   if (build_focus_block(user_id, user_turn_text, &out->focus_block) != SUCCESS)
+    * turn isolation invariant).
+    *
+    * Phase 1g-i: derive conv_id + turn_id from the dispatching session
+    * (TLS-published in session_dispatch_user_turn, NULL on
+    * SESSION_START refresh paths).  Both default to 0 when the
+    * dispatch session is unavailable — build_focus_block treats
+    * conv_id=0 as "skip the WebSocket broadcast" so SESSION_START /
+    * standalone build_system_prompt_string callers never broadcast. */
+   int64_t conv_id = 0;
+   int64_t turn_id = 0;
+   session_t *dispatch = session_get_dispatch_session();
+   if (dispatch != NULL) {
+      conv_id = webui_get_active_conversation_id(dispatch);
+      turn_id = session_get_last_user_msg_id(dispatch);
+   }
+   if (build_focus_block(user_id, conv_id, turn_id, user_turn_text, &out->focus_block) != SUCCESS)
       out->focus_block = NULL;
 
    return SUCCESS;
@@ -6458,6 +6474,203 @@ static void webui_broadcast_silent_observation(const char *category,
       OLOG_INFO(
           "WebUI: Broadcast silent_observation (category=%s, filter_match=%d) to %d client(s)",
           category, filter_match ? 1 : 0, sent);
+   }
+}
+
+/* =============================================================================
+ * Phase 1g-i: context_injection broadcast.  See webui_server.h doxygen for
+ * the full contract; the wire format is the design-doc rev 3 §"UI surface"
+ * shape.
+ * ============================================================================= */
+
+/* Per-source enum → wire-format string.  Mirrors the design-doc lowercase
+ * variants ("internal" / "external" / "user-content").  Keeps the C-side
+ * representation (typed enum) stable while the JSON boundary stays string-
+ * keyed for forward-compat. */
+static const char *focus_source_type_str(focus_source_type_t t) {
+   switch (t) {
+      case FOCUS_SOURCE_INTERNAL:
+         return "internal";
+      case FOCUS_SOURCE_EXTERNAL:
+         return "external";
+      case FOCUS_SOURCE_USER_CONTENT:
+         return "user-content";
+   }
+   /* Defensive — unreachable under typed enum, but keeps the compiler
+    * happy and gives non-noisy output if a future enum value sneaks in
+    * without a switch update. */
+   return "unknown";
+}
+
+/* Defensive size-cap on candidate text.  Adapters truncate to this cap
+ * already (focus_candidate_helpers.h), but a misbehaving adapter could
+ * still emit oversize text — JSON-encoding a 1MB string into a server-
+ * to-client message is a DoS surface, so cap belt-and-suspenders.
+ *
+ * Returns either `text` (when within cap) OR a freshly allocated
+ * truncated copy that the caller must free.  `*out_owned` is set true
+ * iff the caller takes ownership. */
+static const char *capped_text_view(const char *text, char **owned, bool *out_owned) {
+   *owned = NULL;
+   *out_owned = false;
+   if (text == NULL)
+      return "";
+   const size_t n = strlen(text);
+   if (n <= FOCUS_TEXT_MAX_BYTES)
+      return text;
+   *owned = malloc(FOCUS_TEXT_MAX_BYTES + 1);
+   if (*owned == NULL) {
+      /* OOM — drop text content rather than fail the broadcast.  Log
+       * the failure (security audit LOW): under sustained memory
+       * pressure with an adapter emitting oversize text every turn,
+       * this path silently degrades the UX otherwise. */
+      OLOG_WARNING("WebUI: context_injection capped_text_view OOM (text len=%zu); "
+                   "emitting empty string",
+                   n);
+      return "";
+   }
+   memcpy(*owned, text, FOCUS_TEXT_MAX_BYTES);
+   (*owned)[FOCUS_TEXT_MAX_BYTES] = '\0';
+   *out_owned = true;
+   return *owned;
+}
+
+void webui_broadcast_context_injection(int user_id,
+                                       int64_t conv_id,
+                                       int64_t turn_id,
+                                       const focus_compose_result_t *result) {
+   if (result == NULL || user_id <= 0 || conv_id <= 0) {
+      OLOG_DEBUG("WebUI: context_injection broadcast skipped (user=%d conv=%lld result=%p)",
+                 user_id, (long long)conv_id, (const void *)result);
+      return;
+   }
+
+   /* Build the JSON payload ONCE; strdup the canonical string into each
+    * recipient's response queue.  Mirrors the silent-observation
+    * pattern at line 6428 — same rationale (avoid running the json_object
+    * serializer N times on identical data). */
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("context_injection"));
+   json_object_object_add(root, "user_id", json_object_new_int(user_id));
+   json_object_object_add(root, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(root, "turn_id", json_object_new_int64(turn_id));
+
+   json_object *items = json_object_new_array();
+   for (int i = 0; i < result->candidate_count; i++) {
+      const focus_candidate_t *c = &result->candidates[i];
+      const focus_score_breakdown_t *b = (result->score_breakdowns != NULL)
+                                             ? &result->score_breakdowns[i]
+                                             : NULL;
+
+      json_object *item = json_object_new_object();
+      json_object_object_add(item, "source_id",
+                             json_object_new_string(c->source_id ? c->source_id : ""));
+      json_object_object_add(item, "source_type",
+                             json_object_new_string(focus_source_type_str(c->source_type)));
+
+      char *owned_text = NULL;
+      bool owned = false;
+      const char *text_view = capped_text_view(c->text, &owned_text, &owned);
+      json_object_object_add(item, "text", json_object_new_string(text_view));
+      if (owned)
+         free(owned_text);
+
+      json_object_object_add(item, "score",
+                             json_object_new_double(b != NULL ? b->final_score : 0.0));
+
+      json_object *bd = json_object_new_object();
+      json_object_object_add(bd, "semantic",
+                             json_object_new_double(b != NULL ? b->semantic_contribution : 0.0));
+      json_object_object_add(bd, "recency",
+                             json_object_new_double(b != NULL ? b->recency_contribution : 0.0));
+      json_object_object_add(bd, "importance",
+                             json_object_new_double(b != NULL ? b->importance_contribution : 0.0));
+      json_object_object_add(bd, "source",
+                             json_object_new_double(b != NULL ? b->source_contribution : 0.0));
+      json_object_object_add(item, "score_breakdown", bd);
+      json_object_object_add(item, "applied_source_weight",
+                             json_object_new_double(b != NULL ? b->applied_source_weight : 0.0));
+
+      /* Provenance integrity binding (design rev 3 line 279): omit
+       * entirely when conv_id == 0 rather than emitting a zero-stub.
+       * The struct field is `conv_id` (memory_types.h); the wire-
+       * format key is `conversation_id` to match the design-doc JSON
+       * example.  Clients reading provenance treat absence as
+       * "not available." */
+      if (c->provenance.conv_id != 0) {
+         json_object *prov = json_object_new_object();
+         json_object_object_add(prov, "conversation_id",
+                                json_object_new_int64(c->provenance.conv_id));
+         json_object_object_add(prov, "msg_id_start",
+                                json_object_new_int64(c->provenance.msg_id_start));
+         json_object_object_add(prov, "msg_id_end",
+                                json_object_new_int64(c->provenance.msg_id_end));
+         json_object_object_add(item, "provenance", prov);
+      }
+
+      json_object_array_add(items, item);
+   }
+   json_object_object_add(root, "items", items);
+
+   /* filter_rejections[] — capped at MAX_FOCUS_SOURCES by struct shape;
+    * each entry is {source_id, count}.  Counts are >=1 by rejection_bump
+    * construction; the >0 guard is defensive against any future change. */
+   json_object *rejections = json_object_new_array();
+   for (int i = 0; i < result->rejection_count; i++) {
+      const focus_filter_rejection_t *r = &result->rejections[i];
+      if (r->count <= 0 || r->source_id == NULL)
+         continue;
+      json_object *rej = json_object_new_object();
+      json_object_object_add(rej, "source_id", json_object_new_string(r->source_id));
+      json_object_object_add(rej, "count", json_object_new_int(r->count));
+      json_object_array_add(rejections, rej);
+   }
+   json_object_object_add(root, "filter_rejections", rejections);
+
+   const char *json_view = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_canonical = json_view ? strdup(json_view) : NULL;
+   json_object_put(root);
+   if (json_canonical == NULL)
+      return;
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      /* SESSION_TYPE_WEBUI gate is mandatory.  dawn_build_prompt runs
+       * for LOCAL / DAP / DAP2 / WEBUI; only WEBUI sessions have a
+       * `client_data` cast-able to ws_connection_t* and a browser tab
+       * to deliver the event to.  Other types reach this point with
+       * a positive conv_id but never have a matching session in
+       * s_active_connections (registered only on WS auth), so the
+       * type check is technically redundant given the registry
+       * shape — keep it explicit per architectural invariant. */
+      if (conn->session->type != SESSION_TYPE_WEBUI)
+         continue;
+      if (conn->auth_user_id != user_id)
+         continue;
+      if (webui_get_active_conversation_id(conn->session) != conv_id)
+         continue;
+
+      char *json_copy = strdup(json_canonical);
+      if (json_copy == NULL)
+         continue;
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free(json_canonical);
+
+   if (sent > 0) {
+      OLOG_DEBUG("WebUI: Broadcast context_injection (user=%d conv=%lld turn=%lld items=%d) to %d "
+                 "client(s)",
+                 user_id, (long long)conv_id, (long long)turn_id, result->candidate_count, sent);
    }
 }
 

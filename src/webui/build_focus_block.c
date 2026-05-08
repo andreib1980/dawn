@@ -37,6 +37,7 @@
 #include "logging.h"
 #include "memory/focus_source.h"
 #include "memory/memory_embeddings.h"
+#include "webui/webui_server.h"
 
 /* Per-call rendering buffer initial size — sized to comfortably hold
  * the typical ~8-candidate result.  Grows via strbuf if exceeded.
@@ -112,10 +113,12 @@ static int compute_per_source_max(int top_k, int recent_window_turns) {
 
 /* Apply the per-session dedup formula to focus_compose's ranked
  * candidates.  Walks the list under the session's history_mutex, admits
- * up to top_k survivors, and rewrites `result->candidates[]` in place
- * to the survivor prefix (count = kept).  Suppressed candidates have
- * their text/item_id freed inline so focus_result_free() at the end
- * still cleans up survivors only.
+ * up to top_k survivors, and rewrites `result->candidates[]` IN LOCKSTEP
+ * with `result->score_breakdowns[]` to the survivor prefix
+ * (count = kept).  Suppressed candidates have their text/item_id freed
+ * inline so focus_result_free() at the end still cleans up survivors
+ * only.  Breakdowns hold no heap pointers — float scalars only — so
+ * compaction is a structure copy.
  *
  * `*out_suppressed` receives the count of dropped candidates for the
  * grep-friendly log line.
@@ -125,7 +128,15 @@ static int compute_per_source_max(int top_k, int recent_window_turns) {
  * fail inside focus_compose) never reach this loop, so they never call
  * _record_locked.  If a filter-rejected candidate later survives the
  * filter on a future turn, it admits fresh with no prior history.  Per
- * design doc rev 3 §"State management contracts". */
+ * design doc rev 3 §"State management contracts".
+ *
+ * Phase 1g-i: score-uplift now reads `result->score_breakdowns[i].final_score`
+ * (was `c->semantic_score` — a 1f bug that compared raw embedding
+ * cosine instead of the ranker's composed score).  In production with
+ * non-trivial weight_recency / weight_importance / weight_source, the
+ * two values can disagree on admit/suppress; final_score is what the
+ * ranker actually used to order this turn's pool, so it's also what the
+ * uplift-compare must beat to mean "noticeably more relevant now." */
 static void apply_dedup_locked(session_t *session,
                                focus_compose_result_t *result,
                                int top_k,
@@ -135,7 +146,7 @@ static void apply_dedup_locked(session_t *session,
                                int *out_suppressed) {
    *out_suppressed = 0;
    if (session == NULL || result == NULL || result->candidates == NULL ||
-       result->candidate_count <= 0)
+       result->score_breakdowns == NULL || result->candidate_count <= 0)
       return;
 
    const int current_turn = session_injected_set_advance_turn_locked(session);
@@ -149,12 +160,13 @@ static void apply_dedup_locked(session_t *session,
       const char *src = (c->source_id != NULL) ? c->source_id : "";
       const char *iid = (c->item_id != NULL) ? c->item_id : "";
 
-      /* The composite score the ranker emitted lives in semantic_score
-       * after focus_compose collapses the feature vector.  We treat
-       * that as the candidate's "current relevance" — whatever weighting
-       * formula the framework uses, it's the value a future caller's
-       * uplift-compare must beat. */
-      const float current_score = c->semantic_score;
+      /* Use the ranker's composed final_score as the candidate's
+       * "current relevance" — that's what the rank pass ordered the
+       * pool by, and matches what a future call's uplift-compare needs
+       * to beat to mean "noticeably more relevant now."  Phase 1f
+       * read c->semantic_score here, which is only the raw cosine —
+       * weights collapsed it.  See block comment above for context. */
+      const float current_score = result->score_breakdowns[i].final_score;
 
       if (iid[0] == '\0') {
          /* No stable id → cannot dedup.  Admit unconditionally — same
@@ -186,22 +198,25 @@ static void apply_dedup_locked(session_t *session,
       if (admit) {
          if (iid[0] != '\0')
             session_injected_set_record_locked(session, src, iid, current_score);
-         /* Move into the survivor prefix if not already there.  When
-          * compaction happens (i > kept) the source slot is now
-          * dangling — we MUST NOT free it: ownership of text/item_id
-          * just moved to result->candidates[kept]. */
+         /* Move into the survivor prefix if not already there.  Both
+          * arrays compact in lockstep — when i > kept, ownership of
+          * text/item_id moves to slot `kept`, breakdown copies as a
+          * plain struct (no heap), and we zero the source-slot heap
+          * pointers to prevent the truncation cleanup below from
+          * double-freeing.  Breakdown's source-slot is left as-is
+          * (cosmetic — past `kept` after compaction so unreachable). */
          if (i != kept) {
             result->candidates[kept] = *c;
-            /* Zero the source so the truncation cleanup below can't
-             * double-free a stale pointer. */
+            result->score_breakdowns[kept] = result->score_breakdowns[i];
             result->candidates[i].text = NULL;
             result->candidates[i].item_id = NULL;
          }
          kept++;
          if (kept >= top_k) {
-            /* Top_k satisfied — drop the rest.  Free everything from
-             * i+1 onward, regardless of admission status, since
-             * over-fetch produced extras we don't render. */
+            /* Top_k satisfied — drop the rest.  Free heap on candidates
+             * from i+1 onward; breakdowns past `kept` need no teardown
+             * (no heap pointers).  Over-fetch produced extras we don't
+             * render. */
             for (int j = i + 1; j < result->candidate_count; j++) {
                free(result->candidates[j].text);
                free(result->candidates[j].item_id);
@@ -211,8 +226,10 @@ static void apply_dedup_locked(session_t *session,
             break;
          }
       } else {
-         /* Suppressed by dedup — count it and free its heap.  admit=false
-          * here implies the lookup hit (the only !admit path above). */
+         /* Suppressed by dedup — count it and free the candidate's
+          * heap.  admit=false here implies the lookup hit (the only
+          * !admit path above).  Breakdown stays in place; effectively
+          * garbage past `kept` after compaction. */
          (*out_suppressed)++;
          free(c->text);
          free(c->item_id);
@@ -224,7 +241,11 @@ static void apply_dedup_locked(session_t *session,
    result->candidate_count = kept;
 }
 
-int build_focus_block(int user_id, const char *user_turn_text, char **out_block) {
+int build_focus_block(int user_id,
+                      int64_t conv_id,
+                      int64_t turn_id,
+                      const char *user_turn_text,
+                      char **out_block) {
    if (out_block == NULL)
       return FAILURE;
    *out_block = NULL;
@@ -330,51 +351,64 @@ int build_focus_block(int user_id, const char *user_turn_text, char **out_block)
                       candidates_before_dedup, dedup_session->session_id);
    }
 
-   /* Empty result (post-dedup) is a successful no-op — composer omits
-    * the section.  This can happen either because focus_compose returned
-    * nothing OR because dedup suppressed every survivor. */
-   if (result.candidate_count <= 0) {
-      log_focus_summary(user_turn_text, 0, result.rejection_count, dedup_suppressed,
-                        monotonic_ms_now() - t_start);
-      focus_result_free(&result);
-      return SUCCESS;
-   }
+   /* Empty result (post-dedup) is a successful no-op for the focus
+    * BLOCK — composer omits the section.  But Phase 1g-i still
+    * broadcasts the empty payload so the UI shows "DAWN looked,
+    * found nothing" rather than silently skipping; the broadcast
+    * fires below, after the heap-cheap rejection-logging walk. */
+   const bool empty_result = (result.candidate_count <= 0);
 
-   /* Render survivors.  Format: one line per candidate, opening with
-    * the source_id in brackets so the LLM can attribute relevance.
-    * Text content is reproduced verbatim from the candidate (already
-    * truncated to FOCUS_TEXT_MAX_BYTES inside the framework). */
-   strbuf_t sb;
-   strbuf_init_with_max(&sb, FOCUS_BLOCK_INIT_BYTES, FOCUS_BLOCK_MAX_BYTES);
-   for (int i = 0; i < result.candidate_count; i++) {
-      const focus_candidate_t *c = &result.candidates[i];
-      if (c->text == NULL || c->text[0] == '\0')
-         continue;
-      if (strbuf_appendf(&sb, "[%s] %s\n", c->source_id, c->text) < 0) {
-         /* strbuf max-cap hit — stop appending; surface the partial
-          * block so the LLM still sees the highest-ranked items. */
-         OLOG_WARNING("focus: strbuf max cap reached at candidate %d/%d — truncating", i,
-                      result.candidate_count);
-         break;
+   if (!empty_result) {
+      /* Render survivors.  Format: one line per candidate, opening with
+       * the source_id in brackets so the LLM can attribute relevance.
+       * Text content is reproduced verbatim from the candidate (already
+       * truncated to FOCUS_TEXT_MAX_BYTES inside the framework). */
+      strbuf_t sb;
+      strbuf_init_with_max(&sb, FOCUS_BLOCK_INIT_BYTES, FOCUS_BLOCK_MAX_BYTES);
+      for (int i = 0; i < result.candidate_count; i++) {
+         const focus_candidate_t *c = &result.candidates[i];
+         if (c->text == NULL || c->text[0] == '\0')
+            continue;
+         if (strbuf_appendf(&sb, "[%s] %s\n", c->source_id, c->text) < 0) {
+            /* strbuf max-cap hit — stop appending; surface the partial
+             * block so the LLM still sees the highest-ranked items. */
+            OLOG_WARNING("focus: strbuf max cap reached at candidate %d/%d — truncating", i,
+                         result.candidate_count);
+            break;
+         }
+      }
+
+      /* Lift ownership of the strbuf-internal buffer into out_block.
+       * Use _or_null variant so an empty buffer (every candidate had
+       * empty text — pathological but possible) collapses to NULL and
+       * the composer omits the section.  strbuf_steal resets the buf
+       * to its zero state, so strbuf_free is safe + a no-op afterward. */
+      *out_block = strbuf_steal_or_null(&sb);
+      strbuf_free(&sb);
+
+      /* Per-source rejection logging — fires only when the framework
+       * filter caught poison in adapter output. */
+      for (int i = 0; i < result.rejection_count; i++) {
+         const focus_filter_rejection_t *r = &result.rejections[i];
+         if (r->count > 0)
+            OLOG_WARNING("focus: filter rejected %d candidate(s) from source='%s' (user_id=%d)",
+                         r->count, r->source_id, user_id);
       }
    }
 
-   /* Lift ownership of the strbuf-internal buffer into out_block.
-    * Use _or_null variant so an empty buffer (every candidate had
-    * empty text — pathological but possible) collapses to NULL and
-    * the composer omits the section.  strbuf_steal resets the buf
-    * to its zero state, so strbuf_free is safe + a no-op afterward. */
-   *out_block = strbuf_steal_or_null(&sb);
-   strbuf_free(&sb);
-
-   /* Per-source rejection logging — fires only when the framework
-    * filter caught poison in adapter output. */
-   for (int i = 0; i < result.rejection_count; i++) {
-      const focus_filter_rejection_t *r = &result.rejections[i];
-      if (r->count > 0)
-         OLOG_WARNING("focus: filter rejected %d candidate(s) from source='%s' (user_id=%d)",
-                      r->count, r->source_id, user_id);
-   }
+   /* Phase 1g-i: broadcast the structured event to every WebUI session
+    * matching (user_id, conv_id) — fires on EVERY post-dedup result
+    * including empty (empty-state UX), but ONLY when the feature is
+    * enabled (already gated above) and conv_id is positive.  The
+    * helper itself filters to SESSION_TYPE_WEBUI sessions; non-webui
+    * dispatchers (DAP / DAP2 / LOCAL) reach this point with conv_id
+    * > 0 too, but the type gate is what keeps the event scoped to
+    * browser tabs that actually consume it.  history_mutex was
+    * released back at line ~346; broadcast iterates a separate
+    * registry mutex.  conv_id == 0 disables — the SESSION_START
+    * refresh_all_prompts path passes 0 (no user-visible turn). */
+   if (conv_id > 0)
+      webui_broadcast_context_injection(user_id, conv_id, turn_id, &result);
 
    log_focus_summary(user_turn_text, result.candidate_count, result.rejection_count,
                      dedup_suppressed, monotonic_ms_now() - t_start);
