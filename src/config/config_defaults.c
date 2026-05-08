@@ -317,9 +317,14 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.top_k = 8;
    config->memory.focus_injection.min_score = 0.4f;
    config->memory.focus_injection.classifier_enabled = false;
+   /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
+    * Probe Component 6 fix-rate lifted 7/11 → 11/11 across all three
+    * providers (anthropic / openai / local) on the v2 fixtures.  See
+    * docs/PHASE_1J_TUNING_LOG.md for rationale and the bench-validated
+    * pathologies these weights resolve. */
    config->memory.focus_injection.weight_semantic = 1.0f;
-   config->memory.focus_injection.weight_recency = 0.3f;
-   config->memory.focus_injection.weight_importance = 0.2f;
+   config->memory.focus_injection.weight_recency = 0.15f;
+   config->memory.focus_injection.weight_importance = 1.0f;
    config->memory.focus_injection.weight_source = 1.0f;
    config->memory.focus_injection.source_weights.memory_fact = 1.0f;
    config->memory.focus_injection.source_weights.memory_entity = 0.9f;

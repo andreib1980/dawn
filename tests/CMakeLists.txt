@@ -581,6 +581,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_source_dedup.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_fact_search.c
            ${SRC_ROOT}/src/memory/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c

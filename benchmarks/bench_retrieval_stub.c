@@ -243,3 +243,13 @@ const struct device_type_def *device_type_get_def(const char *name) {
    (void)name;
    return NULL;
 }
+
+/* llm_silent_observe.c brings full SSE + audit-log dependency cone.  The
+ * bench never invokes silent observation, but config_validate.c calls
+ * llm_silent_observe_provider_is_valid() when validating a freshly-loaded
+ * dawn.toml.  Stub returns true so config_load passes; the bench's loaded
+ * config never executes silent_observe paths. */
+bool llm_silent_observe_provider_is_valid(const char *provider) {
+   (void)provider;
+   return true;
+}

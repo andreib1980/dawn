@@ -6400,6 +6400,71 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
 }
 
 /* =============================================================================
+ * Pre-flight registry scan (Phase 1j optimization)
+ *
+ * Several broadcasters today build a JSON payload, then iterate the
+ * connection registry under the registry mutex, then drop the payload
+ * when no recipients matched.  When the matching pool is empty (common
+ * for per-user / per-conversation broadcasts on a quiet daemon), the
+ * payload-build cost is wasted.
+ *
+ * `any_session_matches` does a cheap pre-flight scan under the registry
+ * mutex and lets the broadcaster bail before doing any JSON work.
+ *
+ * Semantics — must match the broadcaster's iteration filter exactly so
+ * the optimization is pure efficiency (no behavior change):
+ *
+ *   user_id == 0 → broadcast-to-all WebUI authenticated sessions
+ *                  (silent_observation's system-scoped observation form)
+ *   user_id  > 0 → only that user's authenticated WebUI sessions
+ *
+ *   conv_id_or_zero == 0 → don't filter by conversation (silent_observation
+ *                          + future per-user broadcasts)
+ *   conv_id_or_zero  > 0 → only sessions whose currently-active conv id
+ *                          matches (context_injection per-turn delivery)
+ *
+ * SESSION_TYPE_WEBUI gate is hardcoded on purpose:
+ *   - context_injection's broadcaster body already enforces it
+ *   - silent_observation is a WebUI-rail-icon UI primitive (Phase 0
+ *     design): satellites don't render the peek popup, and tightening
+ *     the broadcaster body to match here removes the latent
+ *     accidental-delivery to authenticated Tier-1 satellites
+ *
+ * NOT used for scheduler_broadcast_notification or
+ * scheduler_broadcast_briefing_notification — those insert a
+ * missed_notif DB row inside the registry mutex when sent == 0, so a
+ * pre-flight skip would silently drop missed-alarm rows.
+ *
+ * TOCTOU note: between pre-flight and the broadcaster's own iteration,
+ * a session could disconnect.  Behavior is identical to today
+ * (broadcaster iterates, finds nothing, returns) — pure efficiency,
+ * no correctness regression.
+ * ============================================================================= */
+static bool any_session_matches(int user_id, int64_t conv_id_or_zero) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   bool found = false;
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      if (conn->session->type != SESSION_TYPE_WEBUI)
+         continue;
+      /* user_id == 0: broadcast-to-all; any authenticated WebUI session
+       * matches.  user_id > 0: per-user. */
+      if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+      if (conv_id_or_zero > 0 && webui_get_active_conversation_id(conn->session) != conv_id_or_zero)
+         continue;
+      found = true;
+      break;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   OLOG_DEBUG("any_session_matches: user=%d conv=%lld → %d", user_id, (long long)conv_id_or_zero,
+              found ? 1 : 0);
+   return found;
+}
+
+/* =============================================================================
  * Memory Extraction Notice Broadcast
  * ============================================================================= */
 
@@ -6427,6 +6492,14 @@ static void webui_broadcast_silent_observation(const char *category,
    if (!category || !note)
       return;
 
+   /* Pre-flight registry scan — bail before the json_object_new_*
+    * cluster when no WebUI session would match.  silent_observation
+    * is a WebUI-only UI primitive (rail icon + peek popup), so the
+    * pre-flight gate matches the broadcaster body's filter below
+    * (with SESSION_TYPE_WEBUI added in the same change). */
+   if (!any_session_matches(user_id, /*conv_id_or_zero*/ 0))
+      return;
+
    json_object *root = json_object_new_object();
    json_object_object_add(root, "type", json_object_new_string("silent_observation"));
 
@@ -6452,6 +6525,11 @@ static void webui_broadcast_silent_observation(const char *category,
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *conn = s_active_connections[i];
       if (!conn || !conn->session || !conn->authenticated || !conn->wsi)
+         continue;
+      /* WebUI-only: silent_observation is consumed by the rail-icon
+       * peek popup; satellites don't render it.  Aligns with the
+       * pre-flight gate above. */
+      if (conn->session->type != SESSION_TYPE_WEBUI)
          continue;
       if (user_id > 0 && conn->auth_user_id != user_id)
          continue;
@@ -6544,6 +6622,14 @@ void webui_broadcast_context_injection(int user_id,
                  user_id, (long long)conv_id, (const void *)result);
       return;
    }
+
+   /* Pre-flight registry scan — bail before per-candidate JSON object
+    * construction (the inner loop at result->candidate_count creates an
+    * item object with score_breakdown sub-object per candidate) when no
+    * matching session is open.  Three-gate routing (SESSION_TYPE_WEBUI +
+    * user + conv) is preserved by the helper. */
+   if (!any_session_matches(user_id, conv_id))
+      return;
 
    /* Build the JSON payload ONCE; strdup the canonical string into each
     * recipient's response queue.  Mirrors the silent-observation

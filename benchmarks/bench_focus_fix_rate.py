@@ -68,19 +68,21 @@ DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
 DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 
 # Per-provider HEAD baselines for component 6 fix-rate.
-# Calibrated 2026-05-08 via `--recalibrate` against the v2 fixtures
-# (focus_probe_cases.json schema_version=2, 11 cases).  All three
-# providers land at exactly 7/11 — within the 4-8/10 design window.
-# 4 cases designed to fail HEAD (right answer drops out of top_k=8
-# under default weights); 6 designed to pass; 1 negative-empty (judge
-# inverted prompt confirms appropriately-weak surface).  Phase 1j.B
-# weight tuning targets moving the FAIL cases up — regression
-# detection: (candidate_fix_count < baseline_fix_count) is a FAIL on
-# that provider.
+# Recalibrated 2026-05-08 (Phase 1j.B) after the weight-tuning win —
+# w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.  All three providers (anthropic /
+# openai / local) lifted from 7/11 → 11/11 against the v2 fixtures
+# (focus_probe_cases.json schema_version=2): the four designed-FAIL
+# cases (semantic-noise pair, recency-collision, source-weight-bury)
+# all promote into top_k=8 under the new weights, while the six
+# designed-PASS cases stay in top_k and the negative-empty case
+# continues to surface appropriately-weak content.  Going forward,
+# regression detection: (candidate_fix_count < baseline_fix_count) is
+# a FAIL on that provider.  See docs/PHASE_1J_TUNING_LOG.md for the
+# pathology→fix mapping.
 HEAD_BASELINE_FIX_COUNT = {
-    "anthropic": 7,
-    "openai": 7,
-    "local": 7,
+    "anthropic": 11,
+    "openai": 11,
+    "local": 11,
 }
 
 # Production-shape config block — passed verbatim to bench_focus_pipeline
@@ -91,8 +93,8 @@ DEFAULT_FOCUS_CONFIG = {
     "min_score": 0.40,
     "focus_budget_tokens": 1024,
     "weight_semantic": 1.0,
-    "weight_recency": 0.30,
-    "weight_importance": 0.20,
+    "weight_recency": 0.15,
+    "weight_importance": 1.00,
     "weight_source": 1.0,
     "source_weights": {
         "memory_fact": 1.0,

@@ -481,8 +481,11 @@
 # classifier_enabled = false          # RAGRoute-style source classifier
                                       # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker
-# weight_recency = 0.3                # weights.  Range each: 0.0 - 5.0
-# weight_importance = 0.2
+# weight_recency = 0.15               # weights.  Range each: 0.0 - 5.0.  Phase
+# weight_importance = 1.0             # 1j tuning (May 2026) lifted w_imp 0.2 →
+                                      # 1.0 and dropped w_rec 0.3 → 0.15 — Probe
+                                      # Component 6 fix-rate 7/11 → 11/11 across
+                                      # anthropic / openai / local providers.
 # weight_source = 1.0                 # Multiplier on per-source weights below.
 
 [memory.focus_injection.source_weights]
