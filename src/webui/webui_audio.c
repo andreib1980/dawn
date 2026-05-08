@@ -1126,6 +1126,12 @@ static void *audio_worker_thread(void *arg) {
    /* Echo transcription as user message (server_saved prevents duplicate client save) */
    webui_send_transcript_ex(session, "user", transcript, saved_to_db);
 
+   /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
+    * audio_worker_thread (spawned via pthread_create — NEVER on the
+    * lws service thread).  Uses the post-ASR transcript as the turn
+    * text so the focus block reflects what the user actually said. */
+   session_dispatch_user_turn(session, transcript);
+
    /* Send "thinking" state while LLM processes - streaming callback will switch to "speaking" */
    webui_send_state_with_detail(session, "thinking", "Processing request...");
 

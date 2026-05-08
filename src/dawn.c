@@ -97,12 +97,15 @@
 #include "ui/tui.h"
 #endif
 #ifdef ENABLE_WEBUI
+#include "webui/webui_internal.h" /* dawn_build_prompt declaration (Phase 1e) */
 #include "webui/webui_music_server.h"
 #include "webui/webui_server.h"
 #endif
 #include "auth/auth_db.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_focus_adapters.h"
 #include "memory/memory_recategorize.h"
+#include "tools/external_focus_adapters.h"
 #ifdef ENABLE_AUTH
 #include "auth/admin_socket.h"
 #include "auth/auth_crypto.h"
@@ -1937,12 +1940,30 @@ int main(int argc, char *argv[]) {
 
    // Register prompt builders BEFORE mosquitto_loop_start so MQTT-triggered
    // refreshes (HUD status / discovery) never observe NULL callbacks. Keeping
-   // build_user_prompt's declaration local here avoids pulling the WebUI
+   // dawn_build_prompt's declaration local here avoids pulling the WebUI
    // internal header into dawn.c.
    session_manager_set_local_prompt_builder(dawn_local_prompt_builder);
 #ifdef ENABLE_WEBUI
-   extern char *build_user_prompt(int user_id);
-   session_manager_set_user_prompt_builder(build_user_prompt);
+   /* Phase 1d/1e: register all six focus-source adapters into the framework
+    * BEFORE wiring the structured prompt builder.  Adapters register
+    * unconditionally regardless of memory.focus_injection.enabled — the
+    * runtime gate lives in build_focus_block() so toggling the feature
+    * does not require a daemon restart.  Registration is cheap (linear
+    * append into a fixed-cap registry); gating at use time. */
+   if (memory_focus_adapters_register_all() != SUCCESS) {
+      OLOG_ERROR("Failed to register memory focus adapters");
+      return FAILURE;
+   }
+   if (external_focus_adapters_register_all() != SUCCESS) {
+      OLOG_ERROR("Failed to register external focus adapters");
+      return FAILURE;
+   }
+
+   /* Phase 1e: structured per-user prompt builder.  Replaces the legacy
+    * single-string session_manager_set_user_prompt_builder(build_user_prompt).
+    * Declaration via webui_internal.h (pulled in for ENABLE_WEBUI builds —
+    * no extra dep cost since this block already lives under that gate). */
+   session_manager_set_prompt_builder(dawn_build_prompt);
 #endif
 
    // Initialize command router for worker thread request/response

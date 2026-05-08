@@ -31,6 +31,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h> /* free() in static-inline composed_prompt_free fallback */
 #include <time.h>
 
 #include "core/text_filter.h"   // For cmd_tag_filter_state_t
@@ -265,8 +266,68 @@ typedef struct session {
 // Prompt Builder Callback Types (defined before #ifdef so stubs can use them)
 // =============================================================================
 
-typedef char *(*session_user_prompt_builder_t)(int user_id);
+/**
+ * Local-mic prompt builder (SESSION_TYPE_LOCAL).  Returns a static const
+ * string owned by the dawn.c command_processing_mode helpers; the
+ * session manager never frees the result.  Untouched by Phase 1e —
+ * local-mic focus injection lands in a follow-up phase.
+ */
 typedef const char *(*session_local_prompt_builder_t)(void);
+
+/* ----- Phase 1e: structured per-user prompt builder ---------------------- */
+
+/**
+ * Refresh kind hint passed to the per-user prompt builder.
+ *
+ * In Phase 1e BOTH kinds rebuild every block — the parameter exists as
+ * forward-compat for Phase 1f's dedup state, which will let PER_TURN
+ * refreshes skip the base+memory rebuild and only recompute the focus
+ * block.
+ */
+typedef enum {
+   PROMPT_REFRESH_SESSION_START, /* full rebuild — settings/tools/memory/persona/all blocks */
+   PROMPT_REFRESH_PER_TURN,      /* per-turn — IN 1e BOTH KINDS REBUILD ALL BLOCKS */
+} prompt_refresh_kind_t;
+
+/**
+ * Composed prompt — three named blocks the builder fills in.  The
+ * session manager owns the heap allocations on a successful builder
+ * return and releases them via `composed_prompt_free()`.  Struct
+ * intentionally contains only `char *` so no webui/, tools/, or
+ * memory/* type leaks through Layer 1.
+ *
+ * `focus_block` may be NULL on every refresh kind: when feature is
+ * disabled, when focus_compose returns zero candidates, when the focus
+ * builder fails.  The composer omits the focus section entirely when
+ * the block is NULL or empty so pre-1e output is byte-identical with
+ * the feature off.
+ */
+typedef struct {
+   char *base_prompt;  /* L4 builds; session_manager owns/frees */
+   char *memory_block; /* L4 builds via memory_build_context */
+   char *focus_block;  /* L4 builds via focus_compose render; NULL when
+                          disabled, on empty result, or on failure */
+} composed_prompt_t;
+
+/**
+ * Per-user prompt builder — replaces the legacy
+ * `session_user_prompt_builder_t (int)` callback.  Implementation
+ * lives in src/webui/ (Layer 4); session_manager (Layer 1) only knows
+ * the function pointer.
+ *
+ * Contract:
+ *   SUCCESS — `*out` is populated; session_manager owns the heap
+ *             allocations and releases them via composed_prompt_free.
+ *             A NULL `focus_block` is valid — it just omits the
+ *             focus section in the composed string.
+ *   FAILURE — Builder MUST clean up any partial allocation.  Caller
+ *             treats this as a refresh failure; no system-prompt swap
+ *             occurs.
+ */
+typedef int (*session_prompt_builder_t)(int user_id,
+                                        const char *user_turn_text,
+                                        prompt_refresh_kind_t kind,
+                                        composed_prompt_t *out);
 
 // =============================================================================
 // Lifecycle Functions
@@ -645,15 +706,20 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
 char *session_get_system_prompt(session_t *session);
 
 /**
- * @brief Register the per-user prompt builder used by the refresh helper
+ * @brief Register the structured per-user prompt builder used by the
+ *        refresh helper (Phase 1e).
  *
- * Called once during subsystem init (e.g., by webui_server_init) to wire the
- * session manager to the WebUI's per-user prompt builder without creating a
- * direct dependency from core into webui. May be called with NULL to clear.
+ * Called once during dawn.c init to wire the session manager to the
+ * WebUI's structured prompt builder (`dawn_build_prompt`) without
+ * creating a direct dependency from core into webui.  Replaces the
+ * legacy single-string `session_user_prompt_builder_t` registration
+ * (removed in 1e).
+ *
+ * May be called with NULL to clear.
  *
  * @param fn Builder function pointer (may be NULL)
  */
-void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn);
+void session_manager_set_prompt_builder(session_prompt_builder_t fn);
 
 /**
  * @brief Register the local (mic) prompt builder used by the refresh helper
@@ -664,6 +730,70 @@ void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn);
  * @param fn Builder function pointer (may be NULL)
  */
 void session_manager_set_local_prompt_builder(session_local_prompt_builder_t fn);
+
+/**
+ * @brief Free the heap allocations inside a composed_prompt_t.
+ *
+ * Idempotent on a zeroed / already-freed struct.  Resets all three
+ * pointers to NULL so the struct is safe to reuse.
+ */
+void composed_prompt_free(composed_prompt_t *p);
+
+/**
+ * @brief Flatten a composed_prompt_t into a single allocated string.
+ *
+ * Concatenates `base_prompt + memory_block + focus_block` with the
+ * existing `--- USER MEMORY ---` framing identity for the memory
+ * section and a parallel `--- TURN CONTEXT ---` framing for the
+ * focus section.  NULL or empty `focus_block` omits the focus
+ * section entirely (preserves byte-identical pre-1e output when
+ * feature is disabled).
+ *
+ * @return Caller-owned string; NULL on OOM or NULL input.
+ */
+char *session_manager_compose_prompt_string(const composed_prompt_t *blocks);
+
+/**
+ * @brief Build the full per-user system prompt as a flat string,
+ *        matching the legacy `build_user_prompt` ownership semantics.
+ *
+ * Convenience wrapper used by capability-change refresh paths that
+ * need a `char *` to hand to `session_update_system_prompt`.  Calls
+ * the registered structured builder with `kind=SESSION_START` and
+ * `user_turn_text=NULL`, then flattens the result via
+ * `session_manager_compose_prompt_string`, which transparently picks
+ * up any future `composed_prompt_t` block — callers do NOT need to
+ * update this function when 1f / 1g add blocks.
+ *
+ * If you need block-level access (e.g., for caching individual
+ * blocks across PER_TURN refreshes, or for surfacing per-block
+ * provenance in a UI), call the structured builder directly via
+ * the `session_prompt_builder_t` registered with
+ * `session_manager_set_prompt_builder` instead.
+ *
+ * @return Caller-owned string; NULL on builder failure.
+ */
+char *session_manager_build_system_prompt_string(int user_id);
+
+/**
+ * @brief Per-turn refresh helper — called from every user-message-to-LLM
+ *        dispatch site BEFORE the LLM dispatch.
+ *
+ * Calls the registered prompt builder with `kind=PER_TURN` and the
+ * user's turn text, flattens the result, and swaps the session's
+ * system message in place via `session_update_system_prompt`.
+ *
+ * Always returns SUCCESS even when the focus refresh fails — failure
+ * is logged and `focus_block` is set to NULL; LLM dispatch is never
+ * blocked by focus errors.  The previous turn's focus_block content
+ * NEVER survives into the next turn (cross-turn isolation invariant).
+ *
+ * Synchronous.  All in-1e-scope dispatch sites (webui text worker,
+ * webui audio worker, satellite worker) run on dedicated worker
+ * threads; no worker_pool dispatch needed.  The lws service thread
+ * MUST NOT call this — verified via the per-site audit.
+ */
+int session_dispatch_user_turn(session_t *session, const char *user_turn_text);
 
 /**
  * @brief Rebuild the system prompt on every active session, preserving history
@@ -1110,7 +1240,7 @@ static inline void session_retain(session_t *session) {
    (void)session;
 }
 
-static inline void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn) {
+static inline void session_manager_set_prompt_builder(session_prompt_builder_t fn) {
    (void)fn;
 }
 
@@ -1119,6 +1249,39 @@ static inline void session_manager_set_local_prompt_builder(session_local_prompt
 }
 
 static inline void session_manager_refresh_all_prompts(void) {
+}
+
+static inline void composed_prompt_free(composed_prompt_t *p) {
+   /* Inlined free — non-MULTI_CLIENT builds still release any heap
+    * allocations a builder may have produced.  The prior no-op
+    * variant silently leaked all three blocks if a builder ever ran
+    * under !ENABLE_MULTI_CLIENT.  Cannot delegate to
+    * prompt_compose_free (its header includes session_manager.h, so a
+    * back-include would be circular). */
+   if (p == NULL)
+      return;
+   free(p->base_prompt);
+   p->base_prompt = NULL;
+   free(p->memory_block);
+   p->memory_block = NULL;
+   free(p->focus_block);
+   p->focus_block = NULL;
+}
+
+static inline char *session_manager_compose_prompt_string(const composed_prompt_t *blocks) {
+   (void)blocks;
+   return NULL;
+}
+
+static inline char *session_manager_build_system_prompt_string(int user_id) {
+   (void)user_id;
+   return NULL;
+}
+
+static inline int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
+   (void)session;
+   (void)user_turn_text;
+   return 0;
 }
 
 #endif /* !ENABLE_MULTI_CLIENT */

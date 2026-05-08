@@ -33,6 +33,8 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/prompt_compose.h"
+#include "dawn_error.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
@@ -1647,15 +1649,130 @@ char *session_get_system_prompt(session_t *session) {
  * publication from init thread (main) is visible to callers on MQTT /
  * worker threads without stale-NULL reads on weakly ordered architectures.
  */
-static _Atomic(session_user_prompt_builder_t) s_user_prompt_builder = NULL;
+/* Phase 1e: structured per-user builder replaces the legacy
+ * session_user_prompt_builder_t (int) → char *.  Local-mic builder
+ * is unchanged — local-mic SESSION_TYPE_LOCAL focus injection is
+ * a follow-up phase.
+ *
+ * Atomic pointers ensure cross-thread publication from init thread
+ * (main) is visible to refresh callers on MQTT / worker threads
+ * without stale-NULL reads on weakly ordered architectures. */
+static _Atomic(session_prompt_builder_t) s_prompt_builder = NULL;
 static _Atomic(session_local_prompt_builder_t) s_local_prompt_builder = NULL;
 
-void session_manager_set_user_prompt_builder(session_user_prompt_builder_t fn) {
-   atomic_store_explicit(&s_user_prompt_builder, fn, memory_order_release);
+void session_manager_set_prompt_builder(session_prompt_builder_t fn) {
+   atomic_store_explicit(&s_prompt_builder, fn, memory_order_release);
 }
 
 void session_manager_set_local_prompt_builder(session_local_prompt_builder_t fn) {
    atomic_store_explicit(&s_local_prompt_builder, fn, memory_order_release);
+}
+
+/* =============================================================================
+ * Phase 1e: composed_prompt_t lifecycle + composer
+ *
+ * Implementation extracted to src/core/prompt_compose.c so the composer
+ * can be unit-tested without dragging the full session-manager runtime
+ * (auth_db, conv_db, satellite_db, ...) into the test link.  The
+ * session_manager-namespaced functions below are thin wrappers that
+ * forward to the extracted helpers — public API is unchanged.
+ * ============================================================================= */
+
+void composed_prompt_free(composed_prompt_t *p) {
+   prompt_compose_free(p);
+}
+
+char *session_manager_compose_prompt_string(const composed_prompt_t *blocks) {
+   return prompt_compose_to_string(blocks);
+}
+
+/* Run the registered builder with kind=SESSION_START and flatten.
+ * Convenience wrapper for capability-change refresh callers that need
+ * a `char *` to hand to session_update_system_prompt — preserves the
+ * legacy `build_user_prompt(int)` ownership semantics so the 9
+ * existing call sites need a one-line rename rather than a full
+ * composed_prompt_t lifecycle dance. */
+char *session_manager_build_system_prompt_string(int user_id) {
+   session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
+   if (builder == NULL)
+      return NULL;
+
+   composed_prompt_t cp = { 0 };
+   if (builder(user_id, /*user_turn_text*/ NULL, PROMPT_REFRESH_SESSION_START, &cp) != SUCCESS) {
+      composed_prompt_free(&cp);
+      return NULL;
+   }
+   char *flat = session_manager_compose_prompt_string(&cp);
+   composed_prompt_free(&cp);
+   return flat;
+}
+
+/* =============================================================================
+ * Phase 1e: per-turn refresh dispatch
+ * ============================================================================= */
+
+int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
+   if (session == NULL || user_turn_text == NULL)
+      return SUCCESS;
+
+   /* SESSION_TYPE_LOCAL is out of scope for 1e — local-mic uses its
+    * own static-string builder peer (s_local_prompt_builder).  Local
+    * focus injection lands in a follow-up phase. */
+   if (session->type == SESSION_TYPE_LOCAL)
+      return SUCCESS;
+
+   session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
+   if (builder == NULL)
+      return SUCCESS; /* No builder registered — leave system prompt as-is. */
+
+   /* Re-read user_id under metrics_mutex so satellite rebinds that
+    * occurred since last turn are picked up.  Session manager design
+    * pattern (matches refresh_all_prompts at line 1700-1702). */
+   pthread_mutex_lock(&session->metrics_mutex);
+   const int user_id = session->metrics.user_id;
+   pthread_mutex_unlock(&session->metrics_mutex);
+   if (user_id <= 0)
+      return SUCCESS; /* Unauthenticated — base prompt only; nothing to refresh. */
+
+   composed_prompt_t cp = { 0 };
+   const int rc = builder(user_id, user_turn_text, PROMPT_REFRESH_PER_TURN, &cp);
+   if (rc != SUCCESS) {
+      /* Builder failure — focus_block guaranteed NULL by builder
+       * contract.  Skip the system-prompt swap entirely; LLM dispatch
+       * proceeds with last-good system prompt.  The previous turn's
+       * focus_block content NEVER leaks into this turn because the
+       * last-good prompt is whatever was set at session start (no
+       * stale focus from a prior PER_TURN call). */
+      OLOG_WARNING("session_dispatch_user_turn: builder failed (user_id=%d, kind=PER_TURN) — "
+                   "skipping system-prompt swap, LLM dispatch proceeds with last-good prompt",
+                   user_id);
+      composed_prompt_free(&cp);
+      return SUCCESS; /* LLM dispatch never blocked by focus errors. */
+   }
+
+   char *flat = session_manager_compose_prompt_string(&cp);
+   composed_prompt_free(&cp);
+   if (flat == NULL) {
+      OLOG_WARNING("session_dispatch_user_turn: compose flatten failed (user_id=%d, kind=PER_TURN) "
+                   "— skipping system-prompt swap",
+                   user_id);
+      return SUCCESS;
+   }
+
+   session_update_system_prompt(session, flat);
+   free(flat);
+
+   /* Re-apply DAP2 satellite area suffix if applicable — mirrors the
+    * refresh_all_prompts pattern at session_manager.c:1728-1736. */
+   if (session->type == SESSION_TYPE_DAP2 && session->identity.uuid[0] != '\0') {
+      satellite_mapping_t mapping;
+      if (satellite_db_get(session->identity.uuid, &mapping) == 0)
+         session_append_satellite_context(session, session->identity.location, mapping.ha_area);
+      else
+         session_append_satellite_context(session, session->identity.location, NULL);
+   }
+
+   return SUCCESS;
 }
 
 void session_manager_refresh_all_prompts(void) {
@@ -1682,10 +1799,12 @@ void session_manager_refresh_all_prompts(void) {
    }
    pthread_rwlock_unlock(&session_manager_rwlock);
 
-   session_user_prompt_builder_t user_builder = atomic_load_explicit(&s_user_prompt_builder,
-                                                                     memory_order_acquire);
    session_local_prompt_builder_t local_builder = atomic_load_explicit(&s_local_prompt_builder,
                                                                        memory_order_acquire);
+   /* Phase 1e: structured builder.  Loaded inside the loop on demand
+    * via session_manager_build_system_prompt_string() so each session's
+    * SESSION_START rebuild picks up the per-user persona/memory blocks
+    * and the (currently-empty for SESSION_START) focus block. */
 
    int refreshed = 0;
    for (int i = 0; i < count; i++) {
@@ -1706,11 +1825,20 @@ void session_manager_refresh_all_prompts(void) {
 
       if (type == SESSION_TYPE_LOCAL) {
          /* Local mic session — delegate to dawn.c so the prompt matches the
-          * active command_processing_mode (direct-only vs LLM). */
+          * active command_processing_mode (direct-only vs LLM).  Local-mic
+          * focus injection is a follow-up phase; SESSION_TYPE_LOCAL stays
+          * on the legacy single-string peer. */
          static_prompt = local_builder ? local_builder() : get_local_command_prompt();
-      } else if (user_id > 0 && user_builder) {
-         /* Authenticated WebUI / satellite — rebuild with per-user persona */
-         owned_prompt = user_builder(user_id);
+      } else if (user_id > 0) {
+         /* Authenticated WebUI / satellite — rebuild with per-user persona
+          * via the structured builder (PER_TURN focus block is empty for
+          * a capability-change refresh — this is a SESSION_START path). */
+         owned_prompt = session_manager_build_system_prompt_string(user_id);
+         if (owned_prompt == NULL) {
+            /* Builder unregistered or failed — fall back to base remote
+             * prompt so the session keeps a usable system message. */
+            static_prompt = get_remote_command_prompt();
+         }
       } else {
          /* Unauthenticated remote or WebUI not registered — base remote prompt */
          static_prompt = get_remote_command_prompt();

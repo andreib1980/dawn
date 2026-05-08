@@ -557,6 +557,7 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/webui/webui_server.c
+        src/webui/build_focus_block.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
         src/webui/webui_history.c
@@ -592,6 +593,7 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
+        src/core/prompt_compose.c
         src/core/worker_pool.c
         src/core/text_filter.c
         src/core/rate_limiter.c

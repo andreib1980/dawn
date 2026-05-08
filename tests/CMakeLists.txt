@@ -290,6 +290,19 @@ dawn_add_unit_test(test_memory_focus_adapters
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
+# Phase 1e: composer (prompt_compose) + build_focus_block.  The composer
+# was extracted from session_manager.c into prompt_compose.c specifically
+# so this test can link it without the full session-manager runtime
+# (auth_db / conv_db / satellite_db / json-c).  build_focus_block links
+# against programmable focus_compose / memory_embeddings stubs.
+dawn_add_unit_test(test_prompt_builder
+   SOURCES test_prompt_builder.c test_prompt_builder_stub.c
+           ${SRC_ROOT}/src/core/prompt_compose.c
+           ${SRC_ROOT}/src/webui/build_focus_block.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Phase 1d: external focus-source adapters (document chunks + calendar
 # events; email deferred to v2 — see design doc §"API Audit (Phase 1d)").
 # Links the two adapters + their init wrapper + the framework + the

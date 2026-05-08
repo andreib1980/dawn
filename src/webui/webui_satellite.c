@@ -290,6 +290,11 @@ static void *satellite_worker_thread(void *arg) {
    /* Add user message to history */
    session_add_message(session, "user", text);
 
+   /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
+    * satellite_worker_thread (spawned via pthread_create from
+    * handle_satellite_query — NEVER on the lws service thread). */
+   session_dispatch_user_turn(session, text);
+
    /* Call LLM with TTS callback for Tier 2 satellites (server-side TTS).
     * Tier 1 satellites have local TTS and only need the text response, but
     * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
@@ -580,7 +585,7 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
             conn->auth_user_id = mapping.user_id;
 
             /* Build personalized system prompt with user memories */
-            char *user_prompt = build_user_prompt(mapping.user_id);
+            char *user_prompt = session_manager_build_system_prompt_string(mapping.user_id);
             if (user_prompt) {
                session_update_system_prompt(session, user_prompt);
                free(user_prompt);

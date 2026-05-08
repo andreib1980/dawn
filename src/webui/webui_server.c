@@ -42,6 +42,7 @@
 #include <sys/random.h>
 #include <unistd.h>
 
+#include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
 
 #ifdef ENABLE_WEBUI_AUDIO
@@ -1624,32 +1625,31 @@ bool conn_require_admin(ws_connection_t *conn) {
  * @param user_id User ID (0 for unauthenticated - returns base prompt copy)
  * @return Allocated prompt string (caller must free)
  */
-char *build_user_prompt(int user_id) {
+/* Internal helper: build the base+persona/settings string only (no
+ * memory, no focus).  Phase 1e split — memory and focus are now
+ * separate blocks owned by the composer in session_manager. */
+static char *build_base_block(int user_id) {
    /* Take an owned copy of the base prompt up-front. get_remote_command_prompt()
     * returns a pointer into a shared static buffer that can be rebuilt in place
     * by invalidate_system_instructions() firing from MQTT callback threads
-    * (HUD status / discovery). We may do DB I/O and memory_build_context()
-    * below — holding the static pointer across that work would race against
-    * a concurrent rebuild and read a torn buffer. */
+    * (HUD status / discovery). We may do DB I/O below — holding the static
+    * pointer across that work would race against a concurrent rebuild and
+    * read a torn buffer. */
    const char *source = get_remote_command_prompt();
-   if (!source) {
+   if (!source)
       return NULL;
-   }
    char *base_prompt = strdup(source);
-   if (!base_prompt) {
+   if (!base_prompt)
       return NULL;
-   }
 
    /* No user ID - return the owned base prompt (transfer ownership) */
-   if (user_id <= 0) {
+   if (user_id <= 0)
       return base_prompt;
-   }
 
    /* Load user settings */
    auth_user_settings_t settings;
-   if (auth_db_get_user_settings(user_id, &settings) != AUTH_DB_SUCCESS) {
+   if (auth_db_get_user_settings(user_id, &settings) != AUTH_DB_SUCCESS)
       return base_prompt;
-   }
 
    /* Check if any settings are customized */
    bool has_persona = settings.persona_description[0] != '\0';
@@ -1658,23 +1658,10 @@ char *build_user_prompt(int user_id) {
    bool has_units = settings.units[0] != '\0';
    bool is_replace_mode = (strcmp(settings.persona_mode, "replace") == 0);
 
-   if (!has_persona && !has_location && !has_timezone && !has_units) {
+   if (!has_persona && !has_location && !has_timezone && !has_units)
       return base_prompt;
-   }
 
    size_t base_len = strlen(base_prompt);
-
-   /* Build memory context if enabled.  memory_build_context returns
-    * heap-allocated text bounded by context_budget_tokens × 4 chars; NULL
-    * when there are no memories to surface.  Caller frees after splicing
-    * into the system prompt below. */
-   char *memory_ctx = NULL;
-   size_t memory_len = 0;
-   if (g_config.memory.enabled) {
-      memory_ctx = memory_build_context(user_id, g_config.memory.context_budget_tokens);
-      if (memory_ctx)
-         memory_len = strlen(memory_ctx);
-   }
 
    /* Replace mode: Prepend custom persona with override instruction */
    if (is_replace_mode && has_persona) {
@@ -1697,38 +1684,28 @@ char *build_user_prompt(int user_id) {
 
       if (has_location || has_timezone || has_units) {
          BUF_PRINTF(suffix, suffix_len, suffix_rem, "\n\n## User Info\n");
-         if (has_location) {
+         if (has_location)
             BUF_PRINTF(suffix, suffix_len, suffix_rem, "Location: %s\n", settings.location);
-         }
-         if (has_timezone) {
+         if (has_timezone)
             BUF_PRINTF(suffix, suffix_len, suffix_rem, "Timezone: %s\n", settings.timezone);
-         }
-         if (has_units) {
+         if (has_units)
             BUF_PRINTF(suffix, suffix_len, suffix_rem, "Preferred units: %s\n", settings.units);
-         }
       } else {
          suffix[0] = '\0';
       }
 
-      /* Allocate: prefix + base + suffix + memory */
-      char *combined = malloc(prefix_len + base_len + suffix_len + memory_len + 1);
-      if (!combined) {
-         free(memory_ctx);
+      char *combined = malloc(prefix_len + base_len + suffix_len + 1);
+      if (!combined)
          return base_prompt; /* fallback: transfer ownership of base copy */
-      }
 
       memcpy(combined, prefix, prefix_len);
       memcpy(combined + prefix_len, base_prompt, base_len);
       memcpy(combined + prefix_len + base_len, suffix, suffix_len);
-      if (memory_len > 0) {
-         memcpy(combined + prefix_len + base_len + suffix_len, memory_ctx, memory_len);
-      }
-      combined[prefix_len + base_len + suffix_len + memory_len] = '\0';
+      combined[prefix_len + base_len + suffix_len] = '\0';
 
-      OLOG_INFO("Built REPLACE prompt for user_id=%d (%zu + %zu + %zu + %zu bytes)", user_id,
-                prefix_len, base_len, suffix_len, memory_len);
+      OLOG_DEBUG("dawn_build_prompt: REPLACE base for user_id=%d (%zu + %zu + %zu bytes)", user_id,
+                 prefix_len, base_len, suffix_len);
 
-      free(memory_ctx);
       free(base_prompt);
       return combined;
    }
@@ -1744,37 +1721,72 @@ char *build_user_prompt(int user_id) {
       BUF_PRINTF(user_context, offset, remain, "Additional persona traits: %s\n",
                  settings.persona_description);
    }
-   if (has_location) {
+   if (has_location)
       BUF_PRINTF(user_context, offset, remain, "Location: %s\n", settings.location);
-   }
-   if (has_timezone) {
+   if (has_timezone)
       BUF_PRINTF(user_context, offset, remain, "Timezone: %s\n", settings.timezone);
-   }
-   if (has_units) {
+   if (has_units)
       BUF_PRINTF(user_context, offset, remain, "Preferred units: %s\n", settings.units);
-   }
 
-   /* Allocate combined prompt with memory context */
    size_t context_len = strlen(user_context);
-   char *combined = malloc(base_len + context_len + memory_len + 1);
-   if (!combined) {
-      free(memory_ctx);
+   char *combined = malloc(base_len + context_len + 1);
+   if (!combined)
       return base_prompt; /* fallback: transfer ownership of base copy */
-   }
 
    memcpy(combined, base_prompt, base_len);
    memcpy(combined + base_len, user_context, context_len);
-   if (memory_len > 0) {
-      memcpy(combined + base_len + context_len, memory_ctx, memory_len);
-   }
-   combined[base_len + context_len + memory_len] = '\0';
+   combined[base_len + context_len] = '\0';
 
-   OLOG_INFO("Built APPEND prompt for user_id=%d (%zu + %zu + %zu bytes)", user_id, base_len,
-             context_len, memory_len);
+   OLOG_DEBUG("dawn_build_prompt: APPEND base for user_id=%d (%zu + %zu bytes)", user_id, base_len,
+              context_len);
 
-   free(memory_ctx);
    free(base_prompt);
    return combined;
+}
+
+int dawn_build_prompt(int user_id,
+                      const char *user_turn_text,
+                      prompt_refresh_kind_t kind,
+                      composed_prompt_t *out) {
+   if (out == NULL)
+      return FAILURE;
+   /* Initialize output so the caller can safely composed_prompt_free
+    * on either SUCCESS or FAILURE return. */
+   out->base_prompt = NULL;
+   out->memory_block = NULL;
+   out->focus_block = NULL;
+
+   /* `kind` is forward-compat in 1e — both kinds rebuild everything;
+    * 1f wires kind-aware optimization (skip base+memory rebuild on
+    * PER_TURN when dedup state says nothing changed). */
+   (void)kind;
+
+   /* Block 1: base + persona/settings.  NULL on hard failure (no
+    * remote prompt source); session manager treats that as a refresh
+    * failure and skips the system-prompt swap. */
+   out->base_prompt = build_base_block(user_id);
+   if (out->base_prompt == NULL)
+      return FAILURE;
+
+   /* Block 2: memory context (existing logic).  NULL when memory is
+    * disabled or has nothing to surface — composer omits the marker
+    * pair via byte-identical pre-1e behavior. */
+   if (g_config.memory.enabled && user_id > 0) {
+      out->memory_block = memory_build_context(user_id, g_config.memory.context_budget_tokens);
+      /* memory_build_context returns NULL on empty result; no error
+       * propagation needed. */
+   }
+
+   /* Block 3: per-turn focus.  Builder short-circuits on disabled
+    * feature, empty/NULL turn text, or unauthenticated user.  On hard
+    * focus_compose failure, we leave focus_block NULL and proceed —
+    * a missing focus block is preferable to no LLM dispatch.  The
+    * NULL guarantees the previous turn's content cannot leak (cross-
+    * turn isolation invariant). */
+   if (build_focus_block(user_id, user_turn_text, &out->focus_block) != SUCCESS)
+      out->focus_block = NULL;
+
+   return SUCCESS;
 }
 
 #endif /* ENABLE_AUTH */
@@ -2920,7 +2932,8 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                         /* Set user_id for metrics and memory extraction */
                         session_set_metrics_user(conn->session, conn->auth_user_id);
                         /* Build personalized prompt with user settings + memory context */
-                        char *prompt = build_user_prompt(conn->auth_user_id);
+                        char *prompt = session_manager_build_system_prompt_string(
+                            conn->auth_user_id);
                         session_init_system_prompt(conn->session,
                                                    prompt ? prompt : get_remote_command_prompt());
                         free(prompt);
@@ -3775,7 +3788,7 @@ static int callback_websocket(struct lws *wsi,
                   /* Set user_id for metrics and memory extraction */
                   session_set_metrics_user(conn->session, conn->auth_user_id);
                   /* Build personalized prompt with user settings + memory context */
-                  char *prompt = build_user_prompt(conn->auth_user_id);
+                  char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
                   session_init_system_prompt(conn->session,
                                              prompt ? prompt : get_remote_command_prompt());
                   free(prompt);
@@ -5680,6 +5693,13 @@ static void *text_worker_thread(void *arg) {
    /* Echo user input as transcript (with server_saved flag to prevent duplicate DB save) */
    webui_send_transcript_ex(session, "user", text, saved_to_db);
 
+   /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
+    * worker thread (text_worker_thread is spawned via pthread_create
+    * from webui_process_text_input_with_vision — NEVER on the lws
+    * service thread).  Returns SUCCESS even on focus failure; LLM
+    * dispatch never blocked. */
+   session_dispatch_user_turn(session, text);
+
    /* Check if TTS is enabled for this connection */
    bool tts_enabled = conn && conn->tts_enabled;
 
@@ -6626,7 +6646,7 @@ int webui_restore_conversation_context(ws_connection_t *conn,
    session_clear_history(conn->session);
 
    if (!has_system) {
-      char *prompt = build_user_prompt(conn->auth_user_id);
+      char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
       session_add_message(conn->session, "system", prompt ? prompt : get_remote_command_prompt());
       free(prompt);
    }
@@ -6763,7 +6783,7 @@ static bool webui_conn_create_session(ws_connection_t *conn) {
 
    /* If no conversation was restored, initialize with the user's system prompt */
    if (!restored) {
-      char *prompt = build_user_prompt(conn->auth_user_id);
+      char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
       session_init_system_prompt(conn->session, prompt ? prompt : get_remote_command_prompt());
       free(prompt);
    }
