@@ -1366,3 +1366,100 @@ admin_resp_code_t admin_client_memory_recategorize(int fd,
    }
    return recv_text_response(fd, response, resp_len);
 }
+
+/* Encode the binary reextract payload (see admin_socket.h
+ * "MEMORY_REEXTRACT payload" block).  Returns the populated payload
+ * length, or 0 on validation failure. */
+static uint16_t encode_reextract_payload(uint8_t flags,
+                                         const char *backup_path,
+                                         double max_cost_usd,
+                                         const char *username,
+                                         uint8_t *out, /* size >= ADMIN_MSG_MAX_PAYLOAD */
+                                         size_t out_size) {
+   if (!username || !username[0])
+      return 0;
+   size_t ulen = strlen(username);
+   if (ulen == 0 || ulen > ADMIN_REEXTRACT_USERNAME_MAX)
+      return 0;
+   size_t bplen = backup_path ? strlen(backup_path) : 0;
+   if (bplen > ADMIN_REEXTRACT_BACKUP_PATH_MAX)
+      return 0;
+   /* Cost cap → micros, clamp to uint32 max. */
+   uint32_t max_micros = 0;
+   if (max_cost_usd > 0.0) {
+      double micros = max_cost_usd * 1.0e6;
+      if (micros >= (double)UINT32_MAX) {
+         max_micros = UINT32_MAX;
+      } else {
+         max_micros = (uint32_t)micros;
+      }
+   }
+   /* Total = 1 + 2 + bplen + 4 + 1 + ulen */
+   size_t total = 1 + 2 + bplen + 4 + 1 + ulen;
+   if (total > out_size || total > ADMIN_MSG_MAX_PAYLOAD)
+      return 0;
+
+   size_t off = 0;
+   out[off++] = flags;
+   uint16_t bplen_le = (uint16_t)bplen;
+   memcpy(out + off, &bplen_le, sizeof(bplen_le));
+   off += sizeof(bplen_le);
+   if (bplen > 0) {
+      memcpy(out + off, backup_path, bplen);
+      off += bplen;
+   }
+   memcpy(out + off, &max_micros, sizeof(max_micros));
+   off += sizeof(max_micros);
+   out[off++] = (uint8_t)ulen;
+   memcpy(out + off, username, ulen);
+   off += ulen;
+   return (uint16_t)off;
+}
+
+admin_resp_code_t admin_client_memory_reextract(int fd,
+                                                const char *username,
+                                                bool confirm,
+                                                bool keep_summaries,
+                                                const char *backup_path,
+                                                double max_cost_usd,
+                                                char *response,
+                                                size_t resp_len) {
+   uint8_t payload[ADMIN_MSG_MAX_PAYLOAD];
+   uint8_t flags = 0;
+   if (confirm)
+      flags |= ADMIN_REEXTRACT_FLAG_CONFIRM;
+   if (keep_summaries)
+      flags |= ADMIN_REEXTRACT_FLAG_KEEP_SUMMARIES;
+
+   uint16_t payload_len = encode_reextract_payload(flags, backup_path, max_cost_usd, username,
+                                                   payload, sizeof(payload));
+   if (payload_len == 0) {
+      fprintf(stderr,
+              "Error: invalid reextract arguments (username 1-%d bytes, "
+              "backup-path <= %d bytes)\n",
+              ADMIN_REEXTRACT_USERNAME_MAX, ADMIN_REEXTRACT_BACKUP_PATH_MAX);
+      return ADMIN_RESP_FAILURE;
+   }
+   if (send_message(fd, ADMIN_MSG_MEMORY_REEXTRACT, payload, payload_len) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_reextract_status(int fd,
+                                                       const char *username,
+                                                       char *response,
+                                                       size_t resp_len) {
+   uint8_t payload[ADMIN_MSG_MAX_PAYLOAD];
+   uint8_t flags = ADMIN_REEXTRACT_FLAG_STATUS_QUERY;
+   uint16_t payload_len = encode_reextract_payload(flags, NULL, 0.0, username, payload,
+                                                   sizeof(payload));
+   if (payload_len == 0) {
+      fprintf(stderr, "Error: invalid username for reextract-status\n");
+      return ADMIN_RESP_FAILURE;
+   }
+   if (send_message(fd, ADMIN_MSG_MEMORY_REEXTRACT_STATUS, payload, payload_len) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}

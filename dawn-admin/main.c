@@ -24,6 +24,7 @@
  */
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +91,14 @@ static void print_usage(const char *prog) {
    fprintf(stderr, "  music rescan                      Trigger library rescan\n");
    fprintf(stderr, "\nMemory Management:\n");
    fprintf(stderr, "  memory recategorize-all <user>     LLM-classify 'general' facts\n");
+   fprintf(stderr,
+           "  memory reextract --user <user> [--confirm] [--keep-summaries]\n"
+           "                    [--backup-path <path>] [--max-cost-usd <X>]\n"
+           "                                       Drop derived memory tables and re-extract.\n"
+           "                                       Defaults to dry-run; --confirm executes.\n");
+   fprintf(stderr,
+           "  memory reextract-status --user <user>\n"
+           "                                       Report progress of last reextract run\n");
    fprintf(stderr, "\n");
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  --yes, -y    Skip confirmation prompts\n");
@@ -1148,6 +1157,51 @@ static int cmd_memory_recategorize(const char *username) {
    }
 }
 
+static int cmd_memory_reextract(const char *username,
+                                bool confirm,
+                                bool keep_summaries,
+                                const char *backup_path,
+                                double max_cost_usd) {
+   int fd = admin_client_connect();
+   if (fd < 0) {
+      return 1;
+   }
+
+   char response[ADMIN_MSG_CONTENT_MAX + 1];
+   admin_resp_code_t resp = admin_client_memory_reextract(fd, username, confirm, keep_summaries,
+                                                          backup_path, max_cost_usd, response,
+                                                          sizeof(response));
+   admin_client_disconnect(fd);
+
+   if (resp == ADMIN_RESP_SUCCESS) {
+      printf("%s\n", response);
+      return 0;
+   } else {
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+      return 1;
+   }
+}
+
+static int cmd_memory_reextract_status(const char *username) {
+   int fd = admin_client_connect();
+   if (fd < 0) {
+      return 1;
+   }
+
+   char response[ADMIN_MSG_CONTENT_MAX + 1];
+   admin_resp_code_t resp = admin_client_memory_reextract_status(fd, username, response,
+                                                                 sizeof(response));
+   admin_client_disconnect(fd);
+
+   if (resp == ADMIN_RESP_SUCCESS) {
+      printf("%s\n", response);
+      return 0;
+   } else {
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+      return 1;
+   }
+}
+
 int main(int argc, char *argv[]) {
    if (argc < 2) {
       print_usage(argv[0]);
@@ -1553,6 +1607,11 @@ int main(int argc, char *argv[]) {
       if (argc < 3) {
          fprintf(stderr, "Error: Missing memory subcommand\n");
          fprintf(stderr, "Usage: %s memory recategorize-all <username>\n", argv[0]);
+         fprintf(stderr,
+                 "       %s memory reextract --user <username> [--confirm] [--keep-summaries] "
+                 "[--backup-path <path>] [--max-cost-usd <X>]\n",
+                 argv[0]);
+         fprintf(stderr, "       %s memory reextract-status --user <username>\n", argv[0]);
          return 1;
       }
       const char *subcmd = argv[2];
@@ -1564,11 +1623,53 @@ int main(int argc, char *argv[]) {
             return 1;
          }
          return cmd_memory_recategorize(argv[3]);
-      } else {
-         fprintf(stderr, "Error: Unknown memory subcommand: %s\n", subcmd);
-         fprintf(stderr, "Available: recategorize-all\n");
-         return 1;
       }
+
+      if (strcmp(subcmd, "reextract") == 0 || strcmp(subcmd, "reextract-status") == 0) {
+         bool is_status = (strcmp(subcmd, "reextract-status") == 0);
+         const char *username = NULL;
+         bool confirm = false;
+         bool keep_summaries = false;
+         const char *backup_path = NULL;
+         double max_cost_usd = 0.0;
+
+         for (int i = 3; i < argc; i++) {
+            const char *arg = argv[i];
+            if (strcmp(arg, "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (!is_status && strcmp(arg, "--confirm") == 0) {
+               confirm = true;
+            } else if (!is_status && strcmp(arg, "--dry-run") == 0) {
+               confirm = false;
+            } else if (!is_status && strcmp(arg, "--keep-summaries") == 0) {
+               keep_summaries = true;
+            } else if (!is_status && strcmp(arg, "--backup-path") == 0 && i + 1 < argc) {
+               backup_path = argv[++i];
+            } else if (!is_status && strcmp(arg, "--max-cost-usd") == 0 && i + 1 < argc) {
+               char *endp = NULL;
+               double v = strtod(argv[++i], &endp);
+               if (!endp || *endp != '\0' || v < 0.0) {
+                  fprintf(stderr, "Error: --max-cost-usd requires a non-negative number\n");
+                  return 1;
+               }
+               max_cost_usd = v;
+            } else {
+               fprintf(stderr, "Error: Unknown option for memory %s: %s\n", subcmd, arg);
+               return 1;
+            }
+         }
+         if (!username || !username[0]) {
+            fprintf(stderr, "Error: --user <username> is required\n");
+            return 1;
+         }
+         if (is_status)
+            return cmd_memory_reextract_status(username);
+         return cmd_memory_reextract(username, confirm, keep_summaries, backup_path, max_cost_usd);
+      }
+
+      fprintf(stderr, "Error: Unknown memory subcommand: %s\n", subcmd);
+      fprintf(stderr, "Available: recategorize-all, reextract, reextract-status\n");
+      return 1;
    }
 
    fprintf(stderr, "Error: Unknown command: %s\n", cmd);

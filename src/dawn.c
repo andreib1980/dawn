@@ -102,6 +102,7 @@
 #include "webui/webui_server.h"
 #endif
 #include "auth/auth_db.h"
+#include "memory/memory_db_admin.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_focus_adapters.h"
 #include "memory/memory_recategorize.h"
@@ -3856,6 +3857,8 @@ server_shutdown:
 #endif
    OLOG_INFO("Shutdown: memory_recategorize_stop");
    memory_recategorize_stop();
+   OLOG_INFO("Shutdown: memory_db_admin_stop_reextract_worker");
+   memory_db_admin_stop_reextract_worker();
    OLOG_INFO("Shutdown: memory_embeddings_cleanup");
    memory_embeddings_cleanup();
    OLOG_INFO("Shutdown: embedding_engine_cleanup");

@@ -108,6 +108,20 @@ bool memory_extraction_in_progress(int user_id);
  */
 struct json_object *memory_extraction_parse_json(const char *response);
 
+/**
+ * @brief Return the character size of the extraction prompt template.
+ *
+ * The prompt sent to the LLM is the template plus an anchor-date line plus
+ * the conversation JSON plus the user's existing-profile snapshot.  This
+ * helper exposes the constant template size so cost estimators can avoid
+ * hardcoding a guess (the actual template is ~3-5K characters, well above
+ * historical 1500-token guesses).  Caller adds per-message + profile
+ * estimates on top.
+ *
+ * @return Size of EXTRACTION_PROMPT_TEMPLATE in characters (excluding NUL).
+ */
+size_t memory_extraction_get_template_size_chars(void);
+
 #ifdef __cplusplus
 }
 #endif

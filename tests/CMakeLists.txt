@@ -383,6 +383,12 @@ dawn_add_unit_test(test_memory_provenance
    LIBS    dawn_common unity sqlite3 pthread m
    LABEL   ci)
 
+dawn_add_unit_test(test_memory_db_admin
+   SOURCES test_memory_db_admin.c test_memory_db_admin_stub.c
+           ${SRC_ROOT}/src/memory/memory_db_admin.c
+   LIBS    dawn_common unity sqlite3 pthread m
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_source_dedup
    SOURCES test_memory_source_dedup.c
            ${SRC_ROOT}/src/memory/memory_source_dedup.c

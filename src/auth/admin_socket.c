@@ -50,6 +50,8 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_admin.h"
+#include "memory/memory_extraction.h"
 #include "memory/memory_recategorize.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
@@ -113,6 +115,8 @@ static int handle_list_conversations(int client_fd, const char *payload, uint16_
 static int handle_get_conversation(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_delete_conversation(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
 static int send_response(int client_fd, admin_resp_code_t code);
 static int send_text_response(int client_fd, admin_resp_code_t code, const char *text);
 static int send_list_response(int client_fd,
@@ -2251,6 +2255,267 @@ static int handle_memory_recategorize(int client_fd, const char *payload, uint16
 }
 
 /* =============================================================================
+ * Memory reextract — drop derived memory tables + reset extraction
+ * cursors + spawn recovery worker.  See memory_db_admin.{c,h}.
+ * ============================================================================= */
+
+/* Decode the binary reextract payload into stack-resident outputs.
+ * Returns SUCCESS on a well-formed payload, FAILURE otherwise. */
+static int decode_reextract_payload(
+    const char *payload,
+    uint16_t payload_len,
+    uint8_t *out_flags,
+    char *out_backup_path, /* size >= ADMIN_REEXTRACT_BACKUP_PATH_MAX + 1 */
+    uint16_t *out_backup_path_len,
+    uint32_t *out_max_cost_micros,
+    char *out_username, /* size >= ADMIN_REEXTRACT_USERNAME_MAX + 1 */
+    uint8_t *out_username_len) {
+   /* Minimum payload: flags (1) + backup_path_len (2) + max_cost (4) + uname_len (1)
+    * + 1 byte username = 9 bytes. */
+   if (payload_len < 9)
+      return FAILURE;
+
+   size_t off = 0;
+   *out_flags = (uint8_t)payload[off++];
+
+   uint16_t bplen;
+   memcpy(&bplen, payload + off, sizeof(bplen));
+   off += sizeof(bplen);
+   if (bplen > ADMIN_REEXTRACT_BACKUP_PATH_MAX)
+      return FAILURE;
+   if (payload_len < off + bplen + 4 + 1)
+      return FAILURE;
+   if (bplen > 0) {
+      memcpy(out_backup_path, payload + off, bplen);
+      off += bplen;
+   }
+   out_backup_path[bplen] = '\0';
+   *out_backup_path_len = bplen;
+
+   uint32_t cap;
+   memcpy(&cap, payload + off, sizeof(cap));
+   off += sizeof(cap);
+   *out_max_cost_micros = cap;
+
+   uint8_t ulen = (uint8_t)payload[off++];
+   if (ulen == 0 || ulen > ADMIN_REEXTRACT_USERNAME_MAX)
+      return FAILURE;
+   if (payload_len < off + ulen)
+      return FAILURE;
+   memcpy(out_username, payload + off, ulen);
+   out_username[ulen] = '\0';
+   *out_username_len = ulen;
+
+   /* Reject embedded NUL — username travels as raw bytes on the wire,
+    * but server-side it must be a valid C-string. */
+   for (uint8_t i = 0; i < ulen; i++) {
+      if (out_username[i] == '\0')
+         return FAILURE;
+   }
+
+   return SUCCESS;
+}
+
+/* Synthesize the default backup path when the client passed an empty one.
+ * /var/lib/dawn/auth.db.reextract.YYYYMMDD-HHMMSSZ — fits inside
+ * ADMIN_REEXTRACT_BACKUP_PATH_MAX with margin.  UTC instead of local
+ * time so DST fall-back can't produce identical filenames an hour
+ * apart, and so the timestamp matches audit-log conventions. */
+static void default_backup_path(char *out, size_t out_size) {
+   time_t now = time(NULL);
+   struct tm tm_buf;
+   gmtime_r(&now, &tm_buf);
+   snprintf(out, out_size, "/var/lib/dawn/auth.db.reextract.%04d%02d%02d-%02d%02d%02dZ",
+            tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min,
+            tm_buf.tm_sec);
+}
+
+static int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   char backup_path[ADMIN_REEXTRACT_BACKUP_PATH_MAX + 1] = { 0 };
+   uint16_t backup_path_len = 0;
+   uint32_t max_cost_micros = 0;
+   char username[ADMIN_REEXTRACT_USERNAME_MAX + 1] = { 0 };
+   uint8_t username_len = 0;
+
+   if (decode_reextract_payload(payload, payload_len, &flags, backup_path, &backup_path_len,
+                                &max_cost_micros, username, &username_len) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed reextract payload");
+   }
+
+   bool confirm = (flags & ADMIN_REEXTRACT_FLAG_CONFIRM) != 0;
+   bool keep_summaries = (flags & ADMIN_REEXTRACT_FLAG_KEEP_SUMMARIES) != 0;
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+
+   /* Cost estimate doubles as the dry-run report; always run it. */
+   memory_db_admin_cost_estimate_t est;
+   if (memory_db_admin_estimate_reextract_cost(user.id, &est) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Cost estimate failed");
+   }
+
+   if (!confirm) {
+      char report[ADMIN_MSG_CONTENT_MAX + 1];
+      int n = snprintf(report, sizeof(report),
+                       "Reextract plan for user '%s' (id=%d) — DRY RUN\n"
+                       "  Backup path:        %s\n"
+                       "  Keep summaries:     %s\n"
+                       "  Stuck conversations: %d (msgs total: %d)\n"
+                       "  Provider/model:     %s/%s\n"
+                       "  Estimated cost:     %s",
+                       username, user.id,
+                       backup_path_len > 0 ? backup_path
+                                           : "(default /var/lib/dawn/auth.db.reextract.<ts>)",
+                       keep_summaries ? "yes" : "no", est.conv_count, est.message_count,
+                       est.provider[0] ? est.provider : "(unset)",
+                       est.model[0] ? est.model : "(unset)",
+                       est.rates_known ? "" : "uncosted (local provider or unknown rates)");
+      /* Continuation snprintfs need at least ~80 bytes free to write a
+       * useful suffix; guard against the n-fills-buffer case where
+       * `sizeof(report) - n == 1` would silently truncate to 0 chars. */
+      const int kMinContinuation = 80;
+      if (est.rates_known && n > 0 && (int)sizeof(report) - n > kMinContinuation) {
+         snprintf(report + n, sizeof(report) - (size_t)n,
+                  "$%.4f - $%.4f USD ($%.4f - $%.4f / conv)", est.cost_low_usd, est.cost_high_usd,
+                  est.per_conv_cost_low_usd, est.per_conv_cost_high_usd);
+      }
+      if (max_cost_micros > 0) {
+         double cap_usd = (double)max_cost_micros / 1e6;
+         size_t cur = strlen(report);
+         if (cur + (size_t)kMinContinuation < sizeof(report)) {
+            snprintf(report + cur, sizeof(report) - cur, "\n  Max cost cap:       $%.4f USD",
+                     cap_usd);
+         }
+         if (!est.rates_known) {
+            /* Security review L1: cap is silently ignored when rates unknown.
+             * Make the suppression visible in the dry-run report. */
+            cur = strlen(report);
+            if (cur + (size_t)kMinContinuation < sizeof(report)) {
+               snprintf(report + cur, sizeof(report) - cur,
+                        "\n  WARNING: --max-cost-usd is NOT enforced (rates unknown for "
+                        "%s/%s)",
+                        est.provider[0] ? est.provider : "(unset)",
+                        est.model[0] ? est.model : "(unset)");
+            }
+         }
+      }
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+   }
+
+   /* CONFIRMED PATH — concurrency guards. */
+   if (memory_recategorize_is_running()) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "Recategorization is running; refuse to reset");
+   }
+   if (memory_extraction_in_progress(user.id)) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "Extraction is in progress for this user; refuse to reset");
+   }
+   if (memory_db_admin_reextract_is_running()) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "Another reextract is already running");
+   }
+
+   /* Cost cap. */
+   if (max_cost_micros > 0 && est.rates_known) {
+      double cap_usd = (double)max_cost_micros / 1e6;
+      if (est.cost_high_usd > cap_usd) {
+         char msg[256];
+         snprintf(msg, sizeof(msg), "Aborted: estimated cost $%.4f exceeds cap $%.4f USD",
+                  est.cost_high_usd, cap_usd);
+         return send_text_response(client_fd, ADMIN_RESP_FAILURE, msg);
+      }
+   }
+
+   /* Backup path resolution + execution. */
+   char actual_backup[ADMIN_REEXTRACT_BACKUP_PATH_MAX + 1];
+   if (backup_path_len > 0) {
+      memcpy(actual_backup, backup_path, backup_path_len);
+      actual_backup[backup_path_len] = '\0';
+   } else {
+      default_backup_path(actual_backup, sizeof(actual_backup));
+   }
+   if (auth_db_backup(actual_backup) != AUTH_DB_SUCCESS) {
+      char msg[ADMIN_REEXTRACT_BACKUP_PATH_MAX + 64];
+      snprintf(msg, sizeof(msg), "Backup failed (path=%s); reset aborted", actual_backup);
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, msg);
+   }
+
+   /* Reset transaction. */
+   memory_db_admin_reset_counts_t counts = { 0 };
+   if (memory_db_admin_reset_derived(user.id, keep_summaries, &counts) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "Reset transaction failed; backup preserved");
+   }
+
+   /* Spawn recovery worker (detached). */
+   int spawn_rc = memory_db_admin_start_reextract_worker();
+
+   auth_db_log_event("MEMORY_REEXTRACT", username, NULL, NULL);
+
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   snprintf(report, sizeof(report),
+            "Reextract executed for user '%s' (id=%d)\n"
+            "  Backup written:     %s\n"
+            "  Facts deleted:      %d\n"
+            "  Preferences:        %d\n"
+            "  Summaries:          %d%s\n"
+            "  Entities:           %d\n"
+            "  Relations:          %d\n"
+            "  Conversations reset: %d\n"
+            "  Recovery worker:    %s",
+            username, user.id, actual_backup, counts.facts_deleted, counts.preferences_deleted,
+            counts.summaries_deleted, keep_summaries ? " (kept)" : "", counts.entities_deleted,
+            counts.relations_deleted, counts.conversations_reset,
+            spawn_rc == SUCCESS ? "started"
+                                : "FAILED to start (run dawn-admin reextract-status to retry)");
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+static int handle_memory_reextract_status(int client_fd,
+                                          const char *payload,
+                                          uint16_t payload_len) {
+   uint8_t flags = 0;
+   char backup_path[ADMIN_REEXTRACT_BACKUP_PATH_MAX + 1] = { 0 };
+   uint16_t backup_path_len = 0;
+   uint32_t max_cost_micros = 0;
+   char username[ADMIN_REEXTRACT_USERNAME_MAX + 1] = { 0 };
+   uint8_t username_len = 0;
+
+   if (decode_reextract_payload(payload, payload_len, &flags, backup_path, &backup_path_len,
+                                &max_cost_micros, username, &username_len) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed status payload");
+   }
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+
+   memory_db_admin_status_t st;
+   if (memory_db_admin_query_status(user.id, &st) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Status query failed");
+   }
+
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   snprintf(report, sizeof(report),
+            "Reextract status for user '%s' (id=%d)\n"
+            "  Worker running:    %s\n"
+            "  Total convs:       %d\n"
+            "  Done:              %d\n"
+            "  Pending:           %d\n"
+            "  Failed (cap-hit):  %d\n"
+            "  Cost spent:        %s",
+            username, user.id, st.worker_running ? "yes" : "no", st.total_conversations,
+            st.conversations_done, st.conversations_pending, st.conversations_failed,
+            st.cost_tracking_available ? "(unimplemented)" : "not tracked (carried debt)");
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+/* =============================================================================
  * Client Handler
  * =============================================================================
  */
@@ -2388,6 +2653,12 @@ static int handle_client(int client_fd) {
       /* Phase 6: Memory */
       case ADMIN_MSG_MEMORY_RECATEGORIZE:
          return handle_memory_recategorize(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_REEXTRACT:
+         return handle_memory_reextract(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_REEXTRACT_STATUS:
+         return handle_memory_reextract_status(client_fd, payload, header.payload_len);
 
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);

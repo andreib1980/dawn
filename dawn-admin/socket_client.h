@@ -596,4 +596,48 @@ admin_resp_code_t admin_client_memory_recategorize(int fd,
                                                    char *response,
                                                    size_t resp_len);
 
+/**
+ * @brief Reextract — drop derived memory tables for a user and re-extract.
+ *
+ * Wire format encoded in this function — see admin_socket.h
+ * "MEMORY_REEXTRACT payload" block.  In dry-run (confirm=false) the daemon
+ * replies with a planning report and mutates nothing; with confirm=true it
+ * runs backup + reset transaction + spawns the recovery worker.
+ *
+ * @param fd                 Connected socket FD.
+ * @param username           Target user (1..ADMIN_REEXTRACT_USERNAME_MAX bytes).
+ * @param confirm            true to execute, false for dry-run.
+ * @param keep_summaries     true to keep memory_summaries during reset.
+ * @param backup_path        NULL or "" to use the daemon-side default
+ *                           (/var/lib/dawn/auth.db.reextract.<ts>).
+ *                           Must start with /var/lib/dawn/ or /tmp/.
+ * @param max_cost_usd       Hard cost cap; 0 = no cap.  Aborts the run when
+ *                           the daemon's high-end estimate exceeds this.
+ * @param response           Output buffer for daemon response text.
+ * @param resp_len           Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_memory_reextract(int fd,
+                                                const char *username,
+                                                bool confirm,
+                                                bool keep_summaries,
+                                                const char *backup_path,
+                                                double max_cost_usd,
+                                                char *response,
+                                                size_t resp_len);
+
+/**
+ * @brief Reextract status — query progress for a user.
+ *
+ * @param fd        Connected socket FD.
+ * @param username  Target user.
+ * @param response  Output buffer for daemon response text.
+ * @param resp_len  Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_memory_reextract_status(int fd,
+                                                       const char *username,
+                                                       char *response,
+                                                       size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

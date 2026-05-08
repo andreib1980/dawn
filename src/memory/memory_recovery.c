@@ -66,6 +66,17 @@ static pthread_t s_recovery_thread;
 static volatile bool s_running = false;
 static pthread_mutex_t s_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Serialize concurrent run_pass invocations.  The standing recovery thread
+ * (recovery_thread_func) and the admin-triggered reextract worker
+ * (memory_db_admin_start_reextract_worker) both call memory_recovery_run_pass.
+ * Without this mutex they would independently load the same stuck-conversation
+ * rows and call memory_trigger_extraction in parallel — the per-user
+ * extraction slot would gate double-extraction of any single conversation,
+ * but the second caller still wastes SELECTs and increments
+ * extraction_attempts on conversations the first caller is handling.
+ * Acquired at run_pass entry, released at exit. */
+static pthread_mutex_t s_pass_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* =============================================================================
  * Internal helpers
  * ============================================================================= */
@@ -420,6 +431,12 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
    int triggered = 0;
    int skipped = 0;
 
+   /* Serialize against any concurrent caller (standing recovery thread vs.
+    * admin-triggered reextract worker).  The pass exits early on
+    * !s_running so the lock-hold is bounded by the longest single
+    * conversation's extraction (capped at RECOVERY_PER_CONV_WAIT_SEC). */
+   pthread_mutex_lock(&s_pass_mutex);
+
    if (!g_config.memory.enabled || !g_config.memory.recovery_enabled) {
       goto out;
    }
@@ -465,6 +482,7 @@ out:
    if (skipped_out) {
       *skipped_out = skipped;
    }
+   pthread_mutex_unlock(&s_pass_mutex);
 }
 
 static void *recovery_thread_func(void *arg) {

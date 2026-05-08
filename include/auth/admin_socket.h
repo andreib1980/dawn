@@ -159,7 +159,9 @@ typedef enum {
    ADMIN_MSG_MUSIC_RESCAN = 0x73, /**< Trigger immediate library rescan */
 
    /* Phase 6: Memory Management */
-   ADMIN_MSG_MEMORY_RECATEGORIZE = 0x80, /**< LLM-classify general facts for a user */
+   ADMIN_MSG_MEMORY_RECATEGORIZE = 0x80,     /**< LLM-classify general facts for a user */
+   ADMIN_MSG_MEMORY_REEXTRACT = 0x81,        /**< Drop derived memory tables + re-extract */
+   ADMIN_MSG_MEMORY_REEXTRACT_STATUS = 0x82, /**< Query reextract progress for a user */
 } admin_msg_type_t;
 
 /**
@@ -336,6 +338,38 @@ typedef struct __attribute__((packed)) {
  * @brief Maximum username length for user creation.
  */
 #define ADMIN_USERNAME_MAX_LEN 63
+
+/*
+ * =============================================================================
+ * MEMORY_REEXTRACT payload (variable-length, binary, ≤240 bytes total)
+ * =============================================================================
+ *
+ * Bound: 1 + 2 + 200 + 4 + 1 + 32 = 240 bytes (within ADMIN_MSG_MAX_PAYLOAD=256
+ * with 16-byte headroom for future extensions).
+ *
+ * Wire format (little-endian):
+ *   Byte 0:        flags
+ *                    bit 0: confirm  (0 = dry-run, 1 = execute)
+ *                    bit 1: keep_summaries
+ *                    bit 2: is_status_query (used by REEXTRACT_STATUS)
+ *   Bytes 1-2:     backup_path_len (uint16, 0 = use default path)
+ *   Bytes 3..3+L:  backup_path[backup_path_len]  (≤200 bytes)
+ *   Next 4 bytes:  max_cost_usd_micros (uint32, 0 = no cap)
+ *   Next byte:     username_len (1..ADMIN_REEXTRACT_USERNAME_MAX)
+ *   Next bytes:    username[username_len]  (≤32 bytes; no trailing NUL)
+ *
+ * Total max: 1 + 2 + 200 + 4 + 1 + 32 = 240 bytes (within ADMIN_MSG_MAX_PAYLOAD).
+ *
+ * The ADMIN_MSG_MEMORY_REEXTRACT_STATUS path reuses the same struct with
+ * is_status_query set; backup/cost fields are ignored for status queries.
+ */
+
+#define ADMIN_REEXTRACT_FLAG_CONFIRM 0x01
+#define ADMIN_REEXTRACT_FLAG_KEEP_SUMMARIES 0x02
+#define ADMIN_REEXTRACT_FLAG_STATUS_QUERY 0x04
+
+#define ADMIN_REEXTRACT_BACKUP_PATH_MAX 200
+#define ADMIN_REEXTRACT_USERNAME_MAX 32
 
 /*
  * =============================================================================

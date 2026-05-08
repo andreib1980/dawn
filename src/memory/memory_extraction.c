@@ -1298,3 +1298,7 @@ bool memory_extraction_in_progress(int user_id) {
 
    return in_progress;
 }
+
+size_t memory_extraction_get_template_size_chars(void) {
+   return strlen(EXTRACTION_PROMPT_TEMPLATE);
+}
