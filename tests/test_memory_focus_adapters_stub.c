@@ -1,0 +1,404 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Programmable stubs for test_memory_focus_adapters and
+ * test_memory_fact_search.  Each stub serves a per-test fixture that
+ * the test programs via the `s_mock_*` globals declared in
+ * test_memory_focus_adapters_mocks.h (a header shared by both test
+ * binaries).
+ *
+ * Stubs honor the public memory_db / memory_embeddings signatures so
+ * the adapters compile and link against this test TU; the actual SQL
+ * paths are tested in test_memory_provenance / test_relation_supersede.
+ */
+
+#include <math.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "config/dawn_config.h"
+#include "dawn_error.h"
+#include "memory/memory_db.h"
+#include "memory/memory_db_provenance.h"
+#include "memory/memory_embeddings.h"
+#include "memory/memory_filter.h"
+#include "memory/memory_types.h"
+#include "test_memory_focus_adapters_mocks.h"
+
+/* g_config is touched by focus_source.c (lookup_source_weight, ranker
+ * weights) — tests pre-populate before each compose call. */
+dawn_config_t g_config;
+
+/* Mock state — extern declarations live in the shared mocks header. */
+mock_state_t s_mock;
+
+void mock_reset(void) {
+   memset(&s_mock, 0, sizeof(s_mock));
+}
+
+/* =============================================================================
+ * memory_db_* fact stubs
+ * ============================================================================= */
+
+int memory_db_fact_search(int user_id,
+                          const char *keywords,
+                          memory_fact_t *out_facts,
+                          int max_facts,
+                          int *count_out) {
+   (void)keywords;
+   int n = 0;
+   for (int i = 0; i < s_mock.fact_count && n < max_facts; i++) {
+      if (s_mock.facts[i].user_id != user_id)
+         continue;
+      out_facts[n++] = s_mock.facts[i];
+   }
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_fact_search_since(int user_id,
+                                const char *keywords,
+                                time_t since_ts,
+                                memory_fact_t *out_facts,
+                                int max_facts,
+                                int *count_out) {
+   (void)keywords;
+   int n = 0;
+   for (int i = 0; i < s_mock.fact_count && n < max_facts; i++) {
+      if (s_mock.facts[i].user_id != user_id)
+         continue;
+      if (s_mock.facts[i].created_at < since_ts)
+         continue;
+      out_facts[n++] = s_mock.facts[i];
+   }
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact) {
+   for (int i = 0; i < s_mock.fact_count; i++) {
+      if (s_mock.facts[i].id == fact_id) {
+         *out_fact = s_mock.facts[i];
+         return MEMORY_DB_SUCCESS;
+      }
+   }
+   return MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_facts_get_sources(int user_id,
+                                const int64_t *fact_ids,
+                                int n,
+                                int64_t *out_conv_ids,
+                                int64_t *out_starts,
+                                int64_t *out_ends) {
+   (void)user_id;
+   for (int i = 0; i < n; i++) {
+      out_conv_ids[i] = 0;
+      out_starts[i] = 0;
+      out_ends[i] = 0;
+      for (int j = 0; j < s_mock.fact_count; j++) {
+         if (s_mock.facts[j].id == fact_ids[i]) {
+            out_conv_ids[i] = s_mock.fact_provenance[j].conv_id;
+            out_starts[i] = s_mock.fact_provenance[j].msg_id_start;
+            out_ends[i] = s_mock.fact_provenance[j].msg_id_end;
+            break;
+         }
+      }
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * memory_db_* entity stubs
+ * ============================================================================= */
+
+int memory_db_entity_search(int user_id,
+                            const char *keywords,
+                            memory_entity_t *out,
+                            int max,
+                            int *count_out) {
+   (void)keywords;
+   int n = 0;
+   for (int i = 0; i < s_mock.entity_count && n < max; i++) {
+      if (s_mock.entities[i].user_id != user_id)
+         continue;
+      if (!s_mock.entity_keyword_match[i])
+         continue;
+      out[n++] = s_mock.entities[i];
+   }
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_get_embeddings(int user_id,
+                                    int expected_dims,
+                                    int64_t *out_ids,
+                                    char out_names[][MEMORY_ENTITY_NAME_MAX],
+                                    char out_types[][MEMORY_ENTITY_TYPE_MAX],
+                                    float *out_embeddings,
+                                    float *out_norms,
+                                    int max,
+                                    int *count_out) {
+   if (expected_dims != s_mock.entity_dim) {
+      if (count_out)
+         *count_out = 0;
+      return MEMORY_DB_SUCCESS; /* Empty result; production behavior */
+   }
+   int n = 0;
+   for (int i = 0; i < s_mock.entity_count && n < max; i++) {
+      if (s_mock.entities[i].user_id != user_id)
+         continue;
+      if (s_mock.entity_embeddings[i] == NULL)
+         continue;
+      out_ids[n] = s_mock.entities[i].id;
+      strncpy(out_names[n], s_mock.entities[i].canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
+      out_names[n][MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      strncpy(out_types[n], s_mock.entities[i].entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
+      out_types[n][MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+      memcpy(&out_embeddings[n * expected_dims], s_mock.entity_embeddings[i],
+             expected_dims * sizeof(float));
+      out_norms[n] = s_mock.entity_norms[i];
+      n++;
+   }
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_get_by_name(int user_id,
+                                 const char *canonical_name,
+                                 memory_entity_t *out_entity) {
+   for (int i = 0; i < s_mock.entity_count; i++) {
+      if (s_mock.entities[i].user_id != user_id)
+         continue;
+      if (strcmp(s_mock.entities[i].canonical_name, canonical_name) == 0) {
+         *out_entity = s_mock.entities[i];
+         return MEMORY_DB_SUCCESS;
+      }
+   }
+   return MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_entity_get_photo(int user_id,
+                               int64_t entity_id,
+                               char *out_photo_id,
+                               size_t photo_id_size) {
+   for (int i = 0; i < s_mock.entity_count; i++) {
+      if (s_mock.entities[i].user_id != user_id)
+         continue;
+      if (s_mock.entities[i].id == entity_id) {
+         if (s_mock.entity_photo_ids[i] != NULL) {
+            strncpy(out_photo_id, s_mock.entity_photo_ids[i], photo_id_size - 1);
+            out_photo_id[photo_id_size - 1] = '\0';
+         } else if (photo_id_size > 0) {
+            out_photo_id[0] = '\0';
+         }
+         return MEMORY_DB_SUCCESS;
+      }
+   }
+   return MEMORY_DB_NOT_FOUND;
+}
+
+/* =============================================================================
+ * memory_db_* relation stubs
+ * ============================================================================= */
+
+int memory_db_relation_list_by_subject_at(int user_id,
+                                          int64_t subject_entity_id,
+                                          int64_t as_of_ts,
+                                          memory_relation_t *out,
+                                          int max,
+                                          int *count_out) {
+   int n = 0;
+   for (int i = 0; i < s_mock.relation_count && n < max; i++) {
+      if (s_mock.relation_user_id[i] != user_id)
+         continue;
+      if (s_mock.relations[i].subject_entity_id != subject_entity_id)
+         continue;
+      /* Bitemporal filter mimicking the production semantics:
+       * (valid_from == 0 || valid_from <= as_of) AND
+       * (valid_to   == 0 || valid_to   >  as_of). */
+      if (s_mock.relations[i].valid_from > 0 && s_mock.relations[i].valid_from > as_of_ts)
+         continue;
+      if (s_mock.relations[i].valid_to > 0 && s_mock.relations[i].valid_to <= as_of_ts)
+         continue;
+      out[n++] = s_mock.relations[i];
+   }
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_relations_get_sources(int user_id,
+                                    const int64_t *relation_ids,
+                                    int n,
+                                    int64_t *out_conv_ids,
+                                    int64_t *out_starts,
+                                    int64_t *out_ends) {
+   (void)user_id;
+   for (int i = 0; i < n; i++) {
+      out_conv_ids[i] = 0;
+      out_starts[i] = 0;
+      out_ends[i] = 0;
+      for (int j = 0; j < s_mock.relation_count; j++) {
+         if (s_mock.relations[j].id == relation_ids[i]) {
+            out_conv_ids[i] = s_mock.relation_provenance[j].conv_id;
+            out_starts[i] = s_mock.relation_provenance[j].msg_id_start;
+            out_ends[i] = s_mock.relation_provenance[j].msg_id_end;
+            break;
+         }
+      }
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * memory_db_* summary stubs
+ * ============================================================================= */
+
+int memory_db_summary_search_since(int user_id,
+                                   const char *keywords,
+                                   time_t since_ts,
+                                   memory_summary_t *out_summaries,
+                                   int max_summaries,
+                                   int *count_out) {
+   (void)keywords;
+   int n = 0;
+   for (int i = 0; i < s_mock.summary_count && n < max_summaries; i++) {
+      if (s_mock.summaries[i].user_id != user_id)
+         continue;
+      if (s_mock.summaries[i].created_at < since_ts)
+         continue;
+      out_summaries[n++] = s_mock.summaries[i];
+   }
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_summaries_get_sources(int user_id,
+                                    const int64_t *summary_ids,
+                                    int n,
+                                    int64_t *out_conv_ids,
+                                    int64_t *out_starts,
+                                    int64_t *out_ends) {
+   (void)user_id;
+   for (int i = 0; i < n; i++) {
+      out_conv_ids[i] = 0;
+      out_starts[i] = 0;
+      out_ends[i] = 0;
+      for (int j = 0; j < s_mock.summary_count; j++) {
+         if (s_mock.summaries[j].id == summary_ids[i]) {
+            out_conv_ids[i] = s_mock.summary_provenance[j].conv_id;
+            out_starts[i] = s_mock.summary_provenance[j].msg_id_start;
+            out_ends[i] = s_mock.summary_provenance[j].msg_id_end;
+            break;
+         }
+      }
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+/* =============================================================================
+ * memory_embeddings_* stubs
+ * ============================================================================= */
+
+bool memory_embeddings_available(void) {
+   return s_mock.embeddings_available;
+}
+
+int memory_embeddings_dims(void) {
+   return s_mock.embeddings_available ? s_mock.entity_dim : 0;
+}
+
+float memory_embeddings_l2_norm(const float *vec, int dims) {
+   double sum = 0.0;
+   for (int i = 0; i < dims; i++)
+      sum += (double)vec[i] * (double)vec[i];
+   return (float)sqrt(sum);
+}
+
+float memory_embeddings_cosine_with_norms(const float *a,
+                                          const float *b,
+                                          int dims,
+                                          float norm_a,
+                                          float norm_b) {
+   if (norm_a <= 0.0f || norm_b <= 0.0f)
+      return 0.0f;
+   double dot = 0.0;
+   for (int i = 0; i < dims; i++)
+      dot += (double)a[i] * (double)b[i];
+   const double cosine = dot / ((double)norm_a * (double)norm_b);
+   if (cosine < 0.0)
+      return 0.0f;
+   if (cosine > 1.0)
+      return 1.0f;
+   return (float)cosine;
+}
+
+int memory_embeddings_hybrid_search(int user_id,
+                                    const char *query,
+                                    const int64_t *keyword_facts,
+                                    const int *keyword_scores,
+                                    int keyword_count,
+                                    int token_count,
+                                    embedding_search_result_t *out_results,
+                                    int max_results) {
+   (void)query;
+   (void)token_count;
+   if (!s_mock.hybrid_enabled) {
+      /* Pass-through: return keyword set as-is. */
+      int n = (keyword_count > max_results) ? max_results : keyword_count;
+      for (int i = 0; i < n; i++) {
+         out_results[i].fact_id = keyword_facts[i];
+         out_results[i].score = (float)keyword_scores[i];
+      }
+      return n;
+   }
+   /* Hybrid path: emit configured re-ranked output, optionally adding
+    * a vector-only hit so the user_id post-check path exercises. */
+   int n = 0;
+   for (int i = 0; i < s_mock.hybrid_result_count && n < max_results; i++) {
+      if (s_mock.hybrid_results[i].user_id_filter != 0 &&
+          s_mock.hybrid_results[i].user_id_filter != user_id)
+         continue;
+      out_results[n].fact_id = s_mock.hybrid_results[i].fact_id;
+      out_results[n].score = s_mock.hybrid_results[i].score;
+      n++;
+   }
+   return n;
+}
+
+/* =============================================================================
+ * memory_filter — production blocklist NOT linked.  Tests never inject
+ * blocklist payloads through the adapter path; the framework's filter-on-
+ * retrieval is exercised in test_focus_source.c (which links the real
+ * filter).  Stub returns false so candidates pass through.
+ * ============================================================================= */
+bool memory_filter_check(const char *text) {
+   (void)text;
+   return false;
+}

@@ -43,6 +43,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_fact_search.h"
 /* SOURCE_DEDUP_CAP / source_dedup_set_t / source_dedup_{seen,add} live in
  * memory_callback_internal.h so the unit tests can exercise them directly. */
 #include "memory/memory_filter.h"
@@ -223,90 +224,14 @@ static void format_time_ago(time_t timestamp, char *buf, size_t buf_size) {
  * ============================================================================= */
 
 #define MAX_SEARCH_TOKENS 8
-#define MAX_DEDUP_RESULTS 30 /* Max intermediate results during multi-token dedup */
 
-/**
- * @brief Multi-token fact search with dedup and relevance ranking
- *
- * Searches for each token independently, deduplicates results by fact ID,
- * scores by number of matching tokens, and returns top results sorted by
- * score (desc) then confidence (desc).
- *
- * @param user_id User to search for
- * @param tokens Tokenized search terms
- * @param token_count Number of tokens
- * @param per_token_limit Max results per individual token search
- * @param results Output array for top results
- * @param max_results Maximum results to return
- * @return Number of results found
- */
-static int multi_token_fact_search(int user_id,
-                                   char tokens[][64],
-                                   int token_count,
-                                   int per_token_limit,
-                                   memory_fact_t *results,
-                                   int max_results,
-                                   time_t since_ts,
-                                   int *out_scores) {
-   int64_t seen_ids[MAX_DEDUP_RESULTS];
-   int seen_scores[MAX_DEDUP_RESULTS];
-   memory_fact_t seen_facts[MAX_DEDUP_RESULTS];
-   int seen_count = 0;
-
-   for (int t = 0; t < token_count; t++) {
-      memory_fact_t token_results[10];
-      int limit = per_token_limit > 10 ? 10 : per_token_limit;
-      int n = 0;
-      if (since_ts > 0)
-         memory_db_fact_search_since(user_id, tokens[t], since_ts, token_results, limit, &n);
-      else
-         memory_db_fact_search(user_id, tokens[t], token_results, limit, &n);
-      for (int j = 0; j < n; j++) {
-         int found = -1;
-         for (int k = 0; k < seen_count; k++) {
-            if (seen_ids[k] == token_results[j].id) {
-               found = k;
-               break;
-            }
-         }
-         if (found >= 0) {
-            seen_scores[found]++;
-         } else if (seen_count < MAX_DEDUP_RESULTS) {
-            seen_ids[seen_count] = token_results[j].id;
-            seen_scores[seen_count] = 1;
-            seen_facts[seen_count] = token_results[j];
-            seen_count++;
-         }
-      }
-   }
-
-   /* Insertion sort by score desc, then confidence desc */
-   for (int i = 1; i < seen_count; i++) {
-      int64_t tmp_id = seen_ids[i];
-      int tmp_score = seen_scores[i];
-      memory_fact_t tmp_fact = seen_facts[i];
-      int j = i - 1;
-      while (j >= 0 &&
-             (seen_scores[j] < tmp_score ||
-              (seen_scores[j] == tmp_score && seen_facts[j].confidence < tmp_fact.confidence))) {
-         seen_ids[j + 1] = seen_ids[j];
-         seen_scores[j + 1] = seen_scores[j];
-         seen_facts[j + 1] = seen_facts[j];
-         j--;
-      }
-      seen_ids[j + 1] = tmp_id;
-      seen_scores[j + 1] = tmp_score;
-      seen_facts[j + 1] = tmp_fact;
-   }
-
-   int count = (seen_count > max_results) ? max_results : seen_count;
-   for (int i = 0; i < count; i++) {
-      results[i] = seen_facts[i];
-      if (out_scores)
-         out_scores[i] = seen_scores[i];
-   }
-   return count;
-}
+/* `multi_token_fact_search` was extracted to `src/memory/memory_fact_search.c`
+ * (Phase 1c-i) so the focus-source fact adapter and the legacy recall path
+ * share identical retrieval semantics.  `tokenize_query` stays here because
+ * `append_graph_context` below also tokenizes the query for entity-keyword
+ * fallback; promoting tokenize_query to a shared header would force
+ * non-memory-callback callers to depend on this module's tokenization
+ * conventions, which is not what we want at this scope. */
 
 static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
    if (!keywords || max_tokens <= 0) {
@@ -509,69 +434,73 @@ char *memory_action_search(int user_id,
 
    /* Search facts — keyword search first, then hybrid if embeddings available */
    memory_fact_t facts[10];
-   int kw_scores[10];
    int fact_count = 0;
    bool category_filter_active = (category && *category);
 
    if (category_filter_active) {
       /* Category pre-filter is independent of token count — single SQL per query.
-       * Score-vs-time combinability deferred (see decision #7). */
+       * Score-vs-time combinability deferred (see decision #7).  This path
+       * intentionally bypasses the shared `memory_fact_search_hybrid` helper
+       * because that helper has no category-filter codepath in 1c; v2 of the
+       * helper will subsume this branch (TODO 1d/1j). */
       memory_db_fact_search_by_category(user_id, keywords, category, facts, 10, &fact_count);
-      for (int i = 0; i < fact_count; i++)
-         kw_scores[i] = 1;
-   } else if (token_count <= 1) {
-      /* Single word or empty: use original single-call path */
-      if (since_ts > 0)
-         memory_db_fact_search_since(user_id, keywords, since_ts, facts, 10, &fact_count);
-      else
-         memory_db_fact_search(user_id, keywords, facts, 10, &fact_count);
-      /* Single-token: all scores = 1 */
-      for (int i = 0; i < fact_count; i++)
-         kw_scores[i] = 1;
-   } else {
-      /* Multi-word: search per token, dedup by ID, rank by match count */
-      fact_count = multi_token_fact_search(user_id, tokens, token_count, 10, facts, 10, since_ts,
-                                           kw_scores);
-   }
 
-   /* Hybrid search: combine keyword results with vector similarity */
-   if (memory_embeddings_available() && fact_count >= 0) {
-      int64_t kw_ids[10];
-      for (int i = 0; i < fact_count; i++)
-         kw_ids[i] = facts[i].id;
-
-      embedding_search_result_t hybrid_results[10];
-      int hybrid_count = memory_embeddings_hybrid_search(user_id, keywords, kw_ids, kw_scores,
-                                                         fact_count,
-                                                         (token_count > 0) ? token_count : 1,
-                                                         hybrid_results, 10);
-
-      if (hybrid_count > 0) {
-         /* Re-order facts by hybrid score */
-         memory_fact_t reordered[10];
-         int reordered_count = 0;
-
-         for (int h = 0; h < hybrid_count && reordered_count < 10; h++) {
-            /* Find fact by ID in original results */
-            bool found = false;
-            for (int f = 0; f < fact_count; f++) {
-               if (facts[f].id == hybrid_results[h].fact_id) {
-                  reordered[reordered_count++] = facts[f];
-                  found = true;
-                  break;
-               }
-            }
-            /* Vector-only result: fetch from DB */
-            if (!found) {
-               memory_fact_t vec_fact;
-               if (memory_db_fact_get(hybrid_results[h].fact_id, &vec_fact) == MEMORY_DB_SUCCESS) {
-                  reordered[reordered_count++] = vec_fact;
-               }
-            }
+      if (memory_embeddings_available() && fact_count > 0) {
+         int64_t kw_ids[10];
+         int kw_scores[10];
+         for (int i = 0; i < fact_count; i++) {
+            kw_ids[i] = facts[i].id;
+            kw_scores[i] = 1;
          }
-         memcpy(facts, reordered, reordered_count * sizeof(memory_fact_t));
-         fact_count = reordered_count;
+         embedding_search_result_t hybrid_results[10];
+         int hybrid_count = memory_embeddings_hybrid_search(user_id, keywords, kw_ids, kw_scores,
+                                                            fact_count,
+                                                            (token_count > 0) ? token_count : 1,
+                                                            hybrid_results, 10);
+         if (hybrid_count > 0) {
+            memory_fact_t reordered[10];
+            int reordered_count = 0;
+            for (int h = 0; h < hybrid_count && reordered_count < 10; h++) {
+               bool found = false;
+               for (int f = 0; f < fact_count; f++) {
+                  if (facts[f].id == hybrid_results[h].fact_id) {
+                     reordered[reordered_count++] = facts[f];
+                     found = true;
+                     break;
+                  }
+               }
+               if (!found) {
+                  memory_fact_t vec_fact;
+                  if (memory_db_fact_get(hybrid_results[h].fact_id, &vec_fact) ==
+                      MEMORY_DB_SUCCESS) {
+                     /* Defense-in-depth: hybrid_search currently scopes by user_id,
+                      * but `memory_db_fact_get` is NOT user-scoped.  Skip foreign
+                      * facts. */
+                     if (vec_fact.user_id != user_id) {
+                        OLOG_ERROR("memory_callback: vector-only fact_id=%lld owned by user_id=%d "
+                                   "(expected %d) — skipping",
+                                   (long long)hybrid_results[h].fact_id, vec_fact.user_id, user_id);
+                        continue;
+                     }
+                     reordered[reordered_count++] = vec_fact;
+                  }
+               }
+            }
+            memcpy(facts, reordered, reordered_count * sizeof(memory_fact_t));
+            fact_count = reordered_count;
+         }
       }
+   } else {
+      /* Non-category path: shared with the focus-source fact adapter via
+       * `memory_fact_search_hybrid()`.  The non-NULL `embed_gate` opts into
+       * the hybrid re-rank when embeddings are available; the pointer is
+       * never dereferenced (hybrid_search re-embeds the query string
+       * internally). */
+      const float embed_gate = 0.0f;
+      const float *gate_ptr = memory_embeddings_available() ? &embed_gate : NULL;
+      float scores[10];
+      memory_fact_search_hybrid(user_id, keywords, gate_ptr, 0, since_ts, facts, scores, 10,
+                                &fact_count);
    }
 
    /* source_budget==0 from caller means "use default"; else honor caller's value

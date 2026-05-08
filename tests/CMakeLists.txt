@@ -266,6 +266,27 @@ dawn_add_unit_test(test_focus_source
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+# Phase 1c: extracted fact-search helper.  Links the production helper
+# against programmable memory_db_*/memory_embeddings_* stubs so the
+# pipeline's tokenize → multi-token-keyword → hybrid re-rank flow can
+# be driven without a real DB.
+dawn_add_unit_test(test_memory_fact_search
+   SOURCES test_memory_fact_search.c test_memory_focus_adapters_stub.c
+           ${SRC_ROOT}/src/memory/memory_fact_search.c
+   LIBS    dawn_common unity pthread m
+   LABEL   ci)
+
+# Phase 1c: focus-source memory adapters (fact, entity, relation, summary).
+# Links the four adapters + the framework + the extracted fact-search
+# helper against the same programmable stubs.
+dawn_add_unit_test(test_memory_focus_adapters
+   SOURCES test_memory_focus_adapters.c test_memory_focus_adapters_stub.c
+           ${SRC_ROOT}/src/memory/memory_focus_adapters.c
+           ${SRC_ROOT}/src/memory/memory_fact_search.c
+           ${SRC_ROOT}/src/memory/focus_source.c
+   LIBS    dawn_common unity pthread m
+   LABEL   ci)
+
 # Silent-observe primitive (Phase 0 of Dynamic Context Injection).
 # Stubs llm_chat_completion_with_config + memory_filter_check via
 # strong-symbol replacement in the test TU.
