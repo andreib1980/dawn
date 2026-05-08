@@ -384,6 +384,16 @@
                   window.DawnSilentObserve.handleEvent(msg.payload);
                }
                break;
+            case 'context_injection':
+               // Phase 1g-ii.  Per-turn context-injection rendering.  Note the
+               // wire format is FLAT at the root (user_id / conversation_id /
+               // turn_id / items / filter_rejections all top-level) — NOT
+               // wrapped under msg.payload like silent_observation.  See
+               // src/webui/webui_server.c::webui_broadcast_context_injection.
+               if (window.DawnContextInjection) {
+                  window.DawnContextInjection.handleEvent(msg);
+               }
+               break;
             case 'get_metrics_response':
                DawnMetricsPanel.handleResponse(msg.payload);
                break;

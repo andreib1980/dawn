@@ -1,0 +1,422 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Per-turn context-injection block (Phase 1g-ii of Dynamic Context Injection).
+ *
+ * Palette discipline: structural / informational reading.  Background uses
+ * accent-tinted bg-secondary, left border 3px text-secondary (NOT accent —
+ * accent is reserved for active behavior; this is passive context).  Trust
+ * tier rendering and the warning chip palette match the design doc rev 3
+ * §"UI surface".  Reuses .dawn-badge.warning.soft and .modal-overlay /
+ * .modal-content shells — no new shared primitives in this phase.
+ */
+
+/* =============================================================================
+ * Block container — anchored inline in the transcript above the assistant
+ * response for the current turn.
+ * ============================================================================= */
+.dawn-context-injection-block {
+   margin: 0.75rem 0;
+   padding: 0.5rem 0.75rem;
+   background: color-mix(in srgb, var(--accent) 4%, var(--bg-secondary));
+   border: 1px solid var(--border-color);
+   border-left: 3px solid var(--text-secondary);
+   border-radius: var(--border-radius);
+   font-size: 0.875rem;
+   color: var(--text-primary);
+}
+
+.dawn-context-injection-header {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.25rem 0;
+   border-bottom: 1px solid var(--border-color);
+   margin-bottom: 0.375rem;
+}
+
+.dawn-context-injection-title {
+   font-size: 0.75rem;
+   font-weight: 600;
+   text-transform: uppercase;
+   letter-spacing: 0.5px;
+   color: var(--text-secondary);
+}
+
+/* H4: empty-state collapses to a single muted line — no border, no chrome,
+ * no per-turn vertical padding.  Avoids visual chaff on every empty turn. */
+.dawn-context-injection-empty-line {
+   margin: 0.125rem 0;
+   padding: 0.125rem 0.75rem;
+   font-size: 0.75rem;
+   color: var(--text-tertiary);
+   font-style: italic;
+}
+
+/* =============================================================================
+ * Internal cluster — native <details><summary> for keyboard / screen-reader
+ * semantics.  Summary styled like a small pill button.
+ * ============================================================================= */
+.dawn-context-injection-internal-cluster {
+   margin: 0.25rem 0;
+}
+
+.dawn-context-injection-cluster-summary {
+   display: inline-flex;
+   align-items: center;
+   font-size: 0.6875rem;
+   font-weight: 600;
+   padding: 4px 8px;
+   cursor: pointer;
+   background: var(--bg-secondary);
+   color: var(--text-secondary);
+   border: 1px solid var(--border-color);
+   border-radius: 3px;
+   text-transform: uppercase;
+   letter-spacing: 0.5px;
+   line-height: 1.2;
+   list-style: none;
+   user-select: none;
+   transition:
+      color 120ms ease,
+      background 120ms ease,
+      border-color 120ms ease;
+}
+
+.dawn-context-injection-cluster-summary::-webkit-details-marker {
+   display: none;
+}
+
+.dawn-context-injection-cluster-summary::after {
+   content: ' ▾';
+   color: var(--text-tertiary);
+   margin-left: 0.25rem;
+}
+
+.dawn-context-injection-internal-cluster[open] > .dawn-context-injection-cluster-summary::after {
+   content: ' ▴';
+}
+
+.dawn-context-injection-cluster-summary:hover,
+.dawn-context-injection-cluster-summary:focus-visible {
+   color: var(--accent);
+   border-color: var(--accent-border);
+   outline: none;
+}
+
+.dawn-context-injection-cluster-list {
+   margin-top: 0.375rem;
+   padding-left: 0.5rem;
+   border-left: 1px dashed var(--border-color);
+}
+
+/* =============================================================================
+ * Per-item rows — pattern mirrors .memory-source-message (memory.css:1308).
+ * ============================================================================= */
+.dawn-context-injection-item {
+   display: flex;
+   flex-direction: column;
+   gap: 0.25rem;
+   padding: 0.5rem 0.5rem;
+   border-bottom: 1px solid var(--border-color);
+}
+
+.dawn-context-injection-item:last-child {
+   border-bottom: none;
+}
+
+.dawn-context-injection-item-header {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   flex-wrap: wrap;
+}
+
+.dawn-context-injection-source {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   font-weight: 500;
+}
+
+/* M6: trust-tier label is a plain span (not .dawn-badge) — overriding every
+ * dawn-badge property would amount to reskinning a primitive. */
+.dawn-context-injection-trust {
+   font-size: 0.625rem;
+   padding: 1px 5px;
+   font-weight: 600;
+   text-transform: capitalize;
+   letter-spacing: 0;
+   color: var(--text-secondary);
+   background: var(--bg-secondary);
+   border: 1px solid var(--border-color);
+   border-radius: 3px;
+   line-height: 1.4;
+}
+
+.dawn-context-injection-more {
+   margin-left: auto;
+   background: transparent;
+   border: 1px solid var(--border-color);
+   color: var(--text-secondary);
+   font-size: 0.6875rem;
+   padding: 2px 8px;
+   border-radius: 3px;
+   cursor: pointer;
+   transition:
+      color 120ms ease,
+      border-color 120ms ease,
+      background 120ms ease;
+}
+
+.dawn-context-injection-more:hover,
+.dawn-context-injection-more:focus-visible {
+   color: var(--accent);
+   border-color: var(--accent-border);
+   background: var(--accent-subtle);
+   outline: none;
+}
+
+.dawn-context-injection-preview {
+   font-size: 0.875rem;
+   color: var(--text-primary);
+   word-break: break-word;
+}
+
+/* User-content trust tier renders monospace per design rev 3 line 417 —
+ * potentially-malicious external text gets visual flagging. */
+.dawn-context-injection-item[data-source-trust='user-content'] .dawn-context-injection-preview,
+.dawn-context-injection-item[data-source-trust='user-content'] .dawn-context-injection-text {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.8125rem;
+}
+
+.dawn-context-injection-disclosure {
+   margin-top: 0.25rem;
+}
+
+.dawn-context-injection-disclosure > summary {
+   cursor: pointer;
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   list-style: none;
+   padding: 0.125rem 0;
+   transition: color 120ms ease;
+}
+
+.dawn-context-injection-disclosure > summary::-webkit-details-marker {
+   display: none;
+}
+
+.dawn-context-injection-disclosure > summary::before {
+   content: '▸ ';
+   color: var(--text-tertiary);
+}
+
+.dawn-context-injection-disclosure[open] > summary::before {
+   content: '▾ ';
+}
+
+.dawn-context-injection-disclosure > summary:hover {
+   color: var(--accent);
+}
+
+.dawn-context-injection-text {
+   margin-top: 0.25rem;
+   padding: 0.375rem 0.5rem;
+   background: var(--bg-secondary);
+   border-radius: var(--border-radius-sm);
+   color: var(--text-primary);
+   font-size: 0.8125rem;
+   line-height: 1.5;
+   white-space: pre-wrap;
+   word-break: break-word;
+}
+
+/* =============================================================================
+ * Warning rail — H5: groups silent-observe + context-injection chips so
+ * concurrent rejections share visual hierarchy.  Anchored top-right.  The
+ * chip elements inside are individually positioned by their existing rules
+ * (silent-observe.css uses `position: fixed` with explicit coords); the
+ * rail container itself is just a logical group + accessibility region.
+ *
+ * NOTE: silent-observe-warning-chip retains its `position: fixed` from
+ * silent-observe.css.  This rail's role is the static mount point for
+ * context-injection's chip — the visual stack happens because both chips
+ * are positioned relative to the viewport, not the rail.  A future
+ * cohesion pass should consolidate to flow layout inside the rail.
+ * ============================================================================= */
+#warning-chip-rail {
+   /* Logical region only; child positioning is currently handled per-chip. */
+   contain: layout style;
+}
+
+/* =============================================================================
+ * Filter-match warning chip — top-right of the viewport, BELOW the silent-
+ * observe chip when both are present.  Lives OUTSIDE the per-turn block so
+ * a rejection signal stays visible after the block scrolls out of view.
+ * Reuses .dawn-badge.warning.soft palette from base/components.css.
+ * ============================================================================= */
+#context-injection-warning-chip-anchor {
+   position: fixed;
+   /* Below silent-observe chip (12px top + ~32px chip + 8px gap = 52px) so
+    * concurrent rejections stack vertically with shared visual hierarchy. */
+   top: 52px;
+   right: 12px;
+   z-index: 997;
+   pointer-events: none;
+}
+
+.dawn-context-injection-warning-chip {
+   pointer-events: auto;
+   padding: 0.375rem 0.625rem;
+   font-size: 0.75rem;
+   text-transform: none;
+   letter-spacing: 0;
+   border-radius: 4px;
+   max-width: 320px;
+   cursor: pointer;
+}
+
+.dawn-context-injection-warning-chip.hidden {
+   display: none;
+}
+
+/* =============================================================================
+ * Modal — score breakdown + provenance back-link.
+ * Reuses the shared .modal-overlay / .modal-content shells from modals.css.
+ * ============================================================================= */
+.dawn-context-injection-modal-content {
+   max-width: 520px;
+   width: 100%;
+}
+
+.dawn-context-injection-modal-summary {
+   margin: 0 0 0.75rem 0;
+   font-size: 0.875rem;
+   color: var(--text-secondary);
+}
+
+.dawn-context-injection-modal-noprov {
+   margin-top: 1rem;
+   font-size: 0.875rem;
+   color: var(--text-tertiary);
+   font-style: italic;
+}
+
+.dawn-context-injection-breakdown {
+   display: flex;
+   flex-direction: column;
+   gap: 0.375rem;
+   margin: 0.5rem 0 0.75rem 0;
+}
+
+.dawn-context-injection-bar-row {
+   display: grid;
+   grid-template-columns: 90px 1fr 60px;
+   align-items: center;
+   gap: 0.5rem;
+   font-size: 0.8125rem;
+}
+
+.dawn-context-injection-bar-label {
+   color: var(--text-secondary);
+   text-transform: capitalize;
+}
+
+.dawn-context-injection-bar-track {
+   position: relative;
+   height: 8px;
+   background: var(--bg-tertiary);
+   border-radius: 4px;
+   overflow: hidden;
+}
+
+/* M8: per-dimension bar colors so the four scoring contributions read at a
+ * glance.  Default is accent (semantic / "active behavior" tier). */
+.dawn-context-injection-bar-fill {
+   display: block;
+   height: 100%;
+   background: var(--accent);
+   border-radius: 4px;
+   transition: width 200ms ease;
+}
+
+.dawn-context-injection-bar-fill[data-dim='semantic'] {
+   background: var(--accent);
+}
+
+.dawn-context-injection-bar-fill[data-dim='recency'] {
+   background: #6ee7b7;
+}
+
+.dawn-context-injection-bar-fill[data-dim='importance'] {
+   background: var(--warning);
+}
+
+.dawn-context-injection-bar-fill[data-dim='source'] {
+   background: #c4b5fd;
+}
+
+.dawn-context-injection-bar-value {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.75rem;
+   color: var(--text-tertiary);
+   text-align: right;
+   font-variant-numeric: tabular-nums;
+}
+
+.dawn-context-injection-provenance {
+   margin-top: 1rem;
+   padding-top: 0.75rem;
+   border-top: 1px solid var(--border-color);
+}
+
+.dawn-context-injection-provenance-heading {
+   margin: 0 0 0.25rem 0;
+   font-size: 0.75rem;
+   font-weight: 600;
+   text-transform: uppercase;
+   letter-spacing: 0.5px;
+   color: var(--text-secondary);
+}
+
+.dawn-context-injection-provenance-meta {
+   margin: 0 0 0.5rem 0;
+   font-size: 0.8125rem;
+   color: var(--text-primary);
+}
+
+.dawn-context-injection-provenance-link {
+   font-size: 0.8125rem;
+}
+
+@media (max-width: 600px) {
+   #context-injection-warning-chip-anchor {
+      top: 56px;
+      right: 8px;
+      left: 8px;
+   }
+   .dawn-context-injection-warning-chip {
+      max-width: none;
+      width: 100%;
+   }
+   .dawn-context-injection-bar-row {
+      grid-template-columns: 70px 1fr 48px;
+   }
+}

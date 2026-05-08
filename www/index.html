@@ -82,15 +82,24 @@
          </button>
       </nav>
 
-      <!-- Silent-Observe filter-match warning chip (Phase 0).
-           Lives OUTSIDE the peek so it persists across peek visibility changes —
-           filter rejections must remain visible until the user reviews them. -->
-      <div
-         id="silent-observe-warning-chip"
-         class="hidden dawn-badge warning soft"
-         role="status"
-         aria-live="polite"
-      ></div>
+      <!-- Warning rail: groups silent-observe + context-injection filter-match
+           chips so concurrent rejections stack vertically with shared visual
+           hierarchy rather than fighting at opposite corners of the viewport. -->
+      <div id="warning-chip-rail" role="region" aria-label="DAWN background warnings">
+         <!-- Silent-Observe filter-match warning chip (Phase 0).
+              Lives OUTSIDE the peek so it persists across peek visibility changes —
+              filter rejections must remain visible until the user reviews them. -->
+         <div
+            id="silent-observe-warning-chip"
+            class="hidden dawn-badge warning soft"
+            role="status"
+            aria-live="polite"
+         ></div>
+         <!-- Context-Injection filter-match warning chip (Phase 1g-ii). Static
+              mount + co-located with the silent-observe chip so concurrent
+              rejections share visual context. -->
+         <div id="context-injection-warning-chip-anchor" role="status" aria-live="polite"></div>
+      </div>
 
       <!-- Silent-Observe peek popup (Phase 0). Hidden until rail icon clicked
            or auto-expanded on filter-match.  role="region" rather than dialog
@@ -456,6 +465,28 @@
                   <button id="memory-source-close" class="modal-close-btn">&times;</button>
                </div>
                <div id="memory-source-body" class="memory-source-body"></div>
+            </div>
+         </div>
+
+         <!-- Context-Injection Modal (Phase 1g-ii of Dynamic Context Injection).
+              Singleton mount: opened by Tell-me-more affordances on per-turn
+              context blocks.  Dedicated to avoid clobbering memory-source-modal
+              when both are interactive concurrently. -->
+         <div
+            id="context-injection-modal"
+            class="modal-overlay hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="context-injection-modal-title"
+         >
+            <div class="modal-content dawn-context-injection-modal-content">
+               <div class="modal-header">
+                  <h3 id="context-injection-modal-title">Context item</h3>
+                  <button id="context-injection-modal-close" class="modal-close-btn">
+                     &times;
+                  </button>
+               </div>
+               <div id="context-injection-modal-body"></div>
             </div>
          </div>
 
@@ -2684,6 +2715,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/history.js"></script>
       <script defer src="/js/ui/memory.js"></script>
       <script defer src="/js/ui/silent-observe.js"></script>
+      <script defer src="/js/ui/context-injection.js"></script>
       <script defer src="/js/ui/contacts.js"></script>
       <script defer src="/js/ui/doc-library.js"></script>
       <script defer src="/js/ui/oauth.js"></script>
