@@ -153,6 +153,23 @@ import re
 import sys
 from pathlib import Path
 
+# 1i.A factor: dispatch / endpoint / secrets-parsing / quorum constant moved
+# to benchmarks/multi_model_probe.py so the focus-injection probe (1i.C)
+# can share the same harness.  Probe-specific baselines and case lists
+# stay in this file.
+from multi_model_probe import (
+    AGGREGATE_QUORUM,
+    PROVIDER_DEFAULTS,
+    PROVIDER_CALLERS,
+    _anthropic_call,
+    _openai_call,
+    _local_call,
+    load_secrets,
+    read_local_endpoint_from_toml,
+    read_local_model_from_endpoint,
+    resolve_provider_config,
+)
+
 DAWN_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LOCOMO_PATH = Path.home() / "datasets/locomo/data/locomo10.json"
 DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
@@ -164,26 +181,32 @@ EXTRACTION_C_PATH = DAWN_ROOT / "src/memory/memory_extraction.c"
 # baseline fact count, baseline attribution pass rate).  endpoint=None
 # means "read from dawn.toml" (used for local).
 #
+# 1i.A: model + endpoint defaults moved to PROVIDER_DEFAULTS in
+# multi_model_probe.py — kept here only as a back-pointer so the
+# pre-factor calibration constants stay co-located with the speaker-
+# specific baselines.  resolve_provider_config reads from PROVIDER_DEFAULTS,
+# so the speaker probe and any future probe see the same defaults.
+#
 # Recalibrate by running probe with --recalibrate against HEAD; constants
 # update from the printed JSON (--json-output).
 PROVIDERS = {
     "anthropic": {
-        "default_model": "claude-haiku-4-5",
-        "endpoint": "https://api.anthropic.com/v1/messages",
+        "default_model": PROVIDER_DEFAULTS["anthropic"]["default_model"],
+        "endpoint": PROVIDER_DEFAULTS["anthropic"]["endpoint"],
         "baseline_fact_count": 60,
         "baseline_attribution_passed": 20,    # of 20 attribution-failure cases
         "baseline_known_good_passed": 5,       # of 5 known-good cases
     },
     "openai": {
-        "default_model": "gpt-5.4-mini",
-        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "default_model": PROVIDER_DEFAULTS["openai"]["default_model"],
+        "endpoint": PROVIDER_DEFAULTS["openai"]["endpoint"],
         "baseline_fact_count": 50,
         "baseline_attribution_passed": 20,
         "baseline_known_good_passed": 5,
     },
     "local": {
-        "default_model": "",                   # use whatever's loaded at the endpoint
-        "endpoint": None,                      # read from dawn.toml [llm.local].endpoint
+        "default_model": PROVIDER_DEFAULTS["local"]["default_model"],
+        "endpoint": PROVIDER_DEFAULTS["local"]["endpoint"],
         "baseline_fact_count": 42,
         "baseline_attribution_passed": 20,
         # Qwen3.6-35B-A3B drops good_audrey_dogs at HEAD — it extracts Andrew's
@@ -196,11 +219,6 @@ PROVIDERS = {
 FACT_COUNT_THRESHOLD = 1.10        # fail C1 if candidate > BASELINE * threshold
 ATTRIBUTION_REGRESS_TOLERANCE = 2  # fail C2 if attribution_passed < baseline - this many
 KNOWN_GOOD_REGRESS_TOLERANCE = 1   # fail C2 if known_good_passed < baseline - this many
-
-# Aggregate verdict: PASS iff at least this many providers pass each component.
-# With 3 providers, a 2-of-3 quorum tolerates one model-specific quirk while
-# requiring real cross-model evidence of widening / regression.
-AGGREGATE_QUORUM = 2
 
 
 # =============================================================================
@@ -294,182 +312,11 @@ def extract_prompt_template_from_c(c_path):
 
 
 # =============================================================================
-# Provider call helpers — one urllib-based call per backend.  No SDK
-# dependencies, mirroring run_benchmark.py:_anthropic_call shape so the
-# probe is self-contained.
+# Provider dispatch + endpoint resolution + secrets parsing all live in
+# benchmarks/multi_model_probe.py — imported at the top of this file
+# alongside AGGREGATE_QUORUM and PROVIDER_DEFAULTS.  The pre-factor
+# implementations were 200+ lines that this file no longer carries.
 # =============================================================================
-
-
-def _anthropic_call(model, system, user_prompt, api_key, endpoint,
-                    temperature=0.0, max_tokens=1024, timeout=60.0):
-    import urllib.request
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "system": system,
-        "messages": [{"role": "user", "content": user_prompt}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8")
-    data = json.loads(body)
-    for b in data.get("content", []):
-        if b.get("type") == "text":
-            return b.get("text", "")
-    return ""
-
-
-def _openai_call(model, system, user_prompt, api_key, endpoint,
-                 temperature=0.0, max_tokens=1024, timeout=60.0):
-    """OpenAI chat-completions style.  Used for both api.openai.com and any
-    OpenAI-compatible local endpoint that exposes /v1/chat/completions.
-
-    Newer OpenAI models (gpt-5.4*, o-series) reject `max_tokens` and require
-    `max_completion_tokens` instead.  We try `max_completion_tokens` first
-    when the endpoint is api.openai.com (the canonical signal), and retry
-    with `max_tokens` on a 400 response from older / local endpoints that
-    only accept the legacy field."""
-    import urllib.request
-    import urllib.error
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": user_prompt})
-
-    def post(token_field):
-        body = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            token_field: max_tokens,
-        }
-        payload = json.dumps(body).encode("utf-8")
-        headers = {"content-type": "application/json"}
-        if api_key:
-            headers["authorization"] = f"Bearer {api_key}"
-        req = urllib.request.Request(
-            endpoint, data=payload, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8")
-
-    is_canonical_openai = "api.openai.com" in (endpoint or "")
-    primary, fallback = (("max_completion_tokens", "max_tokens")
-                         if is_canonical_openai
-                         else ("max_tokens", "max_completion_tokens"))
-    try:
-        body = post(primary)
-    except urllib.error.HTTPError as e:
-        if e.code == 400:
-            body = post(fallback)
-        else:
-            raise
-    data = json.loads(body)
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    return msg.get("content") or ""
-
-
-def _local_call(model, system, user_prompt, api_key, endpoint,
-                temperature=0.0, max_tokens=1024, timeout=120.0):
-    """Local llama.cpp / Ollama OpenAI-compatible endpoint.  Same wire shape
-    as _openai_call; longer default timeout because Qwen3-35B-A3B inference
-    on a single Jetson is slower than cloud round-trip."""
-    return _openai_call(model, system, user_prompt, api_key, endpoint,
-                        temperature=temperature, max_tokens=max_tokens,
-                        timeout=timeout)
-
-
-PROVIDER_CALLERS = {
-    "anthropic": _anthropic_call,
-    "openai": _openai_call,
-    "local": _local_call,
-}
-
-
-def resolve_provider_config(provider, secrets, dawn_toml_path, override_model=None,
-                            override_endpoint=None):
-    """Return a (caller_fn, model, endpoint, api_key) tuple for the named
-    provider.  Reads model/endpoint from PROVIDERS, falling back to dawn.toml
-    for local endpoint, and accepts CLI overrides."""
-    if provider not in PROVIDERS:
-        sys.exit(f"error: unknown provider {provider!r}; expected one of "
-                 f"{list(PROVIDERS.keys())}")
-    cfg = PROVIDERS[provider]
-    model = override_model or cfg["default_model"]
-    endpoint = override_endpoint or cfg["endpoint"]
-    api_key = None
-    if provider == "anthropic":
-        api_key = secrets.get("claude_api_key", "")
-        if not api_key:
-            sys.exit("error: anthropic provider needs claude_api_key in secrets.toml")
-    elif provider == "openai":
-        api_key = secrets.get("openai_api_key", "")
-        if not api_key:
-            sys.exit("error: openai provider needs openai_api_key in secrets.toml")
-    elif provider == "local":
-        if endpoint is None:
-            endpoint = read_local_endpoint_from_toml(dawn_toml_path)
-        # Local endpoints we use don't require auth.
-        api_key = None
-        if not model:
-            model = read_local_model_from_endpoint(endpoint)
-        if endpoint and not endpoint.endswith("/chat/completions"):
-            endpoint = endpoint.rstrip("/") + "/v1/chat/completions"
-    return PROVIDER_CALLERS[provider], model, endpoint, api_key
-
-
-def read_local_endpoint_from_toml(toml_path):
-    """Cheap inline TOML lookup for [llm.local] endpoint — avoids a tomllib
-    dep on Python 3.10 systems (Jetson Linux 5.15 ships 3.10).  Falls back
-    to the OASIS local default if the section isn't found."""
-    try:
-        body = Path(toml_path).read_text()
-    except OSError:
-        return None
-    in_section = False
-    for line in body.splitlines():
-        s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            in_section = (s == "[llm.local]")
-            continue
-        if in_section and s.startswith("endpoint"):
-            m = re.search(r'endpoint\s*=\s*"([^"]+)"', s)
-            if m:
-                return m.group(1)
-    return None
-
-
-def read_local_model_from_endpoint(endpoint):
-    """Query the local /v1/models endpoint (or /models) and return the first
-    model id.  Used when --model is not given for the local provider."""
-    if not endpoint:
-        return ""
-    base = endpoint.split("/v1/")[0] if "/v1/" in endpoint else endpoint
-    base = base.rstrip("/")
-    import urllib.request
-    for path in ("/v1/models", "/models"):
-        try:
-            with urllib.request.urlopen(base + path, timeout=5.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            models = data.get("models") or data.get("data") or []
-            if models:
-                m = models[0]
-                # Different runtimes name the field differently.
-                return m.get("id") or m.get("name") or m.get("model") or ""
-        except Exception:
-            continue
-    return ""
 
 
 # =============================================================================
@@ -1315,21 +1162,9 @@ def component2_attribution(prompt_template, caller_fn, model, endpoint, api_key,
 # Helpers
 # =============================================================================
 
-def load_secrets(secrets_path):
-    """Return a dict with the provider API keys we use.  Inline parser
-    (no tomllib dep) — tolerates missing keys; provider-specific lookups
-    in resolve_provider_config error out only when the chosen provider
-    needs a key it can't find."""
-    out = {}
-    try:
-        body = Path(secrets_path).read_text()
-    except OSError:
-        return out
-    for key in ("claude_api_key", "openai_api_key", "gemini_api_key"):
-        m = re.search(rf'^\s*{key}\s*=\s*"([^"]+)"', body, re.MULTILINE)
-        if m:
-            out[key] = m.group(1)
-    return out
+# load_secrets / resolve_provider_config / read_local_* all live in
+# multi_model_probe.py; imported above.  This section used to carry a
+# duplicate `load_secrets`; removed during 1i.A.
 
 
 # =============================================================================

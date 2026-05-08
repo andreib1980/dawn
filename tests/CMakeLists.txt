@@ -304,6 +304,26 @@ dawn_add_unit_test(test_prompt_builder
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+# Phase 1i.B: focus-injection probe (Components 4 + 5).  Probe-style
+# coverage for the ranker (recency / importance / source-weight), dedup
+# (suppress / uplift), and budget force-keep-first behaviors via a
+# fake adapter that emits a synthetic candidate pool.  Differs from
+# test_prompt_builder by using the REAL focus_compose + framework
+# (not stubs) so the ranker is exercised end-to-end against the same
+# code path production runs.  Stub TU covers only memory_embeddings
+# + webui_broadcast.
+dawn_add_unit_test(test_focus_probe
+   SOURCES test_focus_probe.c test_focus_probe_stub.c
+           ${SRC_ROOT}/src/memory/focus_source.c
+           ${SRC_ROOT}/src/memory/focus_recency.c
+           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/session_dedup.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/webui/build_focus_block.c
+   LIBS    dawn_common unity pthread m
+   LABEL   ci)
+
 # Phase 1d: external focus-source adapters (document chunks + calendar
 # events; email deferred to v2 — see design doc §"API Audit (Phase 1d)").
 # Links the two adapters + their init wrapper + the framework + the
