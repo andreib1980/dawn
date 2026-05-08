@@ -67,14 +67,21 @@ DEFAULT_CASES_PATH = DAWN_ROOT / "benchmarks/focus_probe_cases.json"
 DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
 DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 
-# Per-provider HEAD baselines for component 6 fix-rate.  None until the
-# coordinator runs `--recalibrate` after authorizing the paid dry-run.
-# Once populated, regression detection: (candidate_fix_count <
+# Per-provider HEAD baselines for component 6 fix-rate.
+# Calibrated 2026-05-08 via `--recalibrate` against the v1 synthetic
+# fixtures.  All three providers pass 10/10 — saturated baseline.  The
+# three cases marked head_known_fail=true (family_kids_missing,
+# stock_followup_off_topic, anaphora_pronoun_resolution) are intended to
+# fail but pass under v1 fixtures because the case shape is too clean
+# (2-3 candidates, no partial-match competition).  Phase 1j folds in
+# fixture hardening (10-15 cases × 8-12 candidates each with partial-
+# match competition), after which baselines should drop and become
+# movable by tuning.  Regression detection: (candidate_fix_count <
 # baseline_fix_count) is a FAIL on that provider.
 HEAD_BASELINE_FIX_COUNT = {
-    "anthropic": None,
-    "openai": None,
-    "local": None,
+    "anthropic": 10,
+    "openai": 10,
+    "local": 10,
 }
 
 # Production-shape config block — passed verbatim to bench_focus_pipeline
