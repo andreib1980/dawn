@@ -314,11 +314,12 @@ void test_estimate_uses_real_template_size(void) {
 
    memory_db_admin_cost_estimate_t est = { 0 };
    TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &est));
-   /* User 1 has two stuck conversations: conv 11 (10/30 extracted, stuck)
-    * and conv 10 is 50/50 (done — not stuck).  Wait, conv 10 starts as
-    * extracted=50/50. */
-   TEST_ASSERT_EQUAL(1, est.conv_count); /* only conv 11 is stuck pre-reset */
-   TEST_ASSERT_EQUAL(30, est.message_count);
+   /* Estimator sizes the POST-RESET work: every non-private user conv with
+    * message_count >= 2.  User 1 has conv 10 (50 msgs) + conv 11 (30 msgs);
+    * the existing extraction state of those convs is ignored — they are
+    * both going to be re-extracted after the reset. */
+   TEST_ASSERT_EQUAL(2, est.conv_count);
+   TEST_ASSERT_EQUAL(80, est.message_count); /* 50 + 30 */
    TEST_ASSERT_TRUE(est.rates_known);
    TEST_ASSERT_EQUAL_STRING("claude", est.provider);
    TEST_ASSERT_EQUAL_STRING("claude-haiku-4-5", est.model);
@@ -345,14 +346,22 @@ void test_estimate_after_reset_includes_all_conversations(void) {
    strncpy(g_config.memory.extraction_model, "claude-haiku-4-5",
            sizeof(g_config.memory.extraction_model) - 1);
 
-   /* Reset first, then estimate — every conversation is now stuck. */
+   /* Pre-reset estimate. */
+   memory_db_admin_cost_estimate_t before = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &before));
+
+   /* Reset, then estimate again — must match pre-reset because the
+    * estimator is reset-state-independent (it sizes the post-reset
+    * work in both cases). */
    memory_db_admin_reset_counts_t c = { 0 };
    TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_reset_derived(1, false, &c));
 
-   memory_db_admin_cost_estimate_t est = { 0 };
-   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &est));
-   TEST_ASSERT_EQUAL(2, est.conv_count);     /* both user 1 convs now stuck */
-   TEST_ASSERT_EQUAL(80, est.message_count); /* 50 + 30 */
+   memory_db_admin_cost_estimate_t after = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &after));
+   TEST_ASSERT_EQUAL(2, after.conv_count);     /* both user 1 convs */
+   TEST_ASSERT_EQUAL(80, after.message_count); /* 50 + 30 */
+   TEST_ASSERT_EQUAL(before.conv_count, after.conv_count);
+   TEST_ASSERT_EQUAL(before.message_count, after.message_count);
 }
 
 /* ============================================================================

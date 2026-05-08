@@ -307,16 +307,20 @@ int memory_db_admin_estimate_reextract_cost(int user_id, memory_db_admin_cost_es
 
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
-   /* Sum messages across stuck conversations.  After a fresh reset_derived
-    * call every conversation is "stuck" by definition, but estimate works
-    * for the pre-reset case too (only sums conversations that recovery
-    * would actually re-run). */
+   /* Size the POST-RESET work, not the current eligible-for-recovery state.
+    * After --confirm runs reset_derived, every non-private conversation
+    * with message_count >= 2 will have its high-water mark zeroed and
+    * become eligible.  Pre-fix this query also gated on
+    * last_extracted_msg_count < message_count, which underestimated by
+    * excluding the (typically large) set of already-extracted
+    * conversations.  Post-fix mirrors the post-reset eligibility
+    * predicate exactly: every non-private user conv with at least 2
+    * messages will be re-run.  See coordinator hot-patch. */
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
                                "SELECT COUNT(*), COALESCE(SUM(message_count), 0) "
                                "FROM conversations "
                                "WHERE user_id = ? AND message_count >= 2 "
-                               "  AND last_extracted_msg_count < message_count "
                                "  AND COALESCE(is_private, 0) = 0",
                                -1, &stmt, NULL);
    if (rc != SQLITE_OK) {

@@ -2363,7 +2363,7 @@ static int handle_memory_reextract(int client_fd, const char *payload, uint16_t 
                        "Reextract plan for user '%s' (id=%d) — DRY RUN\n"
                        "  Backup path:        %s\n"
                        "  Keep summaries:     %s\n"
-                       "  Stuck conversations: %d (msgs total: %d)\n"
+                       "  Convs to re-extract: %d (msgs total: %d)\n"
                        "  Provider/model:     %s/%s\n"
                        "  Estimated cost:     %s",
                        username, user.id,
