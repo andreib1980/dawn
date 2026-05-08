@@ -622,3 +622,24 @@ dawn_add_unit_test(bench_contradiction
    INCLUDES /usr/local/include/onnxruntime
    LIBS    dawn_common pthread m onnxruntime
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
+
+# Phase 1i.C focus-pipeline bench binary.  Standalone driver that wraps
+# build_focus_block end-to-end against a fake-adapter synthetic memory
+# pool, marshals the result to JSON stdout for the multi-model fix-rate
+# probe (benchmarks/bench_focus_fix_rate.py).  No SQLite linkage per
+# coordinator pin C2 — keeps the link surface lean and consistent with
+# 1i.B's test_focus_probe shape.  Embedded synth_embed stub provides
+# deterministic FNV-derived float vectors; webui_broadcast hook captures
+# the result for marshalling before build_focus_block frees it.
+dawn_add_unit_test(bench_focus_pipeline
+   NO_TEST
+   SOURCES ${SRC_ROOT}/benchmarks/bench_focus_pipeline.c
+           ${SRC_ROOT}/src/memory/focus_source.c
+           ${SRC_ROOT}/src/memory/focus_recency.c
+           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/session_dedup.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/webui/build_focus_block.c
+   LIBS    dawn_common pthread m
+           ${JSONC_LIBRARIES})

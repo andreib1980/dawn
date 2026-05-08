@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "comment": "Phase 1i.C synthetic Component-6 cases.  All content is synthetic per coordinator pin C2 — no real PII.  Cases are SHAPED like the user's manual-smoke failures (family_kids_missing, stock_followup_off_topic) but the literal text is invented.  Every case has expected_facts_to_surface (substring match against rendered_block) and a head_known_fail flag for HEAD baseline tracking.",
+  "cases": [
+    {
+      "case_id": "family_kids_missing",
+      "comment": "Mirrors the 'Wife? Kids?' failure mode where focus surfaced ambient calendar/genealogy items instead of the children's names.  Probe target: did the kids' names actually surface?",
+      "user_query": "Tell me about my family. Wife? Kids?",
+      "memory_seed": [
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User's three children are named Alice, Bob, and Charlie.",
+          "item_id": "fact:kids",
+          "importance": 0.9,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.85
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User does genealogy research focused on great-grandmother Margaret.",
+          "item_id": "fact:genealogy",
+          "importance": 0.6,
+          "item_timestamp": 1690000000,
+          "semantic_override": 0.20
+        },
+        {
+          "source_id": "calendar_event",
+          "source_type": "external",
+          "text": "[2026-04-12] Soccer practice for the kids.",
+          "item_id": "cal:soccer",
+          "importance": 0.5,
+          "item_timestamp": 1700100000,
+          "semantic_override": 0.30
+        }
+      ],
+      "expected_facts_to_surface": ["Alice", "Bob", "Charlie"],
+      "head_known_fail": true
+    },
+    {
+      "case_id": "stock_followup_off_topic",
+      "comment": "Off-topic follow-up where 'how's that doing today' surfaced infrastructure facts instead of the previously-discussed stock-tracking facts.  Probe target: did the right interest surface given the conversational anaphora?",
+      "user_query": "How's that doing today?",
+      "conversation_context": "Earlier in this conversation: discussed XYZCorp and ACMEHoldings stock performance.",
+      "memory_seed": [
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User actively tracks XYZCorp and ACMEHoldings stock performance.",
+          "item_id": "fact:stocks",
+          "importance": 0.8,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.20
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User runs a home server with multiple GPUs for local language models.",
+          "item_id": "fact:server",
+          "importance": 0.6,
+          "item_timestamp": 1690000000,
+          "semantic_override": 0.50
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User employs INT8 quantization to fit larger models in available VRAM.",
+          "item_id": "fact:quant",
+          "importance": 0.5,
+          "item_timestamp": 1690500000,
+          "semantic_override": 0.45
+        }
+      ],
+      "expected_facts_to_surface": ["XYZCorp", "ACMEHoldings"],
+      "head_known_fail": true
+    },
+    {
+      "case_id": "temporal_recent_work",
+      "comment": "Temporal recency probe — query asks about recent work; older items must yield to newer ones.",
+      "user_query": "What did I work on recently?",
+      "memory_seed": [
+        {
+          "source_id": "memory_summary",
+          "source_type": "internal",
+          "text": "Yesterday: shipped the focus-injection probe scaffolding.",
+          "item_id": "sum:yesterday",
+          "importance": 0.7,
+          "item_timestamp": 1730000000,
+          "semantic_override": 0.55
+        },
+        {
+          "source_id": "memory_summary",
+          "source_type": "internal",
+          "text": "Last week: drafted the telemetry pipeline notes.",
+          "item_id": "sum:lastweek",
+          "importance": 0.7,
+          "item_timestamp": 1729000000,
+          "semantic_override": 0.55
+        },
+        {
+          "source_id": "memory_summary",
+          "source_type": "internal",
+          "text": "Three months ago: completed the storage migration project.",
+          "item_id": "sum:oldmigr",
+          "importance": 0.7,
+          "item_timestamp": 1720000000,
+          "semantic_override": 0.55
+        }
+      ],
+      "now": 1730086400,
+      "expected_facts_to_surface": ["shipped the focus-injection"],
+      "head_known_fail": false
+    },
+    {
+      "case_id": "entity_graph_project_status",
+      "comment": "Entity-graph traversal probe.  Query names a project; expected items are its related entities (linked relations).",
+      "user_query": "What's the status of project Apollo?",
+      "memory_seed": [
+        {
+          "source_id": "memory_entity",
+          "source_type": "internal",
+          "text": "Project Apollo: orbital telemetry rewrite, owned by Maya.",
+          "item_id": "ent:apollo",
+          "importance": 0.85,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.80
+        },
+        {
+          "source_id": "memory_relation",
+          "source_type": "internal",
+          "text": "Maya leads project Apollo since 2025-09-01.",
+          "item_id": "rel:maya-apollo",
+          "importance": 0.7,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.65
+        },
+        {
+          "source_id": "memory_entity",
+          "source_type": "internal",
+          "text": "Project Hermes: messaging refactor, owned by Theo.",
+          "item_id": "ent:hermes",
+          "importance": 0.7,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.30
+        }
+      ],
+      "expected_facts_to_surface": ["Apollo"],
+      "head_known_fail": false
+    },
+    {
+      "case_id": "ambiguous_category_painting",
+      "comment": "Query that could match interests OR professional.  Either is acceptable as long as SOMETHING relevant surfaces.",
+      "user_query": "Tell me about my painting work.",
+      "memory_seed": [
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User paints landscapes in oils on weekends.",
+          "item_id": "fact:hobby-paint",
+          "importance": 0.6,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.85
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User paints commercial murals as a freelance professional.",
+          "item_id": "fact:work-paint",
+          "importance": 0.7,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.80
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User volunteers at the local food bank on Tuesday evenings.",
+          "item_id": "fact:foodbank",
+          "importance": 0.5,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.10
+        }
+      ],
+      "expected_facts_to_surface": ["paint"],
+      "head_known_fail": false
+    },
+    {
+      "case_id": "negative_empty_unrelated",
+      "comment": "Query unrelated to anything in the memory_seed.  Expected: zero or near-zero candidates surface; the rendered block is minimal.  Validates that the ranker doesn't surface noise above min_score on irrelevant queries.",
+      "user_query": "What's my favorite chess opening?",
+      "memory_seed": [
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User prefers tea over coffee in the morning.",
+          "item_id": "fact:tea",
+          "importance": 0.4,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.10
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User commutes by bicycle when weather permits.",
+          "item_id": "fact:bike",
+          "importance": 0.4,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.10
+        }
+      ],
+      "expected_facts_to_surface": [],
+      "head_known_fail": false,
+      "expect_empty_or_minimal": true
+    },
+    {
+      "case_id": "anaphora_pronoun_resolution",
+      "comment": "Pronoun follow-up — 'their' refers to a person named earlier.  Memory has the named entity plus their attributes.  Expected: the named entity's attributes surface (not unrelated entities).",
+      "user_query": "What were their thoughts on the deadline?",
+      "conversation_context": "Earlier: discussed Sarah's feedback on the project deadline.",
+      "memory_seed": [
+        {
+          "source_id": "memory_summary",
+          "source_type": "internal",
+          "text": "Sarah expressed concern that the December deadline is too tight for QA.",
+          "item_id": "sum:sarah-deadline",
+          "importance": 0.75,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.45
+        },
+        {
+          "source_id": "memory_summary",
+          "source_type": "internal",
+          "text": "Marcus was generally optimistic about the rollout schedule.",
+          "item_id": "sum:marcus-rollout",
+          "importance": 0.65,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.40
+        }
+      ],
+      "expected_facts_to_surface": ["Sarah"],
+      "head_known_fail": true
+    },
+    {
+      "case_id": "recency_collision_old_high_importance",
+      "comment": "Old-but-important fact vs. new-but-unrelated fact.  Tests the recency/importance balance — high importance on an older item should still surface it for a directly-relevant query.",
+      "user_query": "What's my mother's maiden name?",
+      "memory_seed": [
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User's mother's maiden name is Petrova.",
+          "item_id": "fact:maiden",
+          "importance": 0.95,
+          "item_timestamp": 1600000000,
+          "semantic_override": 0.85
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User attended a poetry reading last Tuesday.",
+          "item_id": "fact:poetry",
+          "importance": 0.4,
+          "item_timestamp": 1729900000,
+          "semantic_override": 0.10
+        }
+      ],
+      "now": 1730000000,
+      "expected_facts_to_surface": ["Petrova"],
+      "head_known_fail": false
+    },
+    {
+      "case_id": "document_chunk_priority",
+      "comment": "External document content should surface when the query is squarely about its topic — sanity check that document_chunk is not buried by lower-scored memory items.",
+      "user_query": "What does the Q3 architecture review document say about the scheduler?",
+      "memory_seed": [
+        {
+          "source_id": "document_chunk",
+          "source_type": "external",
+          "text": "Q3 architecture review §4.2: scheduler quiesce protocol requires draining the per-shard queues before stopping the worker pool.",
+          "item_id": "doc:q3-arch:42",
+          "importance": 0.6,
+          "item_timestamp": 1720000000,
+          "semantic_override": 0.80
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User dislikes long architecture review meetings.",
+          "item_id": "fact:meetings",
+          "importance": 0.4,
+          "item_timestamp": 1720000000,
+          "semantic_override": 0.20
+        }
+      ],
+      "expected_facts_to_surface": ["scheduler quiesce"],
+      "head_known_fail": false
+    },
+    {
+      "case_id": "calendar_today_relevance",
+      "comment": "Calendar query asking 'what's today look like' — calendar events with today's date should surface above older facts.",
+      "user_query": "What's on my schedule today?",
+      "memory_seed": [
+        {
+          "source_id": "calendar_event",
+          "source_type": "external",
+          "text": "[2026-05-08 09:00] Project standup with the platform team.",
+          "item_id": "cal:standup",
+          "importance": 0.7,
+          "item_timestamp": 1746694800,
+          "semantic_override": 0.65
+        },
+        {
+          "source_id": "calendar_event",
+          "source_type": "external",
+          "text": "[2026-05-08 14:00] One-on-one with manager.",
+          "item_id": "cal:1on1",
+          "importance": 0.7,
+          "item_timestamp": 1746712800,
+          "semantic_override": 0.65
+        },
+        {
+          "source_id": "memory_fact",
+          "source_type": "internal",
+          "text": "User generally prefers morning meetings to afternoon ones.",
+          "item_id": "fact:morning",
+          "importance": 0.4,
+          "item_timestamp": 1700000000,
+          "semantic_override": 0.20
+        }
+      ],
+      "now": 1746738000,
+      "expected_facts_to_surface": ["standup"],
+      "head_known_fail": false
+    }
+  ]
+}
