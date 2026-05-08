@@ -68,20 +68,19 @@ DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
 DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 
 # Per-provider HEAD baselines for component 6 fix-rate.
-# Calibrated 2026-05-08 via `--recalibrate` against the v1 synthetic
-# fixtures.  All three providers pass 10/10 — saturated baseline.  The
-# three cases marked head_known_fail=true (family_kids_missing,
-# stock_followup_off_topic, anaphora_pronoun_resolution) are intended to
-# fail but pass under v1 fixtures because the case shape is too clean
-# (2-3 candidates, no partial-match competition).  Phase 1j folds in
-# fixture hardening (10-15 cases × 8-12 candidates each with partial-
-# match competition), after which baselines should drop and become
-# movable by tuning.  Regression detection: (candidate_fix_count <
-# baseline_fix_count) is a FAIL on that provider.
+# Calibrated 2026-05-08 via `--recalibrate` against the v2 fixtures
+# (focus_probe_cases.json schema_version=2, 11 cases).  All three
+# providers land at exactly 7/11 — within the 4-8/10 design window.
+# 4 cases designed to fail HEAD (right answer drops out of top_k=8
+# under default weights); 6 designed to pass; 1 negative-empty (judge
+# inverted prompt confirms appropriately-weak surface).  Phase 1j.B
+# weight tuning targets moving the FAIL cases up — regression
+# detection: (candidate_fix_count < baseline_fix_count) is a FAIL on
+# that provider.
 HEAD_BASELINE_FIX_COUNT = {
-    "anthropic": 10,
-    "openai": 10,
-    "local": 10,
+    "anthropic": 7,
+    "openai": 7,
+    "local": 7,
 }
 
 # Production-shape config block — passed verbatim to bench_focus_pipeline
