@@ -22,6 +22,7 @@
  * are the dependencies it pulls in.  All three are stubbed here.
  */
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -30,6 +31,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/focus_source.h"
 #include "memory/memory_embeddings.h"
@@ -60,8 +62,23 @@ typedef struct {
 
 static pb_focus_compose_mock_t s_focus = { 0 };
 
+/* Per-call score override storage — see public functions further down
+ * for the API.  Defined here so pb_focus_reset can scrub it. */
+typedef struct {
+   bool override;
+   float final_score;
+} pb_seed_score_t;
+
+static pb_seed_score_t s_seed_scores[8];
+
+/* Forward decls — defined further down so the focus_compose stub can
+ * use the seed-score override without re-ordering the public test
+ * fixture functions. */
+float pb_focus_seed_score_for(int idx);
+
 void pb_focus_reset(void) {
    memset(&s_focus, 0, sizeof(s_focus));
+   memset(s_seed_scores, 0, sizeof(s_seed_scores));
 }
 
 pb_focus_compose_mock_t *pb_focus_state(void) {
@@ -121,7 +138,11 @@ int focus_compose(int user_id,
    for (int i = 0; i < s_focus.seeded_count; i++) {
       arr[i].source_id = s_focus.seeded[i].source_id;
       arr[i].source_type = FOCUS_SOURCE_INTERNAL;
-      arr[i].semantic_score = 1.0f;
+      /* semantic_score is what apply_dedup_locked treats as the
+       * candidate's "current relevance" for the uplift compare.
+       * pb_focus_set_seed_score overrides this per-candidate; default
+       * 1.0 preserves pre-1f test expectations. */
+      arr[i].semantic_score = pb_focus_seed_score_for(i);
       arr[i].recency_score = 1.0f;
       arr[i].importance_score = 1.0f;
       arr[i].item_timestamp = 1700000000;
@@ -168,6 +189,46 @@ void focus_result_free(focus_compose_result_t *result) {
 int focus_register_source(const focus_source_adapter_t *adapter) {
    (void)adapter;
    return SUCCESS;
+}
+
+/* ----- programmable focus_compose stub: per-call score override ----------
+ *
+ * Phase 1f score-uplift formula needs the test to control final_score
+ * per candidate per call.  Storage (`s_seed_scores`) is declared near
+ * the top of this file alongside `s_focus` so `pb_focus_reset` can
+ * scrub it; the public API lives down here next to the rest. */
+
+void pb_focus_set_seed_score(int idx, float score) {
+   if (idx < 0 || idx >= (int)(sizeof(s_seed_scores) / sizeof(s_seed_scores[0])))
+      return;
+   s_seed_scores[idx].override = true;
+   s_seed_scores[idx].final_score = score;
+}
+
+void pb_focus_clear_seed_scores(void) {
+   memset(s_seed_scores, 0, sizeof(s_seed_scores));
+}
+
+float pb_focus_seed_score_for(int idx) {
+   if (idx < 0 || idx >= (int)(sizeof(s_seed_scores) / sizeof(s_seed_scores[0])))
+      return 1.0f;
+   return s_seed_scores[idx].override ? s_seed_scores[idx].final_score : 1.0f;
+}
+
+/* ----- session_t test fixtures ------------------------------------------- */
+
+/* Phase 1f tests need a real session_t with at least history_mutex
+ * inited (session_dedup.c locks it via session_injected_set_clear).
+ * Other session_t fields are zeroed and unused by build_focus_block. */
+void pb_session_init(session_t *s, uint32_t session_id) {
+   memset(s, 0, sizeof(*s));
+   s->session_id = session_id;
+   pthread_mutex_init(&s->history_mutex, NULL);
+}
+
+void pb_session_destroy(session_t *s) {
+   pthread_mutex_destroy(&s->history_mutex);
+   memset(s, 0, sizeof(*s));
 }
 
 /* ----- programmable embedding engine stub ------------------------------- */

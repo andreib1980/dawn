@@ -1546,6 +1546,13 @@ void session_init_system_prompt(session_t *session, const char *system_prompt) {
       json_object_array_add(session->conversation_history, system_message);
    }
 
+   /* Phase 1f: a fresh system prompt on this session is by definition a
+    * SESSION_START boundary — clear dedup state under the same lock so
+    * the next PER_TURN admits all candidates fresh.  Inline memset (not
+    * session_injected_set_clear) because we already hold history_mutex
+    * here and the helper is self-locking. */
+   memset(&session->injected_set, 0, sizeof(session->injected_set));
+
    pthread_mutex_unlock(&session->history_mutex);
 
    OLOG_INFO("Session %u: Initialized with system prompt (%zu chars)", session->session_id,
@@ -1712,6 +1719,15 @@ char *session_manager_build_system_prompt_string(int user_id) {
  * ============================================================================= */
 
 int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
+   /* Phase 1f defense: erase any stale dispatch-session pointer before
+    * doing anything else.  Today's only writers (the four explicit
+    * clear-on-return paths in this function) cover all return points,
+    * but a future signal handler / pthread_cancel / setjmp unwind path
+    * could leave the slot non-NULL for the next dispatch on this
+    * thread.  This belt-and-suspenders clear makes the setter
+    * idempotent against stale state — security audit MEDIUM. */
+   session_set_dispatch_session(NULL);
+
    if (session == NULL || user_turn_text == NULL)
       return SUCCESS;
 
@@ -1734,6 +1750,14 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
    if (user_id <= 0)
       return SUCCESS; /* Unauthenticated — base prompt only; nothing to refresh. */
 
+   /* Phase 1f: publish the dispatch session into TLS so build_focus_block
+    * can find the dedup set without needing session plumbed through the
+    * builder typedef.  Cleared on every return path below; the worker
+    * thread's TLS slot returns to NULL before the next dispatch.  Order
+    * matters: set BEFORE the builder call, clear AFTER all uses (system-
+    * prompt swap completes in the success path). */
+   session_set_dispatch_session(session);
+
    composed_prompt_t cp = { 0 };
    const int rc = builder(user_id, user_turn_text, PROMPT_REFRESH_PER_TURN, &cp);
    if (rc != SUCCESS) {
@@ -1747,6 +1771,7 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
                    "skipping system-prompt swap, LLM dispatch proceeds with last-good prompt",
                    user_id);
       composed_prompt_free(&cp);
+      session_set_dispatch_session(NULL);
       return SUCCESS; /* LLM dispatch never blocked by focus errors. */
    }
 
@@ -1756,6 +1781,7 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
       OLOG_WARNING("session_dispatch_user_turn: compose flatten failed (user_id=%d, kind=PER_TURN) "
                    "— skipping system-prompt swap",
                    user_id);
+      session_set_dispatch_session(NULL);
       return SUCCESS;
    }
 
@@ -1772,6 +1798,7 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
          session_append_satellite_context(session, session->identity.location, NULL);
    }
 
+   session_set_dispatch_session(NULL);
    return SUCCESS;
 }
 
@@ -1832,7 +1859,14 @@ void session_manager_refresh_all_prompts(void) {
       } else if (user_id > 0) {
          /* Authenticated WebUI / satellite — rebuild with per-user persona
           * via the structured builder (PER_TURN focus block is empty for
-          * a capability-change refresh — this is a SESSION_START path). */
+          * a capability-change refresh — this is a SESSION_START path).
+          *
+          * Phase 1f: clear the session's focus-injection dedup state
+          * BEFORE invoking the builder so the next PER_TURN admits all
+          * candidates fresh.  The builder itself stays kind-agnostic —
+          * the clear is the session_manager's responsibility, not the
+          * builder's.  Self-locking; safe under read-lock. */
+         session_injected_set_clear(s);
          owned_prompt = session_manager_build_system_prompt_string(user_id);
          if (owned_prompt == NULL) {
             /* Builder unregistered or failed — fall back to base remote

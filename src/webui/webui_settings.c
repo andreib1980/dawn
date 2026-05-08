@@ -169,6 +169,8 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
 
       /* Refresh active session's system prompt immediately (preserves conversation) */
       if (conn->session) {
+         /* Phase 1f: SESSION_START builder boundary — clear dedup state. */
+         session_injected_set_clear(conn->session);
          char *new_prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
          if (new_prompt) {
             session_update_system_prompt(conn->session, new_prompt);

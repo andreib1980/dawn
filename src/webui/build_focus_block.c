@@ -22,6 +22,7 @@
 
 #include "webui/build_focus_block.h"
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -64,10 +66,15 @@ static double monotonic_ms_now(void) {
  * FOCUS_LOG_TURN_EXCERPT_CHARS of the user query and NEVER the
  * candidate text content.  Extracted from inline duplicate code at
  * the empty-result and success paths so the format string is one
- * source of truth. */
+ * source of truth.
+ *
+ * 1f addition: `dedup_suppressed` is a grep-friendly counter for the
+ * number of focus_compose candidates that the per-session dedup state
+ * dropped this turn.  Always emitted (zero when dedup didn't run). */
 static void log_focus_summary(const char *turn_text,
                               int candidates,
                               int rejections,
+                              int dedup_suppressed,
                               double elapsed_ms) {
    char excerpt[FOCUS_LOG_TURN_EXCERPT_CHARS + 1];
    const size_t turn_len = (turn_text != NULL) ? strlen(turn_text) : 0;
@@ -76,9 +83,145 @@ static void log_focus_summary(const char *turn_text,
    if (copy > 0)
       memcpy(excerpt, turn_text, copy);
    excerpt[copy] = '\0';
-   OLOG_INFO("focus: turn=\"%s%s\" candidates=%d rejections=%d elapsed_ms=%.1f", excerpt,
-             turn_len > FOCUS_LOG_TURN_EXCERPT_CHARS ? "..." : "", candidates, rejections,
-             elapsed_ms);
+   OLOG_INFO("focus: turn=\"%s%s\" candidates=%d rejections=%d dedup_suppressed=%d elapsed_ms=%.1f",
+             excerpt, turn_len > FOCUS_LOG_TURN_EXCERPT_CHARS ? "..." : "", candidates, rejections,
+             dedup_suppressed, elapsed_ms);
+}
+
+/* Compute the over-fetch hint passed to focus_compose.
+ *
+ * Phase 1f adds dedup-suppression on top of focus_compose's ranked
+ * output.  If we asked for exactly top_k candidates, dedup-suppression
+ * would shrink the surfaced block below the user-configured size on
+ * busy turns.  Over-fetch by half the dedup window so the typical
+ * suppress-everything-old turn still yields ~top_k survivors:
+ *
+ *     per_source_max = top_k + recent_window/2
+ *     per_source_max = MIN(per_source_max, top_k * 2)
+ *
+ * Capped at 2× top_k so a pathological recent_window setting can't
+ * blow latency / token budget.  Default knobs (top_k=8, window=8)
+ * land at per_source_max=12 — comfortably under the 2× = 16 cap. */
+static int compute_per_source_max(int top_k, int recent_window_turns) {
+   if (top_k <= 0)
+      top_k = 8;
+   const int over_fetch = top_k + (recent_window_turns / 2);
+   const int cap = top_k * 2;
+   return (over_fetch < cap) ? over_fetch : cap;
+}
+
+/* Apply the per-session dedup formula to focus_compose's ranked
+ * candidates.  Walks the list under the session's history_mutex, admits
+ * up to top_k survivors, and rewrites `result->candidates[]` in place
+ * to the survivor prefix (count = kept).  Suppressed candidates have
+ * their text/item_id freed inline so focus_result_free() at the end
+ * still cleans up survivors only.
+ *
+ * `*out_suppressed` receives the count of dropped candidates for the
+ * grep-friendly log line.
+ *
+ * INVARIANT: dedup state ONLY tracks candidates that surfaced to the
+ * LLM via this turn's render.  Filter-rejected candidates (memory_filter
+ * fail inside focus_compose) never reach this loop, so they never call
+ * _record_locked.  If a filter-rejected candidate later survives the
+ * filter on a future turn, it admits fresh with no prior history.  Per
+ * design doc rev 3 §"State management contracts". */
+static void apply_dedup_locked(session_t *session,
+                               focus_compose_result_t *result,
+                               int top_k,
+                               int recent_window_turns,
+                               float min_score,
+                               float score_uplift_factor,
+                               int *out_suppressed) {
+   *out_suppressed = 0;
+   if (session == NULL || result == NULL || result->candidates == NULL ||
+       result->candidate_count <= 0)
+      return;
+
+   const int current_turn = session_injected_set_advance_turn_locked(session);
+
+   int kept = 0;
+   for (int i = 0; i < result->candidate_count; i++) {
+      focus_candidate_t *c = &result->candidates[i];
+
+      bool admit = false;
+      injected_set_entry_t prior;
+      const char *src = (c->source_id != NULL) ? c->source_id : "";
+      const char *iid = (c->item_id != NULL) ? c->item_id : "";
+
+      /* The composite score the ranker emitted lives in semantic_score
+       * after focus_compose collapses the feature vector.  We treat
+       * that as the candidate's "current relevance" — whatever weighting
+       * formula the framework uses, it's the value a future caller's
+       * uplift-compare must beat. */
+      const float current_score = c->semantic_score;
+
+      if (iid[0] == '\0') {
+         /* No stable id → cannot dedup.  Admit unconditionally — same
+          * behavior as a guaranteed-miss lookup.  This shouldn't happen
+          * with shipped adapters (all emit server-generated ids), but
+          * the fallback keeps us correct under future adapters that
+          * forget. */
+         admit = true;
+      } else if (session_injected_set_lookup_locked(session, src, iid, &prior) != SUCCESS) {
+         /* Never injected before → admit. */
+         admit = true;
+      } else {
+         /* Strict greater-than (NOT >=).  At recent_window_turns=0 any
+          * turn after the original admits — score_uplift becomes the
+          * only path that can suppress.  Documented in dawn.toml.example.
+          *
+          * The min_score branch is defense-in-depth — focus_compose
+          * already drops sub-min_score candidates before this loop sees
+          * them — so it should never trigger today, but keeps the
+          * formula correct if focus_compose's drop-below-min behavior
+          * changes. */
+         const int turns_since = current_turn - prior.last_injected_turn;
+         const bool window_passed = (turns_since > recent_window_turns) &&
+                                    (current_score >= min_score);
+         const bool uplift_met = (current_score >= prior.last_score * score_uplift_factor);
+         admit = window_passed || uplift_met;
+      }
+
+      if (admit) {
+         if (iid[0] != '\0')
+            session_injected_set_record_locked(session, src, iid, current_score);
+         /* Move into the survivor prefix if not already there.  When
+          * compaction happens (i > kept) the source slot is now
+          * dangling — we MUST NOT free it: ownership of text/item_id
+          * just moved to result->candidates[kept]. */
+         if (i != kept) {
+            result->candidates[kept] = *c;
+            /* Zero the source so the truncation cleanup below can't
+             * double-free a stale pointer. */
+            result->candidates[i].text = NULL;
+            result->candidates[i].item_id = NULL;
+         }
+         kept++;
+         if (kept >= top_k) {
+            /* Top_k satisfied — drop the rest.  Free everything from
+             * i+1 onward, regardless of admission status, since
+             * over-fetch produced extras we don't render. */
+            for (int j = i + 1; j < result->candidate_count; j++) {
+               free(result->candidates[j].text);
+               free(result->candidates[j].item_id);
+               result->candidates[j].text = NULL;
+               result->candidates[j].item_id = NULL;
+            }
+            break;
+         }
+      } else {
+         /* Suppressed by dedup — count it and free its heap.  admit=false
+          * here implies the lookup hit (the only !admit path above). */
+         (*out_suppressed)++;
+         free(c->text);
+         free(c->item_id);
+         c->text = NULL;
+         c->item_id = NULL;
+      }
+   }
+
+   result->candidate_count = kept;
 }
 
 int build_focus_block(int user_id, const char *user_turn_text, char **out_block) {
@@ -89,8 +232,8 @@ int build_focus_block(int user_id, const char *user_turn_text, char **out_block)
    /* Snapshot the focus_injection sub-config under one read — guards
     * against TOCTOU when the WebUI settings handler mutates `enabled`
     * + `top_k` from a different thread mid-call (security audit M1).
-    * Inexpensive struct copy — current shape is two ints + a few
-    * floats. */
+    * Inexpensive struct copy — current shape is a few ints + floats +
+    * the dedup sub-struct. */
    const focus_injection_config_t fi = g_config.memory.focus_injection;
 
    /* Gate 1: feature flag.  ZERO embedding compute, ZERO focus_compose
@@ -140,7 +283,8 @@ int build_focus_block(int user_id, const char *user_turn_text, char **out_block)
       embed_dims = 0;
 
    const time_t now = time(NULL);
-   const int per_source_max = fi.top_k > 0 ? fi.top_k : 8;
+   const int top_k = fi.top_k > 0 ? fi.top_k : 8;
+   const int per_source_max = compute_per_source_max(top_k, fi.dedup.recent_window_turns);
 
    focus_compose_result_t result = { 0 };
    const int rc = focus_compose(user_id, /*include_private*/ false, user_turn_text, query_ptr,
@@ -151,9 +295,47 @@ int build_focus_block(int user_id, const char *user_turn_text, char **out_block)
       return FAILURE;
    }
 
-   /* Empty result is a successful no-op — composer omits the section. */
+   const int candidates_before_dedup = result.candidate_count;
+   int dedup_suppressed = 0;
+
+   /* Phase 1f: dedup runs only when a session is published into the
+    * dispatch TLS slot — i.e., we're on the PER_TURN path.  SESSION_START
+    * (refresh_all_prompts) and standalone build_system_prompt_string
+    * callers leave the slot NULL; build_focus_block already short-
+    * circuits on NULL/empty turn text in those paths anyway, but the
+    * NULL guard here is defense-in-depth for any future caller. */
+   session_t *dedup_session = session_get_dispatch_session();
+   bool warn_all_suppressed = false;
+   if (dedup_session != NULL && result.candidate_count > 0) {
+      pthread_mutex_lock(&dedup_session->history_mutex);
+      apply_dedup_locked(dedup_session, &result, top_k, fi.dedup.recent_window_turns, fi.min_score,
+                         fi.dedup.score_uplift_factor, &dedup_suppressed);
+      /* Empty-block observability: if dedup ate everything this turn
+       * AND we had candidates going in, the user might be tuning the
+       * window/uplift too aggressively.  Log OLOG_WARNING ONCE per
+       * session — gate via the session-scoped flag (under the same
+       * lock that owns the flag).  Substitutes for the kill-switch
+       * 1e shipped without; runaway suppression is observable without
+       * adding a config knob. */
+      if (candidates_before_dedup > 0 && result.candidate_count == 0 &&
+          !dedup_session->injected_set.all_suppressed_logged_once) {
+         dedup_session->injected_set.all_suppressed_logged_once = true;
+         warn_all_suppressed = true;
+      }
+      pthread_mutex_unlock(&dedup_session->history_mutex);
+
+      if (warn_all_suppressed)
+         OLOG_WARNING("focus: dedup suppressed all %d candidates this turn (session=%u); "
+                      "dedup config may need tuning",
+                      candidates_before_dedup, dedup_session->session_id);
+   }
+
+   /* Empty result (post-dedup) is a successful no-op — composer omits
+    * the section.  This can happen either because focus_compose returned
+    * nothing OR because dedup suppressed every survivor. */
    if (result.candidate_count <= 0) {
-      log_focus_summary(user_turn_text, 0, result.rejection_count, monotonic_ms_now() - t_start);
+      log_focus_summary(user_turn_text, 0, result.rejection_count, dedup_suppressed,
+                        monotonic_ms_now() - t_start);
       focus_result_free(&result);
       return SUCCESS;
    }
@@ -195,7 +377,7 @@ int build_focus_block(int user_id, const char *user_turn_text, char **out_block)
    }
 
    log_focus_summary(user_turn_text, result.candidate_count, result.rejection_count,
-                     monotonic_ms_now() - t_start);
+                     dedup_suppressed, monotonic_ms_now() - t_start);
 
    focus_result_free(&result);
    return SUCCESS;

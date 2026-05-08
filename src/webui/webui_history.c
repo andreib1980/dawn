@@ -475,6 +475,10 @@ void handle_clear_session(ws_connection_t *conn) {
 
    session_clear_history(conn->session);
 
+   /* Phase 1f: history clear is a SESSION_START boundary — clear dedup
+    * state so the new conversation admits all candidates fresh. */
+   session_injected_set_clear(conn->session);
+
    /* Re-add system prompt for the new conversation */
    char *prompt = session_manager_build_system_prompt_string(conn->auth_user_id);
    session_add_message(conn->session, "system", prompt ? prompt : get_remote_command_prompt());

@@ -298,6 +298,7 @@ dawn_add_unit_test(test_memory_focus_adapters
 dawn_add_unit_test(test_prompt_builder
    SOURCES test_prompt_builder.c test_prompt_builder_stub.c
            ${SRC_ROOT}/src/core/prompt_compose.c
+           ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
            ${SRC_ROOT}/src/core/strbuf.c
    LIBS    dawn_common unity pthread

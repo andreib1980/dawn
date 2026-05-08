@@ -584,6 +584,10 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
 #endif
             conn->auth_user_id = mapping.user_id;
 
+            /* Phase 1f: SESSION_START builder boundary on satellite
+             * rebind — clear dedup state so the next PER_TURN starts
+             * fresh against the new user's persona/memory. */
+            session_injected_set_clear(session);
             /* Build personalized system prompt with user memories */
             char *user_prompt = session_manager_build_system_prompt_string(mapping.user_id);
             if (user_prompt) {
