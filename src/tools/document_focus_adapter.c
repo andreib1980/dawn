@@ -203,18 +203,22 @@ static int document_adapter_query(int user_id,
       const document_chunk_t *c = &chunks[rows[i].chunk_index];
 
       /* Render "[<filename>] <chunk_text>".  filename comes from the
-       * JOIN inside document_db_chunk_search_load — no per-chunk N+1. */
-      char rendered[FOCUS_TEXT_MAX_BYTES + 64];
+       * JOIN inside document_db_chunk_search_load — no per-chunk N+1.
+       *
+       * Sizing: filename ≤ DOC_FILENAME_MAX (256), `[` + `] ` = 3,
+       * chunk text ≤ DOC_CHUNK_TEXT_MAX (4096), terminator = 1.
+       * Worst-case 4356 bytes; buffer is FOCUS_TEXT_MAX_BYTES +
+       * DOC_FILENAME_MAX + 16 (4368) so snprintf cannot truncate
+       * even with maximum-length filename and chunk text together.
+       * If the rendered string ever exceeds FOCUS_TEXT_MAX_BYTES,
+       * focus_candidate_init's truncation handler downstream caps
+       * and logs once via `truncated_warned`.  We do NOT pre-reject
+       * here: pre-guarding work the framework already does correctly
+       * silently dropped content the framework would have truncated
+       * cleanly. */
+      char rendered[FOCUS_TEXT_MAX_BYTES + DOC_FILENAME_MAX + 16];
       const char *fname = (c->doc_filename[0] != '\0') ? c->doc_filename : "(document)";
-      const int rn = snprintf(rendered, sizeof(rendered), "[%s] %s", fname, c->text);
-      if (rn < 0 || (size_t)rn >= sizeof(rendered)) {
-         /* snprintf failure or pathological filename + text overflow —
-          * skip the chunk rather than abort the whole adapter
-          * (matches calendar adapter's render-failure handling). */
-         OLOG_WARNING("document_adapter: render skipped (chunk_id=%lld, rn=%d) — continuing",
-                      (long long)c->id, rn);
-         continue;
-      }
+      (void)snprintf(rendered, sizeof(rendered), "[%s] %s", fname, c->text);
 
       char item_id[FOCUS_ITEM_ID_BUFLEN];
       if (focus_candidate_format_item_id(item_id, sizeof(item_id), "document_chunk", c->id) !=

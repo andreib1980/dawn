@@ -37,10 +37,16 @@
 #include "memory/memory_embeddings.h"
 
 /* Per-call rendering buffer initial size — sized to comfortably hold
- * the typical ~8-candidate result with ~1024-char text caps.  Grows
- * via strbuf if exceeded. */
+ * the typical ~8-candidate result.  Grows via strbuf if exceeded.
+ *
+ * Max cap: top_k_max (64) × (FOCUS_TEXT_MAX_BYTES (4096) + framing
+ * overhead per line ~96) + slack ≈ 270 KB worst case.  Practical
+ * top_k default (8) × 4 KB = ~33 KB lands right at the previous 32 KB
+ * cap and silently truncated under document-heavy turns; sized to
+ * 64 KB to comfortably hold the typical 8-candidate document-heavy
+ * case while still bounded against runaway adapter output. */
 #define FOCUS_BLOCK_INIT_BYTES 4096
-#define FOCUS_BLOCK_MAX_BYTES (32 * 1024)
+#define FOCUS_BLOCK_MAX_BYTES (64 * 1024)
 
 /* Truncate user_turn_text to this many chars when building the
  * privacy-safe LOG_INFO summary.  Logs go to syslog; the daemon does

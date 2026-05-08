@@ -40,11 +40,34 @@
 extern "C" {
 #endif
 
-/* Hard cap on candidate text length copied into the focus block.
- * Defends downstream LLM-prompt assembly against an unexpectedly huge
- * fact / summary / chunk; truncation is logged once per call when
- * triggered (caller passes a `bool *truncated_warned` flag). */
-#define FOCUS_TEXT_MAX_BYTES 1024
+/* Per-candidate text cap (truncate-at, not reject-at).  Sized to
+ * accommodate document chunks (typically 1.5-4 KB).  The earlier
+ * 1024 default made sense when only memory facts/entities/summaries
+ * (avg ~200 chars) were candidate sources; document chunks pushed
+ * past it consistently, so the cap was raised to 4096.
+ *
+ * NOTE: focus_budget_tokens (default 1024 ≈ 4096 chars) is the
+ * per-call budget.  At 4096-byte candidate cap, a SINGLE large
+ * candidate may consume the entire budget on document-heavy turns.
+ * This is intentional for v1: the framework's score-ordered ranker
+ * keeps the most relevant candidate even if it crowds out others;
+ * `focus_compose` additionally force-keeps the top-ranked candidate
+ * when the strict budget would otherwise produce an empty focus
+ * block.  Users who want multi-source coexistence on document-heavy
+ * turns should bump focus_budget_tokens.  Per-source byte caps and
+ * runtime-configurable per-candidate sizing are budget-tuning
+ * concerns for the bench-driven 1j pass.
+ *
+ * Stack-allocation footprint: per-call rendering buffers in the
+ * focus-source adapters use a single `char rendered[]` per call
+ * site, sized to fit `FOCUS_TEXT_MAX_BYTES` plus an adapter-specific
+ * framing overhead (calendar: +64 = 4160 B; document:
+ * +DOC_FILENAME_MAX+16 = 4368 B).  Worker-thread stack default is
+ * 8 MB on Linux; impact is negligible.  No adapter uses
+ * `FOCUS_TEXT_MAX_BYTES * N` array patterns; before bumping the cap
+ * again, re-grep `FOCUS_TEXT_MAX_BYTES` across src/ + include/ to
+ * confirm that property still holds. */
+#define FOCUS_TEXT_MAX_BYTES 4096
 
 /* "fact:9223372036854775807\0" → 24 chars; entity / relation /
  * document_chunk / calendar_occ variants all fit within 64. */

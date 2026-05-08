@@ -406,6 +406,33 @@ int focus_compose(int user_id,
 
       const int cost = approx_token_cost(pool[e->idx].text);
       if (cost > budget_left) {
+         /* Budget exceeded.  Subtle case: when this is the FIRST
+          * candidate (kept == 0), a strict break produces an empty
+          * focus block even though the highest-ranked item barely
+          * exceeded the budget.  At FOCUS_TEXT_MAX_BYTES = 4096
+          * (≈ 1024 tokens), a single max-sized candidate plus the
+          * "[source_id] " framing prefix can land just above the
+          * default 1024-token budget; dropping it leaves the LLM
+          * with no focus context at all.  Force-keep the first
+          * candidate (the per-candidate truncation cap already
+          * bounds it) and let the next iteration cleanly break on
+          * the second candidate's cost.  Subsequent candidates
+          * honor the budget normally.
+          *
+          * Termination invariant: focus_candidate_init rejects NULL
+          * / empty text, so every surviving candidate has length ≥ 1
+          * and approx_token_cost ≥ 1.  After saturating budget_left
+          * to 0, the next iteration's `cost > budget_left` is true
+          * and the regular `break` fires — no infinite loop. */
+         if (kept == 0) {
+            OLOG_INFO("focus_source: top-ranked candidate cost=%d exceeds budget=%d — "
+                      "force-keeping single candidate (source='%s')",
+                      cost, budget_left, pool[e->idx].source_id);
+            keep[e->idx] = true;
+            budget_left = 0;
+            kept++;
+            continue;
+         }
          /* Truncate at last fully-included candidate.  Don't consume
           * partial budget — keeps the output coherent. */
          break;

@@ -1019,6 +1019,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "decay",
                                              "embeddings",
                                              "recovery",
+                                             "focus_injection", /* Phase 1b sub-table */
                                              NULL };
    warn_unknown_keys(table, "memory", known_keys);
 

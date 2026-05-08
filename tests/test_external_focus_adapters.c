@@ -696,6 +696,104 @@ static void test_end_to_end_compose_with_both_adapters(void) {
  * above.
  * ===================================================================== */
 
+/* =====================================================================
+ * Document-chunk size handling:
+ *   - 3 KB chunks must pass through with full text intact (no
+ *     silent clipping at the per-candidate cap).
+ *   - Chunks whose rendered "[filename] text" overflows the
+ *     per-candidate cap are truncated by focus_candidate_init's
+ *     standard handler — NOT pre-rejected by the adapter.
+ * ===================================================================== */
+
+static void test_document_3kb_chunk_passthrough(void) {
+   /* Seed a 3 KB chunk — well below the FOCUS_TEXT_MAX_BYTES per-
+    * candidate cap.  Surfaces with full text, no truncation. */
+   const size_t text_size = 3072;
+   char *big_text = malloc(text_size + 1);
+   TEST_ASSERT_NOT_NULL(big_text);
+   memset(big_text, 'X', text_size);
+   big_text[text_size] = '\0';
+
+   /* seed_chunk strncpy's into chunks[idx].text (DOC_CHUNK_TEXT_MAX = 4096). */
+   seed_chunk(0, 100, 1, big_text, "big.pdf", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q, EXT_MOCK_DIMS,
+                                                1700000000, 5, &result));
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         fc = &result.candidates[i];
+   TEST_ASSERT_NOT_NULL_MESSAGE(fc, "3 KB chunk must surface (no pre-rejection, no clipping)");
+   /* Rendered "[big.pdf] " (10 chars) + 3072 chars text = 3082 chars,
+    * well under the new 4096 cap. */
+   const size_t rendered_len = strlen(fc->text);
+   TEST_ASSERT_TRUE_MESSAGE(rendered_len > 3000, "3 KB chunk text should be present in candidate");
+   TEST_ASSERT_TRUE_MESSAGE(rendered_len <= 4096,
+                            "rendered text must respect FOCUS_TEXT_MAX_BYTES cap");
+   TEST_ASSERT_NOT_NULL(strstr(fc->text, "[big.pdf]"));
+   /* Verify no truncation marker / no missing tail. */
+   TEST_ASSERT_EQUAL_INT('X', fc->text[rendered_len - 1]);
+
+   focus_result_free(&result);
+   free(big_text);
+}
+
+static void test_document_oversize_chunk_truncated_not_rejected(void) {
+   /* Seed the maximum chunk text the stub's strncpy can accept
+    * (DOC_CHUNK_TEXT_MAX - 1 = 4095 bytes).  Combined with a
+    * deliberately long filename, the rendered "[filename] text"
+    * string exceeds FOCUS_TEXT_MAX_BYTES (4096), so
+    * focus_candidate_init's truncation handler fires and clips to
+    * exactly 4096 bytes.  The adapter must surface the candidate
+    * with truncated text — NOT pre-reject and drop it (the bug
+    * this test guards against). */
+   const size_t text_size = 4095;
+   char *big_text = malloc(text_size + 1);
+   TEST_ASSERT_NOT_NULL(big_text);
+   memset(big_text, 'Y', text_size);
+   big_text[text_size] = '\0';
+
+   /* Filename "really_long_filename_to_force_overflow.pdf" (42 chars)
+    * + brackets + space (3 chars) + 4095 chars of text = 4140 chars
+    * rendered, well over the 4096 cap, guaranteeing the truncation
+    * path is exercised. */
+   seed_chunk(0, 100, 1, big_text, "really_long_filename_to_force_overflow.pdf", embed_v1,
+              1700000000);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", embed_q, EXT_MOCK_DIMS,
+                                                1700000000, 5, &result));
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         fc = &result.candidates[i];
+   /* (a) candidate surfaces (NOT pre-rejected by adapter) */
+   TEST_ASSERT_NOT_NULL_MESSAGE(fc, "oversize chunk must surface — adapter must NOT pre-reject; "
+                                    "framework's focus_candidate_init must truncate cleanly");
+   /* (b) truncation actually happened — text is exactly
+    * FOCUS_TEXT_MAX_BYTES bytes (NOT just "≤", which would also
+    * pass on a no-truncation regression).  Proves the framework,
+    * not the adapter, does the size-bounding. */
+   TEST_ASSERT_EQUAL_INT_MESSAGE(4096, (int)strlen(fc->text),
+                                 "rendered text must be truncated to exactly "
+                                 "FOCUS_TEXT_MAX_BYTES — proves framework-side truncation");
+   /* (c) opening "[filename]" prefix retained — content kept from
+    * the head, not garbled by partial render. */
+   TEST_ASSERT_TRUE(strstr(fc->text, "really_long_filename") != NULL);
+
+   focus_result_free(&result);
+   free(big_text);
+}
+
 static void test_memory_cycle_1000x(void) {
    const time_t now = 1700000000;
    seed_chunk(0, 1, 1, "doc", "f.txt", embed_v1, now);
@@ -764,6 +862,10 @@ int main(void) {
    /* End-to-end via framework */
    RUN_TEST(test_register_all_external_succeeds);
    RUN_TEST(test_end_to_end_compose_with_both_adapters);
+
+   /* Document-chunk size handling */
+   RUN_TEST(test_document_3kb_chunk_passthrough);
+   RUN_TEST(test_document_oversize_chunk_truncated_not_rejected);
 
    /* Memory ownership cycle (ASan target) */
    RUN_TEST(test_memory_cycle_1000x);
