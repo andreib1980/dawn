@@ -27,6 +27,39 @@
  */
 
 /* =============================================================================
+ * Debug-mode gate (Phase 1h)
+ *
+ * The entire focus-injection surface (per-turn block, empty-state line, and
+ * filter-match chip anchor) is hidden by default and only revealed when the
+ * existing #debug-btn toggle flips body.debug-mode (see dawn.js:1453).
+ * Mirrors the .transcript-entry.debug pattern in transcript.css:357.
+ *
+ * Scope note: silent-observe's chip lives in the same #warning-chip-rail
+ * but is NOT gated here — Phase 0's chip is a separate always-on safety
+ * surface.  We gate ONLY #context-injection-warning-chip-anchor.
+ * ============================================================================= */
+.dawn-context-injection-block,
+.dawn-context-injection-empty-line {
+   display: none;
+}
+
+#context-injection-warning-chip-anchor {
+   display: none;
+}
+
+body.debug-mode .dawn-context-injection-block {
+   display: block;
+}
+
+body.debug-mode .dawn-context-injection-empty-line {
+   display: block;
+}
+
+body.debug-mode #context-injection-warning-chip-anchor {
+   display: block;
+}
+
+/* =============================================================================
  * Block container — anchored inline in the transcript above the assistant
  * response for the current turn.
  * ============================================================================= */
