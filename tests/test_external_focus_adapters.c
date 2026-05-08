@@ -1,0 +1,772 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Unit tests for src/tools/document_focus_adapter.c +
+ * src/tools/calendar_focus_adapter.c — Phase 1d adapters wired into
+ * the focus-source framework.  Cross-user isolation, ranker shape,
+ * empty-result behavior, partial-failure cleanup, multi-account cap,
+ * NULL-query safety, item_id opacity, calendar event-time recency,
+ * and the network-call invariant are all exercised here.
+ *
+ * Email adapter is DEFERRED to v2 — see docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md
+ * §"API Audit (Phase 1d)" for the missing-cache rationale.  No tests
+ * cover an email path because there is no email path to cover.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "config/dawn_config.h"
+#include "dawn_error.h"
+#include "memory/focus_source.h"
+#include "memory/focus_source_internal.h"
+#include "test_external_focus_adapters_mocks.h"
+#include "tools/external_focus_adapters.h"
+#include "unity.h"
+
+/* =====================================================================
+ * Fixture / test setup
+ * ===================================================================== */
+
+static void config_defaults_for_test(void) {
+   /* Open ranker so the assertions on candidate counts aren't masked by
+    * min_score / token-budget trimming.  Per-source weights all 1.0. */
+   memset(&g_config, 0, sizeof(g_config));
+   g_config.memory.focus_injection.enabled = true;
+   g_config.memory.focus_injection.focus_budget_tokens = 4096;
+   g_config.memory.focus_injection.top_k = 32;
+   g_config.memory.focus_injection.min_score = 0.0f;
+   g_config.memory.focus_injection.weight_semantic = 1.0f;
+   g_config.memory.focus_injection.weight_recency = 0.0f;
+   g_config.memory.focus_injection.weight_importance = 0.0f;
+   g_config.memory.focus_injection.weight_source = 0.0f;
+}
+
+void setUp(void) {
+   focus_unregister_all();
+   ext_mock_reset();
+   config_defaults_for_test();
+}
+
+void tearDown(void) {
+}
+
+/* Identity-pointed unit-norm embeddings shared across tests. */
+static const float embed_v1[EXT_MOCK_DIMS] = { 1.0f, 0.0f, 0.0f, 0.0f };
+static const float embed_v2[EXT_MOCK_DIMS] = { 0.0f, 1.0f, 0.0f, 0.0f };
+static const float embed_q[EXT_MOCK_DIMS] = { 1.0f, 0.0f, 0.0f, 0.0f };
+
+/* =====================================================================
+ * Fixture builders
+ * ===================================================================== */
+
+static void seed_chunk(int idx,
+                       int64_t id,
+                       int user_id,
+                       const char *text,
+                       const char *filename,
+                       const float *embedding,
+                       time_t created_at) {
+   document_chunk_t *c = &s_ext_mock.chunks[idx];
+   memset(c, 0, sizeof(*c));
+   c->id = id;
+   c->chunk_index = idx;
+   strncpy(c->text, text, sizeof(c->text) - 1);
+   strncpy(c->doc_filename, filename, sizeof(c->doc_filename) - 1);
+   strncpy(c->doc_filetype, "txt", sizeof(c->doc_filetype) - 1);
+   c->document_id = id; /* good enough for tests */
+   c->embedding_norm = 1.0f;
+   c->created_at = created_at;
+   s_ext_mock.chunk_user_id[idx] = user_id;
+   s_ext_mock.chunk_embeddings[idx] = embedding;
+}
+
+static void seed_account(int idx, int64_t id, int user_id, const char *name) {
+   calendar_account_t *a = &s_ext_mock.accounts[idx];
+   memset(a, 0, sizeof(*a));
+   a->id = id;
+   a->user_id = user_id;
+   strncpy(a->name, name, sizeof(a->name) - 1);
+   a->enabled = true;
+}
+
+static void seed_calendar(int idx, int64_t id, int64_t account_id, const char *name, bool active) {
+   calendar_calendar_t *c = &s_ext_mock.calendars[idx];
+   memset(c, 0, sizeof(*c));
+   c->id = id;
+   c->account_id = account_id;
+   strncpy(c->display_name, name, sizeof(c->display_name) - 1);
+   c->is_active = active;
+}
+
+static void seed_occurrence(int idx,
+                            int64_t id,
+                            int64_t calendar_id,
+                            const char *summary,
+                            time_t dtstart,
+                            const char *event_uid) {
+   calendar_occurrence_t *o = &s_ext_mock.occurrences[idx];
+   memset(o, 0, sizeof(*o));
+   o->id = id;
+   /* Real schema joins occurrence -> event -> calendar; tests skip
+    * the event indirection and stash calendar_id in the parallel array. */
+   s_ext_mock.occurrence_calendar_id[idx] = calendar_id;
+   strncpy(o->summary, summary, sizeof(o->summary) - 1);
+   if (event_uid != NULL)
+      strncpy(o->event_uid, event_uid, sizeof(o->event_uid) - 1);
+   o->dtstart = dtstart;
+   o->dtend = dtstart + 3600;
+   o->is_cancelled = false;
+}
+
+/* Convenience: build a "single user, single account, single
+ * always-active calendar" baseline so individual tests focus on what
+ * varies.  Returns the calendar_id the seeded occurrences should
+ * attach to. */
+static int64_t seed_basic_user_calendar(int user_id) {
+   seed_account(s_ext_mock.account_count++, 1, user_id, "primary");
+   seed_calendar(s_ext_mock.calendar_count++, 100, 1, "personal", true);
+   return 100;
+}
+
+/* =====================================================================
+ * 1-2.  Cross-user isolation — load-bearing security gates
+ * ===================================================================== */
+
+static void test_document_cross_user(void) {
+   seed_chunk(0, 100, /*user*/ 1, "user1 secret chunk", "u1.txt", embed_v1, 1700000000);
+   seed_chunk(1, 101, /*user*/ 2, "user2 chunk text", "u2.txt", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 2;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(/*user_id*/ 2, false, "anything", embed_q,
+                                                EXT_MOCK_DIMS, 1700000200, 5, &result));
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0) {
+         TEST_ASSERT_TRUE_MESSAGE(strstr(result.candidates[i].text, "user2") != NULL,
+                                  "document adapter must NOT surface other users' chunks");
+         TEST_ASSERT_NULL_MESSAGE(strstr(result.candidates[i].text, "secret"),
+                                  "user1 secret content must not appear in user2 result");
+      }
+   }
+   focus_result_free(&result);
+}
+
+static void test_calendar_cross_user(void) {
+   seed_account(0, 1, /*user*/ 1, "u1");
+   seed_account(1, 2, /*user*/ 2, "u2");
+   s_ext_mock.account_count = 2;
+   seed_calendar(0, 100, 1, "u1cal", true);
+   seed_calendar(1, 200, 2, "u2cal", true);
+   s_ext_mock.calendar_count = 2;
+   const time_t base = 1700000000;
+   seed_occurrence(0, 1000, /*cal*/ 100, "user1 dentist", base + 3600, "uid-u1");
+   seed_occurrence(1, 1001, /*cal*/ 200, "user2 standup", base + 3600, "uid-u2");
+   s_ext_mock.occurrence_count = 2;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(/*user_id*/ 2, false, NULL, NULL, 0, base, 5, &result));
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0) {
+         TEST_ASSERT_NULL_MESSAGE(strstr(result.candidates[i].text, "user1 dentist"),
+                                  "calendar adapter must NOT surface other users' events");
+         TEST_ASSERT_TRUE(strstr(result.candidates[i].text, "user2 standup") != NULL);
+      }
+   }
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 3-5.  Document adapter happy paths
+ * ===================================================================== */
+
+static void test_document_adapter_shape(void) {
+   seed_chunk(0, 42, 1, "Annual report draft 3", "report.pdf", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "annual", embed_q, EXT_MOCK_DIMS,
+                                                1700000200, 5, &result));
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         fc = &result.candidates[i];
+   TEST_ASSERT_NOT_NULL(fc);
+   TEST_ASSERT_TRUE_MESSAGE(strstr(fc->text, "[report.pdf]") != NULL,
+                            "filename must be rendered as [<filename>] prefix");
+   TEST_ASSERT_TRUE_MESSAGE(strstr(fc->text, "Annual report draft 3") != NULL,
+                            "chunk text must follow the filename prefix");
+   TEST_ASSERT_EQUAL_STRING("document_chunk:42", fc->item_id);
+   TEST_ASSERT_TRUE(fc->semantic_score > 0.99f); /* identity vectors */
+   TEST_ASSERT_EQUAL_INT64(0, fc->provenance.conv_id);
+   focus_result_free(&result);
+}
+
+static void test_document_skipped_when_no_query_embedding(void) {
+   seed_chunk(0, 1, 1, "anything", "f.txt", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* requires_embedding=true → framework skips the adapter. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", /*qembed*/ NULL, 0,
+                                                1700000000, 5, &result));
+   /* No chunk_search_load call should have fired. */
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_chunk_search_load);
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "document_chunk"));
+   focus_result_free(&result);
+}
+
+static void test_document_cap_honoring(void) {
+   for (int i = 0; i < 10; i++) {
+      char text[32];
+      char fname[32];
+      snprintf(text, sizeof(text), "chunk %d", i);
+      snprintf(fname, sizeof(fname), "f%d.txt", i);
+      seed_chunk(i, 100 + i, 1, text, fname, embed_v1, 1700000000);
+   }
+   s_ext_mock.chunk_count = 10;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                /*per_source_max=*/3, &result));
+   int doc_count = 0;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         doc_count++;
+   TEST_ASSERT_EQUAL_INT(3, doc_count);
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 6-10.  Calendar adapter happy paths
+ * ===================================================================== */
+
+static void test_calendar_range_only_path(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(/*user*/ 1);
+   seed_occurrence(0, 5000, cal, "dentist", now + 3600, "uid-1");
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* query_text NULL → search path NOT consulted. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
+         fc = &result.candidates[i];
+   TEST_ASSERT_NOT_NULL(fc);
+   TEST_ASSERT_TRUE(strstr(fc->text, "dentist") != NULL);
+   /* Range-only path → semantic_score is FOCUS_SCORE_NA (negative sentinel). */
+   TEST_ASSERT_TRUE(fc->semantic_score < 0.0f);
+   focus_result_free(&result);
+}
+
+static void test_calendar_search_path_assigns_semantic_score(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* The occurrence is OUTSIDE the 1d-past..7d-future range so the
+    * range path won't surface it; only the search path will.  The
+    * adapter then assigns the search-hit semantic score (0.7). */
+   seed_occurrence(0, 5000, cal, "Pepper birthday", now + 30 * 86400, "uid-x");
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "Pepper", NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
+         fc = &result.candidates[i];
+   TEST_ASSERT_NOT_NULL(fc);
+   TEST_ASSERT_TRUE(fc->semantic_score > 0.6f && fc->semantic_score < 0.8f);
+   focus_result_free(&result);
+}
+
+static void test_calendar_consulted_without_query_embedding(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "standup", now + 3600, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* requires_embedding=false → adapter STILL consulted with NULL embed. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, NULL, /*qembed*/ NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
+   bool saw = false;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
+         saw = true;
+   TEST_ASSERT_TRUE(saw);
+   focus_result_free(&result);
+}
+
+static void test_calendar_empty_query_text_takes_range_path(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "lunch", now + 3600, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* "" → adapter treats as no query, takes range-only path. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "", NULL, 0, now, 5, &result));
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
+   TEST_ASSERT_EQUAL_INT(0, s_ext_mock.call_count_occurrences_search);
+   focus_result_free(&result);
+}
+
+static void test_calendar_inactive_calendar_excluded(void) {
+   const time_t now = 1700000000;
+   seed_account(0, 1, 1, "primary");
+   s_ext_mock.account_count = 1;
+   seed_calendar(0, 100, 1, "active_cal", true);
+   seed_calendar(1, 101, 1, "inactive_cal", false);
+   s_ext_mock.calendar_count = 2;
+   seed_occurrence(0, 5000, /*cal*/ 100, "active event", now + 3600, NULL);
+   seed_occurrence(1, 5001, /*cal*/ 101, "inactive event", now + 3600, NULL);
+   s_ext_mock.occurrence_count = 2;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 10, &result));
+   bool saw_active = false, saw_inactive = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
+         continue;
+      if (strstr(result.candidates[i].text, "active event"))
+         saw_active = true;
+      if (strstr(result.candidates[i].text, "inactive event"))
+         saw_inactive = true;
+   }
+   TEST_ASSERT_TRUE_MESSAGE(saw_active, "active calendar's event must surface");
+   TEST_ASSERT_FALSE_MESSAGE(saw_inactive, "inactive calendar's event must NOT surface");
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 11-13.  Empty-result behavior
+ * ===================================================================== */
+
+static void test_document_empty_db(void) {
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                5, &result));
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "document_chunk"));
+   focus_result_free(&result);
+}
+
+static void test_calendar_empty_db(void) {
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 1700000000, 5, &result));
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "calendar_event"));
+   focus_result_free(&result);
+}
+
+static void test_unknown_user_zero_candidates(void) {
+   /* Seed everything for user_id=1 but query as user_id=99999. */
+   seed_chunk(0, 100, 1, "stuff", "f.txt", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 1, cal, "event", 1700000000 + 3600, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(/*user*/ 99999, false, "stuff", embed_q,
+                                                EXT_MOCK_DIMS, 1700000000, 5, &result));
+   TEST_ASSERT_EQUAL_INT(0, result.candidate_count);
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 14.  Network-call invariant
+ *
+ * Link-level enforcement: this TU does not provide stubs for any
+ * service-layer symbols (calendar_service_*, email_service_*,
+ * document_search) — if the adapter ever regresses to call those,
+ * the link breaks.  Runtime belt-and-suspenders: assert that ONLY the
+ * expected DB-layer counters incremented after a complete compose.
+ * ===================================================================== */
+
+static void test_no_network_calls_during_compose(void) {
+   const time_t now = 1700000000;
+   seed_chunk(0, 1, 1, "doc", "f.txt", embed_v1, now);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 1, cal, "evt", now + 3600, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "doc", embed_q, EXT_MOCK_DIMS, now, 5, &result));
+   /* Only DB-layer counters should be > 0. */
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_chunk_search_load);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_account_list);
+   TEST_ASSERT_TRUE(s_ext_mock.call_count_calendar_list >= 1);
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_in_range);
+   /* search path also fires because query_text was non-empty. */
+   TEST_ASSERT_EQUAL_INT(1, s_ext_mock.call_count_occurrences_search);
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 15-16.  Failure / partial-failure cleanup — out-params zeroed
+ * ===================================================================== */
+
+static void test_document_failure_zeros_outparams(void) {
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   s_ext_mock.fail_chunk_search = true; /* force FAILURE */
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   /* Per-adapter FAILUREs are logged but compose still SUCCEEDs;
+    * the relevant assertion is that no document_chunk candidates
+    * leaked through and no allocations were lost (ASan run covers
+    * the leak side; this asserts the visible state). */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                5, &result));
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "document_chunk"));
+   focus_result_free(&result);
+}
+
+static void test_calendar_failure_zeros_outparams(void) {
+   const time_t now = 1700000000;
+   seed_basic_user_calendar(1);
+   s_ext_mock.fail_occurrences_in_range = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   for (int i = 0; i < result.candidate_count; i++)
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(result.candidates[i].source_id, "calendar_event"));
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 17.  Multi-account cap
+ * ===================================================================== */
+
+static void test_calendar_multi_account_cap(void) {
+   const time_t now = 1700000000;
+   /* User has 5 accounts — adapter should query only the first 3. */
+   for (int i = 0; i < 5; i++) {
+      char name[16];
+      snprintf(name, sizeof(name), "acct%d", i);
+      seed_account(i, 10 + i, 1, name);
+      seed_calendar(i, 100 + i, 10 + i, "cal", true);
+      seed_occurrence(i, 5000 + i, 100 + i, name, now + 3600, NULL);
+   }
+   s_ext_mock.account_count = 5;
+   s_ext_mock.calendar_count = 5;
+   s_ext_mock.occurrence_count = 5;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 32, &result));
+   /* Only 3 calendar_list calls fire (cap = EXTERNAL_MAX_ACCOUNTS_PER_COMPOSE). */
+   TEST_ASSERT_EQUAL_INT(3, s_ext_mock.call_count_calendar_list);
+   /* Only the first-3 accounts' events surface. */
+   bool saw_acct[5] = { false };
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
+         continue;
+      for (int j = 0; j < 5; j++) {
+         char needle[16];
+         snprintf(needle, sizeof(needle), "acct%d", j);
+         if (strstr(result.candidates[i].text, needle))
+            saw_acct[j] = true;
+      }
+   }
+   TEST_ASSERT_TRUE(saw_acct[0] && saw_acct[1] && saw_acct[2]);
+   TEST_ASSERT_FALSE(saw_acct[3]);
+   TEST_ASSERT_FALSE(saw_acct[4]);
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 18-19.  ITEM_ID server-generation invariants
+ * ===================================================================== */
+
+static void test_document_item_id_format(void) {
+   seed_chunk(0, 12345, 1, "x", "f.txt", embed_v1, 1700000000);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "x", embed_q, EXT_MOCK_DIMS, 1700000000,
+                                                5, &result));
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         fc = &result.candidates[i];
+   TEST_ASSERT_NOT_NULL(fc);
+   TEST_ASSERT_EQUAL_STRING("document_chunk:12345", fc->item_id);
+   focus_result_free(&result);
+}
+
+static void test_calendar_item_id_never_contains_ical_uid(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* event_uid is upstream-controlled (CalDAV); item_id MUST be the
+    * local DB row id (occurrence.id), NEVER built from event_uid. */
+   const char *attacker_uid = "PAYLOAD-IGNORE-ALL-PRIOR";
+   seed_occurrence(0, /*occ_id*/ 99, cal, "harmless title", now + 3600, attacker_uid);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   const focus_candidate_t *fc = NULL;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
+         fc = &result.candidates[i];
+   TEST_ASSERT_NOT_NULL(fc);
+   TEST_ASSERT_EQUAL_STRING("calendar_occ:99", fc->item_id);
+   TEST_ASSERT_NULL_MESSAGE(strstr(fc->item_id, "PAYLOAD"),
+                            "item_id must never contain user-influenceable iCal UID");
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 20-22.  Calendar event-time recency / window behavior
+ * ===================================================================== */
+
+static void test_calendar_today_higher_recency_than_far_future(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* Today +1h vs day-6 (still inside the 7d window). */
+   seed_occurrence(0, 1, cal, "today", now + 3600, NULL);
+   seed_occurrence(1, 2, cal, "in_six_days", now + 6 * 86400, NULL);
+   s_ext_mock.occurrence_count = 2;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 10, &result));
+   const focus_candidate_t *today = NULL, *future = NULL;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "calendar_event") != 0)
+         continue;
+      if (strstr(result.candidates[i].text, "today"))
+         today = &result.candidates[i];
+      else if (strstr(result.candidates[i].text, "in_six_days"))
+         future = &result.candidates[i];
+   }
+   TEST_ASSERT_NOT_NULL(today);
+   TEST_ASSERT_NOT_NULL(future);
+   TEST_ASSERT_TRUE_MESSAGE(today->recency_score > future->recency_score,
+                            "today's event must score higher recency than a 6-day-out event");
+   focus_result_free(&result);
+}
+
+static void test_calendar_yesterday_still_surfaces(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* Half a day ago — inside the 1-day past window. */
+   seed_occurrence(0, 1, cal, "earlier_today", now - 12 * 3600, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   bool saw = false;
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0 &&
+          strstr(result.candidates[i].text, "earlier_today"))
+         saw = true;
+   TEST_ASSERT_TRUE(saw);
+   focus_result_free(&result);
+}
+
+static void test_calendar_far_future_outside_range(void) {
+   const time_t now = 1700000000;
+   const int64_t cal = seed_basic_user_calendar(1);
+   /* 6 months out — outside the 7-day forward window; range path
+    * skips it.  No query_text → search path also doesn't fire. */
+   seed_occurrence(0, 1, cal, "vacation", now + 180 * 86400, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, now, 5, &result));
+   for (int i = 0; i < result.candidate_count; i++)
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
+         TEST_FAIL_MESSAGE("event 6 months out must NOT appear via the range-only path");
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 23-24.  Register-all + end-to-end
+ * ===================================================================== */
+
+static void test_register_all_external_succeeds(void) {
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   /* Re-register without focus_unregister_all() must FAIL on the first
+    * duplicate (document_chunk) per the framework's no-overwrite rule. */
+   TEST_ASSERT_EQUAL_INT(FAILURE, external_focus_adapters_register_all());
+}
+
+static void test_end_to_end_compose_with_both_adapters(void) {
+   const time_t now = 1700000000;
+   seed_chunk(0, 1, 1, "doc body", "ref.pdf", embed_v1, now);
+   s_ext_mock.chunk_count = 1;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "soon", now + 3600, NULL);
+   s_ext_mock.occurrence_count = 1;
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         focus_compose(1, false, "doc", embed_q, EXT_MOCK_DIMS, now, 5, &result));
+   bool saw_doc = false, saw_cal = false;
+   for (int i = 0; i < result.candidate_count; i++) {
+      if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
+         saw_doc = true;
+      if (strcmp(result.candidates[i].source_id, "calendar_event") == 0)
+         saw_cal = true;
+   }
+   TEST_ASSERT_TRUE_MESSAGE(saw_doc, "document_chunk candidate must surface end-to-end");
+   TEST_ASSERT_TRUE_MESSAGE(saw_cal, "calendar_event candidate must surface end-to-end");
+   focus_result_free(&result);
+}
+
+/* =====================================================================
+ * 25.  Memory ownership cycle — register/compose/free 1000x
+ *
+ * Production failure mode for missed `focus_result_free()` calls or
+ * leaked mid-loop allocations is unbounded growth.  ASan picks up the
+ * leak on any single iteration; the loop both stresses the contract
+ * and serves as a regression for the failure-cleanup paths exercised
+ * above.
+ * ===================================================================== */
+
+static void test_memory_cycle_1000x(void) {
+   const time_t now = 1700000000;
+   seed_chunk(0, 1, 1, "doc", "f.txt", embed_v1, now);
+   seed_chunk(1, 2, 1, "doc2", "g.txt", embed_v2, now);
+   s_ext_mock.chunk_count = 2;
+   s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
+   s_ext_mock.embeddings_available = true;
+   const int64_t cal = seed_basic_user_calendar(1);
+   seed_occurrence(0, 5000, cal, "evt1", now + 3600, NULL);
+   seed_occurrence(1, 5001, cal, "evt2", now + 7200, NULL);
+   s_ext_mock.occurrence_count = 2;
+
+   for (int iter = 0; iter < 1000; iter++) {
+      focus_unregister_all();
+      TEST_ASSERT_EQUAL_INT(SUCCESS, external_focus_adapters_register_all());
+      focus_compose_result_t result = { 0 };
+      TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "doc", embed_q, EXT_MOCK_DIMS, now, 5,
+                                                   &result));
+      focus_result_free(&result);
+   }
+}
+
+int main(void) {
+   UNITY_BEGIN();
+
+   /* Cross-user isolation */
+   RUN_TEST(test_document_cross_user);
+   RUN_TEST(test_calendar_cross_user);
+
+   /* Document adapter happy paths */
+   RUN_TEST(test_document_adapter_shape);
+   RUN_TEST(test_document_skipped_when_no_query_embedding);
+   RUN_TEST(test_document_cap_honoring);
+
+   /* Calendar adapter happy paths */
+   RUN_TEST(test_calendar_range_only_path);
+   RUN_TEST(test_calendar_search_path_assigns_semantic_score);
+   RUN_TEST(test_calendar_consulted_without_query_embedding);
+   RUN_TEST(test_calendar_empty_query_text_takes_range_path);
+   RUN_TEST(test_calendar_inactive_calendar_excluded);
+
+   /* Empty-result behavior */
+   RUN_TEST(test_document_empty_db);
+   RUN_TEST(test_calendar_empty_db);
+   RUN_TEST(test_unknown_user_zero_candidates);
+
+   /* Network-call invariant */
+   RUN_TEST(test_no_network_calls_during_compose);
+
+   /* Failure / partial-failure cleanup */
+   RUN_TEST(test_document_failure_zeros_outparams);
+   RUN_TEST(test_calendar_failure_zeros_outparams);
+
+   /* Multi-account cap */
+   RUN_TEST(test_calendar_multi_account_cap);
+
+   /* ITEM_ID server-generation invariants */
+   RUN_TEST(test_document_item_id_format);
+   RUN_TEST(test_calendar_item_id_never_contains_ical_uid);
+
+   /* Calendar event-time recency */
+   RUN_TEST(test_calendar_today_higher_recency_than_far_future);
+   RUN_TEST(test_calendar_yesterday_still_surfaces);
+   RUN_TEST(test_calendar_far_future_outside_range);
+
+   /* End-to-end via framework */
+   RUN_TEST(test_register_all_external_succeeds);
+   RUN_TEST(test_end_to_end_compose_with_both_adapters);
+
+   /* Memory ownership cycle (ASan target) */
+   RUN_TEST(test_memory_cycle_1000x);
+
+   return UNITY_END();
+}

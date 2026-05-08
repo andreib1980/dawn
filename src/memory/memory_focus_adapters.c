@@ -43,7 +43,6 @@
 
 #include "memory/memory_focus_adapters.h"
 
-#include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -55,6 +54,8 @@
 
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/focus_candidate_helpers.h"
+#include "memory/focus_recency.h"
 #include "memory/focus_source.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
@@ -69,21 +70,12 @@
  * All file-static so 1j tuning lands here without touching configs.  See
  * `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md` §"Phase 1 — Per-Turn Focus"
  * for the bench-driven tuning plan.
+ *
+ * Phase 1d extracted the previously-local recency / candidate-helper
+ * primitives to `focus_recency.{c,h}` + `focus_candidate_helpers.{c,h}`
+ * so L3 external adapters can share them without depending on the
+ * memory subsystem.  The constants below are memory-adapter-only.
  * ============================================================================= */
-
-/* Recency decay half-life applied uniformly across adapters in v1.
- * TODO(1j): per-source tuning + config exposure once bench evidence
- * justifies the additional knobs. */
-#define RECENCY_HALF_LIFE_SECONDS (14 * 86400)
-
-/* Hard cap on candidate text length copied into the focus block.
- * Defends downstream LLM-prompt assembly against an unexpectedly huge
- * fact / summary; truncation is logged once per call when triggered. */
-#define FOCUS_TEXT_MAX_BYTES 1024
-
-/* "fact:9223372036854775807\0" → 24 chars; entity / relation /
- * document_chunk variants all fit within 64. */
-#define ITEM_ID_BUFLEN 64
 
 /* Importance-score formula constants (1c-author choices, NOT
  * design-doc-mandated): photo indicates user-curation; keyword
@@ -181,126 +173,6 @@ static void release_entity_scratch(void) {
 }
 
 /* =============================================================================
- * Shared helpers
- * ============================================================================= */
-
-/* Recency decay: 0.5 ** (age / half_life), clamped to [0, 1].  Items in
- * the future (clock skew) collapse to 1.0.  Returns FOCUS_SCORE_NA
- * NEVER — recency is always meaningful given a non-zero timestamp.
- * For zero `item_ts` (no creation time recorded) returns 0.0 so the
- * ranker doesn't credit unknowns. */
-static float compute_recency_score(time_t item_ts, time_t now) {
-   if (item_ts <= 0)
-      return 0.0f;
-   if (item_ts >= now)
-      return 1.0f;
-   const double age = (double)(now - item_ts);
-   const double half = (double)RECENCY_HALF_LIFE_SECONDS;
-   const double decay = pow(0.5, age / half);
-   if (decay <= 0.0)
-      return 0.0f;
-   if (decay >= 1.0)
-      return 1.0f;
-   return (float)decay;
-}
-
-/* Failure-path teardown — frees text and item_id allocated by
- * candidate_init.  NOT used on the success path (framework's
- * focus_result_free() handles that). */
-static void candidate_cleanup_on_failure(focus_candidate_t *c) {
-   if (c == NULL)
-      return;
-   free(c->text);
-   c->text = NULL;
-   free(c->item_id);
-   c->item_id = NULL;
-}
-
-/* Free `n` partially-populated candidates plus the array itself, then
- * zero out the caller's out-params per the `focus_source_query_fn`
- * FAILURE contract. */
-static void adapter_failure_cleanup(focus_candidate_t *array,
-                                    int populated,
-                                    focus_candidate_t **out_candidates,
-                                    int *out_count) {
-   if (array != NULL) {
-      for (int i = 0; i < populated; i++)
-         candidate_cleanup_on_failure(&array[i]);
-      free(array);
-   }
-   if (out_candidates != NULL)
-      *out_candidates = NULL;
-   if (out_count != NULL)
-      *out_count = 0;
-}
-
-/* Allocate-and-strdup the text + item_id into `c`.  Truncates `text`
- * to `FOCUS_TEXT_MAX_BYTES` with a logged warning per adapter call
- * (warning fires on the FIRST truncation only via the caller-supplied
- * flag — adapter pre-allocates a `bool truncated_warned = false`).
- *
- * On any allocation failure, partial state is cleaned up and FAILURE
- * is returned. */
-static int candidate_init(focus_candidate_t *c,
-                          const char *source_id,
-                          focus_source_type_t source_type,
-                          const char *text,
-                          const char *item_id,
-                          time_t item_timestamp,
-                          float semantic_score,
-                          float recency_score,
-                          float importance_score,
-                          bool *truncated_warned) {
-   if (c == NULL || source_id == NULL || text == NULL || item_id == NULL)
-      return FAILURE;
-
-   memset(c, 0, sizeof(*c));
-   c->source_id = source_id;
-   c->source_type = source_type;
-   c->semantic_score = semantic_score;
-   c->recency_score = recency_score;
-   c->importance_score = importance_score;
-   c->item_timestamp = item_timestamp;
-
-   const size_t text_len = strlen(text);
-   const size_t copy_len = (text_len > FOCUS_TEXT_MAX_BYTES) ? FOCUS_TEXT_MAX_BYTES : text_len;
-   c->text = malloc(copy_len + 1);
-   if (c->text == NULL) {
-      candidate_cleanup_on_failure(c);
-      return FAILURE;
-   }
-   memcpy(c->text, text, copy_len);
-   c->text[copy_len] = '\0';
-
-   if (text_len > FOCUS_TEXT_MAX_BYTES && truncated_warned != NULL && !*truncated_warned) {
-      *truncated_warned = true;
-      OLOG_WARNING("focus_adapter[%s]: candidate text truncated %zu→%d bytes (further truncations "
-                   "this call suppressed)",
-                   source_id, text_len, FOCUS_TEXT_MAX_BYTES);
-   }
-
-   c->item_id = strdup(item_id);
-   if (c->item_id == NULL) {
-      candidate_cleanup_on_failure(c);
-      return FAILURE;
-   }
-
-   memset(&c->provenance, 0, sizeof(c->provenance));
-   return SUCCESS;
-}
-
-/* Build "<prefix>:<id>" into the caller-supplied buffer.  Returns
- * SUCCESS or FAILURE on snprintf truncation (which would only happen
- * if the int64 representation exceeded the buffer — defensively
- * checked). */
-static int format_item_id(char *buf, size_t buflen, const char *prefix, int64_t id) {
-   const int n = snprintf(buf, buflen, "%s:%lld", prefix, (long long)id);
-   if (n < 0 || (size_t)n >= buflen)
-      return FAILURE;
-   return SUCCESS;
-}
-
-/* =============================================================================
  * Fact adapter
  *
  * source_id          = "memory_fact"
@@ -378,19 +250,21 @@ static int fact_adapter_query(int user_id,
    bool truncated_warned = false;
    int produced = 0;
    for (int i = 0; i < kept; i++) {
-      char item_id[ITEM_ID_BUFLEN];
-      if (format_item_id(item_id, sizeof(item_id), "fact", facts[i].id) != SUCCESS) {
+      char item_id[FOCUS_ITEM_ID_BUFLEN];
+      if (focus_candidate_format_item_id(item_id, sizeof(item_id), "fact", facts[i].id) !=
+          SUCCESS) {
          OLOG_ERROR("fact_adapter: item_id formatting failed (fact_id=%lld)",
                     (long long)facts[i].id);
-         adapter_failure_cleanup(out, produced, out_candidates, out_count);
+         focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          return FAILURE;
       }
-      const float recency = compute_recency_score(facts[i].created_at, now);
-      if (candidate_init(&out[produced], "memory_fact", FOCUS_SOURCE_INTERNAL, facts[i].fact_text,
-                         item_id, facts[i].created_at, scores[i], recency, facts[i].confidence,
-                         &truncated_warned) != SUCCESS) {
-         OLOG_ERROR("fact_adapter: candidate_init failed (fact_id=%lld)", (long long)facts[i].id);
-         adapter_failure_cleanup(out, produced, out_candidates, out_count);
+      const float recency = focus_recency_decay_uniform(facts[i].created_at, now);
+      if (focus_candidate_init(&out[produced], "memory_fact", FOCUS_SOURCE_INTERNAL,
+                               facts[i].fact_text, item_id, facts[i].created_at, scores[i], recency,
+                               facts[i].confidence, &truncated_warned) != SUCCESS) {
+         OLOG_ERROR("fact_adapter: focus_candidate_init failed (fact_id=%lld)",
+                    (long long)facts[i].id);
+         focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          return FAILURE;
       }
       out[produced].provenance.conv_id = conv_ids[i];
@@ -629,23 +503,24 @@ static int entity_adapter_query(int user_id,
       char text_buf[256];
       if (render_entity_text(&rows[i].entity, text_buf, sizeof(text_buf)) != SUCCESS)
          continue;
-      char item_id[ITEM_ID_BUFLEN];
-      if (format_item_id(item_id, sizeof(item_id), "entity", rows[i].entity_id) != SUCCESS)
+      char item_id[FOCUS_ITEM_ID_BUFLEN];
+      if (focus_candidate_format_item_id(item_id, sizeof(item_id), "entity", rows[i].entity_id) !=
+          SUCCESS)
          continue;
 
       const time_t ts = (rows[i].entity.last_seen != 0) ? rows[i].entity.last_seen
                                                         : rows[i].entity.first_seen;
-      const float recency = compute_recency_score(ts, now);
+      const float recency = focus_recency_decay_uniform(ts, now);
       float importance = ENTITY_IMPORTANCE_BASE + rows[i].importance_increment;
       if (importance > 1.0f)
          importance = 1.0f;
 
-      if (candidate_init(&out[produced], "memory_entity", FOCUS_SOURCE_INTERNAL, text_buf, item_id,
-                         ts, rows[i].semantic_score, recency, importance,
-                         &truncated_warned) != SUCCESS) {
-         OLOG_ERROR("entity_adapter: candidate_init failed (entity_id=%lld)",
+      if (focus_candidate_init(&out[produced], "memory_entity", FOCUS_SOURCE_INTERNAL, text_buf,
+                               item_id, ts, rows[i].semantic_score, recency, importance,
+                               &truncated_warned) != SUCCESS) {
+         OLOG_ERROR("entity_adapter: focus_candidate_init failed (entity_id=%lld)",
                     (long long)rows[i].entity_id);
-         adapter_failure_cleanup(out, produced, out_candidates, out_count);
+         focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          free(rows);
          return FAILURE;
       }
@@ -852,14 +727,15 @@ static int relation_adapter_query(int user_id,
              SUCCESS) {
             continue;
          }
-         char item_id[ITEM_ID_BUFLEN];
-         if (format_item_id(item_id, sizeof(item_id), "relation", rels[i].id) != SUCCESS)
+         char item_id[FOCUS_ITEM_ID_BUFLEN];
+         if (focus_candidate_format_item_id(item_id, sizeof(item_id), "relation", rels[i].id) !=
+             SUCCESS)
             continue;
-         const float recency = compute_recency_score(rels[i].valid_from, now);
-         if (candidate_init(&out[produced], "memory_relation", FOCUS_SOURCE_INTERNAL, text_buf,
-                            item_id, rels[i].valid_from, subjects[s].cosine, recency,
-                            rels[i].confidence, &truncated_warned) != SUCCESS) {
-            adapter_failure_cleanup(out, produced, out_candidates, out_count);
+         const float recency = focus_recency_decay_uniform(rels[i].valid_from, now);
+         if (focus_candidate_init(&out[produced], "memory_relation", FOCUS_SOURCE_INTERNAL,
+                                  text_buf, item_id, rels[i].valid_from, subjects[s].cosine,
+                                  recency, rels[i].confidence, &truncated_warned) != SUCCESS) {
+            focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
             return FAILURE;
          }
          if (produced < prod_id_cap)
@@ -957,18 +833,19 @@ static int summary_adapter_query(int user_id,
    bool truncated_warned = false;
    int produced = 0;
    for (int i = 0; i < kept; i++) {
-      char item_id[ITEM_ID_BUFLEN];
-      if (format_item_id(item_id, sizeof(item_id), "summary", summaries[i].id) != SUCCESS) {
-         adapter_failure_cleanup(out, produced, out_candidates, out_count);
+      char item_id[FOCUS_ITEM_ID_BUFLEN];
+      if (focus_candidate_format_item_id(item_id, sizeof(item_id), "summary", summaries[i].id) !=
+          SUCCESS) {
+         focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          return FAILURE;
       }
-      const float recency = compute_recency_score(summaries[i].created_at, now);
+      const float recency = focus_recency_decay_uniform(summaries[i].created_at, now);
       const float importance = summaries[i].consolidated ? SUMMARY_IMPORTANCE_CONSOLIDATED
                                                          : SUMMARY_IMPORTANCE_NORMAL;
-      if (candidate_init(&out[produced], "memory_summary", FOCUS_SOURCE_INTERNAL,
-                         summaries[i].summary, item_id, summaries[i].created_at, FOCUS_SCORE_NA,
-                         recency, importance, &truncated_warned) != SUCCESS) {
-         adapter_failure_cleanup(out, produced, out_candidates, out_count);
+      if (focus_candidate_init(&out[produced], "memory_summary", FOCUS_SOURCE_INTERNAL,
+                               summaries[i].summary, item_id, summaries[i].created_at,
+                               FOCUS_SCORE_NA, recency, importance, &truncated_warned) != SUCCESS) {
+         focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          return FAILURE;
       }
       out[produced].provenance.conv_id = conv_ids[i];

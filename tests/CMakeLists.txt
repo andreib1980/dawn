@@ -278,12 +278,33 @@ dawn_add_unit_test(test_memory_fact_search
 
 # Phase 1c: focus-source memory adapters (fact, entity, relation, summary).
 # Links the four adapters + the framework + the extracted fact-search
-# helper against the same programmable stubs.
+# helper + the Phase-1d shared scaffolding (focus_recency,
+# focus_candidate_helpers) against the same programmable stubs.
 dawn_add_unit_test(test_memory_focus_adapters
    SOURCES test_memory_focus_adapters.c test_memory_focus_adapters_stub.c
            ${SRC_ROOT}/src/memory/memory_focus_adapters.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
            ${SRC_ROOT}/src/memory/focus_source.c
+           ${SRC_ROOT}/src/memory/focus_recency.c
+           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+   LIBS    dawn_common unity pthread m
+   LABEL   ci)
+
+# Phase 1d: external focus-source adapters (document chunks + calendar
+# events; email deferred to v2 — see design doc §"API Audit (Phase 1d)").
+# Links the two adapters + their init wrapper + the framework + the
+# Phase-1d shared scaffolding against programmable document_db /
+# calendar_db / memory_embeddings stubs.  Network-call invariant
+# enforced at link level: no service-layer symbols are stubbed; if an
+# adapter ever regresses to call them the link breaks.
+dawn_add_unit_test(test_external_focus_adapters
+   SOURCES test_external_focus_adapters.c test_external_focus_adapters_stub.c
+           ${SRC_ROOT}/src/tools/document_focus_adapter.c
+           ${SRC_ROOT}/src/tools/calendar_focus_adapter.c
+           ${SRC_ROOT}/src/tools/external_focus_adapters_init.c
+           ${SRC_ROOT}/src/memory/focus_source.c
+           ${SRC_ROOT}/src/memory/focus_recency.c
+           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 

@@ -21,11 +21,21 @@
  * Unit tests for config_validate (range, enum, dependency checks).
  */
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "config/config_validate.h"
 #include "config/dawn_config.h"
 #include "unity.h"
+
+/* Stub — config_validate.c calls into llm_silent_observe.c for the
+ * silent-observe provider enum.  Test exercises range / enum / dep
+ * validation only; treat any non-NULL provider as valid so the
+ * silent-observe branch in config_validate doesn't drag the LLM
+ * subsystem into the test link. */
+bool llm_silent_observe_provider_is_valid(const char *provider) {
+   return provider != NULL && provider[0] != '\0';
+}
 
 #define MAX_ERRORS 32
 
@@ -51,6 +61,26 @@ static void set_valid_defaults(void) {
    s_config.memory.recovery_idle_threshold_seconds = 3600;
    s_config.memory.recovery_max_attempts = 2;
    s_config.memory.recovery_recurring_interval_seconds = 86400;
+   /* focus_injection.* added in Phase 1b — needs valid defaults so
+    * config_validate doesn't short-circuit on this field before
+    * reaching the field the individual test is exercising. */
+   s_config.memory.focus_injection.focus_budget_tokens = 1024;
+   s_config.memory.focus_injection.top_k = 8;
+   s_config.memory.focus_injection.min_score = 0.4f;
+   s_config.memory.focus_injection.weight_semantic = 1.0f;
+   s_config.memory.focus_injection.weight_recency = 0.3f;
+   s_config.memory.focus_injection.weight_importance = 0.2f;
+   s_config.memory.focus_injection.weight_source = 1.0f;
+   s_config.memory.focus_injection.source_weights.memory_fact = 1.0f;
+   s_config.memory.focus_injection.source_weights.memory_entity = 0.9f;
+   s_config.memory.focus_injection.source_weights.memory_relation = 0.85f;
+   s_config.memory.focus_injection.source_weights.memory_summary = 0.7f;
+   s_config.memory.focus_injection.source_weights.document_chunk = 0.7f;
+   s_config.memory.focus_injection.source_weights.calendar_event = 0.6f;
+   s_config.memory.focus_injection.source_weights.recent_email = 0.5f;
+   s_config.memory.focus_injection.source_weights.dawn_background = 0.8f;
+   s_config.memory.focus_injection.dedup.recent_window_turns = 8;
+   s_config.memory.focus_injection.dedup.score_uplift_factor = 1.5f;
    s_config.mqtt.port = 1883;
    s_config.network.workers = 4;
    s_config.network.session_timeout_sec = 3600;
