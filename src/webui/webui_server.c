@@ -1627,6 +1627,121 @@ bool conn_require_admin(ws_connection_t *conn) {
  * @param user_id User ID (0 for unauthenticated - returns base prompt copy)
  * @return Allocated prompt string (caller must free)
  */
+/* Build the v44 user-identity block (real_name / preferred_address /
+ * identity_aliases) that's appended after the persona/settings block in
+ * the system prompt.  Returns an allocated string (caller frees) or NULL
+ * if the user has no real_name set.
+ *
+ * Aliases parsing: newline-separated input, strip whitespace, drop empty
+ * lines, dedupe case-insensitive, emit comma-joined.  Total output size
+ * bounded by the AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX +
+ * AUTH_IDENTITY_ALIASES_MAX caps and a small fixed overhead. */
+static char *build_identity_block(int user_id) {
+   if (user_id <= 0)
+      return NULL;
+
+   auth_user_identity_t identity;
+   if (auth_db_get_user_identity(user_id, &identity) != AUTH_DB_SUCCESS)
+      return NULL;
+   if (identity.real_name[0] == '\0')
+      return NULL; /* no real_name → skip the entire block */
+
+   /* Parse identity_aliases: split on \n, strip whitespace per token,
+    * drop empties, dedupe case-insensitive.  Up to 16 aliases tracked. */
+   char joined_aliases[AUTH_IDENTITY_ALIASES_MAX];
+   joined_aliases[0] = '\0';
+   if (identity.identity_aliases[0] != '\0') {
+      char buf[AUTH_IDENTITY_ALIASES_MAX];
+      strncpy(buf, identity.identity_aliases, sizeof(buf) - 1);
+      buf[sizeof(buf) - 1] = '\0';
+
+      char *seen[16];
+      int seen_count = 0;
+      size_t out_off = 0;
+
+      char *save = NULL;
+      for (char *line = strtok_r(buf, "\n", &save); line != NULL && seen_count < 16;
+           line = strtok_r(NULL, "\n", &save)) {
+         /* Strip leading whitespace */
+         while (*line == ' ' || *line == '\t' || *line == '\r')
+            line++;
+         /* Strip trailing whitespace */
+         char *end = line + strlen(line);
+         while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+            end--;
+         *end = '\0';
+         if (*line == '\0')
+            continue;
+         /* Case-insensitive dedupe against already-emitted aliases. */
+         bool dup = false;
+         for (int i = 0; i < seen_count; i++) {
+            if (strcasecmp(seen[i], line) == 0) {
+               dup = true;
+               break;
+            }
+         }
+         if (dup)
+            continue;
+         seen[seen_count++] = line;
+         /* Append to joined_aliases with comma separator. */
+         size_t alias_len = strlen(line);
+         size_t need = alias_len + (out_off > 0 ? 2 : 0); /* + ", " when not first */
+         if (out_off + need + 1 >= sizeof(joined_aliases))
+            break;
+         if (out_off > 0) {
+            joined_aliases[out_off++] = ',';
+            joined_aliases[out_off++] = ' ';
+         }
+         memcpy(joined_aliases + out_off, line, alias_len);
+         out_off += alias_len;
+         joined_aliases[out_off] = '\0';
+      }
+   }
+
+   char block[AUTH_REAL_NAME_MAX + AUTH_PREFERRED_ADDRESS_MAX + AUTH_IDENTITY_ALIASES_MAX + 256];
+   size_t off = 0;
+   size_t rem = sizeof(block);
+   BUF_PRINTF(block, off, rem, "\n\n## User Identity\nYou are speaking with %s.",
+              identity.real_name);
+   if (identity.preferred_address[0] != '\0') {
+      BUF_PRINTF(block, off, rem, " They prefer to be addressed as %s.",
+                 identity.preferred_address);
+   }
+   if (joined_aliases[0] != '\0') {
+      BUF_PRINTF(block, off, rem, " They may also be referred to as: %s.", joined_aliases);
+   }
+   BUF_PRINTF(block, off, rem,
+              " Use this information to recognize when memory facts or extracted entities refer "
+              "to them.\n");
+   return strdup(block);
+}
+
+/* Concatenate an existing owned base prompt with an optional identity
+ * block; transfers ownership of @p base on success and frees the
+ * identity block.  Returns the combined string (caller frees) or @p base
+ * unchanged when no identity block applies. */
+static char *append_identity_block(char *base, char *identity_block) {
+   if (!identity_block)
+      return base;
+   if (!base) {
+      free(identity_block);
+      return NULL;
+   }
+   size_t base_len = strlen(base);
+   size_t id_len = strlen(identity_block);
+   char *combined = malloc(base_len + id_len + 1);
+   if (!combined) {
+      free(identity_block);
+      return base; /* fallback: leave base unchanged */
+   }
+   memcpy(combined, base, base_len);
+   memcpy(combined + base_len, identity_block, id_len);
+   combined[base_len + id_len] = '\0';
+   free(base);
+   free(identity_block);
+   return combined;
+}
+
 /* Internal helper: build the base+persona/settings string only (no
  * memory, no focus).  Phase 1e split — memory and focus are now
  * separate blocks owned by the composer in session_manager. */
@@ -1651,7 +1766,7 @@ static char *build_base_block(int user_id) {
    /* Load user settings */
    auth_user_settings_t settings;
    if (auth_db_get_user_settings(user_id, &settings) != AUTH_DB_SUCCESS)
-      return base_prompt;
+      return append_identity_block(base_prompt, build_identity_block(user_id));
 
    /* Check if any settings are customized */
    bool has_persona = settings.persona_description[0] != '\0';
@@ -1661,7 +1776,7 @@ static char *build_base_block(int user_id) {
    bool is_replace_mode = (strcmp(settings.persona_mode, "replace") == 0);
 
    if (!has_persona && !has_location && !has_timezone && !has_units)
-      return base_prompt;
+      return append_identity_block(base_prompt, build_identity_block(user_id));
 
    size_t base_len = strlen(base_prompt);
 
@@ -1709,7 +1824,7 @@ static char *build_base_block(int user_id) {
                  prefix_len, base_len, suffix_len);
 
       free(base_prompt);
-      return combined;
+      return append_identity_block(combined, build_identity_block(user_id));
    }
 
    /* Append mode: Add user context (persona 512 + loc 128 + tz 64 + units 16 + headers ~40) */
@@ -1743,7 +1858,7 @@ static char *build_base_block(int user_id) {
               context_len);
 
    free(base_prompt);
-   return combined;
+   return append_identity_block(combined, build_identity_block(user_id));
 }
 
 int dawn_build_prompt(int user_id,

@@ -2842,6 +2842,15 @@ static int handle_memory_entity_link_user_self(int client_fd,
       free(result);
       return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
    }
+   if (rc == MEMORY_DB_REAL_NAME_REQUIRED) {
+      free(result);
+      /* Surface a readable hint instead of leaking the raw error code —
+       * the operator's next step is to set real_name in the WebUI. */
+      return send_text_response(
+          client_fd, ADMIN_RESP_FAILURE,
+          "link-user-self requires a real_name set. Configure in WebUI Settings → User → Real "
+          "name.");
+   }
    if (rc != MEMORY_DB_SUCCESS) {
       free(result);
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
@@ -2861,15 +2870,18 @@ static int handle_memory_entity_link_user_self(int client_fd,
       } else {
          off += snprintf(report + off, sizeof(report) - off,
                          "  user-self canonical: %s (would create)\n", result->self_canonical_name);
-         /* Conservative-score note: with no existing self canonical, the
-          * dry-run scores against a synthetic entity that has id=0 — DB-
-          * touching signals (relation overlap, contact overlap, embedding
-          * cosine) all forfeit to 0, so the report is a lower bound on
-          * what commit will actually score against the materialized self. */
+         /* v44 (Phase 1.5 Ckpt B): the synthetic seed pulls its tokens
+          * from users.real_name + users.identity_aliases, not from
+          * persona_description.  DB-touching signals (relation overlap,
+          * contact overlap, embedding cosine) still forfeit to 0 because
+          * the synthetic carries id=0 — so the scores are a lower bound
+          * on what commit will actually compute against the materialized
+          * self. */
          off += snprintf(report + off, sizeof(report) - off,
-                         "  Note: scores below are conservative — no existing user-self "
-                         "canonical means embedding/relation signals forfeit; commit will "
-                         "score higher.\n");
+                         "  Note: synthetic seed built from real_name + aliases "
+                         "(scores below are conservative — DB-touching signals like "
+                         "embedding cosine and relation overlap forfeit to 0; commit "
+                         "will score higher against the materialized self).\n");
       }
    } else {
       off += snprintf(report + off, sizeof(report) - off, "  user-self canonical: %s (id=%lld)\n",

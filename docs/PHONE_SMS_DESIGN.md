@@ -639,14 +639,14 @@ Receive and send multimedia messages (images, video, contacts). The SIM7600G-H s
 
 Improve contact resolution to support natural language references ("my daughter", "the electrician") and multi-result disambiguation.
 
-**Current behavior**: `resolve_number()` does a direct `contacts_find()` LIKE search on entity name. Works for exact names ("Kris", "Mom") but fails for relational references ("my daughter") and silently picks the first result when multiple contacts match.
+**Current behavior**: `resolve_number()` does a direct `contacts_find()` LIKE search on entity name. Works for exact names ("Jon", "Mom") but fails for relational references ("my daughter") and silently picks the first result when multiple contacts match.
 
 **Required work**:
 
-1. **Memory-aware resolution**: When `contacts_find()` returns zero results, query the memory system (entity relations, facts) to resolve references like "my daughter" → entity "Sarah" → phone contact. This leverages existing memory_db relations (e.g., `Kris → has_daughter → Sarah`).
+1. **Memory-aware resolution**: When `contacts_find()` returns zero results, query the memory system (entity relations, facts) to resolve references like "my daughter" → entity "Sarah" → phone contact. This leverages existing memory_db relations (e.g., `Jon → has_daughter → Sarah`).
 
 2. **Multi-result disambiguation**: When `contacts_find()` returns multiple phone contacts for an ambiguous query:
-   - Return all matches to the LLM with an index: "Multiple contacts found: 1. Sarah Kersey (+1555...) 2. Emily Kersey (+1555...). Which one?"
+   - Return all matches to the LLM with an index: "Multiple contacts found: 1. Sarah Smith (+1555...) 2. Emily Smith (+1555...). Which one?"
    - Add a `select_contact` action or extend `confirm_call`/`confirm_sms` to accept an index
    - LLM asks the user and re-calls with the selected index
 

@@ -521,8 +521,8 @@ static int read_schema_version(void) {
 static void test_v43_schema_fresh_install(void) {
    /* setUp gave us a fresh :memory: DB at the current AUTH_DB_SCHEMA_VERSION;
     * verify all v43 objects are present and the version is correct. */
-   TEST_ASSERT_EQUAL_INT(43, read_schema_version());
-   TEST_ASSERT_EQUAL_INT(43, AUTH_DB_SCHEMA_VERSION);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SCHEMA_VERSION, read_schema_version());
+   TEST_ASSERT_GREATER_OR_EQUAL_INT(43, AUTH_DB_SCHEMA_VERSION);
 
    /* New columns on memory_entities */
    TEST_ASSERT_TRUE(column_exists("memory_entities", "canonical_id"));
@@ -545,7 +545,7 @@ static void test_v43_partial_unique_user_self_constraint(void) {
     * insert two such rows for the same user — the second must fail.  Two
     * is_user_self=0 rows must coexist freely (the partial WHERE clause
     * excludes them from the uniqueness constraint). */
-   int uid = create_and_get_id("kris", "hash", true);
+   int uid = create_and_get_id("jon", "hash", true);
    TEST_ASSERT_GREATER_THAN(0, uid);
 
    const char *insert_sql =
@@ -556,8 +556,8 @@ static void test_v43_partial_unique_user_self_constraint(void) {
    /* First is_user_self=1 row — must succeed. */
    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
    sqlite3_bind_int(stmt, 1, uid);
-   sqlite3_bind_text(stmt, 2, "Kristopher Kersey", -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 3, "kristopher kersey", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 2, "Jonathan Smith", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "jonathan smith", -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 4, 1);
    TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(stmt));
    sqlite3_finalize(stmt);
@@ -566,8 +566,8 @@ static void test_v43_partial_unique_user_self_constraint(void) {
    stmt = NULL;
    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
    sqlite3_bind_int(stmt, 1, uid);
-   sqlite3_bind_text(stmt, 2, "Kris", -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 3, "kris", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 2, "Jon", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "jon", -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 4, 1);
    int rc = sqlite3_step(stmt);
    TEST_ASSERT_EQUAL_INT(SQLITE_CONSTRAINT, rc);
@@ -577,8 +577,8 @@ static void test_v43_partial_unique_user_self_constraint(void) {
    stmt = NULL;
    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
    sqlite3_bind_int(stmt, 1, uid);
-   sqlite3_bind_text(stmt, 2, "Kris", -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 3, "kris", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 2, "Jon", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "jon", -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 4, 0);
    TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(stmt));
    sqlite3_finalize(stmt);
@@ -614,7 +614,7 @@ static void test_v43_migration_from_v42(void) {
 
    /* Step 1: fresh init creates v43 schema. */
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(db_path));
-   TEST_ASSERT_EQUAL_INT(43, read_schema_version());
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SCHEMA_VERSION, read_schema_version());
 
    /* Insert a user + memory_entities row at the v43 schema; we'll verify
     * the row survives the round trip. */
@@ -700,7 +700,7 @@ static void test_v43_migration_from_v42(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(db_path));
 
    /* Verify v43 schema is back. */
-   TEST_ASSERT_EQUAL_INT(43, read_schema_version());
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SCHEMA_VERSION, read_schema_version());
    TEST_ASSERT_TRUE(column_exists("memory_entities", "canonical_id"));
    TEST_ASSERT_TRUE(column_exists("memory_entities", "is_user_self"));
    TEST_ASSERT_TRUE(master_object_exists("table", "memory_entity_aliases"));

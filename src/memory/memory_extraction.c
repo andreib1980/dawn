@@ -122,8 +122,8 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "This is critical for multi-speaker conversations where dropping the subject "
     "loses who-did-what attribution.\n"
     "- IMPORTANT: Reuse entity names from EXISTING USER PROFILE exactly as listed. "
-    "Do NOT create alternate names for the same entity (e.g., use \"Kris\" not \"Kris Kersey\" "
-    "if \"Kris\" is already known)\n"
+    "Do NOT create alternate names for the same entity (e.g., use \"Jon\" not \"Jon Smith\" "
+    "if \"Jon\" is already known)\n"
     "- Generate a concise title (under 40 characters) that captures the main topic(s)\n"
     "- Title should be human-friendly, not a sentence — more like a label\n"
     "- If nothing notable to extract, return empty arrays\n";

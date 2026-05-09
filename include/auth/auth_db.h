@@ -428,6 +428,50 @@ int auth_db_set_user_settings(int user_id, const auth_user_settings_t *settings)
  */
 int auth_db_init_user_settings(int user_id);
 
+/* =============================================================================
+ * User identity fields (v44)
+ *
+ * Stored on the users table (NOT user_settings — these are user-record
+ * metadata, not settings the user actively tunes).  Used by:
+ *   - WebUI Settings → User section (real_name, preferred_address,
+ *     identity_aliases)
+ *   - LLM system-prompt injection in memory_context.c
+ *   - link-user-self synthetic-seed scoring in memory_db_alias.c
+ *
+ * identity_aliases is a newline-separated list parsed at use-site (split
+ * on \n, strip whitespace, drop empties, dedupe case-insensitive).
+ * ============================================================================= */
+#define AUTH_REAL_NAME_MAX 128
+#define AUTH_PREFERRED_ADDRESS_MAX 64
+#define AUTH_IDENTITY_ALIASES_MAX 1024
+
+typedef struct {
+   char real_name[AUTH_REAL_NAME_MAX];
+   char preferred_address[AUTH_PREFERRED_ADDRESS_MAX];
+   char identity_aliases[AUTH_IDENTITY_ALIASES_MAX]; /**< newline-separated */
+} auth_user_identity_t;
+
+/**
+ * @brief Get a user's identity fields (real_name, preferred_address,
+ * identity_aliases) from the users table.  Empty strings indicate "unset"
+ * (the row's column is NULL).
+ *
+ * @param user_id User ID
+ * @param out     Output struct (zeroed before fill)
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int auth_db_get_user_identity(int user_id, auth_user_identity_t *out);
+
+/**
+ * @brief Set a user's identity fields.  Empty strings are persisted as
+ * NULL (column reset).
+ *
+ * @param user_id User ID
+ * @param id      Source struct
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int auth_db_set_user_identity(int user_id, const auth_user_identity_t *id);
+
 /* ============================================================================
  * Session Operations
  * ============================================================================ */

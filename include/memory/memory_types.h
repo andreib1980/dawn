@@ -57,6 +57,12 @@ extern "C" {
  * Distinct from NOT_FOUND so callers can render a helpful "pick its
  * canonical instead" message. */
 #define MEMORY_DB_INVALID_ALIAS_TARGET 4
+/* v44 entity-merge Phase 1.5: link-user-self requires a non-empty
+ * users.real_name so the synthetic seed (or the seeded canonical, on
+ * commit) has a meaningful name to anchor scoring against.  Distinct
+ * from NOT_FOUND so the admin handler can surface a "Configure WebUI
+ * Settings → User → Real name" hint instead of a generic error. */
+#define MEMORY_DB_REAL_NAME_REQUIRED 5
 
 /* =============================================================================
  * Provenance
@@ -244,7 +250,7 @@ typedef struct {
  *
  * Entities represent named people, pets, places, organizations, and things
  * mentioned by the user. Relations capture typed links between entities
- * (e.g., "Bruno" is_a "golden retriever", "Kris" lives_in "Atlanta").
+ * (e.g., "Bruno" is_a "golden retriever", "Jon" lives_in "Atlanta").
  * ============================================================================= */
 
 #define MEMORY_ENTITY_NAME_MAX 64

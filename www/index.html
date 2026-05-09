@@ -1658,6 +1658,58 @@ Format rules:
 
                         <hr class="section-divider" />
 
+                        <!-- User identity (v44) — feeds the LLM system prompt
+                             and the entity-merge link-user-self synthetic seed. -->
+                        <div class="settings-group">
+                           <label for="my-real-name">
+                              Real name <span class="required-indicator">*</span>
+                           </label>
+                           <input
+                              type="text"
+                              id="my-real-name"
+                              name="real_name"
+                              maxlength="128"
+                              placeholder="e.g., Jonathan Smith"
+                           />
+                           <p class="setting-hint">
+                              How DAWN identifies you. Helps the assistant link conversations back
+                              to you correctly. Required for memory features that recognize you in
+                              the entity graph.
+                           </p>
+                        </div>
+
+                        <div class="settings-group">
+                           <label for="my-identity-aliases">Other names / aliases</label>
+                           <textarea
+                              id="my-identity-aliases"
+                              name="identity_aliases"
+                              rows="3"
+                              maxlength="1024"
+                              placeholder="One per line, e.g.:&#10;Jon&#10;J. Smith&#10;smithfabrications"
+                           ></textarea>
+                           <p class="setting-hint">
+                              Other names you may be known by — nicknames, formal names, email
+                              handles. One per line.
+                           </p>
+                        </div>
+
+                        <div class="settings-group">
+                           <label for="my-preferred-address">Preferred form of address</label>
+                           <input
+                              type="text"
+                              id="my-preferred-address"
+                              name="preferred_address"
+                              maxlength="64"
+                              placeholder="e.g., Jon"
+                           />
+                           <p class="setting-hint">
+                              What you'd like DAWN to call you. E.g. "Jon" if your real name is
+                              "Jonathan Smith".
+                           </p>
+                        </div>
+
+                        <hr class="section-divider" />
+
                         <div class="settings-group">
                            <label for="my-location">Location</label>
                            <input

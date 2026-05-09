@@ -586,8 +586,8 @@ void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payl
 
    /* Phase 1 entity-merge: pull the user's alias summary so canonical cards
     * surface an `alias_count` and so alias rows are dropped from the listing
-    * (UX requirement — without this, both Kris and Kristopher render as
-    * top-level cards even though Kris is a soft alias). */
+    * (UX requirement — without this, both Jon and Jonathan render as
+    * top-level cards even though Jon is a soft alias). */
 #define MAX_ALIAS_SUMMARY 512
    memory_alias_summary_row_t alias_summary[MAX_ALIAS_SUMMARY];
    int alias_summary_count = 0;

@@ -19,7 +19,7 @@ dawn-admin log show --type RATE_LIMITED
 dawn-admin log show --type PASSWORD_CHANGED
 
 # Filter by username
-dawn-admin log show --user kris
+dawn-admin log show --user jon
 
 # Combine filters
 dawn-admin log show --last 200 --type LOGIN_FAILED --user guest
@@ -142,7 +142,7 @@ dawn-admin music rescan
 The memory subsystem assigns one of eight categories (personal, professional, relationships, health, interests, practical, preferences, general) to each extracted fact.  Facts created before the categorization feature shipped, or where the embedding-centroid backfill couldn't decide, end up labeled `general`.  This command sends batches of `general` facts to the configured extraction LLM for per-fact classification.
 
 ```bash
-dawn-admin memory recategorize-all kris
+dawn-admin memory recategorize-all jon
 ```
 
 Runs in the background — fire-and-forget.  Cost is small (one extraction LLM call per ~25 facts, typically a few cents per thousand facts on Claude Haiku).  Watch daemon logs for progress and final per-category distribution.
@@ -153,13 +153,13 @@ When the extraction prompt, model, or post-processing logic changes meaningfully
 
 ```bash
 # 1. Dry-run — reports conversation count, message count, estimated cost, provider/model
-dawn-admin memory reextract --user kris
+dawn-admin memory reextract --user jon
 
 # 2. Review the estimate.  If reasonable, run for real:
-dawn-admin memory reextract --user kris --confirm
+dawn-admin memory reextract --user jon --confirm
 
 # 3. Poll progress (the daemon processes conversations in the background)
-dawn-admin memory reextract-status --user kris
+dawn-admin memory reextract-status --user jon
 ```
 
 Optional flags:

@@ -137,3 +137,99 @@ int auth_db_init_user_settings(int user_id) {
    strncpy(defaults.units, "metric", AUTH_UNITS_MAX - 1);
    return auth_db_set_user_settings(user_id, &defaults);
 }
+
+/* =============================================================================
+ * User identity fields (v44) — stored on the users table.  Ad-hoc
+ * sqlite3_prepare_v2 instead of cached prepared statements; called only on
+ * settings GET/SET round-trips, not on every request, so the prepare cost
+ * is negligible.
+ * ============================================================================= */
+
+int auth_db_get_user_identity(int user_id, auth_user_identity_t *out) {
+   if (!out) {
+      return AUTH_DB_INVALID;
+   }
+   memset(out, 0, sizeof(*out));
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "SELECT real_name, preferred_address, identity_aliases "
+                     "FROM users WHERE id = ?";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_DONE) {
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_NOT_FOUND;
+   }
+   if (rc != SQLITE_ROW) {
+      OLOG_ERROR("auth_db: get_user_identity step failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   const char *rn = (const char *)sqlite3_column_text(stmt, 0);
+   const char *pa = (const char *)sqlite3_column_text(stmt, 1);
+   const char *ia = (const char *)sqlite3_column_text(stmt, 2);
+   if (rn) {
+      strncpy(out->real_name, rn, AUTH_REAL_NAME_MAX - 1);
+      out->real_name[AUTH_REAL_NAME_MAX - 1] = '\0';
+   }
+   if (pa) {
+      strncpy(out->preferred_address, pa, AUTH_PREFERRED_ADDRESS_MAX - 1);
+      out->preferred_address[AUTH_PREFERRED_ADDRESS_MAX - 1] = '\0';
+   }
+   if (ia) {
+      strncpy(out->identity_aliases, ia, AUTH_IDENTITY_ALIASES_MAX - 1);
+      out->identity_aliases[AUTH_IDENTITY_ALIASES_MAX - 1] = '\0';
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+int auth_db_set_user_identity(int user_id, const auth_user_identity_t *id) {
+   if (!id) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = NULL;
+   /* Empty strings → NULL: keep the column unset rather than persisting "" so
+    * downstream "field is set?" checks read NULL uniformly. */
+   const char *sql = "UPDATE users SET "
+                     "  real_name         = NULLIF(?, ''), "
+                     "  preferred_address = NULLIF(?, ''), "
+                     "  identity_aliases  = NULLIF(?, '') "
+                     "WHERE id = ?";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(stmt, 1, id->real_name, -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 2, id->preferred_address, -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, id->identity_aliases, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 4, user_id);
+
+   int rc = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db: set_user_identity step failed");
+      return AUTH_DB_FAILURE;
+   }
+   if (changes == 0) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   return AUTH_DB_SUCCESS;
+}

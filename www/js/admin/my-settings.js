@@ -62,6 +62,9 @@
       const persona = document.getElementById('my-persona');
       const location = document.getElementById('my-location');
       const timezone = document.getElementById('my-timezone');
+      const realName = document.getElementById('my-real-name');
+      const aliases = document.getElementById('my-identity-aliases');
+      const preferredAddr = document.getElementById('my-preferred-address');
       if (persona) {
          persona.value = payload.persona_description || '';
          updatePersonaCharCount();
@@ -70,6 +73,9 @@
       }
       if (location) location.value = payload.location || '';
       if (timezone) timezone.value = payload.timezone || 'UTC';
+      if (realName) realName.value = payload.real_name || '';
+      if (aliases) aliases.value = payload.identity_aliases || '';
+      if (preferredAddr) preferredAddr.value = payload.preferred_address || '';
 
       // Set persona mode radio
       const personaMode = payload.persona_mode || 'append';
@@ -246,6 +252,11 @@
                timezone: document.getElementById('my-timezone')?.value || 'UTC',
                units: document.querySelector('input[name="units"]:checked')?.value || 'metric',
                theme: document.querySelector('.theme-btn.active')?.dataset.theme || 'cyan',
+               // v44 identity fields
+               real_name: document.getElementById('my-real-name')?.value.trim() || '',
+               identity_aliases: document.getElementById('my-identity-aliases')?.value.trim() || '',
+               preferred_address:
+                  document.getElementById('my-preferred-address')?.value.trim() || '',
             };
             requestSetMySettings(settings);
          });
@@ -264,6 +275,10 @@
                      timezone: 'UTC',
                      units: 'metric',
                      theme: 'cyan',
+                     // v44 identity fields cleared on reset (NULLIF in SQL)
+                     real_name: '',
+                     identity_aliases: '',
+                     preferred_address: '',
                   });
                   // Apply theme immediately
                   if (callbacks.setTheme) {

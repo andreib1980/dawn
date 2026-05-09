@@ -47,7 +47,10 @@
 static const char *DDL =
    "CREATE TABLE IF NOT EXISTS users ("
    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-   "  username TEXT UNIQUE NOT NULL"
+   "  username TEXT UNIQUE NOT NULL,"
+   "  real_name TEXT DEFAULT NULL,"
+   "  preferred_address TEXT DEFAULT NULL,"
+   "  identity_aliases TEXT DEFAULT NULL"
    ");"
    "INSERT INTO users (id, username) VALUES (1, 'alice');"
    "INSERT INTO users (id, username) VALUES (2, 'bob');"

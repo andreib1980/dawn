@@ -133,6 +133,38 @@ static bool token_set_contains(const alias_token_set_t *set, const char *tok) {
    return false;
 }
 
+/* Directional overlap (Phase 1.5 Ckpt C): |tokens_a ∩ tokens_b| / |tokens_b|.
+ *
+ * Used at Stage 2 in the synthetic-self path: standard Jaccard penalizes
+ * single-token candidates against the verbose synthetic seed (real_name +
+ * aliases), e.g. candidate "jon" against a 4-token synthetic gives
+ * jaccard = 1/4 = 0.25 which falls below the 0.30 floor and gets dropped.
+ * Directional overlap from the candidate's perspective is 1/1 = 1.0 so
+ * it survives the floor and reaches Stage 6 scoring.
+ *
+ * Asymmetric: callers must consistently pass the synthetic side as @p a
+ * and the candidate side as @p b.  Standard Jaccard remains the right
+ * choice for non-synthetic paths (resolver, extraction-time), where the
+ * inbound and existing entities are both real and roughly comparable in
+ * token count. */
+static float compute_directional_overlap(const char *a, const char *b) {
+   if (!a || !b || !*a || !*b)
+      return 0.0f;
+
+   alias_token_set_t ta, tb;
+   tokenize_canonical(a, &ta);
+   tokenize_canonical(b, &tb);
+   if (tb.count == 0)
+      return 0.0f;
+
+   int intersection = 0;
+   for (int i = 0; i < tb.count; i++) {
+      if (token_set_contains(&ta, tb.tokens[i]))
+         intersection++;
+   }
+   return (float)intersection / (float)tb.count;
+}
+
 float memory_alias_compute_name_jaccard(const char *a, const char *b) {
    if (!a || !b || !*a || !*b)
       return 0.0f;
@@ -175,7 +207,7 @@ bool memory_alias_compute_name_substring(const char *a, const char *b) {
  * Type filter helpers — pure functions, no DB
  *
  * Per design §6 Stage 3 + §7: the `thing` carve-out matters for the live DB
- * shape (the LLM extracted "Kris" as `thing` and "Kristopher Kersey" as
+ * shape (the LLM extracted "Jon" as `thing` and "Jonathan Smith" as
  * `person` — strict type matching would block an obvious correct merge).
  * ============================================================================= */
 
@@ -608,15 +640,23 @@ static float compute_contact_field_overlap(int user_id, int64_t a_id, int64_t b_
 
 /* Determine whether the user_self_bonus applies between two entities.
  * Bonus fires when one side has is_user_self = 1 AND the other side has
- * user-identity signal:
- *   - canonical_name contains the user's username, OR
- *   - the contact_field_overlap signal has already fired (email/phone match) */
+ * user-identity signal — any of:
+ *   1. The "other" side is an allow-listed self-reference token (the
+ *      "user" canonical entity, flagged at synth_self_allow_list_user
+ *      time).  This branch is unconditional; it fires regardless of
+ *      whether the operator's username matches.
+ *   2. contact_overlap_fired (email/phone overlap on the contact_t
+ *      surface — strong identity signal).
+ *   3. The operator's username canonical is a substring of the other
+ *      side's canonical_name.
+ * Conditions 1-3 are checked in cheap-to-expensive order. */
 static bool user_self_bonus_applies(int user_id,
                                     bool a_is_user_self,
                                     bool b_is_user_self,
                                     const char *a_canonical_name,
                                     const char *b_canonical_name,
-                                    bool contact_overlap_fired) {
+                                    bool contact_overlap_fired,
+                                    bool other_is_allow_list_token) {
    /* Exactly one side must be user_self.  If neither or both, no bonus. */
    if (a_is_user_self == b_is_user_self)
       return false;
@@ -624,6 +664,14 @@ static bool user_self_bonus_applies(int user_id,
    const char *other_canon = a_is_user_self ? b_canonical_name : a_canonical_name;
    if (!other_canon || !*other_canon)
       return false;
+
+   /* Allow-listed self-reference token (currently just "user"): the
+    * Phase 1.5 brief specifies this branch fires regardless of any
+    * username/alias substring conditions, so the dev's actual case
+    * (username "admin" or "jon" with a "user" entity in the cluster)
+    * still receives the bonus. */
+   if (other_is_allow_list_token)
+      return true;
 
    /* Email / phone overlap is a strong user-identity signal — fire on it. */
    if (contact_overlap_fired)
@@ -658,6 +706,7 @@ static void score_pair_full(int user_id,
                             bool src_is_user_self,
                             const memory_entity_t *tgt,
                             bool tgt_is_user_self,
+                            bool other_is_allow_list_token,
                             memory_alias_evidence_t *out) {
    memset(out, 0, sizeof(*out));
 
@@ -698,11 +747,13 @@ static void score_pair_full(int user_id,
       }
    }
 
-   /* User-self bonus. */
-   out->user_self_bonus_applied = user_self_bonus_applies(user_id, src_is_user_self,
-                                                          tgt_is_user_self, src->canonical_name,
-                                                          tgt->canonical_name,
-                                                          out->contact_field_overlap > 0.0f);
+   /* User-self bonus.  Pair-score callers that don't traffic in allow-
+    * list tokens (the public memory_db_entity_score_pair WebUI preview)
+    * pass false; link-user-self's synth-self path passes true when the
+    * candidate is the canonical-name='user' allow-list token. */
+   out->user_self_bonus_applied = user_self_bonus_applies(
+       user_id, src_is_user_self, tgt_is_user_self, src->canonical_name, tgt->canonical_name,
+       out->contact_field_overlap > 0.0f, other_is_allow_list_token);
 
    memory_alias_apply_composite(out);
 }
@@ -739,7 +790,8 @@ int memory_db_entity_score_pair(int user_id,
       return MEMORY_DB_INVALID_ALIAS_TARGET;
    }
 
-   score_pair_full(user_id, &src, src_is_self, &tgt, tgt_is_self, out_evidence);
+   score_pair_full(user_id, &src, src_is_self, &tgt, tgt_is_self,
+                   /* other_is_allow_list_token */ false, out_evidence);
    return MEMORY_DB_SUCCESS;
 }
 
@@ -802,6 +854,11 @@ typedef struct {
    int mention_count;
    time_t first_seen;
    bool is_user_self;
+   /* Allow-listed self-reference token (currently just "user").  Receives
+    * user_self_bonus regardless of username/alias substring conditions
+    * per the Phase 1.5 design intent — synth_self_allow_list_user() sets
+    * this true; standard Stage 2 candidates leave it false. */
+   bool is_user_self_token;
    float name_jaccard;
    float embedding_cosine;
 } alias_candidate_t;
@@ -809,10 +866,13 @@ typedef struct {
 static int stage2_candidates(int user_id,
                              const char *canonical_name,
                              int64_t exclude_id,
+                             bool use_synth_self,
                              alias_candidate_t *out,
                              int max,
                              int *out_count) {
-   *out_count = 0;
+   /* Append-mode: respect any pre-added candidates (e.g. the synthetic-
+    * self "user" allow-list).  Callers that want a fresh pool zero
+    * *out_count before calling. */
    if (!canonical_name || !*canonical_name || max <= 0)
       return MEMORY_DB_SUCCESS; /* empty result, not an error */
 
@@ -822,9 +882,13 @@ static int stage2_candidates(int user_id,
       return MEMORY_DB_SUCCESS;
 
    /* Per-token keyword search via the existing entity-search helper.
-    * Aggregate unique IDs, capped at @p max. */
+    * Aggregate unique IDs, capped at @p max.  Seed seen_ids with any
+    * pre-added candidates so we don't double-add the same entity. */
    int64_t seen_ids[MEMORY_ALIAS_STAGE2_MAX_CANDIDATES];
    int seen_count = 0;
+   for (int p = 0; p < *out_count && p < MEMORY_ALIAS_STAGE2_MAX_CANDIDATES; p++) {
+      seen_ids[seen_count++] = out[p].entity_id;
+   }
 
    for (int t = 0; t < tokens.count && seen_count < max; t++) {
       memory_entity_t hits[8];
@@ -866,8 +930,16 @@ static int stage2_candidates(int user_id,
       if (canon_id != 0)
          continue;
 
-      float jacc = memory_alias_compute_name_jaccard(canonical_name, e.canonical_name);
-      if (jacc < MEMORY_ALIAS_NAME_JACCARD_FLOOR)
+      /* Phase 1.5 Ckpt C: directional overlap when scoring against the
+       * synthetic-self seed (verbose canonical from real_name + aliases),
+       * standard Jaccard otherwise.  Both apply the same 0.30 floor. */
+      float overlap;
+      if (use_synth_self) {
+         overlap = compute_directional_overlap(canonical_name, e.canonical_name);
+      } else {
+         overlap = memory_alias_compute_name_jaccard(canonical_name, e.canonical_name);
+      }
+      if (overlap < MEMORY_ALIAS_NAME_JACCARD_FLOOR)
          continue;
 
       alias_candidate_t *c = &out[*out_count];
@@ -879,7 +951,7 @@ static int stage2_candidates(int user_id,
       c->mention_count = e.mention_count;
       c->first_seen = e.first_seen;
       c->is_user_self = is_self;
-      c->name_jaccard = jacc;
+      c->name_jaccard = overlap;
       c->embedding_cosine = 0.0f;
       (*out_count)++;
    }
@@ -973,11 +1045,96 @@ static void rank_and_truncate(alias_candidate_t *cands, int *count, int top_n) {
  *
  * Picks the highest-composite candidate; out_winner_id = 0 on no match.
  * out_winner_evidence holds the final composite for routing. */
+/* Phase 1.5 Ckpt C: pre-add the canonical-name='user' entity to the
+ * candidate pool when running synthetic-self resolve.
+ *
+ *   DB scan against /var/lib/dawn/auth.db (May 2026) found exactly one
+ *   self-reference entity: 'user' (thing, 292 mentions).  No 'me' /
+ *   'myself' / 'admin' / 'operator' / etc. exist as entities.  Extending
+ *   this list requires evidence from a real DB scan, not theoretical
+ *   alternatives.
+ *
+ * Adds the row before Stage 2 so it survives the directional-overlap
+ * floor (which it would fail by name signal alone — "user" has no token
+ * overlap with a real_name like "Jonathan Smith").  Stage 3 then
+ * applies the type-veto rule (the carve-out for 'thing' type lets it
+ * through against 'person' synthetics), Stage 4-6 apply normal scoring
+ * + user_self_bonus.  If the entity doesn't exist in this user's graph
+ * the function is a no-op. */
+static void synth_self_allow_list_user(int user_id,
+                                       int64_t exclude_id,
+                                       alias_candidate_t *out,
+                                       int max,
+                                       int *count) {
+   if (!out || max <= 0 || *count >= max)
+      return;
+
+   AUTH_DB_LOCK_OR_RETURN_VOID();
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "SELECT id FROM memory_entities "
+                     "WHERE user_id = ? AND lower(canonical_name) = 'user' "
+                     "  AND canonical_id IS NULL "
+                     "LIMIT 1";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   int64_t hit_id = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      hit_id = sqlite3_column_int64(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (hit_id <= 0 || hit_id == exclude_id)
+      return;
+
+   /* Skip if already in pool. */
+   for (int i = 0; i < *count; i++) {
+      if (out[i].entity_id == hit_id)
+         return;
+   }
+
+   /* Load full row + push.  load_entity_full takes its own lock. */
+   memory_entity_t e;
+   bool is_self = false;
+   int64_t canon_id = 0;
+   if (load_entity_full(user_id, hit_id, &e, &canon_id, &is_self) != MEMORY_DB_SUCCESS)
+      return;
+   if (canon_id != 0)
+      return; /* alias row — not a canonical candidate */
+
+   alias_candidate_t *c = &out[*count];
+   memset(c, 0, sizeof(*c));
+   c->entity_id = e.id;
+   strncpy(c->canonical_name, e.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
+   c->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+   strncpy(c->entity_type, e.entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
+   c->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+   c->mention_count = e.mention_count;
+   c->first_seen = e.first_seen;
+   c->is_user_self = is_self;
+   /* Allow-listed self-reference token — Stage 6 will fire user_self_bonus
+    * unconditionally (regardless of username substring or alias match).
+    * Matches the Phase 1.5 brief's "passes through Stage 3-6 normally
+    * with normal scoring + user_self_bonus" requirement. */
+   c->is_user_self_token = true;
+   /* Score via directional overlap so the entity isn't penalized by
+    * name-signal at Stages 5-6.  For "user" against any verbose
+    * synthetic, intersection = 0 → overlap = 0; the user_self_bonus
+    * carries it instead. */
+   c->name_jaccard = 0.0f;
+   c->embedding_cosine = 0.0f;
+   (*count)++;
+}
+
 static int cascade_internal(int user_id,
                             const char *canonical_name,
                             const char *entity_type,
                             int64_t inbound_id,
                             bool inbound_is_user_self,
+                            bool use_synth_self,
                             int64_t *out_winner_id,
                             int *out_matched_stage,
                             memory_alias_evidence_t *out_evidence) {
@@ -996,11 +1153,17 @@ static int cascade_internal(int user_id,
       return MEMORY_DB_SUCCESS;
    }
 
-   /* Stage 2: token-Jaccard candidate generation. */
+   /* Stage 2: token-Jaccard (or directional overlap, when synth-self)
+    * candidate generation.  When synth-self, also pre-add the "user"
+    * canonical-name allow-list entity. */
    alias_candidate_t cands[MEMORY_ALIAS_STAGE2_MAX_CANDIDATES];
    int cand_count = 0;
-   stage2_candidates(user_id, canonical_name, inbound_id, cands, MEMORY_ALIAS_STAGE2_MAX_CANDIDATES,
-                     &cand_count);
+   if (use_synth_self) {
+      synth_self_allow_list_user(user_id, inbound_id, cands, MEMORY_ALIAS_STAGE2_MAX_CANDIDATES,
+                                 &cand_count);
+   }
+   stage2_candidates(user_id, canonical_name, inbound_id, use_synth_self, cands,
+                     MEMORY_ALIAS_STAGE2_MAX_CANDIDATES, &cand_count);
    if (cand_count == 0)
       return MEMORY_DB_SUCCESS; /* clean miss */
 
@@ -1045,10 +1208,14 @@ static int cascade_internal(int user_id,
       ev.type_veto_fired = type_veto_fires(entity_type, cands[i].entity_type);
       ev.name_substring_bonus_applied = memory_alias_compute_name_substring(
           canonical_name, cands[i].canonical_name);
-      ev.user_self_bonus_applied = user_self_bonus_applies(user_id, inbound_is_user_self,
-                                                           cands[i].is_user_self, canonical_name,
-                                                           cands[i].canonical_name,
-                                                           ev.contact_field_overlap > 0.0f);
+      /* In synth-self mode the inbound is the synthetic (user_self side)
+       * and the candidate is the "other" — pass the candidate's allow-
+       * list flag through so the unconditional-bonus branch inside
+       * user_self_bonus_applies fires for the "user" canonical. */
+      bool other_token = inbound_is_user_self ? cands[i].is_user_self_token : false;
+      ev.user_self_bonus_applied = user_self_bonus_applies(
+          user_id, inbound_is_user_self, cands[i].is_user_self, canonical_name,
+          cands[i].canonical_name, ev.contact_field_overlap > 0.0f, other_token);
 
       memory_alias_apply_composite(&ev);
 
@@ -1113,8 +1280,8 @@ int memory_db_entity_resolve_alias(int user_id,
    memset(&ev, 0, sizeof(ev));
 
    int rc = cascade_internal(user_id, canonical_name, entity_type ? entity_type : "thing",
-                             /* inbound_id */ 0, /* inbound_is_user_self */ false, &winner_id,
-                             &matched_stage, &ev);
+                             /* inbound_id */ 0, /* inbound_is_user_self */ false,
+                             /* use_synth_self */ false, &winner_id, &matched_stage, &ev);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
 
@@ -1133,6 +1300,50 @@ int memory_db_entity_resolve_alias(int user_id,
     * still fall through to upsert; consider_auto_merge() handles the
     * proposal-queue case. */
    if (matched_stage == 6 && ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
+      out_resolution->resolved_id = winner_id;
+      out_resolution->matched_stage = 6;
+      out_resolution->evidence = ev;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_resolve_alias_for_self(int user_id,
+                                            const char *canonical_name,
+                                            const char *entity_type,
+                                            memory_alias_resolve_t *out_resolution) {
+   if (!out_resolution)
+      return MEMORY_DB_FAILURE;
+   memset(out_resolution, 0, sizeof(*out_resolution));
+   if (!canonical_name || !*canonical_name)
+      return MEMORY_DB_SUCCESS; /* clean miss */
+
+   int64_t winner_id = 0;
+   int matched_stage = 0;
+   memory_alias_evidence_t ev;
+   memset(&ev, 0, sizeof(ev));
+
+   /* Synthetic-self mode: directional overlap at Stage 2, "user" allow-list
+    * pre-add, inbound treated as is_user_self=true so user_self_bonus
+    * fires.  inbound_id=0 (no materialized self yet — that's what
+    * "synthetic" means here). */
+   int rc = cascade_internal(user_id, canonical_name, entity_type ? entity_type : "person",
+                             /* inbound_id */ 0, /* inbound_is_user_self */ true,
+                             /* use_synth_self */ true, &winner_id, &matched_stage, &ev);
+   if (rc != MEMORY_DB_SUCCESS)
+      return rc;
+
+   /* Unlike memory_db_entity_resolve_alias() (which only commits to a
+    * resolution at the auto-merge threshold), the synthetic-self resolver
+    * surfaces the cascade's best Stage 6 candidate at any composite band
+    * — Phase 2 callers need to see review-band and below-threshold hits
+    * to make their own band-routing decisions (similar to
+    * consider_auto_merge's evaluate_t shape). */
+   if (matched_stage == 1) {
+      out_resolution->resolved_id = winner_id;
+      out_resolution->matched_stage = 1;
+      return MEMORY_DB_SUCCESS;
+   }
+   if (matched_stage == 6 && winner_id > 0) {
       out_resolution->resolved_id = winner_id;
       out_resolution->matched_stage = 6;
       out_resolution->evidence = ev;
@@ -1225,7 +1436,8 @@ int memory_db_entity_consider_auto_merge(int user_id,
    memset(&ev, 0, sizeof(ev));
 
    rc = cascade_internal(user_id, inbound.canonical_name, inbound.entity_type, entity_id,
-                         inbound_is_self, &winner_id, &matched_stage, &ev);
+                         inbound_is_self, /* use_synth_self */ false, &winner_id, &matched_stage,
+                         &ev);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
 
@@ -2201,54 +2413,6 @@ int memory_db_proposal_resolve(int user_id,
  * status-query pattern if entities-per-user crosses ~10k.
  * ============================================================================= */
 
-/* Look up the username for a user_id (raw value, no normalization). */
-static int load_username(int user_id, char *out_buf, size_t buf_size) {
-   if (!out_buf || buf_size == 0)
-      return MEMORY_DB_FAILURE;
-   out_buf[0] = '\0';
-
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-
-   sqlite3_stmt *stmt = NULL;
-   if (sqlite3_prepare_v2(s_db.db, "SELECT username FROM users WHERE id = ?", -1, &stmt, NULL) !=
-       SQLITE_OK) {
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   int rc = sqlite3_step(stmt);
-   if (rc == SQLITE_ROW) {
-      const char *u = (const char *)sqlite3_column_text(stmt, 0);
-      if (u) {
-         strncpy(out_buf, u, buf_size - 1);
-         out_buf[buf_size - 1] = '\0';
-      }
-   }
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
-   return out_buf[0] ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
-}
-
-/* Capitalize the first letter of each whitespace/punct-separated token in
- * place.  Username has been auth_db_validate_username-validated to ASCII
- * [A-Za-z0-9_.-] so the pure-ASCII walk is safe. */
-static void beautify_display_name(char *s) {
-   if (!s)
-      return;
-   bool at_word_start = true;
-   for (size_t i = 0; s[i]; i++) {
-      unsigned char c = (unsigned char)s[i];
-      if (c == ' ' || c == '\t' || c == '_' || c == '-' || c == '.') {
-         at_word_start = true;
-         continue;
-      }
-      if (at_word_start && c >= 'a' && c <= 'z') {
-         s[i] = (char)(c - 32);
-      }
-      at_word_start = false;
-   }
-}
-
 /* Insert a fresh user-self canonical row.  Acquires its own auth_db lock. */
 static int seed_user_self_entity(int user_id,
                                  const char *display_name,
@@ -2355,49 +2519,54 @@ static void trim_trailing_partial_utf8(char *buf) {
    }
 }
 
-/* Load user_settings.persona_description for richer cosine signal in the
- * synthetic-self dry-run path.  Returns SUCCESS with empty buffer when the
- * row exists but persona_description is NULL/empty.
+/* Load the user-identity fields (real_name, preferred_address,
+ * identity_aliases) via the public auth_db_get_user_identity() helper.
+ * UTF-8 trim is applied to every TEXT field so a downstream tokenizer
+ * doesn't see a malformed leader at any column boundary.
  *
- * Caller-supplied buffer is hard-truncated at buf_size-1 via strncpy; we
- * then trim a trailing partial UTF-8 sequence so a malicious or merely
- * unlucky persona doesn't leave a malformed leader for the canonical-name
- * tokenizer to choke on. */
-static int load_persona_description(int user_id, char *out_buf, size_t buf_size) {
-   if (!out_buf || buf_size == 0)
+ * Returns MEMORY_DB_SUCCESS with all-empty fields if the user row exists
+ * but no identity fields are populated; MEMORY_DB_NOT_FOUND if the user
+ * doesn't exist; MEMORY_DB_FAILURE on bind/step error. */
+static int load_user_identity(int user_id, auth_user_identity_t *out_identity) {
+   if (!out_identity)
       return MEMORY_DB_FAILURE;
-   out_buf[0] = '\0';
+   memset(out_identity, 0, sizeof(*out_identity));
 
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   sqlite3_stmt *stmt = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT persona_description FROM user_settings WHERE user_id = ?", -1,
-                          &stmt, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
+   int rc = auth_db_get_user_identity(user_id, out_identity);
+   if (rc == AUTH_DB_NOT_FOUND)
+      return MEMORY_DB_NOT_FOUND;
+   if (rc != AUTH_DB_SUCCESS)
       return MEMORY_DB_FAILURE;
-   }
-   sqlite3_bind_int(stmt, 1, user_id);
-   if (sqlite3_step(stmt) == SQLITE_ROW) {
-      const char *p = (const char *)sqlite3_column_text(stmt, 0);
-      if (p) {
-         strncpy(out_buf, p, buf_size - 1);
-         out_buf[buf_size - 1] = '\0';
-         trim_trailing_partial_utf8(out_buf);
-      }
-   }
-   sqlite3_finalize(stmt);
-   AUTH_DB_UNLOCK();
+
+   /* Trailing-partial-UTF-8 trim on every TEXT field — auth_db_get_user_identity
+    * applies a hard byte cap on each column, which can split a multi-byte
+    * sequence at the cap boundary.  The downstream tokenizer (memory_make_
+    * canonical_name) is byte-oriented and needs valid input. */
+   trim_trailing_partial_utf8(out_identity->real_name);
+   trim_trailing_partial_utf8(out_identity->preferred_address);
+   trim_trailing_partial_utf8(out_identity->identity_aliases);
    return MEMORY_DB_SUCCESS;
 }
 
-/* Build the synthetic memory_entity_t for the dry-run-with-no-self path.
- * Uses username for both display and canonical name; if persona_description
- * is set, appends a few words from it onto canonical_name so token-Jaccard
- * has more surface to work against (the dev's persona usually mentions
- * their full name, role, location, etc.). */
+/* Build the synthetic memory_entity_t for the dry-run-with-no-self path
+ * from the user's identity record.
+ *
+ *   name           = real_name (display)
+ *   entity_type    = "person"
+ *   canonical_name = tokens(real_name) ∪ tokens(each alias line)
+ *
+ * preferred_address is intentionally NOT used here — it's display-only
+ * (system prompt, UI), not a search anchor.  If the same string also
+ * appears on a candidate's canonical_name, token-Jaccard will still pick
+ * it up via real_name overlap.
+ *
+ * Aliases parsing matches the brief: split on '\n', strip whitespace per
+ * token, drop empties, dedupe case-insensitive, canonicalize each kept
+ * line, append unique tokens to the synthetic canonical_name (whitespace-
+ * separated so memory_alias_compute_name_jaccard's tokenizer sees them as
+ * separate tokens). */
 static void build_synthetic_self_entity(int user_id,
-                                        const char *display_name,
-                                        const char *canonical_name,
+                                        const auth_user_identity_t *identity,
                                         memory_entity_t *out_synth) {
    memset(out_synth, 0, sizeof(*out_synth));
    out_synth->id = 0; /* sentinel — score_pair_full's DB-touching helpers
@@ -2405,29 +2574,60 @@ static void build_synthetic_self_entity(int user_id,
                        * 0 for id=0, which is the correct behavior for a
                        * not-yet-materialized entity. */
    out_synth->user_id = user_id;
-   strncpy(out_synth->name, display_name, MEMORY_ENTITY_NAME_MAX - 1);
+   strncpy(out_synth->name, identity->real_name, MEMORY_ENTITY_NAME_MAX - 1);
    out_synth->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
    strncpy(out_synth->entity_type, "person", MEMORY_ENTITY_TYPE_MAX - 1);
    out_synth->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
 
-   /* Start canonical_name with the username; optionally extend with persona
-    * description so token-Jaccard sees more. */
+   /* Start canonical_name with real_name canonicalized; this is the
+    * primary token surface. */
    char canon[MEMORY_ENTITY_NAME_MAX];
-   strncpy(canon, canonical_name, sizeof(canon) - 1);
-   canon[sizeof(canon) - 1] = '\0';
+   memory_make_canonical_name(identity->real_name, canon, sizeof(canon));
 
-   char persona[256] = { 0 };
-   if (load_persona_description(user_id, persona, sizeof(persona)) == MEMORY_DB_SUCCESS &&
-       persona[0]) {
-      char canon_persona[MEMORY_ENTITY_NAME_MAX];
-      memory_make_canonical_name(persona, canon_persona, sizeof(canon_persona));
-      if (canon_persona[0]) {
-         size_t cur = strlen(canon);
-         if (cur + 1 < sizeof(canon)) {
-            canon[cur] = ' ';
-            canon[cur + 1] = '\0';
-            strncat(canon, canon_persona, sizeof(canon) - cur - 2);
+   /* Union with alias-line tokens.  Up to 16 aliases tracked for dedupe. */
+   if (identity->identity_aliases[0] != '\0') {
+      char buf[AUTH_IDENTITY_ALIASES_MAX];
+      strncpy(buf, identity->identity_aliases, sizeof(buf) - 1);
+      buf[sizeof(buf) - 1] = '\0';
+
+      char *seen[16];
+      int seen_count = 0;
+      char *save = NULL;
+      for (char *line = strtok_r(buf, "\n", &save); line != NULL && seen_count < 16;
+           line = strtok_r(NULL, "\n", &save)) {
+         while (*line == ' ' || *line == '\t' || *line == '\r')
+            line++;
+         char *end = line + strlen(line);
+         while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+            end--;
+         *end = '\0';
+         if (*line == '\0')
+            continue;
+         /* Case-insensitive dedupe. */
+         bool dup = false;
+         for (int i = 0; i < seen_count; i++) {
+            if (strcasecmp(seen[i], line) == 0) {
+               dup = true;
+               break;
+            }
          }
+         if (dup)
+            continue;
+         seen[seen_count++] = line;
+
+         char canon_alias[MEMORY_ENTITY_NAME_MAX];
+         memory_make_canonical_name(line, canon_alias, sizeof(canon_alias));
+         if (!canon_alias[0])
+            continue;
+         size_t cur = strlen(canon);
+         size_t need = (cur > 0 ? 1 : 0) + strlen(canon_alias);
+         if (cur + need + 1 >= sizeof(canon))
+            break;
+         if (cur > 0) {
+            canon[cur++] = ' ';
+            canon[cur] = '\0';
+         }
+         strncat(canon, canon_alias, sizeof(canon) - cur - 1);
       }
    }
    strncpy(out_synth->canonical_name, canon, MEMORY_ENTITY_NAME_MAX - 1);
@@ -2451,6 +2651,30 @@ int memory_alias_link_user_self_run(int user_id,
    if (find_rc == MEMORY_DB_FAILURE)
       return MEMORY_DB_FAILURE;
 
+   /* Load the user's identity record up-front — used for both the seed
+    * path (when no is_user_self=1 row exists) and the synthetic-self
+    * dry-run path.  v44 (Phase 1.5) replaces the previous username-as-
+    * identity reach-around. */
+   auth_user_identity_t identity;
+   memset(&identity, 0, sizeof(identity));
+   int id_rc = load_user_identity(user_id, &identity);
+   if (id_rc == MEMORY_DB_NOT_FOUND)
+      return MEMORY_DB_NOT_FOUND;
+   if (id_rc != MEMORY_DB_SUCCESS)
+      return MEMORY_DB_FAILURE;
+
+   /* Phase 1.5 Ckpt D gate: real_name must be set (non-empty, not all
+    * whitespace) for either the synthetic seed OR the on-commit seeded
+    * canonical to have a meaningful name to anchor.  Without it the run
+    * would degrade silently; the explicit error code lets the admin
+    * handler surface a "Configure WebUI Settings → User → Real name"
+    * hint to the operator. */
+   const char *rn = identity.real_name;
+   while (*rn == ' ' || *rn == '\t' || *rn == '\r' || *rn == '\n')
+      rn++;
+   if (*rn == '\0')
+      return MEMORY_DB_REAL_NAME_REQUIRED;
+
    if (find_rc == MEMORY_DB_SUCCESS && self_id > 0) {
       memory_entity_t self_ent;
       if (load_entity_full(user_id, self_id, &self_ent, NULL, NULL) != MEMORY_DB_SUCCESS) {
@@ -2461,15 +2685,15 @@ int memory_alias_link_user_self_run(int user_id,
       strncpy(result->self_canonical_name, self_ent.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
       result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
    } else {
-      char username[64];
-      if (load_username(user_id, username, sizeof(username)) != MEMORY_DB_SUCCESS) {
-         return MEMORY_DB_NOT_FOUND;
-      }
-
+      /* No is_user_self=1 row exists — seed (commit) or build a synthetic
+       * (dry-run) using the v44 user-identity record.  Phase 1.5 Ckpt D
+       * adds an explicit gate above this point that requires real_name to
+       * be set; for now an empty real_name will produce an empty
+       * canonical_name and the run will degrade gracefully (all candidates
+       * REJECTED). */
       char display_name[MEMORY_ENTITY_NAME_MAX];
-      strncpy(display_name, username, sizeof(display_name) - 1);
+      strncpy(display_name, identity.real_name, sizeof(display_name) - 1);
       display_name[sizeof(display_name) - 1] = '\0';
-      beautify_display_name(display_name);
 
       char canonical_name[MEMORY_ENTITY_NAME_MAX];
       memory_make_canonical_name(display_name, canonical_name, sizeof(canonical_name));
@@ -2484,11 +2708,7 @@ int memory_alias_link_user_self_run(int user_id,
       } else {
          /* Dry-run preview when no canonical exists yet: self_id stays 0
           * (the report renders "(would create)") and the candidate scoring
-          * loop below uses a synthetic entity for accurate band routing.
-          * Without the synthetic, every candidate would have scored 0.0
-          * and shown as REJECTED — useless on the dev's first invocation
-          * against an existing cluster (exactly the case where this
-          * preview is most needed). */
+          * loop below uses a synthetic entity for accurate band routing. */
          self_id = 0;
          result->self_was_seeded = true;
       }
@@ -2497,22 +2717,13 @@ int memory_alias_link_user_self_run(int user_id,
       result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
    }
 
-   /* Build the synthetic self-entity for the dry-run-with-no-self path.
-    * Used only when self_id == 0 (the candidate scoring loop below). */
+   /* Build the synthetic self-entity for the dry-run-with-no-self path
+    * from the v44 user-identity record (real_name + identity_aliases).
+    * preferred_address is display-only and intentionally not used here. */
    memory_entity_t synth_self;
    bool use_synth_self = (dry_run && self_id == 0);
    if (use_synth_self) {
-      char username[64];
-      if (load_username(user_id, username, sizeof(username)) != MEMORY_DB_SUCCESS) {
-         return MEMORY_DB_NOT_FOUND;
-      }
-      char display_name[MEMORY_ENTITY_NAME_MAX];
-      strncpy(display_name, username, sizeof(display_name) - 1);
-      display_name[sizeof(display_name) - 1] = '\0';
-      beautify_display_name(display_name);
-      char canonical_name[MEMORY_ENTITY_NAME_MAX];
-      memory_make_canonical_name(display_name, canonical_name, sizeof(canonical_name));
-      build_synthetic_self_entity(user_id, display_name, canonical_name, &synth_self);
+      build_synthetic_self_entity(user_id, &identity, &synth_self);
    }
 
    /* Step 2: iterate every other canonical entity for the user. */
@@ -2551,17 +2762,25 @@ int memory_alias_link_user_self_run(int user_id,
              * directly with the candidate on one side and the synthetic on
              * the other.  src_is_user_self=false (cand), tgt_is_user_self=
              * true (synthetic) so user_self_bonus_applies fires when the
-             * cand's canonical_name matches the username substring. */
+             * cand's canonical_name matches the username substring.
+             *
+             * Phase 1.5 fold-in: pass the allow-list token flag through
+             * for the canonical "user" entity — the unconditional bonus
+             * branch fires regardless of whether the operator's username
+             * happens to be a substring of "user". */
+            bool other_token = (strcmp(cand.canonical_name, "user") == 0);
             score_pair_full(user_id, &cand, /* src_is_user_self */ false, &synth_self,
-                            /* tgt_is_user_self */ true, &ev);
+                            /* tgt_is_user_self */ true, other_token, &ev);
          } else if (memory_db_entity_score_pair(user_id, eid, self_id, &ev) != MEMORY_DB_SUCCESS) {
             if (row)
                row->outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
             result->rejected++;
             continue;
          }
-         if (row)
+         if (row) {
             row->composite_score = ev.composite_score;
+            row->user_self_bonus_applied = ev.user_self_bonus_applied;
+         }
          if (ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
             if (row)
                row->outcome = MEMORY_ALIAS_OUTCOME_AUTO_MERGED;
@@ -2587,6 +2806,7 @@ int memory_alias_link_user_self_run(int user_id,
          if (row) {
             row->outcome = eval.outcome;
             row->composite_score = eval.evidence.composite_score;
+            row->user_self_bonus_applied = eval.evidence.user_self_bonus_applied;
             row->link_id = eval.link_id;
             row->proposal_id = eval.proposal_id;
          }

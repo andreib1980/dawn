@@ -84,6 +84,16 @@ void handle_get_my_settings(ws_connection_t *conn) {
       json_object_object_add(resp_payload, "timezone", json_object_new_string(settings.timezone));
       json_object_object_add(resp_payload, "units", json_object_new_string(settings.units));
       json_object_object_add(resp_payload, "theme", json_object_new_string(settings.theme));
+
+      /* v44 identity fields — empty strings when unset. */
+      auth_user_identity_t identity;
+      memset(&identity, 0, sizeof(identity));
+      auth_db_get_user_identity(conn->auth_user_id, &identity);
+      json_object_object_add(resp_payload, "real_name", json_object_new_string(identity.real_name));
+      json_object_object_add(resp_payload, "preferred_address",
+                             json_object_new_string(identity.preferred_address));
+      json_object_object_add(resp_payload, "identity_aliases",
+                             json_object_new_string(identity.identity_aliases));
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
@@ -159,6 +169,35 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
          settings.theme[AUTH_THEME_MAX - 1] = '\0';
       }
    }
+
+   /* v44 identity fields — read existing values, overlay any provided
+    * fields, write back.  Persisted on the users table (not user_settings)
+    * via auth_db_set_user_identity which NULLIFs empty strings. */
+   auth_user_identity_t identity;
+   memset(&identity, 0, sizeof(identity));
+   auth_db_get_user_identity(conn->auth_user_id, &identity);
+   if (json_object_object_get_ex(payload, "real_name", &field_obj)) {
+      const char *v = json_object_get_string(field_obj);
+      if (v) {
+         strncpy(identity.real_name, v, AUTH_REAL_NAME_MAX - 1);
+         identity.real_name[AUTH_REAL_NAME_MAX - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "preferred_address", &field_obj)) {
+      const char *v = json_object_get_string(field_obj);
+      if (v) {
+         strncpy(identity.preferred_address, v, AUTH_PREFERRED_ADDRESS_MAX - 1);
+         identity.preferred_address[AUTH_PREFERRED_ADDRESS_MAX - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "identity_aliases", &field_obj)) {
+      const char *v = json_object_get_string(field_obj);
+      if (v) {
+         strncpy(identity.identity_aliases, v, AUTH_IDENTITY_ALIASES_MAX - 1);
+         identity.identity_aliases[AUTH_IDENTITY_ALIASES_MAX - 1] = '\0';
+      }
+   }
+   auth_db_set_user_identity(conn->auth_user_id, &identity);
 
    /* Save settings */
    int result = auth_db_set_user_settings(conn->auth_user_id, &settings);

@@ -174,6 +174,44 @@ int memory_db_entity_resolve_alias(int user_id,
                                    memory_alias_resolve_t *out_resolution);
 
 /**
+ * @brief Resolve a synthetic-self seed against existing canonical entities.
+ *
+ * Phase 1.5 Ckpt C entry point.  Drives the same cascade as
+ * memory_db_entity_resolve_alias() but in synthetic-self mode:
+ *
+ *   - Stage 2 uses directional overlap (|tokens_a ∩ tokens_b| / |tokens_b|)
+ *     instead of standard Jaccard so single-token candidates aren't
+ *     penalized by the verbose synthetic seed (real_name + aliases).
+ *   - The canonical_name='user' allow-list is pre-added to the candidate
+ *     pool before Stage 2 (per the empirical scan documented inline).
+ *   - The inbound is treated as is_user_self=true so user_self_bonus
+ *     fires correctly during Stage 6 scoring.
+ *
+ * @p canonical_name should already be the canonicalized union of
+ * real_name + alias tokens (the same shape build_synthetic_self_entity()
+ * produces for the link-user-self dry-run).  @p entity_type defaults to
+ * "person" — pass NULL to accept the default.
+ *
+ * Unlike memory_db_entity_resolve_alias() (which commits only at the
+ * auto-merge threshold), this entry point surfaces the cascade's best
+ * Stage 6 candidate at ANY composite band — review-band and below-
+ * threshold hits are reported so the Phase 2 caller can make its own
+ * band-routing decision.  Inspect @p out_resolution->evidence
+ * .composite_score to determine the band.
+ *
+ * @param user_id User ID
+ * @param canonical_name Synthetic seed canonical (verbose, multi-token)
+ * @param entity_type "person" or NULL (defaults to "person")
+ * @param out_resolution Output: populated on SUCCESS; resolved_id > 0 when
+ *                       any Stage 6 candidate was scored, 0 on clean miss
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_resolve_alias_for_self(int user_id,
+                                            const char *canonical_name,
+                                            const char *entity_type,
+                                            memory_alias_resolve_t *out_resolution);
+
+/**
  * @brief Score a candidate pair across all five composite signals + bonuses.
  *
  * Pure-pair scoring (no cascade, no candidate generation).  Both entities
@@ -504,6 +542,12 @@ typedef struct {
    char entity_type[MEMORY_ENTITY_TYPE_MAX];
    int outcome; /**< MEMORY_ALIAS_OUTCOME_* */
    float composite_score;
+   /**< Phase 1.5 fold-in: surface the user_self_bonus flag from the
+    *   per-candidate evidence so callers can verify the bonus fired —
+    *   particularly relevant for the canonical-name='user' allow-list
+    *   token, whose composite is otherwise indistinguishable from "no
+    *   match" without inspecting the bonus signal directly. */
+   bool user_self_bonus_applied;
    int64_t link_id;     /**< Set when outcome = AUTO_MERGED */
    int64_t proposal_id; /**< Set when outcome = PROPOSED */
 } memory_alias_link_user_self_row_t;

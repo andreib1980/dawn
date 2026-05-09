@@ -89,7 +89,11 @@ static const char *SCHEMA_SQL =
     ");"
 
     /* Users table (categories_backfilled_at added in v34 — gates lazy fact-category backfill;
-     * embeddings_model_id added in v41 — per-user gate for embedding recomputation) */
+     * embeddings_model_id added in v41 — per-user gate for embedding recomputation;
+     * v44: real_name / preferred_address / identity_aliases — user-identity fields
+     * surfaced in WebUI Settings, injected into the LLM system prompt, and used
+     * by the entity-merge link-user-self synthetic-seed scoring path).  All
+     * three v44 columns are nullable TEXT — existing rows migrate to NULL. */
     "CREATE TABLE IF NOT EXISTS users ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "   username TEXT UNIQUE NOT NULL,"
@@ -100,7 +104,10 @@ static const char *SCHEMA_SQL =
     "   failed_attempts INTEGER DEFAULT 0,"
     "   lockout_until INTEGER DEFAULT 0,"
     "   categories_backfilled_at INTEGER DEFAULT 0,"
-    "   embeddings_model_id TEXT DEFAULT NULL"
+    "   embeddings_model_id TEXT DEFAULT NULL,"
+    "   real_name TEXT DEFAULT NULL,"
+    "   preferred_address TEXT DEFAULT NULL,"
+    "   identity_aliases TEXT DEFAULT NULL"
     ");"
 
     /* Sessions table */
@@ -2086,6 +2093,56 @@ static int create_schema(const char *db_path) {
          return AUTH_DB_FAILURE;
       }
       OLOG_INFO("auth_db: created memory_entity_aliases + memory_entity_merge_proposals (v43)");
+   }
+
+   /* v44 migration: user-identity fields on the users table.
+    *   real_name         — required by the link-user-self synthetic-seed path
+    *                       (gate enforced in memory_alias_link_user_self_run).
+    *                       Surfaced in WebUI Settings → User → Real name.
+    *   preferred_address — optional; injected into the LLM system prompt as
+    *                       "They prefer to be addressed as ..." for personas.
+    *   identity_aliases  — optional newline-separated list of alternate names
+    *                       (nicknames, formal names, email handles).  Parsed
+    *                       at use-site (split on \n, strip whitespace, drop
+    *                       empties, dedupe case-insensitive).  Feeds both the
+    *                       system prompt and the synthetic-self resolver token
+    *                       set in Phase 1.5 Ckpt B.
+    * All three are nullable TEXT with DEFAULT NULL — literal-constant default
+    * → SQLite's O(1) metadata-only ALTER TABLE path so startup doesn't take a
+    * full-table rewrite under the auth_db lock. */
+   if (current_version >= 1 && current_version < 44) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE users ADD COLUMN real_name TEXT DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v44 migration (real_name) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added real_name to users (v44)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE users ADD COLUMN preferred_address TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v44 migration (preferred_address) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added preferred_address to users (v44)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE users ADD COLUMN identity_aliases TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v44 migration (identity_aliases) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added identity_aliases to users (v44)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
    }
 
    /* Create indexes that depend on migration-added columns.

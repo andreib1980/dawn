@@ -60,10 +60,10 @@ void setUp(void) {
    g_alias_test_entity_cache_invalidations = 0;
 
    /* Create a single test user.  All entity tests scope by user_id. */
-   auth_db_create_user("kris", "hash", true);
+   auth_db_create_user("jon", "hash", true);
    auth_user_t u;
    memset(&u, 0, sizeof(u));
-   auth_db_get_user("kris", &u);
+   auth_db_get_user("jon", &u);
    g_test_user_id = u.id;
 }
 
@@ -193,18 +193,17 @@ static int count_active_aliases_for_target(int64_t target_id) {
 
 static void test_name_jaccard_basic(void) {
    /* Identical strings → Jaccard 1.0 (modulo single-token-set quirks). */
-   TEST_ASSERT_EQUAL_FLOAT(1.0f, memory_alias_compute_name_jaccard("kris", "kris"));
+   TEST_ASSERT_EQUAL_FLOAT(1.0f, memory_alias_compute_name_jaccard("jon", "jon"));
 
-   /* Subset case: "kris" ⊂ "kristopher kersey" — tokens are {"kris"} and
-    * {"kristopher", "kersey"}.  Intersection = 0, union = 3 → 0.0.  This is
+   /* Subset case: "jon" ⊂ "jonathan smith" — tokens are {"jon"} and
+    * {"jonathan", "smith"}.  Intersection = 0, union = 3 → 0.0.  This is
     * the Jaccard-misses-substring case the substring bonus exists for. */
-   TEST_ASSERT_EQUAL_FLOAT(0.0f, memory_alias_compute_name_jaccard("kris", "kristopher kersey"));
+   TEST_ASSERT_EQUAL_FLOAT(0.0f, memory_alias_compute_name_jaccard("jon", "jonathan smith"));
 
-   /* Shared full token: tokens {"kristopher", "kersey"} vs {"kristopher", "k"}
-    * — "k" is dropped (length < 2), so {"kristopher", "kersey"} vs
-    * {"kristopher"} → intersection = 1, union = 2, Jaccard = 0.5. */
-   TEST_ASSERT_EQUAL_FLOAT(0.5f,
-                           memory_alias_compute_name_jaccard("kristopher kersey", "kristopher k"));
+   /* Shared full token: tokens {"jonathan", "smith"} vs {"jonathan", "k"}
+    * — "k" is dropped (length < 2), so {"jonathan", "smith"} vs
+    * {"jonathan"} → intersection = 1, union = 2, Jaccard = 0.5. */
+   TEST_ASSERT_EQUAL_FLOAT(0.5f, memory_alias_compute_name_jaccard("jonathan smith", "jonathan k"));
 
    /* Disjoint tokens: 0.0. */
    TEST_ASSERT_EQUAL_FLOAT(0.0f, memory_alias_compute_name_jaccard("apple", "banana"));
@@ -215,10 +214,10 @@ static void test_name_jaccard_basic(void) {
 }
 
 static void test_name_substring_basic(void) {
-   TEST_ASSERT_TRUE(memory_alias_compute_name_substring("kris", "kristopher kersey"));
-   TEST_ASSERT_TRUE(memory_alias_compute_name_substring("kristopher kersey", "kris"));
-   TEST_ASSERT_FALSE(memory_alias_compute_name_substring("kris", "kris"));  /* equal */
-   TEST_ASSERT_FALSE(memory_alias_compute_name_substring("kris", "alice")); /* disjoint */
+   TEST_ASSERT_TRUE(memory_alias_compute_name_substring("jon", "jonathan smith"));
+   TEST_ASSERT_TRUE(memory_alias_compute_name_substring("jonathan smith", "jon"));
+   TEST_ASSERT_FALSE(memory_alias_compute_name_substring("jon", "jon"));   /* equal */
+   TEST_ASSERT_FALSE(memory_alias_compute_name_substring("jon", "alice")); /* disjoint */
    TEST_ASSERT_FALSE(memory_alias_compute_name_substring(NULL, "x"));
    TEST_ASSERT_FALSE(memory_alias_compute_name_substring("x", NULL));
 }
@@ -397,21 +396,21 @@ static void test_canonical_priority_compare_pure(void) {
  * ============================================================================ */
 
 static void test_resolver_stage1_exact_match(void) {
-   int64_t kris = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
 
    memory_alias_resolve_t res;
-   int rc = memory_db_entity_resolve_alias(g_test_user_id, "Kristopher Kersey", "person",
-                                           "kristopher kersey", &res);
+   int rc = memory_db_entity_resolve_alias(g_test_user_id, "Jonathan Smith", "person",
+                                           "jonathan smith", &res);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(1, res.matched_stage);
-   TEST_ASSERT_EQUAL_INT64(kris, res.resolved_id);
+   TEST_ASSERT_EQUAL_INT64(jon, res.resolved_id);
 }
 
 static void test_resolver_stage1_resolves_through_alias(void) {
    /* If an alias row exists pointing at canonical, Stage 1 should return
     * the canonical id (post-COALESCE), not the alias's own id. */
-   int64_t target = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t alias = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t target = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
    /* Manually set canonical_id on the alias row to simulate a prior link. */
    sqlite3_stmt *u = NULL;
    sqlite3_prepare_v2(s_db.db, "UPDATE memory_entities SET canonical_id = ? WHERE id = ?", -1, &u,
@@ -422,7 +421,7 @@ static void test_resolver_stage1_resolves_through_alias(void) {
    sqlite3_finalize(u);
 
    memory_alias_resolve_t res;
-   int rc = memory_db_entity_resolve_alias(g_test_user_id, "Kris", "person", "kris", &res);
+   int rc = memory_db_entity_resolve_alias(g_test_user_id, "Jon", "person", "jon", &res);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(1, res.matched_stage);
    TEST_ASSERT_EQUAL_INT64(target, res.resolved_id); /* canonical, not alias */
@@ -442,19 +441,19 @@ static void test_resolver_no_match(void) {
  * ============================================================================ */
 
 static void test_score_pair_exclusive_relation_overlap(void) {
-   int64_t kris = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t kris_alias = insert_entity_typed(g_test_user_id, "Kris", "thing");
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t jon_alias = insert_entity_typed(g_test_user_id, "Jon", "thing");
    int64_t company = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
 
    /* Both names point at the same exclusive-relation object (works_at). */
-   insert_open_relation(g_test_user_id, kris, "works_at", company, NULL);
-   insert_open_relation(g_test_user_id, kris_alias, "works_at", company, NULL);
+   insert_open_relation(g_test_user_id, jon, "works_at", company, NULL);
+   insert_open_relation(g_test_user_id, jon_alias, "works_at", company, NULL);
 
    memory_alias_evidence_t ev;
-   int rc = memory_db_entity_score_pair(g_test_user_id, kris_alias, kris, &ev);
+   int rc = memory_db_entity_score_pair(g_test_user_id, jon_alias, jon, &ev);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_FLOAT(1.0f, ev.exclusive_relation_overlap);
-   /* Substring bonus also fires (kris ⊂ kristopher kersey). */
+   /* Substring bonus also fires (jon ⊂ jonathan smith). */
    TEST_ASSERT_TRUE(ev.name_substring_bonus_applied);
    /* Composite ≈ 0.30*0 + 0.30*0 + 0.25*1 + 0.10*0 + 0.05*0 + 0.10 (substring)
     *           = 0.35.  Falls below the review threshold (0.70) on this
@@ -476,11 +475,11 @@ static void test_score_pair_type_veto(void) {
 
 static void test_score_pair_thing_no_veto(void) {
    /* The `thing` carve-out: thing/person doesn't trigger the veto. */
-   int64_t kris_thing = insert_entity_typed(g_test_user_id, "Kris", "thing");
-   int64_t kris_person = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t jon_thing = insert_entity_typed(g_test_user_id, "Jon", "thing");
+   int64_t jon_person = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
 
    memory_alias_evidence_t ev;
-   int rc = memory_db_entity_score_pair(g_test_user_id, kris_thing, kris_person, &ev);
+   int rc = memory_db_entity_score_pair(g_test_user_id, jon_thing, jon_person, &ev);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_FALSE(ev.type_veto_fired);
    /* type_match = 0 because one side is `thing`, but composite is non-zero
@@ -490,11 +489,10 @@ static void test_score_pair_thing_no_veto(void) {
 }
 
 static void test_score_pair_contact_field_overlap(void) {
-   int64_t a = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t b = insert_entity_typed(g_test_user_id, "Kris", "thing");
-   insert_contact(g_test_user_id, a, "email", "kerseyfabrications@gmail.com");
-   insert_contact(g_test_user_id, b, "email",
-                  "KerseyFabrications@gmail.com"); /* case-insensitive */
+   int64_t a = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t b = insert_entity_typed(g_test_user_id, "Jon", "thing");
+   insert_contact(g_test_user_id, a, "email", "smithfabrications@gmail.com");
+   insert_contact(g_test_user_id, b, "email", "SmithFabrications@gmail.com"); /* case-insensitive */
 
    memory_alias_evidence_t ev;
    int rc = memory_db_entity_score_pair(g_test_user_id, b, a, &ev);
@@ -503,12 +501,12 @@ static void test_score_pair_contact_field_overlap(void) {
 }
 
 static void test_score_pair_user_self_bonus_via_username(void) {
-   int64_t self = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    mark_entity_user_self(self);
-   /* The user's username is "kris" (set in setUp).  An entity whose
-    * canonical_name contains "kris" gets the user_self bonus when paired
+   /* The user's username is "jon" (set in setUp).  An entity whose
+    * canonical_name contains "jon" gets the user_self bonus when paired
     * with self. */
-   int64_t alias = insert_entity_typed(g_test_user_id, "Kris", "thing");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "thing");
 
    memory_alias_evidence_t ev;
    int rc = memory_db_entity_score_pair(g_test_user_id, alias, self, &ev);
@@ -519,7 +517,7 @@ static void test_score_pair_user_self_bonus_via_username(void) {
 }
 
 static void test_score_pair_user_self_bonus_via_contact_overlap(void) {
-   int64_t self = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    mark_entity_user_self(self);
    int64_t other = insert_entity_typed(g_test_user_id, "totally different", "thing");
    insert_contact(g_test_user_id, self, "email", "shared@example.com");
@@ -554,22 +552,22 @@ static void test_consider_auto_merge_auto_merged(void) {
     *                                + 0.10*1 (contact) + 0.05*0 + 0.10
     *                                (substring) + 0.20 (user_self) = 0.70.
     * To reach 0.90 we need name_jaccard.  Use names that share a token
-    * exactly: "kristopher kersey" vs "kristopher k.k.".  Jaccard = 1/2 =
+    * exactly: "jonathan smith" vs "jonathan k.k.".  Jaccard = 1/2 =
     * 0.50, contributing 0.30*0.50 = 0.15.  Total = 0.85 — still review band.
-    * Add a second shared token: "kristopher kersey" vs "kristopher kersey 2".
-    * Tokens A={kristopher, kersey}, B={kristopher, kersey} (the "2" is a
+    * Add a second shared token: "jonathan smith" vs "jonathan smith 2".
+    * Tokens A={jonathan, smith}, B={jonathan, smith} (the "2" is a
     * single char, dropped).  Jaccard = 1.0.  composite = 0.30 + 0.25 + 0.10
     *                                                    + 0.10 + 0.20 = 0.95. */
-   int64_t self = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
-   insert_contact(g_test_user_id, self, "email", "kerseyfab@example.com");
+   insert_contact(g_test_user_id, self, "email", "smithfab@example.com");
 
    /* Inbound row with the same tokens + same exclusive relation + same email. */
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey 2", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
    insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
-   insert_contact(g_test_user_id, inbound, "email", "kerseyfab@example.com");
+   insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
 
    memory_alias_evaluate_t eval;
    int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
@@ -604,14 +602,14 @@ static void test_consider_auto_merge_proposed(void) {
     * Still below.  Make exclusive overlap fire:
     *   composite = 0.30*0.5 + 0 + 0.25*1 + 0 + 0.05 + 0.10 + 0.20 = 0.75
     *   → review band!  */
-   int64_t self = insert_entity_typed(g_test_user_id, "Kristopher", "person");
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan", "person");
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Acme", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
 
-   /* Inbound: shares the "kristopher" token (jaccard 0.5 with "kristopher
-    * kersey"), shares works_at, gets user_self bonus via username substring. */
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   /* Inbound: shares the "jonathan" token (jaccard 0.5 with "jonathan
+    * smith"), shares works_at, gets user_self bonus via username substring. */
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
 
    memory_alias_evaluate_t eval;
@@ -626,10 +624,10 @@ static void test_consider_auto_merge_proposed(void) {
 static void test_consider_auto_merge_rejected(void) {
    /* Sufficient name overlap to clear Stage 2 floor (jaccard >= 0.30) but
     * not enough total signal to clear review threshold (0.70).
-    * "kristopher kersey" vs "kristopher" → jaccard = 1/2 = 0.50.
+    * "jonathan smith" vs "jonathan" → jaccard = 1/2 = 0.50.
     * composite = 0.30 * 0.50 = 0.15. */
-   insert_entity_typed(g_test_user_id, "Kristopher", "thing");
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "thing");
+   insert_entity_typed(g_test_user_id, "Jonathan", "thing");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "thing");
 
    memory_alias_evaluate_t eval;
    int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
@@ -643,8 +641,8 @@ static void test_consider_auto_merge_rejected(void) {
  * ============================================================================ */
 
 static void test_alias_link_writes_canonical_id_and_audit(void) {
-   int64_t target = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t source = insert_entity_typed(g_test_user_id, "Kris", "thing");
+   int64_t target = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t source = insert_entity_typed(g_test_user_id, "Jon", "thing");
    int prev_inv = g_alias_test_entity_cache_invalidations;
 
    int64_t link_id = 0;
@@ -799,8 +797,8 @@ static void test_loader_filter_excludes_aliases_by_default(void) {
  * ============================================================================ */
 
 static void test_relation_list_by_subject_class_includes_aliases(void) {
-   int64_t canonical = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t alias = insert_entity_typed(g_test_user_id, "Kris", "thing");
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "thing");
    int64_t company = insert_entity_typed(g_test_user_id, "Acme", "org");
 
    /* Relation attached to canonical row. */
@@ -838,16 +836,24 @@ static int count_db_rows(const char *sql) {
 }
 
 static void test_link_user_self_dry_run_no_db_writes(void) {
-   /* Build the dev's-cluster shape: a strong 'Kristopher Kersey' (person,
-    * is_user_self=1) with a shared works_at relation, plus a 'Kris' alias
-    * candidate that should clear auto-merge after the dry-run scoring. */
-   int64_t self = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   /* Build the dev's-cluster shape: a strong 'Jonathan Smith' (person,
+    * is_user_self=1) with a shared works_at relation, plus a 'Jon' alias
+    * candidate that should clear auto-merge after the dry-run scoring.
+    * Phase 1.5 Ckpt D requires real_name to be set before link-user-self
+    * will run — the gate fires up-front regardless of whether a self
+    * entity already exists. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jonathan Smith", AUTH_REAL_NAME_MAX - 1);
+   auth_db_set_user_identity(g_test_user_id, &id);
+
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Acme", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
 
-   int64_t kris = insert_entity_typed(g_test_user_id, "Kristopher Kersey 2", "person");
-   insert_open_relation(g_test_user_id, kris, "works_at", company, NULL);
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   insert_open_relation(g_test_user_id, jon, "works_at", company, NULL);
 
    /* Snapshot the alias / proposal counts BEFORE the dry-run. */
    int aliases_before = count_db_rows(
@@ -863,7 +869,7 @@ static void test_link_user_self_dry_run_no_db_writes(void) {
    /* Self-id resolved to existing canonical (no seed needed). */
    TEST_ASSERT_EQUAL_INT64(self, result.self_entity_id);
    TEST_ASSERT_FALSE(result.self_was_seeded);
-   TEST_ASSERT_EQUAL_INT(2, result.considered); /* Kris + Acme are the candidates */
+   TEST_ASSERT_EQUAL_INT(2, result.considered); /* Jon + Acme are the candidates */
 
    /* No DB mutation. */
    TEST_ASSERT_EQUAL_INT(aliases_before, count_db_rows("SELECT COUNT(*) FROM memory_entity_aliases "
@@ -875,13 +881,18 @@ static void test_link_user_self_dry_run_no_db_writes(void) {
 
 static void test_link_user_self_commit_seeds_and_links(void) {
    /* Same shape as the dry-run, but call with dry_run=false and assert that
-    * the soft-link gets written. */
-   int64_t self = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+    * the soft-link gets written.  Phase 1.5 Ckpt D requires real_name. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jonathan Smith", AUTH_REAL_NAME_MAX - 1);
+   auth_db_set_user_identity(g_test_user_id, &id);
+
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Acme", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
-   int64_t kris = insert_entity_typed(g_test_user_id, "Kristopher Kersey 2", "person");
-   insert_open_relation(g_test_user_id, kris, "works_at", company, NULL);
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   insert_open_relation(g_test_user_id, jon, "works_at", company, NULL);
 
    memory_alias_link_user_self_result_t result;
    memset(&result, 0, sizeof(result));
@@ -890,8 +901,8 @@ static void test_link_user_self_commit_seeds_and_links(void) {
    TEST_ASSERT_EQUAL_INT64(self, result.self_entity_id);
    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, result.auto_merged);
 
-   /* Kris is now an alias of self. */
-   TEST_ASSERT_EQUAL_INT64(self, get_entity_canonical_id(kris));
+   /* Jon is now an alias of self. */
+   TEST_ASSERT_EQUAL_INT64(self, get_entity_canonical_id(jon));
    /* And an audit row exists. */
    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, count_active_aliases_for_target(self));
 }
@@ -1081,8 +1092,8 @@ static void test_entity_list_for_admin_canonical_only_default(void) {
  * The smoke scenarios exercise the same code path the LLM tool uses
  * (memory_db_entity_alias_link / _alias_unlink / equivalence-class relation
  * listing) end-to-end on a seeded fixture.  They mirror the brief's
- * required scenario: extraction emits "Kris", manual merge_entities links
- * to "Kristopher Kersey", focus block recall returns canonical (relations
+ * required scenario: extraction emits "Jon", manual merge_entities links
+ * to "Jonathan Smith", focus block recall returns canonical (relations
  * surface across the equivalence class), split restores both.
  *
  * The reextract-drop-alias-state behavior is verified in
@@ -1091,9 +1102,9 @@ static void test_entity_list_for_admin_canonical_only_default(void) {
 
 static void test_alias_summary_returns_alias_canonical_pairs(void) {
    /* Two aliases pointing at one canonical, plus a standalone canonical. */
-   int64_t canonical1 = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t alias_a = insert_entity_typed(g_test_user_id, "Kris", "person");
-   int64_t alias_b = insert_entity_typed(g_test_user_id, "K. Kersey", "person");
+   int64_t canonical1 = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias_a = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t alias_b = insert_entity_typed(g_test_user_id, "J. Smith", "person");
    int64_t standalone = insert_entity_typed(g_test_user_id, "Bruno", "pet");
 
    int64_t link_a = 0, link_b = 0;
@@ -1133,11 +1144,11 @@ static void test_alias_summary_empty_for_user_with_no_aliases(void) {
 }
 
 static void test_smoke_llm_merge_entities_soft_link_path(void) {
-   /* Seed: canonical "Kristopher Kersey" + soon-to-be-alias "Kris".  Each
+   /* Seed: canonical "Jonathan Smith" + soon-to-be-alias "Jon".  Each
     * has one open relation so we can confirm the focus-block recall path
     * surfaces relations across the equivalence class after the link. */
-   int64_t canonical = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t source = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t source = insert_entity_typed(g_test_user_id, "Jon", "person");
    int64_t shop = insert_entity_typed(g_test_user_id, "CodeShop", "organization");
    int64_t bruno = insert_entity_typed(g_test_user_id, "Bruno", "pet");
 
@@ -1224,11 +1235,16 @@ static void test_smoke_llm_merge_entities_soft_link_path(void) {
  * ============================================================================ */
 
 static void test_link_user_self_dry_run_synthetic_scores_existing_cluster(void) {
-   /* setUp() created user "kris".  Seed an entity with the same
-    * canonical_name + person type — the synthetic-self path should score
-    * it well above 0 (vs the previous all-REJECTED behavior). */
-   int64_t kris_ent = insert_entity_typed(g_test_user_id, "Kris", "person");
-   /* Add an unrelated org entity so we can verify the kris candidate
+   /* Phase 1.5 Ckpt B: synthetic seed pulls from users.real_name +
+    * users.identity_aliases.  Set real_name to "Jon" so the synthetic
+    * canonical_name matches the candidate's. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jon", AUTH_REAL_NAME_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   int64_t jon_ent = insert_entity_typed(g_test_user_id, "Jon", "person");
+   /* Add an unrelated org entity so we can verify the jon candidate
     * outranks it (sanity check on the synthetic-pair scoring, not just
     * "every candidate gets the same uniform boost"). */
    int64_t acme = insert_entity_typed(g_test_user_id, "Acme", "org");
@@ -1244,30 +1260,317 @@ static void test_link_user_self_dry_run_synthetic_scores_existing_cluster(void) 
    TEST_ASSERT_EQUAL_INT64(0, result.self_entity_id);
    TEST_ASSERT_TRUE(result.self_was_seeded);
 
-   /* Find Kris and Acme in the result.  Headline behavioral fix: Kris
+   /* Find Jon and Acme in the result.  Headline behavioral fix: Jon
     * scores meaningfully above zero (the old code returned 0.0 for every
     * candidate when self_id == 0).  Without the embedding engine wired
     * in tests, exact band depends on which signals fire — name_jaccard +
-    * type_match + name_substring + user_self bonuses puts Kris around
+    * type_match + name_substring + user_self bonuses puts Jon around
     * the mid-0.6s, well above Acme's near-zero. */
-   memory_alias_link_user_self_row_t *kris_row = NULL;
+   memory_alias_link_user_self_row_t *jon_row = NULL;
    memory_alias_link_user_self_row_t *acme_row = NULL;
    for (int i = 0; i < result.row_count; i++) {
-      if (result.rows[i].entity_id == kris_ent)
-         kris_row = &result.rows[i];
+      if (result.rows[i].entity_id == jon_ent)
+         jon_row = &result.rows[i];
       else if (result.rows[i].entity_id == acme)
          acme_row = &result.rows[i];
    }
-   TEST_ASSERT_NOT_NULL(kris_row);
+   TEST_ASSERT_NOT_NULL(jon_row);
    TEST_ASSERT_NOT_NULL(acme_row);
-   TEST_ASSERT_GREATER_THAN_FLOAT(0.30f, kris_row->composite_score);
-   TEST_ASSERT_GREATER_THAN_FLOAT(acme_row->composite_score, kris_row->composite_score);
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.30f, jon_row->composite_score);
+   TEST_ASSERT_GREATER_THAN_FLOAT(acme_row->composite_score, jon_row->composite_score);
 
    /* No DB mutation: alias / proposal tables stay empty. */
    TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_aliases "
                                           "WHERE unlinked_at IS NULL"));
    TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_merge_proposals "
                                           "WHERE resolved_at IS NULL"));
+}
+
+/* ============================================================================
+ * Phase 1.5 Ckpt B: synthetic seed sources (real_name + identity_aliases)
+ *
+ * The Ckpt B refactor replaced the persona_description reach-around with a
+ * direct read from users.real_name + users.identity_aliases via the
+ * auth_db_get_user_identity helper.  Three regression-shape tests:
+ *
+ *   1. Token union: synthetic canonical_name covers tokens from real_name
+ *      AND each alias line, so a candidate matching ANY alias scores high.
+ *   2. Alias parsing: newline split, whitespace strip, empty-line drop,
+ *      case-insensitive dedupe — verified by emitting an entity per
+ *      expected token and checking the synthetic outranks an unrelated
+ *      org for each.
+ *   3. Persona no-leak: setting persona_description on user_settings has
+ *      ZERO impact on the synthetic seed (dropped reach-around regression).
+ * ============================================================================ */
+
+static void set_user_settings_persona(int user_id, const char *persona) {
+   /* Direct write via auth_db_set_user_settings — round-trips via the
+    * existing user_settings UPSERT. */
+   auth_user_settings_t s;
+   memset(&s, 0, sizeof(s));
+   strncpy(s.persona_mode, "append", AUTH_PERSONA_MODE_MAX - 1);
+   strncpy(s.persona_description, persona, AUTH_PERSONA_DESC_MAX - 1);
+   strncpy(s.timezone, "UTC", AUTH_TIMEZONE_MAX - 1);
+   strncpy(s.units, "metric", AUTH_UNITS_MAX - 1);
+   strncpy(s.theme, "cyan", AUTH_THEME_MAX - 1);
+   auth_db_set_user_settings(user_id, &s);
+}
+
+static void test_synthetic_seed_unions_real_name_and_alias_tokens(void) {
+   /* real_name = "Jonathan Smith" + aliases "Jon\nsmithfabrications"
+    * — the synthetic canonical should carry tokens for all four words.
+    * Each candidate matches a distinct token and lands above an unrelated
+    * org control. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jonathan Smith", AUTH_REAL_NAME_MAX - 1);
+   strncpy(id.identity_aliases, "Jon\nsmithfabrications", AUTH_IDENTITY_ALIASES_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   int64_t real_match = insert_entity_typed(g_test_user_id, "Jonathan", "person");
+   int64_t alias_match_a = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t alias_match_b = insert_entity_typed(g_test_user_id, "smithfabrications", "person");
+   int64_t control = insert_entity_typed(g_test_user_id, "Acme", "org");
+
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(0, result.self_entity_id);
+   TEST_ASSERT_TRUE(result.self_was_seeded);
+
+   memory_alias_link_user_self_row_t *r_real = NULL, *r_alias_a = NULL;
+   memory_alias_link_user_self_row_t *r_alias_b = NULL, *r_ctl = NULL;
+   for (int i = 0; i < result.row_count; i++) {
+      if (result.rows[i].entity_id == real_match)
+         r_real = &result.rows[i];
+      else if (result.rows[i].entity_id == alias_match_a)
+         r_alias_a = &result.rows[i];
+      else if (result.rows[i].entity_id == alias_match_b)
+         r_alias_b = &result.rows[i];
+      else if (result.rows[i].entity_id == control)
+         r_ctl = &result.rows[i];
+   }
+   TEST_ASSERT_NOT_NULL(r_real);
+   TEST_ASSERT_NOT_NULL(r_alias_a);
+   TEST_ASSERT_NOT_NULL(r_alias_b);
+   TEST_ASSERT_NOT_NULL(r_ctl);
+
+   /* All three identity-token matches must outrank the unrelated org —
+    * the org has no token overlap, no type match, no substring, no
+    * user_self bonus → composite 0.0.  Each of our four candidates
+    * shares at least one token with the synthetic canonical_name, so
+    * each gets a positive name_jaccard contribution proving the union
+    * worked.  (Absolute thresholds would flake on alias-only matches
+    * that miss the username substring used by user_self_bonus — Ckpt C
+    * adds directional similarity that reshapes that case.) */
+   TEST_ASSERT_GREATER_THAN_FLOAT(r_ctl->composite_score, r_real->composite_score);
+   TEST_ASSERT_GREATER_THAN_FLOAT(r_ctl->composite_score, r_alias_a->composite_score);
+   TEST_ASSERT_GREATER_THAN_FLOAT(r_ctl->composite_score, r_alias_b->composite_score);
+}
+
+static void test_synthetic_seed_aliases_parsing_strip_dedup_skip_empty(void) {
+   /* Aliases input exercises the parser:
+    *   - leading/trailing whitespace per line
+    *   - empty lines (multiple \n in a row)
+    *   - case-insensitive dedupe ("Jon" vs "jon" → kept once)
+    *   - tabs and \r mixed in
+    * The parser should still produce a meaningful synthetic — an entity
+    * matching any of the unique non-empty tokens lands above the control. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jonathan Smith", AUTH_REAL_NAME_MAX - 1);
+   /* "  Jon  " with spaces, "" empty, duplicate "jon" different case,
+    * "smithfabrications" lowercase, then a trailing-whitespace tab line. */
+   const char *messy = "  Jon  \n\n\tjon\nsmithfabrications\nSMITHFABRICATIONS\n  \r\n";
+   strncpy(id.identity_aliases, messy, AUTH_IDENTITY_ALIASES_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   int64_t jon_ent = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t kf_ent = insert_entity_typed(g_test_user_id, "smithfabrications", "person");
+   int64_t control = insert_entity_typed(g_test_user_id, "Acme", "org");
+
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+
+   memory_alias_link_user_self_row_t *r_jon = NULL, *r_kf = NULL, *r_ctl = NULL;
+   for (int i = 0; i < result.row_count; i++) {
+      if (result.rows[i].entity_id == jon_ent)
+         r_jon = &result.rows[i];
+      else if (result.rows[i].entity_id == kf_ent)
+         r_kf = &result.rows[i];
+      else if (result.rows[i].entity_id == control)
+         r_ctl = &result.rows[i];
+   }
+   TEST_ASSERT_NOT_NULL(r_jon);
+   TEST_ASSERT_NOT_NULL(r_kf);
+   TEST_ASSERT_NOT_NULL(r_ctl);
+   /* Both identity-derived candidates must outrank the unrelated control —
+    * proves the parser kept the dedupe'd, stripped tokens. */
+   TEST_ASSERT_GREATER_THAN_FLOAT(r_ctl->composite_score, r_jon->composite_score);
+   TEST_ASSERT_GREATER_THAN_FLOAT(r_ctl->composite_score, r_kf->composite_score);
+}
+
+static void test_synthetic_seed_does_not_leak_persona_description(void) {
+   /* Regression: pre-Ckpt-B the synthetic appended persona_description
+    * tokens to the canonical_name.  Ckpt B removes that reach-around;
+    * persona_description returns to its original AI-tuning purpose only.
+    *
+    * Setup:
+    *   - real_name set to a unique token "Solo" with no overlap with
+    *     either the candidate's name or the persona text
+    *   - persona_description set to "DistinctPersonaWord" — pre-Ckpt-B
+    *     this token would have been unioned into the synthetic and would
+    *     have caused a candidate named "DistinctPersonaWord" to score
+    *     above the control.  Post-Ckpt-B it must NOT.
+    *
+    * Expect: persona_word entity scores AT/BELOW the control's score
+    * (only signals firing are: type_match=person/org → 0, no match → no
+    * bonus; control gets the same baseline). */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Solo", AUTH_REAL_NAME_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   set_user_settings_persona(g_test_user_id, "DistinctPersonaWord");
+
+   int64_t persona_word = insert_entity_typed(g_test_user_id, "DistinctPersonaWord", "person");
+   int64_t control = insert_entity_typed(g_test_user_id, "Acme", "org");
+
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+
+   memory_alias_link_user_self_row_t *r_pw = NULL, *r_ctl = NULL;
+   for (int i = 0; i < result.row_count; i++) {
+      if (result.rows[i].entity_id == persona_word)
+         r_pw = &result.rows[i];
+      else if (result.rows[i].entity_id == control)
+         r_ctl = &result.rows[i];
+   }
+   TEST_ASSERT_NOT_NULL(r_pw);
+   TEST_ASSERT_NOT_NULL(r_ctl);
+
+   /* Headline regression: persona_description tokens MUST NOT have entered
+    * the synthetic.  If they did, persona_word's name_jaccard would fire
+    * (token "distinctpersonaword" in synthetic) and lift it above control.
+    * Post-Ckpt-B, persona_word has no name overlap with synthetic ("solo")
+    * — the only differentiator vs control is type_match (person, +0.05)
+    * and user_self_bonus (NOT applicable since neither side is the
+    * username "jon"... wait, user_self_bonus checks username substring
+    * match against the candidate.  Candidate "DistinctPersonaWord" has
+    * canonical "distinctpersonaword" which does NOT contain "jon".  So
+    * no user_self bonus.  control "Acme" canonical "acme" also no
+    * user_self.  Both get type baseline.) */
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, r_ctl->composite_score + 0.05f, r_pw->composite_score);
+}
+
+/* ============================================================================
+ * Phase 1.5 Ckpt C: directional similarity + "user" allow-list
+ *
+ *   1. Directional overlap at Stage 2 catches single-token candidates
+ *      that standard Jaccard would drop below the 0.30 floor.
+ *   2. The canonical_name='user' allow-list pre-add lets that entity
+ *      reach Stage 6 even when name signals are zero.
+ *   3. Regression: non-synthetic resolver path still uses standard
+ *      Jaccard and still drops at the floor.
+ *
+ * The synthetic-self resolver entry point is
+ * memory_db_entity_resolve_alias_for_self(), introduced in Ckpt C.
+ * ============================================================================ */
+
+static void test_resolve_for_self_directional_overlap_keeps_single_token(void) {
+   /* Synthetic seed shape: real_name="Jonathan Smith" + aliases
+    * gives a 4-token canonical "jonathan smith jon smithfabrications".
+    * Candidate is single-token "jon".
+    *
+    * Standard Jaccard: |{jon}| / |{jonathan,smith,jon,smithfabrications}|
+    *                 = 1 / 4 = 0.25 → BELOW the 0.30 floor → dropped at
+    *                 Stage 2 → resolver returns clean miss (resolved_id=0,
+    *                 matched_stage=0).
+    *
+    * Directional overlap (synth-self mode): |{jon}| / |{jon}|
+    *                 = 1 / 1 = 1.00 → kept past Stage 2 → reaches Stage 6
+    *                 with non-zero composite → resolved_id = jon.
+    * The auto-merge threshold isn't reached without embeddings/relations
+    * in the test harness, but the cascade DID score the candidate — that's
+    * the directional-overlap invariant we're pinning. */
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jon", "person");
+   /* Add an unrelated org so we know the resolver isn't just picking the
+    * only candidate. */
+   insert_entity_typed(g_test_user_id, "Acme", "org");
+
+   const char *synth_canonical = "jonathan smith jon smithfabrications";
+   memory_alias_resolve_t res;
+   memset(&res, 0, sizeof(res));
+   int rc = memory_db_entity_resolve_alias_for_self(g_test_user_id, synth_canonical, "person",
+                                                    &res);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(jon, res.resolved_id);
+   TEST_ASSERT_EQUAL_INT(6, res.matched_stage);
+   /* Composite must be > 0 — the candidate was scored, not silently
+    * dropped at the directional-overlap floor. */
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, res.evidence.composite_score);
+   /* Non-Acme: the unrelated org would have been vetoed at Stage 3 by
+    * type filter (person/org with no thing carve-out), so the resolver
+    * had no choice but Jon. */
+}
+
+static void test_resolve_for_self_user_allow_list_reaches_stage6(void) {
+   /* The "user" entity has zero name overlap with any verbose synthetic
+    * — neither standard Jaccard nor directional overlap would keep it
+    * via Stage 2.  The allow-list pre-add bypasses the floor and feeds
+    * it through Stages 3-6 normally.  user_self_bonus carries the
+    * scoring (the candidate reaches Stage 6 with non-zero composite).
+    *
+    * To make user_self_bonus fire, the test creates a user named "user"
+    * so the username canonical matches the entity's canonical_name —
+    * the same shape the dev's live DB has. */
+   auth_db_create_user("user", "hash", false);
+   auth_user_t u;
+   memset(&u, 0, sizeof(u));
+   auth_db_get_user("user", &u);
+   int second_user = u.id;
+   TEST_ASSERT_GREATER_THAN(0, second_user);
+
+   int64_t user_ent = insert_entity_typed(second_user, "user", "thing");
+
+   /* Synth canonical has zero token overlap with "user" — confirms the
+    * allow-list (not Stage 2 token-Jaccard) is what surfaces the
+    * candidate. */
+   const char *synth_canonical = "jonathan smith";
+   memory_alias_resolve_t res;
+   memset(&res, 0, sizeof(res));
+   int rc = memory_db_entity_resolve_alias_for_self(second_user, synth_canonical, "person", &res);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+
+   /* "user" reached Stage 6 with non-zero composite (user_self_bonus
+    * fires via username substring "user" ⊂ "user"). */
+   TEST_ASSERT_EQUAL_INT64(user_ent, res.resolved_id);
+   TEST_ASSERT_EQUAL_INT(6, res.matched_stage);
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, res.evidence.composite_score);
+   TEST_ASSERT_TRUE(res.evidence.user_self_bonus_applied);
+}
+
+static void test_resolve_alias_non_synth_preserves_jaccard_floor(void) {
+   /* Regression: standard memory_db_entity_resolve_alias() (extraction-
+    * time path, use_synth_self=false) MUST still apply the standard
+    * Jaccard 0.30 floor.  Single-token "jon" against verbose
+    * "jonathan smith jon smithfabrications" gives Jaccard 0.25 →
+    * below floor → dropped → no resolution. */
+   insert_entity_typed(g_test_user_id, "Jon", "person");
+
+   memory_alias_resolve_t res;
+   memset(&res, 0, sizeof(res));
+   int rc = memory_db_entity_resolve_alias(g_test_user_id, "jonathan smith jon smithfabrications",
+                                           "person", "jonathan smith jon smithfabrications", &res);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   /* No Stage 1 hit (no entity has the verbose canonical) and Stage 2
+    * drops "jon" via the 0.30 floor → no resolution. */
+   TEST_ASSERT_EQUAL_INT64(0, res.resolved_id);
 }
 
 /* ============================================================================
@@ -1281,8 +1584,8 @@ static void test_link_user_self_dry_run_synthetic_scores_existing_cluster(void) 
 
 static void test_exclusive_relation_overlap_unified_sql_path(void) {
    int64_t company = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
-   int64_t a_with = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t b_with = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t a_with = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t b_with = insert_entity_typed(g_test_user_id, "Jon", "person");
    int64_t a_no = insert_entity_typed(g_test_user_id, "Alice", "person");
    int64_t b_no = insert_entity_typed(g_test_user_id, "Albert", "person");
 
@@ -1445,6 +1748,201 @@ static void test_cross_user_proposal_resolve_returns_not_found(void) {
 }
 
 /* ============================================================================
+ * Phase 1.5 fold-in: allow-list token unconditionally fires user_self_bonus.
+ *
+ * The Ckpt C "user" allow-list pre-add gets the entity into the candidate
+ * pool, but the user_self_bonus would only fire when the operator's
+ * username canonical happened to be a substring of "user" (e.g. literal
+ * username "user").  The dev's actual username is "jon" or "admin" —
+ * neither contains "user" as a substring.  The fold-in flags allow-listed
+ * candidates with is_user_self_token = true so the bonus fires regardless.
+ * ============================================================================ */
+
+static void test_resolve_for_self_user_allow_list_bonus_fires_for_realistic_username(void) {
+   /* setUp() created user "jon" — the dev's actual case.  The "user"
+    * canonical does NOT contain "jon" as a substring, so prior to the
+    * fold-in the user_self_bonus would not fire for the allow-list
+    * candidate.  Post-fold-in: is_user_self_token=true short-circuits
+    * the username-substring check inside user_self_bonus_applies. */
+   int64_t user_ent = insert_entity_typed(g_test_user_id, "user", "thing");
+
+   const char *synth_canonical = "jonathan smith";
+   memory_alias_resolve_t res;
+   memset(&res, 0, sizeof(res));
+   int rc = memory_db_entity_resolve_alias_for_self(g_test_user_id, synth_canonical, "person",
+                                                    &res);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(user_ent, res.resolved_id);
+   TEST_ASSERT_EQUAL_INT(6, res.matched_stage);
+   /* Bonus must fire via the allow-list flag — username "jon" is NOT
+    * substring of "user", so the only path that lights this up is the
+    * is_user_self_token branch. */
+   TEST_ASSERT_TRUE(res.evidence.user_self_bonus_applied);
+   /* Composite ≥ review threshold: just user_self_bonus (0.20) wouldn't
+    * cross 0.70 by itself, but together with no penalty veto and the
+    * ability for production embeddings to add ~0.30, it's the threshold
+    * we'd commit to in the band-routing decision.  In tests without
+    * cosine, composite = user_self_bonus (0.20) only.  Pin > 0 to prove
+    * the bonus fired without depending on production embedding signal. */
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, res.evidence.composite_score);
+}
+
+/* ============================================================================
+ * Phase 1.5 Ckpt D: link-user-self real_name gate + cluster integration
+ *
+ * Two acceptance tests:
+ *   1. The gate refuses link-user-self when real_name is unset/empty,
+ *      with the distinct error code MEMORY_DB_REAL_NAME_REQUIRED and no
+ *      DB writes.
+ *   2. The integration test mimics the dev's actual cluster shape (Jon
+ *      thing/28, Jonathan Smith person/21, user thing/292), sets
+ *      real_name + aliases per the realistic configuration flow, and
+ *      verifies link-user-self in dry-run mode detects all three cluster
+ *      members.
+ *
+ * Auto-merge band note: in production with embeddings configured, the
+ * cosine signal contributes the missing ~0.30 to push composite past
+ * the 0.90 threshold.  In the test harness without ONNX wired,
+ * embedding_cosine forfeits to 0; the integration test verifies what's
+ * structurally achievable — every cluster member is scored at Stage 6
+ * with composite > 0 (no silent drops at the Jaccard floor or type
+ * veto), and the highest-confidence candidate ranks first.  Path A
+ * verification with embeddings happens against the dev's live DB
+ * post-commit, not in this unit test.
+ * ============================================================================ */
+
+static void test_link_user_self_refuses_null_real_name(void) {
+   /* setUp() created user "jon" without setting real_name.  The gate
+    * should fire on either dry-run or commit. */
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_REAL_NAME_REQUIRED, rc);
+
+   /* No DB writes — alias and proposal tables stay empty. */
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_aliases "
+                                          "WHERE unlinked_at IS NULL"));
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_merge_proposals "
+                                          "WHERE resolved_at IS NULL"));
+
+   /* Whitespace-only real_name should also fail the gate (the trim
+    * walks past spaces/tabs/newlines). */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "   \t \n  ", AUTH_REAL_NAME_MAX - 1);
+   /* set_user_identity NULLIFs empty strings via SQL, so we have to
+    * bypass and write the whitespace directly to confirm the C-level
+    * trim works.  Set to a non-empty whitespace string via prepared
+    * UPDATE that doesn't NULLIF. */
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db, "UPDATE users SET real_name = ? WHERE id = ?", -1, &stmt, NULL);
+   sqlite3_bind_text(stmt, 1, "   \t \n  ", -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 2, g_test_user_id);
+   sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+
+   memset(&result, 0, sizeof(result));
+   rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_REAL_NAME_REQUIRED, rc);
+
+   /* Setting a real real_name unblocks. */
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jon", AUTH_REAL_NAME_MAX - 1);
+   auth_db_set_user_identity(g_test_user_id, &id);
+
+   memset(&result, 0, sizeof(result));
+   rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+}
+
+static void test_link_user_self_finds_jonathan_cluster(void) {
+   /* Phase 1.5 acceptance: synthetic data mimicking the dev's actual
+    * cluster shape.  Real_name + aliases configured per the realistic
+    * flow.  All three cluster members must be detected at Stage 6 with
+    * non-zero composite — proves the cluster is found by the synthetic
+    * seed without persona-reach-around or username-only fallback. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jonathan Smith", AUTH_REAL_NAME_MAX - 1);
+   strncpy(id.identity_aliases, "Jon\nsmithfabrications", AUTH_IDENTITY_ALIASES_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   /* The dev's three-member cluster — exact mention_counts from the
+    * live DB scan. */
+   int64_t jon = insert_entity_typed(g_test_user_id, "Jon", "thing");
+   int64_t jonathan_smith = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t user_ent = insert_entity_typed(g_test_user_id, "user", "thing");
+   /* Set mention_counts to match production. */
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db, "UPDATE memory_entities SET mention_count = ? WHERE id = ?", -1,
+                      &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, 28);
+   sqlite3_bind_int64(stmt, 2, jon);
+   sqlite3_step(stmt);
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, 21);
+   sqlite3_bind_int64(stmt, 2, jonathan_smith);
+   sqlite3_step(stmt);
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, 292);
+   sqlite3_bind_int64(stmt, 2, user_ent);
+   sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ true, &result);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+
+   /* No is_user_self entity exists yet — synthetic seed path was used. */
+   TEST_ASSERT_EQUAL_INT64(0, result.self_entity_id);
+   TEST_ASSERT_TRUE(result.self_was_seeded);
+
+   /* All three cluster members must appear in result.rows. */
+   memory_alias_link_user_self_row_t *r_jon = NULL;
+   memory_alias_link_user_self_row_t *r_kk = NULL;
+   memory_alias_link_user_self_row_t *r_user = NULL;
+   for (int i = 0; i < result.row_count; i++) {
+      if (result.rows[i].entity_id == jon)
+         r_jon = &result.rows[i];
+      else if (result.rows[i].entity_id == jonathan_smith)
+         r_kk = &result.rows[i];
+      else if (result.rows[i].entity_id == user_ent)
+         r_user = &result.rows[i];
+   }
+   TEST_ASSERT_NOT_NULL_MESSAGE(r_jon, "Jon cluster member not detected");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r_kk, "Jonathan Smith cluster member not detected");
+   TEST_ASSERT_NOT_NULL_MESSAGE(r_user, "user cluster member not detected");
+
+   /* Each member scored above zero — none was silently dropped at any
+    * pre-Stage-6 filter (Jaccard floor, type veto, etc.).  Production
+    * embeddings would push these past the auto-merge band; in the test
+    * harness without cosine, each member's name + bonus signals carry
+    * a meaningful confidence score. */
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, r_jon->composite_score);
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, r_kk->composite_score);
+
+   /* Phase 1.5 fold-in (allow-list token): the canonical-name='user'
+    * candidate must receive user_self_bonus regardless of whether the
+    * operator's username happens to be a substring of "user".  This is
+    * the brief's literal intent — the bonus fires on the allow-list
+    * flag, not on coincidental name overlap. */
+   TEST_ASSERT_TRUE_MESSAGE(r_user->user_self_bonus_applied,
+                            "user_self_bonus must fire for the allow-listed 'user' canonical");
+   /* Bonus alone = 0.20 in tests without cosine; the bonus contribution
+    * itself proves the allow-list flag flowed through end-to-end. */
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, r_user->composite_score);
+
+   /* Jonathan Smith (person) outranks Jon (thing) — type_match
+    * contributes 0.05 to person/person but 0 to thing/person. */
+   TEST_ASSERT_GREATER_THAN_FLOAT(r_jon->composite_score, r_kk->composite_score);
+
+   /* No DB writes (dry-run). */
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_aliases "
+                                          "WHERE unlinked_at IS NULL"));
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -1517,6 +2015,23 @@ int main(void) {
    /* Ckpt 5 fold-in round 2 */
    RUN_TEST(test_exclusive_relation_overlap_unified_sql_path);
    RUN_TEST(test_link_user_self_dry_run_synthetic_scores_existing_cluster);
+
+   /* Phase 1.5 Ckpt B: synthetic seed sources the real_name + aliases */
+   RUN_TEST(test_synthetic_seed_unions_real_name_and_alias_tokens);
+   RUN_TEST(test_synthetic_seed_aliases_parsing_strip_dedup_skip_empty);
+   RUN_TEST(test_synthetic_seed_does_not_leak_persona_description);
+
+   /* Phase 1.5 Ckpt C: directional similarity + "user" allow-list */
+   RUN_TEST(test_resolve_for_self_directional_overlap_keeps_single_token);
+   RUN_TEST(test_resolve_for_self_user_allow_list_reaches_stage6);
+   RUN_TEST(test_resolve_alias_non_synth_preserves_jaccard_floor);
+
+   /* Phase 1.5 fold-in: allow-list token unconditionally fires bonus */
+   RUN_TEST(test_resolve_for_self_user_allow_list_bonus_fires_for_realistic_username);
+
+   /* Phase 1.5 Ckpt D: link-user-self gate + cluster integration */
+   RUN_TEST(test_link_user_self_refuses_null_real_name);
+   RUN_TEST(test_link_user_self_finds_jonathan_cluster);
 
    return UNITY_END();
 }
