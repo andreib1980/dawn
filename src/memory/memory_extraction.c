@@ -38,6 +38,7 @@
 #include "core/buf_printf.h"
 #include "core/iso8601.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_db.h"
@@ -900,6 +901,23 @@ static void *extraction_thread(void *arg) {
       }
    }
 
+   /* Resolve config first — pure stack work + pointer copies, no heap.  Bailing
+    * here on misconfiguration skips the prompt malloc and json_object tree
+    * entirely on the unhappy path.  The buffers backing extraction_config
+    * (model_buf, endpoint_buf) live on this stack frame and outlive every use
+    * of extraction_config below. */
+   llm_resolved_config_t extraction_config;
+   char model_buf[LLM_MODEL_NAME_MAX];
+   char endpoint_buf[MEMORY_EXTRACTION_ENDPOINT_BUF_MIN];
+   if (memory_extraction_resolve_config(&extraction_config, model_buf, sizeof(model_buf),
+                                        endpoint_buf, sizeof(endpoint_buf),
+                                        "memory_extraction") != SUCCESS) {
+      goto cleanup;
+   }
+
+   OLOG_INFO("memory_extraction: using provider=%s, model=%s", g_config.memory.extraction_provider,
+             g_config.memory.extraction_model[0] ? g_config.memory.extraction_model : "(default)");
+
    /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
     * three "%s" format specifiers plus a small safety margin; expand if more
     * placeholders are added to EXTRACTION_PROMPT_TEMPLATE. */
@@ -923,62 +941,6 @@ static void *extraction_thread(void *arg) {
    json_object_object_add(user_msg, "role", json_object_new_string("user"));
    json_object_object_add(user_msg, "content", json_object_new_string(prompt));
    json_object_array_add(extraction_history, user_msg);
-
-   /* Build resolved config from memory extraction settings */
-   llm_resolved_config_t extraction_config = { 0 };
-   char model_buf[LLM_MODEL_NAME_MAX];
-   char endpoint_buf[128];
-
-   const char *provider = g_config.memory.extraction_provider;
-   const char *model = g_config.memory.extraction_model;
-
-   /* Copy model to local buffer */
-   if (model && model[0] != '\0') {
-      strncpy(model_buf, model, sizeof(model_buf) - 1);
-      model_buf[sizeof(model_buf) - 1] = '\0';
-      extraction_config.model = model_buf;
-   }
-
-   /* Determine provider type and configure accordingly */
-   if (strcmp(provider, "local") == 0 || strcmp(provider, "ollama") == 0) {
-      extraction_config.type = LLM_LOCAL;
-      extraction_config.cloud_provider = CLOUD_PROVIDER_NONE;
-      /* Use local endpoint from config */
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, sizeof(endpoint_buf) - 1);
-      endpoint_buf[sizeof(endpoint_buf) - 1] = '\0';
-      extraction_config.endpoint = endpoint_buf;
-   } else if (strcmp(provider, "openai") == 0) {
-      extraction_config.type = LLM_CLOUD;
-      extraction_config.cloud_provider = CLOUD_PROVIDER_OPENAI;
-      extraction_config.api_key = g_secrets.openai_api_key;
-      extraction_config.endpoint = NULL; /* Use default */
-   } else if (strcmp(provider, "claude") == 0) {
-      extraction_config.type = LLM_CLOUD;
-      extraction_config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      extraction_config.api_key = g_secrets.claude_api_key;
-      extraction_config.endpoint = NULL; /* Use default */
-   } else {
-      /* Default to local if unknown - warn with valid options */
-      OLOG_WARNING("memory_extraction: unknown provider '%s' in config "
-                   "(valid: local, ollama, openai, claude) - falling back to local",
-                   provider);
-      extraction_config.type = LLM_LOCAL;
-      extraction_config.cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, sizeof(endpoint_buf) - 1);
-      endpoint_buf[sizeof(endpoint_buf) - 1] = '\0';
-      extraction_config.endpoint = endpoint_buf;
-   }
-
-   /* Disable tools and thinking for extraction - we just want JSON output */
-   strncpy(extraction_config.tool_mode, "disabled", sizeof(extraction_config.tool_mode) - 1);
-   strncpy(extraction_config.thinking_mode, "disabled",
-           sizeof(extraction_config.thinking_mode) - 1);
-
-   OLOG_INFO("memory_extraction: using provider=%s, model=%s", provider,
-             model ? model : "(default)");
-
-   /* Set per-request timeout for extraction (thread-local, no global mutation) */
-   extraction_config.timeout_ms = g_config.memory.extraction_timeout_ms;
 
    /* Use the configured LLM for extraction */
    response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
@@ -1058,7 +1020,9 @@ static void *extraction_thread(void *arg) {
          snprintf(notice, sizeof(notice),
                   "Memory extraction used fallback model \"%s\" "
                   "(configured model \"%s\" unavailable)",
-                  ctx->fallback.model, model ? model : "(default)");
+                  ctx->fallback.model,
+                  g_config.memory.extraction_model[0] ? g_config.memory.extraction_model
+                                                      : "(default)");
          OLOG_WARNING("memory_extraction: %s", notice);
 #ifdef ENABLE_WEBUI
          if (!is_recovery_run) {
@@ -1091,7 +1055,9 @@ static void *extraction_thread(void *arg) {
       }
    } else {
       OLOG_WARNING("memory_extraction: LLM returned no response (model=%s, conv=%ld)",
-                   model ? model : "(default)", (long)ctx->conversation_id);
+                   g_config.memory.extraction_model[0] ? g_config.memory.extraction_model
+                                                       : "(default)",
+                   (long)ctx->conversation_id);
 #ifdef ENABLE_WEBUI
       if (!is_recovery_run) {
          webui_broadcast_memory_notice(ctx->user_id, "error",
@@ -1301,4 +1267,74 @@ bool memory_extraction_in_progress(int user_id) {
 
 size_t memory_extraction_get_template_size_chars(void) {
    return strlen(EXTRACTION_PROMPT_TEMPLATE);
+}
+
+int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
+                                     char *model_buf,
+                                     size_t model_buf_sz,
+                                     char *endpoint_buf,
+                                     size_t endpoint_buf_sz,
+                                     const char *log_prefix) {
+   const char *prefix = log_prefix ? log_prefix : "memory_extraction";
+   if (!cfg || !model_buf || !endpoint_buf) {
+      OLOG_ERROR("%s: NULL argument to resolve_config", prefix);
+      return FAILURE;
+   }
+   if (model_buf_sz < LLM_MODEL_NAME_MAX) {
+      OLOG_ERROR("%s: model_buf_sz %zu < required %d", prefix, model_buf_sz, LLM_MODEL_NAME_MAX);
+      return FAILURE;
+   }
+   if (endpoint_buf_sz < MEMORY_EXTRACTION_ENDPOINT_BUF_MIN) {
+      OLOG_ERROR("%s: endpoint_buf_sz %zu < required %d", prefix, endpoint_buf_sz,
+                 MEMORY_EXTRACTION_ENDPOINT_BUF_MIN);
+      return FAILURE;
+   }
+   memset(cfg, 0, sizeof(*cfg));
+
+   const char *provider = g_config.memory.extraction_provider;
+   const char *model = g_config.memory.extraction_model;
+
+   if (!provider || provider[0] == '\0') {
+      OLOG_ERROR("%s: extraction_provider not configured", prefix);
+      return FAILURE;
+   }
+
+   if (model && model[0] != '\0') {
+      strncpy(model_buf, model, model_buf_sz - 1);
+      model_buf[model_buf_sz - 1] = '\0';
+      cfg->model = model_buf;
+   }
+
+   if (strcmp(provider, "local") == 0 || strcmp(provider, "ollama") == 0) {
+      cfg->type = LLM_LOCAL;
+      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
+      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz - 1);
+      endpoint_buf[endpoint_buf_sz - 1] = '\0';
+      cfg->endpoint = endpoint_buf;
+   } else if (strcmp(provider, "openai") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
+      cfg->api_key = g_secrets.openai_api_key;
+      cfg->endpoint = NULL;
+   } else if (strcmp(provider, "claude") == 0) {
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+      cfg->api_key = g_secrets.claude_api_key;
+      cfg->endpoint = NULL;
+   } else {
+      OLOG_WARNING("%s: unknown provider '%s' in config "
+                   "(valid: local, ollama, openai, claude) - falling back to local",
+                   prefix, provider);
+      cfg->type = LLM_LOCAL;
+      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
+      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz - 1);
+      endpoint_buf[endpoint_buf_sz - 1] = '\0';
+      cfg->endpoint = endpoint_buf;
+   }
+
+   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
+   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
+   cfg->timeout_ms = g_config.memory.extraction_timeout_ms;
+
+   return SUCCESS;
 }

@@ -67,59 +67,6 @@ static const char *RECAT_PROMPT_TEMPLATE =
     "Respond with ONLY a JSON array:\n"
     "[{\"id\": 42, \"category\": \"relationships\"}, ...]\n";
 
-static int build_llm_config(llm_resolved_config_t *cfg,
-                            char *model_buf,
-                            size_t model_buf_sz,
-                            char *endpoint_buf,
-                            size_t endpoint_buf_sz) {
-   memset(cfg, 0, sizeof(*cfg));
-
-   const char *provider = g_config.memory.extraction_provider;
-   const char *model = g_config.memory.extraction_model;
-
-   if (!provider || provider[0] == '\0') {
-      OLOG_ERROR("memory_recategorize: extraction_provider not configured");
-      return FAILURE;
-   }
-
-   if (model && model[0] != '\0') {
-      strncpy(model_buf, model, model_buf_sz - 1);
-      model_buf[model_buf_sz - 1] = '\0';
-      cfg->model = model_buf;
-   }
-
-   if (strcmp(provider, "local") == 0 || strcmp(provider, "ollama") == 0) {
-      cfg->type = LLM_LOCAL;
-      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz - 1);
-      endpoint_buf[endpoint_buf_sz - 1] = '\0';
-      cfg->endpoint = endpoint_buf;
-   } else if (strcmp(provider, "openai") == 0) {
-      cfg->type = LLM_CLOUD;
-      cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
-      cfg->api_key = g_secrets.openai_api_key;
-      cfg->endpoint = NULL;
-   } else if (strcmp(provider, "claude") == 0) {
-      cfg->type = LLM_CLOUD;
-      cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      cfg->api_key = g_secrets.claude_api_key;
-      cfg->endpoint = NULL;
-   } else {
-      OLOG_WARNING("memory_recategorize: unknown provider '%s', falling back to local", provider);
-      cfg->type = LLM_LOCAL;
-      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_sz - 1);
-      endpoint_buf[endpoint_buf_sz - 1] = '\0';
-      cfg->endpoint = endpoint_buf;
-   }
-
-   strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
-   strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
-   cfg->timeout_ms = g_config.memory.extraction_timeout_ms;
-
-   return SUCCESS;
-}
-
 static bool validate_category(const char *cat) {
    if (!cat || !*cat)
       return false;
@@ -250,9 +197,9 @@ static void *recategorize_thread_fn(void *arg) {
 
    llm_resolved_config_t cfg;
    char model_buf[LLM_MODEL_NAME_MAX];
-   char endpoint_buf[128];
-   if (build_llm_config(&cfg, model_buf, sizeof(model_buf), endpoint_buf, sizeof(endpoint_buf)) !=
-       SUCCESS) {
+   char endpoint_buf[MEMORY_EXTRACTION_ENDPOINT_BUF_MIN];
+   if (memory_extraction_resolve_config(&cfg, model_buf, sizeof(model_buf), endpoint_buf,
+                                        sizeof(endpoint_buf), "memory_recategorize") != SUCCESS) {
       atomic_store(&s_recat_running, false);
       return NULL;
    }

@@ -109,6 +109,43 @@ bool memory_extraction_in_progress(int user_id);
 struct json_object *memory_extraction_parse_json(const char *response);
 
 /**
+ * @brief Resolve memory.extraction_provider/extraction_model into an llm_resolved_config_t.
+ *
+ * Converts the string-keyed extraction settings (provider name + model) into
+ * a fully-populated config suitable for llm_chat_completion_with_config().
+ * Caller-provided buffers back the model and endpoint string fields because
+ * the resolved config holds pointers into them — the buffers must outlive
+ * every use of the resolved config (typically allocated on the same stack
+ * frame that consumes the config, as the in-tree callers do).
+ *
+ * On unknown provider the helper logs a warning and falls back to LLM_LOCAL.
+ * Returns FAILURE when extraction_provider is missing/empty (a config error
+ * worth surfacing rather than masking with a silent fallback) or when the
+ * caller's buffers are smaller than the required minimums (model_buf_sz <
+ * LLM_MODEL_NAME_MAX or endpoint_buf_sz < MEMORY_EXTRACTION_ENDPOINT_BUF_MIN).
+ *
+ * Sets cfg->tool_mode = "disabled", cfg->thinking_mode = "disabled", and
+ * cfg->timeout_ms from g_config.memory.extraction_timeout_ms — extraction
+ * paths universally want JSON output without tools or visible reasoning.
+ *
+ * @param cfg              Output config (zeroed by the helper)
+ * @param model_buf        Caller-owned buffer for cfg->model
+ * @param model_buf_sz     Size of model_buf (must be >= LLM_MODEL_NAME_MAX)
+ * @param endpoint_buf     Caller-owned buffer for cfg->endpoint
+ * @param endpoint_buf_sz  Size of endpoint_buf (must be >= MEMORY_EXTRACTION_ENDPOINT_BUF_MIN)
+ * @param log_prefix       Module name for log messages (NULL → "memory_extraction")
+ * @return SUCCESS on resolution, FAILURE on missing provider, undersized
+ *         buffers, or invalid args
+ */
+#define MEMORY_EXTRACTION_ENDPOINT_BUF_MIN 128
+int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
+                                     char *model_buf,
+                                     size_t model_buf_sz,
+                                     char *endpoint_buf,
+                                     size_t endpoint_buf_sz,
+                                     const char *log_prefix);
+
+/**
  * @brief Return the character size of the extraction prompt template.
  *
  * The prompt sent to the LLM is the template plus an anchor-date line plus
