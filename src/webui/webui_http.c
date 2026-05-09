@@ -48,6 +48,7 @@
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
 #include "image_store.h"
+#include "memory/memory_db_aliases.h"
 #include "webui/webui_documents.h"
 #include "webui/webui_images.h"
 #endif
@@ -887,6 +888,196 @@ static int handle_auth_logout(struct lws *wsi) {
    return LWS_CLOSE_CONNECTION;
 }
 
+/* =============================================================================
+ * Memory entity-merge REST endpoints (v43, design §14)
+ *
+ * Three thin authenticated endpoints that delegate to the alias surface in
+ * memory_db_alias.c.  All three use send_auth_response which has a 4096-byte
+ * stack body cap — Phase 1 alias counts comfortably fit; bulk callers should
+ * use the WebSocket message variants which stream JSON.
+ * ============================================================================= */
+
+/* GET /api/memory/entities/:id/aliases */
+static int handle_memory_entity_aliases_get(struct lws *wsi, int64_t entity_id) {
+   auth_session_t session;
+   if (!is_request_authenticated(wsi, &session)) {
+      send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED,
+                         "{\"success\":false,\"error\":\"unauthenticated\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+   if (entity_id <= 0) {
+      send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST,
+                         "{\"success\":false,\"error\":\"invalid entity_id\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+
+   memory_alias_listing_row_t rows[32];
+   int count = 0;
+   if (memory_db_entity_alias_list(session.user_id, entity_id, rows, 32, &count) !=
+       MEMORY_DB_SUCCESS) {
+      send_auth_response(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR,
+                         "{\"success\":false,\"error\":\"query failed\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+
+   /* Build via json-c so canonical_name fields containing " or \ are
+    * escaped correctly (JSON-injection guard).  Source-of-truth shape
+    * matches the WebSocket variant in webui_memory.c. */
+   struct json_object *resp = json_object_new_object();
+   json_object_object_add(resp, "success", json_object_new_boolean(1));
+   json_object_object_add(resp, "entity_id", json_object_new_int64(entity_id));
+   struct json_object *arr = json_object_new_array();
+   for (int i = 0; i < count; i++) {
+      struct json_object *row = json_object_new_object();
+      json_object_object_add(row, "link_id", json_object_new_int64(rows[i].link_id));
+      json_object_object_add(row, "source_entity_id",
+                             json_object_new_int64(rows[i].source_entity_id));
+      json_object_object_add(row, "source_canonical_name",
+                             json_object_new_string(rows[i].source_canonical_name));
+      json_object_object_add(row, "link_kind", json_object_new_string(rows[i].link_kind));
+      json_object_object_add(row, "composite_score",
+                             json_object_new_double((double)rows[i].composite_score));
+      json_object_object_add(row, "linked_at", json_object_new_int64(rows[i].linked_at));
+      json_object_array_add(arr, row);
+   }
+   json_object_object_add(resp, "aliases", arr);
+   const char *body = json_object_to_json_string_ext(resp, JSON_C_TO_STRING_PLAIN);
+   send_auth_response(wsi, HTTP_STATUS_OK, body, NULL, 0);
+   json_object_put(resp);
+   return LWS_CLOSE_CONNECTION;
+}
+
+/* GET /api/memory/entity-merge-proposals — pending merge proposals for the
+ * authenticated user, sorted by proposed_at DESC.  link-user-self queues
+ * 0.70-0.90 candidates as proposals; the WebUI renders them for review. */
+static int handle_memory_merge_proposals_get(struct lws *wsi) {
+   auth_session_t session;
+   if (!is_request_authenticated(wsi, &session)) {
+      send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED,
+                         "{\"success\":false,\"error\":\"unauthenticated\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+
+   /* Cap the REST surface at 16 entries to fit comfortably in the 4096-byte
+    * send_auth_response stack body; the WebSocket variant lifts to 64 for
+    * bulk callers. */
+   memory_alias_proposal_row_t rows[16];
+   int count = 0;
+   if (memory_db_proposal_list_pending(session.user_id, rows, 16, &count) != MEMORY_DB_SUCCESS) {
+      send_auth_response(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR,
+                         "{\"success\":false,\"error\":\"query failed\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+
+   /* Build via json-c — see handle_memory_entity_aliases_get for rationale. */
+   struct json_object *resp = json_object_new_object();
+   json_object_object_add(resp, "success", json_object_new_boolean(1));
+   struct json_object *arr = json_object_new_array();
+   for (int i = 0; i < count; i++) {
+      struct json_object *row = json_object_new_object();
+      json_object_object_add(row, "proposal_id", json_object_new_int64(rows[i].proposal_id));
+      json_object_object_add(row, "source_entity_id",
+                             json_object_new_int64(rows[i].source_entity_id));
+      json_object_object_add(row, "target_entity_id",
+                             json_object_new_int64(rows[i].target_entity_id));
+      json_object_object_add(row, "source_canonical_name",
+                             json_object_new_string(rows[i].source_canonical_name));
+      json_object_object_add(row, "target_canonical_name",
+                             json_object_new_string(rows[i].target_canonical_name));
+      json_object_object_add(row, "composite_score",
+                             json_object_new_double((double)rows[i].composite_score));
+      json_object_object_add(row, "proposed_at", json_object_new_int64(rows[i].proposed_at));
+      json_object_array_add(arr, row);
+   }
+   json_object_object_add(resp, "proposals", arr);
+   const char *body = json_object_to_json_string_ext(resp, JSON_C_TO_STRING_PLAIN);
+   send_auth_response(wsi, HTTP_STATUS_OK, body, NULL, 0);
+   json_object_put(resp);
+   return LWS_CLOSE_CONNECTION;
+}
+
+/* POST /api/memory/entities/:source/link-to/:target — body is currently
+ * ignored; reason defaults to "operator".  WebSocket variant supports a
+ * full reason string. */
+static int handle_memory_entity_link_post(struct lws *wsi, int64_t source_id, int64_t target_id) {
+   /* CSRF protection: verify request is same-origin (matches the
+    * /api/auth/logout pattern at handle_auth_logout above).  Without this
+    * a cross-site POST to /api/memory/entities/X/link-to/Y could ride a
+    * session cookie and silently soft-link entities for the victim. */
+   if (!is_same_origin_request(wsi)) {
+      OLOG_WARNING("WebUI: Blocked cross-origin entity link-to attempt");
+      send_auth_response(wsi, HTTP_STATUS_FORBIDDEN, "{\"success\":false,\"error\":\"forbidden\"}",
+                         NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+   auth_session_t session;
+   if (!is_request_authenticated(wsi, &session)) {
+      send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED,
+                         "{\"success\":false,\"error\":\"unauthenticated\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+   if (source_id <= 0 || target_id <= 0 || source_id == target_id) {
+      send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST,
+                         "{\"success\":false,\"error\":\"invalid source/target ids\"}", NULL, 0);
+      return LWS_CLOSE_CONNECTION;
+   }
+   int64_t link_id = 0;
+   int rc = memory_db_entity_alias_link(session.user_id, source_id, target_id, "soft", "operator",
+                                        -1.0f, NULL, &link_id);
+   char body[256];
+   if (rc == MEMORY_DB_SUCCESS) {
+      snprintf(body, sizeof(body),
+               "{\"success\":true,\"link_id\":%lld,\"source_entity_id\":%lld,"
+               "\"target_entity_id\":%lld}",
+               (long long)link_id, (long long)source_id, (long long)target_id);
+      send_auth_response(wsi, HTTP_STATUS_OK, body, NULL, 0);
+   } else {
+      snprintf(body, sizeof(body),
+               "{\"success\":false,\"error\":\"link failed (entity not found, self-link, "
+               "or source has dependents)\"}");
+      send_auth_response(wsi, HTTP_STATUS_BAD_REQUEST, body, NULL, 0);
+   }
+   return LWS_CLOSE_CONNECTION;
+}
+
+/* Path parser: tries `/api/memory/entities/<num>/aliases` and returns the
+ * entity_id on hit, or -1 on miss.  Pure-string parsing; no allocation. */
+static int64_t parse_alias_path(const char *path) {
+   const char *prefix = "/api/memory/entities/";
+   size_t plen = strlen(prefix);
+   if (strncmp(path, prefix, plen) != 0)
+      return -1;
+   const char *id_start = path + plen;
+   char *endp = NULL;
+   long long id = strtoll(id_start, &endp, 10);
+   if (!endp || id <= 0)
+      return -1;
+   if (strcmp(endp, "/aliases") != 0)
+      return -1;
+   return (int64_t)id;
+}
+
+/* Parser for `/api/memory/entities/<src>/link-to/<tgt>`. */
+static bool parse_link_path(const char *path, int64_t *out_src, int64_t *out_tgt) {
+   const char *prefix = "/api/memory/entities/";
+   size_t plen = strlen(prefix);
+   if (strncmp(path, prefix, plen) != 0)
+      return false;
+   const char *src_start = path + plen;
+   char *endp = NULL;
+   long long src = strtoll(src_start, &endp, 10);
+   if (!endp || src <= 0 || strncmp(endp, "/link-to/", 9) != 0)
+      return false;
+   const char *tgt_start = endp + 9;
+   char *endp2 = NULL;
+   long long tgt = strtoll(tgt_start, &endp2, 10);
+   if (!endp2 || tgt <= 0 || *endp2 != '\0')
+      return false;
+   *out_src = (int64_t)src;
+   *out_tgt = (int64_t)tgt;
+   return true;
+}
+
 /**
  * @brief Handle GET /api/auth/status
  * @param wsi HTTP connection
@@ -1049,6 +1240,23 @@ int callback_http(struct lws *wsi,
          if (strcmp(path, "/api/auth/login") == 0 && pss && pss->is_post) {
             /* Return 0 to allow body callbacks */
             return 0;
+         }
+
+         /* Memory entity-merge REST (v43) */
+         if (pss && !pss->is_post) {
+            int64_t alias_entity_id = parse_alias_path(path);
+            if (alias_entity_id > 0) {
+               return handle_memory_entity_aliases_get(wsi, alias_entity_id);
+            }
+            if (strcmp(path, "/api/memory/entity-merge-proposals") == 0) {
+               return handle_memory_merge_proposals_get(wsi);
+            }
+         }
+         if (pss && pss->is_post) {
+            int64_t src = 0, tgt = 0;
+            if (parse_link_path(path, &src, &tgt)) {
+               return handle_memory_entity_link_post(wsi, src, tgt);
+            }
          }
 
          /* Image API endpoints (require auth) */

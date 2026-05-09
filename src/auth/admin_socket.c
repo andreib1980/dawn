@@ -51,6 +51,8 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_admin.h"
+#include "memory/memory_db_aliases.h"
+#include "memory/memory_db_entities.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_recategorize.h"
 #ifdef ENABLE_WEBUI
@@ -117,6 +119,14 @@ static int handle_delete_conversation(int client_fd, const char *payload, uint16
 static int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_entity_merge(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_entity_split(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_entity_aliases(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_entity_history(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_entity_list(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_entity_link_user_self(int client_fd,
+                                               const char *payload,
+                                               uint16_t payload_len);
 static int send_response(int client_fd, admin_resp_code_t code);
 static int send_text_response(int client_fd, admin_resp_code_t code, const char *text);
 static int send_list_response(int client_fd,
@@ -2402,6 +2412,18 @@ static int handle_memory_reextract(int client_fd, const char *payload, uint16_t 
             }
          }
       }
+      /* v43: surface alias-graph state that reset_derived will drop, so the
+       * operator sees what they're losing before --confirm.  Only printed
+       * when there's something to lose; absent rows render nothing. */
+      if (est.active_aliases > 0 || est.pending_proposals > 0) {
+         size_t cur = strlen(report);
+         if (cur + (size_t)kMinContinuation < sizeof(report)) {
+            snprintf(report + cur, sizeof(report) - cur,
+                     "\n  Aliases to drop:    %d active soft-link%s + %d pending proposal%s",
+                     est.active_aliases, est.active_aliases == 1 ? "" : "s", est.pending_proposals,
+                     est.pending_proposals == 1 ? "" : "s");
+         }
+      }
       return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
    }
 
@@ -2513,6 +2535,375 @@ static int handle_memory_reextract_status(int client_fd,
             st.conversations_done, st.conversations_pending, st.conversations_failed,
             st.cost_tracking_available ? "(unimplemented)" : "not tracked (carried debt)");
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+/* =============================================================================
+ * Phase 6.5: Memory entity-merge alias subcommands (v43)
+ *
+ * Six synchronous handlers backed by memory_db_alias.c.  Each decodes the
+ * shared admin_memory_entity_payload_t, resolves the username → user_id,
+ * dispatches to the alias surface, formats a text report, and replies via
+ * send_text_response.
+ * ============================================================================= */
+
+/* Decode the shared entity payload.  Returns SUCCESS on a well-formed
+ * payload (out_username + out_reason are NUL-terminated copies that fit in
+ * caller-supplied buffers); FAILURE on truncation or invalid lengths. */
+static int decode_entity_payload(const char *payload,
+                                 uint16_t payload_len,
+                                 uint8_t *out_flags,
+                                 int64_t *out_arg1,
+                                 int64_t *out_arg2,
+                                 char *out_username,
+                                 size_t username_buf_size,
+                                 char *out_reason,
+                                 size_t reason_buf_size) {
+   if (!payload || payload_len < sizeof(admin_memory_entity_payload_t)) {
+      return FAILURE;
+   }
+   const admin_memory_entity_payload_t *pl = (const admin_memory_entity_payload_t *)payload;
+   if (pl->username_len == 0 || pl->username_len > ADMIN_MEM_ENTITY_USERNAME_MAX ||
+       pl->reason_len > ADMIN_MEM_ENTITY_REASON_MAX) {
+      return FAILURE;
+   }
+   uint16_t expected = (uint16_t)(sizeof(admin_memory_entity_payload_t) + pl->username_len +
+                                  pl->reason_len);
+   if (payload_len < expected) {
+      return FAILURE;
+   }
+   if (out_flags)
+      *out_flags = pl->flags;
+   if (out_arg1)
+      *out_arg1 = pl->arg1;
+   if (out_arg2)
+      *out_arg2 = pl->arg2;
+
+   const char *u_start = payload + sizeof(admin_memory_entity_payload_t);
+   if (out_username && username_buf_size > 0) {
+      size_t copy = pl->username_len < (username_buf_size - 1) ? pl->username_len
+                                                               : (username_buf_size - 1);
+      memcpy(out_username, u_start, copy);
+      out_username[copy] = '\0';
+   }
+   const char *r_start = u_start + pl->username_len;
+   if (out_reason && reason_buf_size > 0) {
+      size_t copy = pl->reason_len < (reason_buf_size - 1) ? pl->reason_len : (reason_buf_size - 1);
+      memcpy(out_reason, r_start, copy);
+      out_reason[copy] = '\0';
+   }
+   return SUCCESS;
+}
+
+/* Resolve username → user_id; sends NOT_FOUND on miss.  Returns 0 on
+ * SUCCESS (out_user populated), 1 on failure (response already sent). */
+static int resolve_username_to_user(int client_fd, const char *username, auth_user_t *out_user) {
+   if (!username || !*username) {
+      send_text_response(client_fd, ADMIN_RESP_FAILURE, "Username required");
+      return 1;
+   }
+   if (auth_db_get_user(username, out_user) != AUTH_DB_SUCCESS) {
+      send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+      return 1;
+   }
+   return 0;
+}
+
+static int handle_memory_entity_merge(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t source_id = 0, target_id = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   char reason[ADMIN_MEM_ENTITY_REASON_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &source_id, &target_id, username,
+                             sizeof(username), reason, sizeof(reason)) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed entity payload");
+   }
+   if (source_id <= 0 || target_id <= 0 || source_id == target_id) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid source/target ids");
+   }
+
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   const char *r = (reason[0] ? reason : "operator");
+   int64_t link_id = 0;
+   int rc = memory_db_entity_alias_link(user.id, source_id, target_id, "soft", r, -1.0f, NULL,
+                                        &link_id);
+   if (rc != MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "Merge failed (entity not found, has dependents, or self-link)");
+   }
+   char report[256];
+   snprintf(report, sizeof(report), "Linked entity %lld → %lld as soft alias (link_id=%lld).",
+            (long long)source_id, (long long)target_id, (long long)link_id);
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+static int handle_memory_entity_split(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t link_id = 0, unused = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   char reason[ADMIN_MEM_ENTITY_REASON_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &link_id, &unused, username,
+                             sizeof(username), reason, sizeof(reason)) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed entity payload");
+   }
+   if (link_id <= 0) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid link_id");
+   }
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   const char *r = (reason[0] ? reason : "split-by-operator");
+   int rc = memory_db_entity_alias_unlink(user.id, link_id, r);
+   if (rc == MEMORY_DB_NOT_FOUND) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND,
+                                "Link not found or already unlinked");
+   }
+   if (rc != MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "Split failed (hard merge — use 'dawn-admin memory reextract')");
+   }
+   char report[160];
+   snprintf(report, sizeof(report), "Split link %lld (reason=%s).", (long long)link_id, r);
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+static int handle_memory_entity_aliases(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t entity_id = 0, unused = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &entity_id, &unused, username,
+                             sizeof(username), NULL, 0) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed entity payload");
+   }
+   if (entity_id <= 0) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid entity_id");
+   }
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   memory_alias_listing_row_t rows[64];
+   int count = 0;
+   if (memory_db_entity_alias_list(user.id, entity_id, rows, 64, &count) != MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Alias query failed");
+   }
+
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   int off = snprintf(report, sizeof(report), "Aliases of entity %lld (user '%s'):\n",
+                      (long long)entity_id, username);
+   for (int i = 0; i < count && off < (int)sizeof(report) - 96; i++) {
+      char compbuf[16];
+      if (rows[i].composite_score < 0.0f)
+         snprintf(compbuf, sizeof(compbuf), "—");
+      else
+         snprintf(compbuf, sizeof(compbuf), "%.2f", (double)rows[i].composite_score);
+      off += snprintf(report + off, sizeof(report) - off,
+                      "  [%lld] %s (id=%lld, %s, composite=%s, linked_at=%lld)\n",
+                      (long long)rows[i].link_id,
+                      rows[i].source_canonical_name[0] ? rows[i].source_canonical_name
+                                                       : "(deleted)",
+                      (long long)rows[i].source_entity_id, rows[i].link_kind, compbuf,
+                      (long long)rows[i].linked_at);
+   }
+   if (count == 0) {
+      snprintf(report, sizeof(report), "No active aliases for entity %lld (user '%s').",
+               (long long)entity_id, username);
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+static int handle_memory_entity_history(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t entity_id = 0, unused = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &entity_id, &unused, username,
+                             sizeof(username), NULL, 0) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed entity payload");
+   }
+   if (entity_id <= 0) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid entity_id");
+   }
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   memory_alias_history_row_t rows[64];
+   int count = 0;
+   if (memory_db_entity_alias_history(user.id, entity_id, rows, 64, &count) != MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "History query failed");
+   }
+
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   int off = snprintf(report, sizeof(report), "Audit timeline for entity %lld (user '%s'):\n",
+                      (long long)entity_id, username);
+   for (int i = 0; i < count && off < (int)sizeof(report) - 128; i++) {
+      if (rows[i].unlinked_at == 0) {
+         off += snprintf(report + off, sizeof(report) - off,
+                         "  [%lld] %s → %s (%s, %s) at %lld — active\n", (long long)rows[i].link_id,
+                         rows[i].source_canonical_name, rows[i].target_canonical_name,
+                         rows[i].link_kind, rows[i].reason, (long long)rows[i].linked_at);
+      } else {
+         off += snprintf(report + off, sizeof(report) - off,
+                         "  [%lld] %s → %s (%s, %s) at %lld — UNLINKED %lld (%s)\n",
+                         (long long)rows[i].link_id, rows[i].source_canonical_name,
+                         rows[i].target_canonical_name, rows[i].link_kind, rows[i].reason,
+                         (long long)rows[i].linked_at, (long long)rows[i].unlinked_at,
+                         rows[i].unlink_reason[0] ? rows[i].unlink_reason : "?");
+      }
+   }
+   if (count == 0) {
+      snprintf(report, sizeof(report), "No alias history for entity %lld (user '%s').",
+               (long long)entity_id, username);
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+static int handle_memory_entity_list(int client_fd, const char *payload, uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t unused1 = 0, unused2 = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &unused1, &unused2, username,
+                             sizeof(username), NULL, 0) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed entity payload");
+   }
+   bool show_aliases = (flags & ADMIN_MEM_ENTITY_FLAG_INCLUDE_ALIASES) != 0;
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   memory_alias_entity_row_t rows[200];
+   int count = 0;
+   if (memory_db_entity_list_for_admin(user.id, show_aliases, rows, 200, &count) !=
+       MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "List query failed");
+   }
+
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   int off = snprintf(report, sizeof(report), "Entities for user '%s'%s:\n", username,
+                      show_aliases ? " (canonical + aliases)" : " (canonical only)");
+   for (int i = 0; i < count && off < (int)sizeof(report) - 128; i++) {
+      off += snprintf(report + off, sizeof(report) - off, "  [%lld] %s (%s, mentions=%d)%s%s\n",
+                      (long long)rows[i].entity_id, rows[i].name[0] ? rows[i].name : "(unnamed)",
+                      rows[i].entity_type[0] ? rows[i].entity_type : "?", rows[i].mention_count,
+                      rows[i].is_user_self ? " [user-self]" : "",
+                      rows[i].is_alias ? " [alias]" : "");
+   }
+   if (count == 0) {
+      snprintf(report, sizeof(report), "No entities for user '%s'.", username);
+   } else if (count == 200) {
+      off += snprintf(report + off, sizeof(report) - off, "  …(truncated at 200 entries)\n");
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+static const char *outcome_label(int outcome) {
+   switch (outcome) {
+      case MEMORY_ALIAS_OUTCOME_AUTO_MERGED:
+         return "Auto-merged";
+      case MEMORY_ALIAS_OUTCOME_PROPOSED:
+         return "Queued for review";
+      case MEMORY_ALIAS_OUTCOME_REJECTED:
+         return "Below threshold";
+      default:
+         return "(no candidates)";
+   }
+}
+
+static int handle_memory_entity_link_user_self(int client_fd,
+                                               const char *payload,
+                                               uint16_t payload_len) {
+   uint8_t flags = 0;
+   int64_t unused1 = 0, unused2 = 0;
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1] = { 0 };
+   if (decode_entity_payload(payload, payload_len, &flags, &unused1, &unused2, username,
+                             sizeof(username), NULL, 0) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed entity payload");
+   }
+   bool dry_run = (flags & ADMIN_MEM_ENTITY_FLAG_DRY_RUN) != 0;
+   auth_user_t user;
+   if (resolve_username_to_user(client_fd, username, &user) != 0)
+      return 1;
+
+   /* Heap-allocate the result struct: at MEMORY_ALIAS_LINK_USER_SELF_MAX_ROWS
+    * = 256 the struct is ~33 KB on aarch64; combined with the report buffer
+    * a stack frame this size is an order of magnitude bigger than typical
+    * admin handlers, and Phase 2 lifting MAX_ROWS would push toward 128 KB.
+    * calloc + free keeps the frame small. */
+   memory_alias_link_user_self_result_t *result = calloc(1, sizeof(*result));
+   if (!result) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "link-user-self: out of memory");
+   }
+   int rc = memory_alias_link_user_self_run(user.id, dry_run, result);
+   if (rc == MEMORY_DB_NOT_FOUND) {
+      free(result);
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+   if (rc != MEMORY_DB_SUCCESS) {
+      free(result);
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "link-user-self orchestrator failed");
+   }
+
+   /* Format the §8 report. */
+   char report[ADMIN_MSG_CONTENT_MAX + 1];
+   int off = 0;
+   off += snprintf(report + off, sizeof(report) - off, "link-user-self for '%s'%s:\n", username,
+                   dry_run ? " — DRY RUN" : "");
+   if (result->self_was_seeded) {
+      if (result->self_entity_id > 0) {
+         off += snprintf(report + off, sizeof(report) - off,
+                         "  user-self canonical: %s (id=%lld) [seeded]\n",
+                         result->self_canonical_name, (long long)result->self_entity_id);
+      } else {
+         off += snprintf(report + off, sizeof(report) - off,
+                         "  user-self canonical: %s (would create)\n", result->self_canonical_name);
+         /* Conservative-score note: with no existing self canonical, the
+          * dry-run scores against a synthetic entity that has id=0 — DB-
+          * touching signals (relation overlap, contact overlap, embedding
+          * cosine) all forfeit to 0, so the report is a lower bound on
+          * what commit will actually score against the materialized self. */
+         off += snprintf(report + off, sizeof(report) - off,
+                         "  Note: scores below are conservative — no existing user-self "
+                         "canonical means embedding/relation signals forfeit; commit will "
+                         "score higher.\n");
+      }
+   } else {
+      off += snprintf(report + off, sizeof(report) - off, "  user-self canonical: %s (id=%lld)\n",
+                      result->self_canonical_name, (long long)result->self_entity_id);
+   }
+   off += snprintf(report + off, sizeof(report) - off,
+                   "  Considered: %d  |  Auto-merged: %d  |  Proposed: %d  |  Rejected: %d\n",
+                   result->considered, result->auto_merged, result->proposed, result->rejected);
+
+   /* Render rows in three sections: auto-merged, proposed, rejected (top 10). */
+   for (int section = 0; section < 3 && off < (int)sizeof(report) - 128; section++) {
+      int target_outcome = (section == 0)   ? MEMORY_ALIAS_OUTCOME_AUTO_MERGED
+                           : (section == 1) ? MEMORY_ALIAS_OUTCOME_PROPOSED
+                                            : MEMORY_ALIAS_OUTCOME_REJECTED;
+      int section_count = 0;
+      int max_rows = (target_outcome == MEMORY_ALIAS_OUTCOME_REJECTED) ? 5 : 20;
+      for (int i = 0;
+           i < result->row_count && section_count < max_rows && off < (int)sizeof(report) - 96;
+           i++) {
+         if (result->rows[i].outcome != target_outcome)
+            continue;
+         if (section_count == 0) {
+            off += snprintf(report + off, sizeof(report) - off, "  %s:\n",
+                            outcome_label(target_outcome));
+         }
+         off += snprintf(report + off, sizeof(report) - off, "    [%lld] %s (%s, composite=%.2f)\n",
+                         (long long)result->rows[i].entity_id, result->rows[i].canonical_name,
+                         result->rows[i].entity_type, result->rows[i].composite_score);
+         section_count++;
+      }
+   }
+   int sret = send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+   free(result);
+   return sret;
 }
 
 /* =============================================================================
@@ -2659,6 +3050,25 @@ static int handle_client(int client_fd) {
 
       case ADMIN_MSG_MEMORY_REEXTRACT_STATUS:
          return handle_memory_reextract_status(client_fd, payload, header.payload_len);
+
+      /* Phase 6.5: Entity-merge alias surface (v43) */
+      case ADMIN_MSG_MEMORY_ENTITY_MERGE:
+         return handle_memory_entity_merge(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_ENTITY_SPLIT:
+         return handle_memory_entity_split(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_ENTITY_ALIASES:
+         return handle_memory_entity_aliases(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_ENTITY_HISTORY:
+         return handle_memory_entity_history(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_ENTITY_LIST:
+         return handle_memory_entity_list(client_fd, payload, header.payload_len);
+
+      case ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF:
+         return handle_memory_entity_link_user_self(client_fd, payload, header.payload_len);
 
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);

@@ -1463,3 +1463,124 @@ admin_resp_code_t admin_client_memory_reextract_status(int fd,
    }
    return recv_text_response(fd, response, resp_len);
 }
+
+/* =============================================================================
+ * MEMORY_ENTITY_* subcommands (v43, dawn-admin memory entity *)
+ *
+ * One shared encoder + six thin send/recv wrappers.  All six subcommands use
+ * admin_memory_entity_payload_t and reply with text via recv_text_response.
+ * ============================================================================= */
+
+static uint16_t encode_entity_payload(uint8_t flags,
+                                      int64_t arg1,
+                                      int64_t arg2,
+                                      const char *username,
+                                      const char *reason,
+                                      uint8_t *out,
+                                      size_t out_size) {
+   if (!out || !username || !*username)
+      return 0;
+   size_t ulen = strlen(username);
+   if (ulen == 0 || ulen > ADMIN_MEM_ENTITY_USERNAME_MAX)
+      return 0;
+   size_t rlen = (reason && *reason) ? strlen(reason) : 0;
+   if (rlen > ADMIN_MEM_ENTITY_REASON_MAX)
+      return 0;
+
+   size_t total = sizeof(admin_memory_entity_payload_t) + ulen + rlen;
+   if (total > out_size || total > ADMIN_MSG_MAX_PAYLOAD)
+      return 0;
+
+   admin_memory_entity_payload_t header = { 0 };
+   header.flags = flags;
+   header.username_len = (uint8_t)ulen;
+   header.arg1 = arg1;
+   header.arg2 = arg2;
+   header.reason_len = (uint8_t)rlen;
+   memcpy(out, &header, sizeof(header));
+   memcpy(out + sizeof(header), username, ulen);
+   if (rlen > 0)
+      memcpy(out + sizeof(header) + ulen, reason, rlen);
+   return (uint16_t)total;
+}
+
+static admin_resp_code_t entity_send_recv(int fd,
+                                          admin_msg_type_t opcode,
+                                          uint8_t flags,
+                                          int64_t arg1,
+                                          int64_t arg2,
+                                          const char *username,
+                                          const char *reason,
+                                          char *response,
+                                          size_t resp_len) {
+   uint8_t payload[ADMIN_MSG_MAX_PAYLOAD];
+   uint16_t payload_len = encode_entity_payload(flags, arg1, arg2, username, reason, payload,
+                                                sizeof(payload));
+   if (payload_len == 0) {
+      fprintf(stderr, "Error: invalid entity-subcommand arguments\n");
+      return ADMIN_RESP_FAILURE;
+   }
+   if (send_message(fd, opcode, payload, payload_len) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_entity_merge(int fd,
+                                                   const char *username,
+                                                   int64_t source_id,
+                                                   int64_t target_id,
+                                                   const char *reason,
+                                                   char *response,
+                                                   size_t resp_len) {
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_MERGE, 0, source_id, target_id, username,
+                           reason, response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_entity_split(int fd,
+                                                   const char *username,
+                                                   int64_t link_id,
+                                                   const char *reason,
+                                                   char *response,
+                                                   size_t resp_len) {
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_SPLIT, 0, link_id, 0, username, reason,
+                           response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_entity_aliases(int fd,
+                                                     const char *username,
+                                                     int64_t entity_id,
+                                                     char *response,
+                                                     size_t resp_len) {
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_ALIASES, 0, entity_id, 0, username, NULL,
+                           response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_entity_history(int fd,
+                                                     const char *username,
+                                                     int64_t entity_id,
+                                                     char *response,
+                                                     size_t resp_len) {
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_HISTORY, 0, entity_id, 0, username, NULL,
+                           response, resp_len);
+}
+
+admin_resp_code_t admin_client_memory_entity_list(int fd,
+                                                  const char *username,
+                                                  bool include_aliases,
+                                                  char *response,
+                                                  size_t resp_len) {
+   uint8_t flags = include_aliases ? ADMIN_MEM_ENTITY_FLAG_INCLUDE_ALIASES : 0;
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_LIST, flags, 0, 0, username, NULL, response,
+                           resp_len);
+}
+
+admin_resp_code_t admin_client_memory_entity_link_user_self(int fd,
+                                                            const char *username,
+                                                            bool dry_run,
+                                                            char *response,
+                                                            size_t resp_len) {
+   uint8_t flags = dry_run ? ADMIN_MEM_ENTITY_FLAG_DRY_RUN : 0;
+   return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF, flags, 0, 0, username, NULL,
+                           response, resp_len);
+}

@@ -162,6 +162,25 @@ typedef enum {
    ADMIN_MSG_MEMORY_RECATEGORIZE = 0x80,     /**< LLM-classify general facts for a user */
    ADMIN_MSG_MEMORY_REEXTRACT = 0x81,        /**< Drop derived memory tables + re-extract */
    ADMIN_MSG_MEMORY_REEXTRACT_STATUS = 0x82, /**< Query reextract progress for a user */
+
+   /* Phase 6.5: Entity-merge alias surface (v43, dawn-admin memory entity *).
+    * Six request opcodes (0x83-0x88), all synchronous text-response.  Six
+    * STATUS opcodes (0x89-0x8E) are RESERVED for a future Phase-2 async
+    * upgrade — e.g. propose-merges --apply-all scanning every entity pair on
+    * a large multi-user deployment — so that the request opcode space stays
+    * stable as scale grows.  Phase 1 does not implement them. */
+   ADMIN_MSG_MEMORY_ENTITY_MERGE = 0x83,          /**< Manual soft-link source → target */
+   ADMIN_MSG_MEMORY_ENTITY_SPLIT = 0x84,          /**< Reverse a soft-link by link_id */
+   ADMIN_MSG_MEMORY_ENTITY_ALIASES = 0x85,        /**< List active aliases of a canonical */
+   ADMIN_MSG_MEMORY_ENTITY_HISTORY = 0x86,        /**< Full alias audit timeline */
+   ADMIN_MSG_MEMORY_ENTITY_LIST = 0x87,           /**< List entities (canonical-only by default) */
+   ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF = 0x88, /**< Path B backfill for user-self cluster */
+   ADMIN_MSG_MEMORY_ENTITY_MERGE_STATUS = 0x89,   /**< RESERVED (Phase 2 async) */
+   ADMIN_MSG_MEMORY_ENTITY_SPLIT_STATUS = 0x8A,   /**< RESERVED (Phase 2 async) */
+   ADMIN_MSG_MEMORY_ENTITY_ALIASES_STATUS = 0x8B, /**< RESERVED (Phase 2 async) */
+   ADMIN_MSG_MEMORY_ENTITY_HISTORY_STATUS = 0x8C, /**< RESERVED (Phase 2 async) */
+   ADMIN_MSG_MEMORY_ENTITY_LIST_STATUS = 0x8D,    /**< RESERVED (Phase 2 async) */
+   ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF_STATUS = 0x8E, /**< RESERVED (Phase 2 async) */
 } admin_msg_type_t;
 
 /**
@@ -370,6 +389,46 @@ typedef struct __attribute__((packed)) {
 
 #define ADMIN_REEXTRACT_BACKUP_PATH_MAX 200
 #define ADMIN_REEXTRACT_USERNAME_MAX 32
+
+/*
+ * =============================================================================
+ * MEMORY_ENTITY_* payload (v43; shared by all six entity subcommands)
+ * =============================================================================
+ *
+ * Wire format (little-endian, fixed-then-variable):
+ *   Byte 0:        flags  (subcommand-specific bits below)
+ *   Byte 1:        username_len  (1..ADMIN_MEM_ENTITY_USERNAME_MAX)
+ *   Bytes 2-9:     arg1   (int64_t, subcommand-specific; see notes)
+ *   Bytes 10-17:   arg2   (int64_t, subcommand-specific; 0 = unused)
+ *   Byte 18:       reason_len  (0..ADMIN_MEM_ENTITY_REASON_MAX)
+ *   Bytes 19+:     username[username_len] (no NUL)
+ *   Following:     reason[reason_len]     (no NUL; may be empty)
+ *
+ * Total max: 1 + 1 + 8 + 8 + 1 + 32 + 32 = 83 bytes (ADMIN_MSG_MAX_PAYLOAD = 256).
+ *
+ * Per-subcommand semantics:
+ *   MERGE          : arg1 = source_id, arg2 = target_id, reason = caller-supplied
+ *   SPLIT          : arg1 = link_id,   arg2 = unused,    reason = caller-supplied
+ *   ALIASES        : arg1 = entity_id, arg2 = unused,    reason = unused
+ *   HISTORY        : arg1 = entity_id, arg2 = unused,    reason = unused
+ *   LIST           : arg1 = unused,    arg2 = unused,    flags bit 1 = include_aliases
+ *   LINK_USER_SELF : arg1 = unused,    arg2 = unused,    flags bit 0 = dry_run
+ */
+
+#define ADMIN_MEM_ENTITY_FLAG_DRY_RUN 0x01
+#define ADMIN_MEM_ENTITY_FLAG_INCLUDE_ALIASES 0x02
+
+#define ADMIN_MEM_ENTITY_USERNAME_MAX 32
+#define ADMIN_MEM_ENTITY_REASON_MAX 32
+
+typedef struct __attribute__((packed)) {
+   uint8_t flags;
+   uint8_t username_len;
+   int64_t arg1;
+   int64_t arg2;
+   uint8_t reason_len;
+   /* Followed by: username[username_len] + reason[reason_len] */
+} admin_memory_entity_payload_t;
 
 /*
  * =============================================================================

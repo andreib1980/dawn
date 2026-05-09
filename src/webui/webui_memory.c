@@ -33,6 +33,7 @@
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_filter.h"
 #include "memory/memory_similarity.h"
@@ -583,6 +584,18 @@ void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payl
    int count = 0;
    int rc = memory_db_entity_list(conn->auth_user_id, entities, limit, offset, &count);
 
+   /* Phase 1 entity-merge: pull the user's alias summary so canonical cards
+    * surface an `alias_count` and so alias rows are dropped from the listing
+    * (UX requirement — without this, both Kris and Kristopher render as
+    * top-level cards even though Kris is a soft alias). */
+#define MAX_ALIAS_SUMMARY 512
+   memory_alias_summary_row_t alias_summary[MAX_ALIAS_SUMMARY];
+   int alias_summary_count = 0;
+   if (rc == MEMORY_DB_SUCCESS) {
+      memory_db_entity_alias_summary(conn->auth_user_id, alias_summary, MAX_ALIAS_SUMMARY,
+                                     &alias_summary_count);
+   }
+
 /* Bulk-load all relations in a single query (avoids N+1 per-entity queries) */
 #define MAX_RELATIONS_BULK 400
    memory_relation_t all_rels[MAX_RELATIONS_BULK];
@@ -596,6 +609,27 @@ void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payl
    if (rc == MEMORY_DB_SUCCESS) {
       json_object *entities_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
+         /* Skip alias rows — they're surfaced via the canonical's expand
+          * panel instead of as standalone cards. */
+         bool is_alias = false;
+         for (int a = 0; a < alias_summary_count; a++) {
+            if (alias_summary[a].alias_entity_id == entities[i].id) {
+               is_alias = true;
+               break;
+            }
+         }
+         if (is_alias) {
+            continue;
+         }
+
+         /* Count aliases pointing at this canonical for the badge. */
+         int alias_count = 0;
+         for (int a = 0; a < alias_summary_count; a++) {
+            if (alias_summary[a].canonical_entity_id == entities[i].id) {
+               alias_count++;
+            }
+         }
+
          json_object *entity_obj = json_object_new_object();
          json_object_object_add(entity_obj, "id", json_object_new_int64(entities[i].id));
          json_object_object_add(entity_obj, "name", json_object_new_string(entities[i].name));
@@ -603,6 +637,7 @@ void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payl
                                 json_object_new_string(entities[i].entity_type));
          json_object_object_add(entity_obj, "mention_count",
                                 json_object_new_int(entities[i].mention_count));
+         json_object_object_add(entity_obj, "alias_count", json_object_new_int(alias_count));
          json_object_object_add(entity_obj, "first_seen",
                                 json_object_new_int64(entities[i].first_seen));
          json_object_object_add(entity_obj, "last_seen",
@@ -1513,4 +1548,274 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
           conn->auth_user_id, format, imported_facts, imported_prefs, skipped_dupes,
           skipped_blocked);
    }
+}
+
+/* =============================================================================
+ * Entity-merge alias surface (v43) — WebSocket handlers per design §14.
+ *
+ * All five share the same response envelope shape: {type, payload:{success,
+ * error?, ...}}.  Underlying logic comes from memory_db_alias.c — no new
+ * SQL is added here.
+ * ============================================================================= */
+
+/* Helper: render a {success: false, error: ...} envelope and send it. */
+static void send_alias_error(ws_connection_t *conn, const char *type, const char *err) {
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string(type));
+   json_object *resp_payload = json_object_new_object();
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+   json_object_object_add(resp_payload, "error", json_object_new_string(err));
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+void handle_entity_aliases_request(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+   json_object *id_obj = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "entity_id", &id_obj)) {
+      send_alias_error(conn, "entity_aliases_response", "Missing entity_id");
+      return;
+   }
+   int64_t entity_id = json_object_get_int64(id_obj);
+   if (entity_id <= 0) {
+      send_alias_error(conn, "entity_aliases_response", "Invalid entity_id");
+      return;
+   }
+
+   memory_alias_listing_row_t rows[64];
+   int count = 0;
+   int rc = memory_db_entity_alias_list(conn->auth_user_id, entity_id, rows, 64, &count);
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("entity_aliases_response"));
+   json_object *resp_payload = json_object_new_object();
+   if (rc != MEMORY_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to list aliases"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "entity_id", json_object_new_int64(entity_id));
+      json_object *arr = json_object_new_array();
+      for (int i = 0; i < count; i++) {
+         json_object *row = json_object_new_object();
+         json_object_object_add(row, "link_id", json_object_new_int64(rows[i].link_id));
+         json_object_object_add(row, "source_entity_id",
+                                json_object_new_int64(rows[i].source_entity_id));
+         json_object_object_add(row, "source_canonical_name",
+                                json_object_new_string(rows[i].source_canonical_name));
+         json_object_object_add(row, "link_kind", json_object_new_string(rows[i].link_kind));
+         json_object_object_add(row, "composite_score",
+                                json_object_new_double(rows[i].composite_score));
+         json_object_object_add(row, "linked_at", json_object_new_int64(rows[i].linked_at));
+         json_object_array_add(arr, row);
+      }
+      json_object_object_add(resp_payload, "aliases", arr);
+   }
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+void handle_entity_merge_proposal_list_request(ws_connection_t *conn, struct json_object *payload) {
+   (void)payload; /* No filtering args today — the user's pending-only list. */
+   if (!conn_require_auth(conn))
+      return;
+
+   memory_alias_proposal_row_t rows[64];
+   int count = 0;
+   int rc = memory_db_proposal_list_pending(conn->auth_user_id, rows, 64, &count);
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("entity_merge_proposal_list_response"));
+   json_object *resp_payload = json_object_new_object();
+   if (rc != MEMORY_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to list proposals"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object *arr = json_object_new_array();
+      for (int i = 0; i < count; i++) {
+         json_object *row = json_object_new_object();
+         json_object_object_add(row, "proposal_id", json_object_new_int64(rows[i].proposal_id));
+         json_object_object_add(row, "source_entity_id",
+                                json_object_new_int64(rows[i].source_entity_id));
+         json_object_object_add(row, "target_entity_id",
+                                json_object_new_int64(rows[i].target_entity_id));
+         json_object_object_add(row, "source_canonical_name",
+                                json_object_new_string(rows[i].source_canonical_name));
+         json_object_object_add(row, "target_canonical_name",
+                                json_object_new_string(rows[i].target_canonical_name));
+         json_object_object_add(row, "composite_score",
+                                json_object_new_double(rows[i].composite_score));
+         json_object_object_add(row, "proposed_at", json_object_new_int64(rows[i].proposed_at));
+         json_object_array_add(arr, row);
+      }
+      json_object_object_add(resp_payload, "proposals", arr);
+   }
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+void handle_entity_link_request(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+   json_object *src_obj = NULL, *tgt_obj = NULL, *reason_obj = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "source_entity_id", &src_obj) ||
+       !json_object_object_get_ex(payload, "target_entity_id", &tgt_obj)) {
+      send_alias_error(conn, "entity_link_response",
+                       "Missing source_entity_id or target_entity_id");
+      return;
+   }
+   int64_t source_id = json_object_get_int64(src_obj);
+   int64_t target_id = json_object_get_int64(tgt_obj);
+   /* Cap the operator-supplied reason at 128 bytes server-side and run it
+    * through the prompt-injection filter before it lands in the
+    * memory_entity_aliases audit row.  Free-form strings reaching DB +
+    * downstream consumers without a length cap or filter pass is the
+    * Ckpt 5 fold-in for sec-M2. */
+   char reason_buf[129] = "operator";
+   if (json_object_object_get_ex(payload, "reason", &reason_obj)) {
+      const char *r = json_object_get_string(reason_obj);
+      if (r && *r) {
+         strncpy(reason_buf, r, sizeof(reason_buf) - 1);
+         reason_buf[sizeof(reason_buf) - 1] = '\0';
+         if (memory_filter_check(reason_buf)) {
+            send_alias_error(conn, "entity_link_response", "Reason failed prompt-injection filter");
+            return;
+         }
+      }
+   }
+
+   int64_t link_id = 0;
+   int rc = memory_db_entity_alias_link(conn->auth_user_id, source_id, target_id, "soft",
+                                        reason_buf, -1.0f, NULL, &link_id);
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("entity_link_response"));
+   json_object *resp_payload = json_object_new_object();
+   if (rc == MEMORY_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "link_id", json_object_new_int64(link_id));
+      json_object_object_add(resp_payload, "source_entity_id", json_object_new_int64(source_id));
+      json_object_object_add(resp_payload, "target_entity_id", json_object_new_int64(target_id));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Link failed (entity not found, "
+                                                    "self-link, or source has dependents)"));
+   }
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+void handle_entity_unlink_request(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+   json_object *id_obj = NULL, *reason_obj = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "link_id", &id_obj)) {
+      send_alias_error(conn, "entity_unlink_response", "Missing link_id");
+      return;
+   }
+   int64_t link_id = json_object_get_int64(id_obj);
+   /* Cap + filter the unlink reason — same rationale as entity_link_request. */
+   char reason_buf[129] = "split-by-operator";
+   if (json_object_object_get_ex(payload, "reason", &reason_obj)) {
+      const char *r = json_object_get_string(reason_obj);
+      if (r && *r) {
+         strncpy(reason_buf, r, sizeof(reason_buf) - 1);
+         reason_buf[sizeof(reason_buf) - 1] = '\0';
+         if (memory_filter_check(reason_buf)) {
+            send_alias_error(conn, "entity_unlink_response",
+                             "Reason failed prompt-injection filter");
+            return;
+         }
+      }
+   }
+
+   int rc = memory_db_entity_alias_unlink(conn->auth_user_id, link_id, reason_buf);
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("entity_unlink_response"));
+   json_object *resp_payload = json_object_new_object();
+   if (rc == MEMORY_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "link_id", json_object_new_int64(link_id));
+   } else if (rc == MEMORY_DB_NOT_FOUND) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Link not found or already unlinked"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(
+          resp_payload, "error",
+          json_object_new_string(
+              "Hard merges cannot be split — use 'dawn-admin memory reextract'"));
+   }
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+void handle_entity_proposal_resolve_request(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *id_obj = NULL, *res_obj = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "proposal_id", &id_obj) ||
+       !json_object_object_get_ex(payload, "resolution", &res_obj)) {
+      send_alias_error(conn, "entity_proposal_resolve_response",
+                       "Missing proposal_id or resolution");
+      return;
+   }
+   int64_t proposal_id = json_object_get_int64(id_obj);
+   const char *resolution = json_object_get_string(res_obj);
+   if (proposal_id <= 0 || !resolution) {
+      send_alias_error(conn, "entity_proposal_resolve_response",
+                       "Invalid proposal_id or resolution");
+      return;
+   }
+   bool approved;
+   if (strcmp(resolution, "approved") == 0) {
+      approved = true;
+   } else if (strcmp(resolution, "rejected") == 0) {
+      approved = false;
+   } else {
+      send_alias_error(conn, "entity_proposal_resolve_response",
+                       "resolution must be 'approved' or 'rejected'");
+      return;
+   }
+
+   int64_t link_id = 0;
+   int rc = memory_db_proposal_resolve(conn->auth_user_id, proposal_id, approved, &link_id);
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("entity_proposal_resolve_response"));
+   json_object *resp_payload = json_object_new_object();
+   if (rc == MEMORY_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "proposal_id", json_object_new_int64(proposal_id));
+      json_object_object_add(resp_payload, "resolution", json_object_new_string(resolution));
+      if (approved && link_id > 0) {
+         json_object_object_add(resp_payload, "link_id", json_object_new_int64(link_id));
+      }
+   } else if (rc == MEMORY_DB_NOT_FOUND) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Proposal not found or already resolved"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Approve failed (entity not found, "
+                                                    "self-link, or source has dependents); "
+                                                    "proposal still pending"));
+   }
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
 }

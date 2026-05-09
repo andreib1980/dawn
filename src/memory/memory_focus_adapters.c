@@ -389,8 +389,12 @@ static int entity_adapter_query(int user_id,
             return FAILURE;
          }
          int loaded = 0;
-         if (memory_db_entity_get_embeddings(user_id, dims, scratch->ids, scratch->names,
-                                             scratch->types, scratch->embeddings, scratch->norms,
+         /* Focus-adapter scratch is canonical-only (v43) — soft aliases are
+          * absent from the cosine pool so duplicate surface forms don't
+          * compete for the focus-block budget. */
+         if (memory_db_entity_get_embeddings(user_id, /* include_aliases */ false, dims,
+                                             scratch->ids, scratch->names, scratch->types,
+                                             scratch->embeddings, scratch->norms,
                                              ENTITY_EMBED_BUF_CAP, &loaded) == MEMORY_DB_SUCCESS) {
             if (loaded == 0 && !s_entity_dim_mismatch_warned) {
                s_entity_dim_mismatch_warned = true;
@@ -625,9 +629,10 @@ static int relation_adapter_query(int user_id,
       return FAILURE;
 
    int loaded = 0;
-   memory_db_entity_get_embeddings(user_id, dims, scratch->ids, scratch->names, scratch->types,
-                                   scratch->embeddings, scratch->norms, ENTITY_EMBED_BUF_CAP,
-                                   &loaded);
+   /* Canonical-only (v43) — see entity adapter above for rationale. */
+   memory_db_entity_get_embeddings(user_id, /* include_aliases */ false, dims, scratch->ids,
+                                   scratch->names, scratch->types, scratch->embeddings,
+                                   scratch->norms, ENTITY_EMBED_BUF_CAP, &loaded);
    if (loaded <= 0) {
       release_entity_scratch();
       return SUCCESS;

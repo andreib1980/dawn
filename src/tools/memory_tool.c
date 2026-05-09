@@ -50,7 +50,8 @@ static const treg_param_t memory_params[] = {
            "'find_contact' (look up contact info), "
            "'list_contacts' (list all contacts), "
            "'delete_contact' (remove contact by ID), "
-           "'merge_entities' (combine two entities that refer to the same person/thing)",
+           "'merge_entities' (soft-link two entities that refer to the same person/thing — "
+           "creates a reversible alias; both entity rows remain)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
@@ -68,7 +69,8 @@ static const treg_param_t memory_params[] = {
                       "For 'find_contact': name to search for. "
                       "For 'list_contacts': optional field_type filter (email/phone). "
                       "For 'delete_contact': contact ID to remove. "
-                      "For 'merge_entities': the source entity name (will be deleted).",
+                      "For 'merge_entities': the source entity name (will become an alias of "
+                      "target; source row is preserved and reversible).",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -84,8 +86,8 @@ static const treg_param_t memory_params[] = {
    },
    {
        .name = "target_name",
-       .description = "For 'merge_entities': the name of the entity to merge INTO (keeps its name, "
-                      "absorbs all relations and contacts from the source entity).",
+       .description = "For 'merge_entities': the name of the entity to make canonical (keeps its "
+                      "name and identity; the source becomes a soft alias that resolves here).",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -168,8 +170,10 @@ static const tool_metadata_t memory_metadata = {
                   "(query: name, optional field_type). "
                   "Use 'list_contacts' to list all stored contacts (query: optional field_type). "
                   "Use 'delete_contact' to remove a contact record by ID. "
-                  "Use 'merge_entities' to combine two entities that refer to the same "
-                  "person/pet/place (query: source name to delete, target_name: entity to keep). "
+                  "Use 'merge_entities' to soft-link two entities that refer to the same "
+                  "person/pet/place (query: source name, target_name: canonical entity to keep). "
+                  "The link is reversible — the source row is preserved and can be split later. "
+                  "Use 'dawn-admin memory entity consolidate' to make a soft link permanent. "
                   "Use with_source=true on 'search'/'recent' to include verbatim conversation "
                   "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",

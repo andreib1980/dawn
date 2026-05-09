@@ -546,6 +546,22 @@
             case 'merge_memory_entities_response':
                DawnMemory.handleMergeEntityResponse(msg.payload);
                break;
+            // Phase 1 entity-merge: alias + proposal responses
+            case 'entity_aliases_response':
+               DawnMemory.handleEntityAliasesResponse(msg.payload);
+               break;
+            case 'entity_merge_proposal_list_response':
+               DawnMemory.handleEntityMergeProposalListResponse(msg.payload);
+               break;
+            case 'entity_link_response':
+               DawnMemory.handleEntityLinkResponse(msg.payload);
+               break;
+            case 'entity_unlink_response':
+               DawnMemory.handleEntityUnlinkResponse(msg.payload);
+               break;
+            case 'entity_proposal_resolve_response':
+               DawnMemory.handleEntityProposalResolveResponse(msg.payload);
+               break;
             case 'delete_all_memories_response':
                DawnMemory.handleDeleteAllResponse(msg.payload);
                break;

@@ -640,4 +640,50 @@ admin_resp_code_t admin_client_memory_reextract_status(int fd,
                                                        char *response,
                                                        size_t resp_len);
 
+/* =============================================================================
+ * Memory entity subcommands (v43, dawn-admin memory entity *)
+ *
+ * All six wrappers send the shared admin_memory_entity_payload_t and expect a
+ * text response.  See dawn-admin/main.c for argument-parsing context.
+ * ============================================================================= */
+
+admin_resp_code_t admin_client_memory_entity_merge(int fd,
+                                                   const char *username,
+                                                   int64_t source_id,
+                                                   int64_t target_id,
+                                                   const char *reason,
+                                                   char *response,
+                                                   size_t resp_len);
+
+admin_resp_code_t admin_client_memory_entity_split(int fd,
+                                                   const char *username,
+                                                   int64_t link_id,
+                                                   const char *reason,
+                                                   char *response,
+                                                   size_t resp_len);
+
+admin_resp_code_t admin_client_memory_entity_aliases(int fd,
+                                                     const char *username,
+                                                     int64_t entity_id,
+                                                     char *response,
+                                                     size_t resp_len);
+
+admin_resp_code_t admin_client_memory_entity_history(int fd,
+                                                     const char *username,
+                                                     int64_t entity_id,
+                                                     char *response,
+                                                     size_t resp_len);
+
+admin_resp_code_t admin_client_memory_entity_list(int fd,
+                                                  const char *username,
+                                                  bool include_aliases,
+                                                  char *response,
+                                                  size_t resp_len);
+
+admin_resp_code_t admin_client_memory_entity_link_user_self(int fd,
+                                                            const char *username,
+                                                            bool dry_run,
+                                                            char *response,
+                                                            size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

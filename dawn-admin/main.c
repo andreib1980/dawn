@@ -99,6 +99,21 @@ static void print_usage(const char *prog) {
    fprintf(stderr,
            "  memory reextract-status --user <user>\n"
            "                                       Report progress of last reextract run\n");
+   fprintf(stderr, "\nEntity Merge (v43):\n");
+   fprintf(stderr,
+           "  memory entity list [--user <u>] [--show-aliases]\n"
+           "                                       List entities (canonical-only by default)\n"
+           "  memory entity merge --user <u> --source <id> --target <id> [--reason <r>]\n"
+           "                                       Soft-link source as alias of target\n"
+           "  memory entity split --user <u> --link-id <id> [--reason <r>]\n"
+           "                                       Reverse a soft alias link\n"
+           "  memory entity aliases --user <u> --entity-id <id>\n"
+           "                                       List active aliases of a canonical entity\n"
+           "  memory entity history --user <u> --entity-id <id>\n"
+           "                                       Show full audit timeline for an entity\n"
+           "  memory entity link-user-self --user <u> [--dry-run]\n"
+           "                                       Path B backfill: seed user-self + link\n"
+           "                                       matching entities (dry-run by default)\n");
    fprintf(stderr, "\n");
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  --yes, -y    Skip confirmation prompts\n");
@@ -1202,6 +1217,89 @@ static int cmd_memory_reextract_status(const char *username) {
    }
 }
 
+/* =============================================================================
+ * memory entity * subcommands (v43)
+ *
+ * One helper that wraps connect → call → disconnect → render-or-error for
+ * the six text-response subcommands.  Each public cmd_* dispatches into
+ * here with its own client wrapper invocation.
+ * ============================================================================= */
+
+typedef admin_resp_code_t (*entity_invoker_fn)(int fd, char *response, size_t resp_len, void *ctx);
+
+static int run_entity_subcommand(entity_invoker_fn fn, void *ctx) {
+   int fd = admin_client_connect();
+   if (fd < 0)
+      return 1;
+   char response[ADMIN_MSG_CONTENT_MAX + 1];
+   admin_resp_code_t resp = fn(fd, response, sizeof(response), ctx);
+   admin_client_disconnect(fd);
+   if (resp == ADMIN_RESP_SUCCESS) {
+      printf("%s\n", response);
+      return 0;
+   }
+   fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+   return 1;
+}
+
+typedef struct {
+   const char *username;
+   int64_t source_id;
+   int64_t target_id;
+   const char *reason;
+} entity_merge_ctx_t;
+static admin_resp_code_t invoke_entity_merge(int fd, char *response, size_t resp_len, void *ctx) {
+   entity_merge_ctx_t *c = ctx;
+   return admin_client_memory_entity_merge(fd, c->username, c->source_id, c->target_id, c->reason,
+                                           response, resp_len);
+}
+
+typedef struct {
+   const char *username;
+   int64_t link_id;
+   const char *reason;
+} entity_split_ctx_t;
+static admin_resp_code_t invoke_entity_split(int fd, char *response, size_t resp_len, void *ctx) {
+   entity_split_ctx_t *c = ctx;
+   return admin_client_memory_entity_split(fd, c->username, c->link_id, c->reason, response,
+                                           resp_len);
+}
+
+typedef struct {
+   const char *username;
+   int64_t entity_id;
+} entity_id_ctx_t;
+static admin_resp_code_t invoke_entity_aliases(int fd, char *response, size_t resp_len, void *ctx) {
+   entity_id_ctx_t *c = ctx;
+   return admin_client_memory_entity_aliases(fd, c->username, c->entity_id, response, resp_len);
+}
+static admin_resp_code_t invoke_entity_history(int fd, char *response, size_t resp_len, void *ctx) {
+   entity_id_ctx_t *c = ctx;
+   return admin_client_memory_entity_history(fd, c->username, c->entity_id, response, resp_len);
+}
+
+typedef struct {
+   const char *username;
+   bool include_aliases;
+} entity_list_ctx_t;
+static admin_resp_code_t invoke_entity_list(int fd, char *response, size_t resp_len, void *ctx) {
+   entity_list_ctx_t *c = ctx;
+   return admin_client_memory_entity_list(fd, c->username, c->include_aliases, response, resp_len);
+}
+
+typedef struct {
+   const char *username;
+   bool dry_run;
+} entity_link_user_self_ctx_t;
+static admin_resp_code_t invoke_entity_link_user_self(int fd,
+                                                      char *response,
+                                                      size_t resp_len,
+                                                      void *ctx) {
+   entity_link_user_self_ctx_t *c = ctx;
+   return admin_client_memory_entity_link_user_self(fd, c->username, c->dry_run, response,
+                                                    resp_len);
+}
+
 int main(int argc, char *argv[]) {
    if (argc < 2) {
       print_usage(argv[0]);
@@ -1667,8 +1765,103 @@ int main(int argc, char *argv[]) {
          return cmd_memory_reextract(username, confirm, keep_summaries, backup_path, max_cost_usd);
       }
 
+      if (strcmp(subcmd, "entity") == 0) {
+         if (argc < 4) {
+            fprintf(stderr, "Error: Missing entity subcommand\n");
+            fprintf(stderr,
+                    "Available: merge | split | aliases | history | list | link-user-self\n");
+            fprintf(stderr,
+                    "Usage:\n"
+                    "  %s memory entity merge --user <u> --source <id> --target <id> "
+                    "[--reason <r>]\n"
+                    "  %s memory entity split --user <u> --link-id <id> [--reason <r>]\n"
+                    "  %s memory entity aliases --user <u> --entity-id <id>\n"
+                    "  %s memory entity history --user <u> --entity-id <id>\n"
+                    "  %s memory entity list --user <u> [--show-aliases]\n"
+                    "  %s memory entity link-user-self --user <u> [--dry-run]\n",
+                    argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
+            return 1;
+         }
+         const char *ent_subcmd = argv[3];
+         const char *username = NULL;
+         int64_t source_id = 0, target_id = 0, link_id = 0, entity_id = 0;
+         const char *reason = NULL;
+         bool include_aliases = false;
+         bool dry_run = false;
+         for (int i = 4; i < argc; i++) {
+            const char *arg = argv[i];
+            if (strcmp(arg, "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (strcmp(arg, "--source") == 0 && i + 1 < argc) {
+               source_id = (int64_t)strtoll(argv[++i], NULL, 10);
+            } else if (strcmp(arg, "--target") == 0 && i + 1 < argc) {
+               target_id = (int64_t)strtoll(argv[++i], NULL, 10);
+            } else if (strcmp(arg, "--link-id") == 0 && i + 1 < argc) {
+               link_id = (int64_t)strtoll(argv[++i], NULL, 10);
+            } else if (strcmp(arg, "--entity-id") == 0 && i + 1 < argc) {
+               entity_id = (int64_t)strtoll(argv[++i], NULL, 10);
+            } else if (strcmp(arg, "--reason") == 0 && i + 1 < argc) {
+               reason = argv[++i];
+            } else if (strcmp(arg, "--show-aliases") == 0) {
+               include_aliases = true;
+            } else if (strcmp(arg, "--dry-run") == 0) {
+               dry_run = true;
+            } else {
+               fprintf(stderr, "Error: Unknown option for memory entity %s: %s\n", ent_subcmd, arg);
+               return 1;
+            }
+         }
+         if (!username || !username[0]) {
+            fprintf(stderr, "Error: --user <username> is required\n");
+            return 1;
+         }
+         if (strcmp(ent_subcmd, "merge") == 0) {
+            if (source_id <= 0 || target_id <= 0) {
+               fprintf(stderr, "Error: --source <id> and --target <id> are required\n");
+               return 1;
+            }
+            entity_merge_ctx_t ctx = { username, source_id, target_id, reason };
+            return run_entity_subcommand(invoke_entity_merge, &ctx);
+         }
+         if (strcmp(ent_subcmd, "split") == 0) {
+            if (link_id <= 0) {
+               fprintf(stderr, "Error: --link-id <id> is required\n");
+               return 1;
+            }
+            entity_split_ctx_t ctx = { username, link_id, reason };
+            return run_entity_subcommand(invoke_entity_split, &ctx);
+         }
+         if (strcmp(ent_subcmd, "aliases") == 0) {
+            if (entity_id <= 0) {
+               fprintf(stderr, "Error: --entity-id <id> is required\n");
+               return 1;
+            }
+            entity_id_ctx_t ctx = { username, entity_id };
+            return run_entity_subcommand(invoke_entity_aliases, &ctx);
+         }
+         if (strcmp(ent_subcmd, "history") == 0) {
+            if (entity_id <= 0) {
+               fprintf(stderr, "Error: --entity-id <id> is required\n");
+               return 1;
+            }
+            entity_id_ctx_t ctx = { username, entity_id };
+            return run_entity_subcommand(invoke_entity_history, &ctx);
+         }
+         if (strcmp(ent_subcmd, "list") == 0) {
+            entity_list_ctx_t ctx = { username, include_aliases };
+            return run_entity_subcommand(invoke_entity_list, &ctx);
+         }
+         if (strcmp(ent_subcmd, "link-user-self") == 0) {
+            entity_link_user_self_ctx_t ctx = { username, dry_run };
+            return run_entity_subcommand(invoke_entity_link_user_self, &ctx);
+         }
+         fprintf(stderr, "Error: Unknown entity subcommand: %s\n", ent_subcmd);
+         fprintf(stderr, "Available: merge, split, aliases, history, list, link-user-self\n");
+         return 1;
+      }
+
       fprintf(stderr, "Error: Unknown memory subcommand: %s\n", subcmd);
-      fprintf(stderr, "Available: recategorize-all, reextract, reextract-status\n");
+      fprintf(stderr, "Available: recategorize-all, reextract, reextract-status, entity\n");
       return 1;
    }
 

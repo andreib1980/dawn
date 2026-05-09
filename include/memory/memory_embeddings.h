@@ -182,6 +182,36 @@ int memory_embeddings_entity_search(int user_id,
                                     int max_results);
 
 /**
+ * @brief Score a precomputed query embedding against a single entity's cached
+ * embedding.
+ *
+ * Loads the per-user entity cache on demand (same RAM-resident pool used by
+ * memory_embeddings_entity_search) and returns the cosine in @p out_cosine
+ * if the entity is found.  Returns FAILURE if the entity is not in the cache
+ * (no embedding stored, or — once Ckpt 3's loader filter ships — an alias
+ * row with canonical_id IS NOT NULL).  Caller treats FAILURE as "no signal"
+ * and contributes 0 to the embedding-cosine term in the alias-merge composite.
+ *
+ * Used by the v43 alias resolver Stage 4 (see memory_db_alias.c).  Operates
+ * on the same cache as memory_embeddings_entity_search() so the resolver does
+ * not pay a DB hit per candidate.
+ *
+ * @param user_id User ID (selects which cache to use)
+ * @param entity_id Entity to score
+ * @param query_embedding Pre-computed query embedding
+ * @param query_dims Dimensions of query embedding (must match cache dims)
+ * @param query_norm Pre-computed L2 norm of query embedding
+ * @param out_cosine Output: cosine similarity in [-1, 1]; populated only on SUCCESS
+ * @return SUCCESS, or FAILURE if entity_id is not in the cache or dims mismatch
+ */
+int memory_embeddings_entity_cosine(int user_id,
+                                    int64_t entity_id,
+                                    const float *query_embedding,
+                                    int query_dims,
+                                    float query_norm,
+                                    float *out_cosine);
+
+/**
  * @brief Start background backfill of un-embedded facts
  *
  * @param user_id User ID to backfill

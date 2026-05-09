@@ -178,6 +178,19 @@ dawn_add_unit_test(test_relation_supersede
    LIBS    dawn_common unity sqlite3 pthread m
    LABEL   ci)
 
+# Entity-merge alias surface (v43).  Links the full auth_db chain so the v43
+# schema and prepared statements are available out of the box; stubs the
+# embedding engine so Stage 4 returns "no engine" gracefully (composite
+# correctly forfeits the embedding-cosine term in tests).
+dawn_add_unit_test(test_memory_db_alias
+   SOURCES test_memory_db_alias.c test_memory_db_alias_stub.c
+           ${SRC_ROOT}/src/memory/memory_db_alias.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m
+   LABEL   ci)
+
 # Document extract has conditional MuPDF / libzip+libxml2 linking, so the
 # optional libs and defines are appended to the target after creation.
 dawn_add_unit_test(test_document_extract

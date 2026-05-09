@@ -156,13 +156,24 @@ int memory_db_admin_reset_derived(int user_id,
 
    AUTH_DB_LOCK_OR_RETURN(FAILURE);
 
-   /* The whole reset (5 DELETEs + 2 UPDATEs) runs under the auth_db leaf
-    * lock.  For a power user with thousands of facts/entities this can
-    * plausibly hold the lock 100-500ms on Jetson eMMC with a cold page
-    * cache while every other auth_db consumer (sessions, scheduler,
-    * calendar sync) blocks.  Acceptable for a one-shot admin op invoked
-    * manually; revisit by chunking DELETEs (LIMIT N + relock between
-    * batches) if a future user crosses ~10k facts. */
+   /* The whole reset (7 DELETEs + 2 UPDATEs after the v43 entity-merge
+    * fold-in: facts, preferences, entities, relations, summaries plus
+    * memory_entity_aliases + memory_entity_merge_proposals; UPDATEs zero
+    * conversation extraction cursors and per-user backfill flags) runs
+    * under the auth_db leaf lock.  For a power user with thousands of
+    * facts/entities this can plausibly hold the lock 100-500ms on Jetson
+    * eMMC with a cold page cache while every other auth_db consumer
+    * (sessions, scheduler, calendar sync) blocks.  Acceptable for a
+    * one-shot admin op invoked manually.
+    *
+    * Phase 2 chunking note: at the dev's 2k-entity scale all seven
+    * DELETEs finish well under the 500ms target.  When chunking becomes
+    * necessary (~10k facts or ~5k entities), the first table to split is
+    * memory_entity_aliases — its row count grows quadratically with
+    * mergeable entity pairs and Phase 2's auto-merge gate at extraction
+    * time will be the dominant producer once it ships.  Chunk by
+    * `LIMIT N + relock between batches` per the existing reset_derived
+    * pattern. */
    char *errmsg = NULL;
    int rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
@@ -172,10 +183,21 @@ int memory_db_admin_reset_derived(int user_id,
       return FAILURE;
    }
 
-   /* FK-safe order: relations -> entities -> facts -> preferences -> summaries.
-    * (relations FK→entities; relations.fact_id FK→facts ON DELETE SET NULL.) */
+   /* FK-safe order: aliases + proposals -> relations -> entities -> facts ->
+    * preferences -> summaries.  Aliases / proposals are derived state from
+    * the v43 entity-merge workstream and must be dropped along with the
+    * underlying entities they reference (proposals FK→entities CASCADE,
+    * aliases FK→entities SET NULL — clearing the rows explicitly first
+    * gives accurate counts and keeps the audit trail tied to its targets). */
    int n_rel = 0, n_ent = 0, n_fact = 0, n_pref = 0, n_sum = 0;
+   int n_alias = 0, n_prop = 0;
 
+   if (run_simple_delete("DELETE FROM memory_entity_aliases WHERE user_id = ?", user_id,
+                         &n_alias) != SUCCESS)
+      goto rollback;
+   if (run_simple_delete("DELETE FROM memory_entity_merge_proposals WHERE user_id = ?", user_id,
+                         &n_prop) != SUCCESS)
+      goto rollback;
    if (run_simple_delete("DELETE FROM memory_relations WHERE user_id = ?", user_id, &n_rel) !=
        SUCCESS)
       goto rollback;
@@ -257,11 +279,14 @@ int memory_db_admin_reset_derived(int user_id,
       counts->preferences_deleted = n_pref;
       counts->summaries_deleted = n_sum;
       counts->conversations_reset = n_conv;
+      counts->aliases_deleted = n_alias;
+      counts->merge_proposals_deleted = n_prop;
    }
 
    OLOG_INFO("memory_db_admin: reset user=%d facts=%d prefs=%d sums=%d ents=%d rels=%d convs=%d "
-             "(keep_summaries=%d)",
-             user_id, n_fact, n_pref, n_sum, n_ent, n_rel, n_conv, keep_summaries ? 1 : 0);
+             "aliases=%d proposals=%d (keep_summaries=%d)",
+             user_id, n_fact, n_pref, n_sum, n_ent, n_rel, n_conv, n_alias, n_prop,
+             keep_summaries ? 1 : 0);
    return SUCCESS;
 
 rollback:
@@ -334,6 +359,34 @@ int memory_db_admin_estimate_reextract_cost(int user_id, memory_db_admin_cost_es
       out->message_count = sqlite3_column_int(stmt, 1);
    }
    sqlite3_finalize(stmt);
+
+   /* v43: count active aliases + pending merge proposals for the dry-run
+    * report.  Both tables are dropped by reset_derived; surfacing them
+    * here lets the operator see what alias graph state they're losing
+    * before --confirm runs.  Same auth_db lock as the conv-count query
+    * — both partial indexes (idx_memory_entity_aliases_user_target,
+    * idx_merge_proposals_pending) make these COUNTs cheap. */
+   sqlite3_stmt *cnt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM memory_entity_aliases "
+                          "WHERE user_id = ? AND unlinked_at IS NULL",
+                          -1, &cnt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(cnt, 1, user_id);
+      if (sqlite3_step(cnt) == SQLITE_ROW)
+         out->active_aliases = sqlite3_column_int(cnt, 0);
+      sqlite3_finalize(cnt);
+   }
+   cnt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM memory_entity_merge_proposals "
+                          "WHERE user_id = ? AND resolved_at IS NULL",
+                          -1, &cnt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(cnt, 1, user_id);
+      if (sqlite3_step(cnt) == SQLITE_ROW)
+         out->pending_proposals = sqlite3_column_int(cnt, 0);
+      sqlite3_finalize(cnt);
+   }
+
    AUTH_DB_UNLOCK();
 
    if (out->conv_count <= 0)

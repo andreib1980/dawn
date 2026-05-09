@@ -860,6 +860,16 @@ void handle_delete_memory_entity(ws_connection_t *conn, struct json_object *payl
  */
 void handle_merge_memory_entities(ws_connection_t *conn, struct json_object *payload);
 
+/* =============================================================================
+ * Entity-merge alias surface (v43) — five WebSocket handlers per
+ * docs/ENTITY_MERGE_DESIGN.md §14.
+ * ============================================================================= */
+void handle_entity_aliases_request(ws_connection_t *conn, struct json_object *payload);
+void handle_entity_merge_proposal_list_request(ws_connection_t *conn, struct json_object *payload);
+void handle_entity_link_request(ws_connection_t *conn, struct json_object *payload);
+void handle_entity_unlink_request(ws_connection_t *conn, struct json_object *payload);
+void handle_entity_proposal_resolve_request(ws_connection_t *conn, struct json_object *payload);
+
 /**
  * @brief Delete all memories for the current user
  */

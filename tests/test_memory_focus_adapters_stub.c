@@ -154,6 +154,7 @@ int memory_db_entity_search(int user_id,
 }
 
 int memory_db_entity_get_embeddings(int user_id,
+                                    bool include_aliases,
                                     int expected_dims,
                                     int64_t *out_ids,
                                     char out_names[][MEMORY_ENTITY_NAME_MAX],
@@ -162,6 +163,10 @@ int memory_db_entity_get_embeddings(int user_id,
                                     float *out_norms,
                                     int max,
                                     int *count_out) {
+   /* Mock data has no canonical_id distinctions, so the include_aliases flag
+    * is a no-op here.  Accept the parameter for signature parity with v43
+    * production. */
+   (void)include_aliases;
    if (expected_dims != s_mock.entity_dim) {
       if (count_out)
          *count_out = 0;

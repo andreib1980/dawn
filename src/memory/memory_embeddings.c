@@ -685,7 +685,11 @@ static int entity_cache_load(int user_id) {
    }
 
    int loaded = 0;
-   if (memory_db_entity_get_embeddings(user_id, dims, s_entity_cache.ids, s_entity_cache.names,
+   /* Production cache is canonical-only — aliases (canonical_id IS NOT NULL)
+    * are filtered out so the cosine pool doesn't surface duplicate
+    * surface-form variants. */
+   if (memory_db_entity_get_embeddings(user_id, /* include_aliases */ false, dims,
+                                       s_entity_cache.ids, s_entity_cache.names,
                                        s_entity_cache.types, s_entity_cache.embeddings,
                                        s_entity_cache.norms, ENTITY_CACHE_CAP,
                                        &loaded) != MEMORY_DB_SUCCESS) {
@@ -814,6 +818,55 @@ int memory_embeddings_entity_search(int user_id,
 
    pthread_mutex_unlock(&s_entity_cache.mutex);
    return result_count;
+}
+
+int memory_embeddings_entity_cosine(int user_id,
+                                    int64_t entity_id,
+                                    const float *query_embedding,
+                                    int query_dims,
+                                    float query_norm,
+                                    float *out_cosine) {
+   if (!query_embedding || query_dims <= 0 || !out_cosine || entity_id <= 0) {
+      return FAILURE;
+   }
+   if (!memory_embeddings_available()) {
+      return FAILURE;
+   }
+
+   pthread_mutex_lock(&s_entity_cache.mutex);
+   if (entity_cache_load(user_id) != 0) {
+      pthread_mutex_unlock(&s_entity_cache.mutex);
+      return FAILURE;
+   }
+
+   /* Dimension mismatch — caller's embedding came from a different model;
+    * cosine would be meaningless. */
+   if (s_entity_cache.dims != query_dims) {
+      pthread_mutex_unlock(&s_entity_cache.mutex);
+      return FAILURE;
+   }
+
+   /* Linear scan over the cache.  ENTITY_CACHE_CAP is 500; the alias
+    * resolver runs at extraction time (off the conversational hot path)
+    * and visits at most 8 candidates per call (Stage 4 cap), so the
+    * outer-loop count of 500 is amortized across few invocations. */
+   int found = -1;
+   for (int i = 0; i < s_entity_cache.count; i++) {
+      if (s_entity_cache.ids[i] == entity_id) {
+         found = i;
+         break;
+      }
+   }
+   if (found < 0) {
+      pthread_mutex_unlock(&s_entity_cache.mutex);
+      return FAILURE;
+   }
+
+   *out_cosine = memory_embeddings_cosine_with_norms(
+       query_embedding, s_entity_cache.embeddings + (size_t)found * query_dims, query_dims,
+       query_norm, s_entity_cache.norms[found]);
+   pthread_mutex_unlock(&s_entity_cache.mutex);
+   return SUCCESS;
 }
 
 /* =============================================================================

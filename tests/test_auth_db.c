@@ -22,9 +22,13 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 
+#include <fcntl.h>
 #include <sqlite3.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
@@ -453,6 +457,287 @@ static void test_user_settings_set_and_get(void) {
 }
 
 /* ============================================================================
+ * v43 schema tests — entity-merge / user-identity-dedup workstream
+ *
+ * Three tests cover (1) fresh-install schema completeness, (2) the partial
+ * UNIQUE one-self-per-user invariant, (3) round-trip migration: a fresh v43
+ * DB is downgraded to v42 (table renamed + recreated without the new columns,
+ * new tables and indexes dropped, schema_version reset), then re-init runs
+ * the v43 migration and we verify the v43 objects came back and pre-existing
+ * data survived.
+ * ============================================================================ */
+
+/* Helper: returns true if a column with the given name exists on the table.
+ * Uses PRAGMA table_info, which reflects the current schema after migrations. */
+static bool column_exists(const char *table, const char *column) {
+   char sql[256];
+   snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", table);
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      return false;
+   }
+   bool found = false;
+   while (sqlite3_step(stmt) == SQLITE_ROW) {
+      const char *name = (const char *)sqlite3_column_text(stmt, 1);
+      if (name && strcmp(name, column) == 0) {
+         found = true;
+         break;
+      }
+   }
+   sqlite3_finalize(stmt);
+   return found;
+}
+
+/* Helper: returns true if a sqlite_master object (table or index) with the
+ * given name exists. */
+static bool master_object_exists(const char *type, const char *name) {
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      return false;
+   }
+   sqlite3_bind_text(stmt, 1, type, -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+   bool found = (sqlite3_step(stmt) == SQLITE_ROW);
+   sqlite3_finalize(stmt);
+   return found;
+}
+
+/* Helper: read schema_version (assumes single row, returns 0 on failure). */
+static int read_schema_version(void) {
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT version FROM schema_version LIMIT 1", -1, &stmt, NULL) !=
+       SQLITE_OK) {
+      return 0;
+   }
+   int version = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      version = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   return version;
+}
+
+static void test_v43_schema_fresh_install(void) {
+   /* setUp gave us a fresh :memory: DB at the current AUTH_DB_SCHEMA_VERSION;
+    * verify all v43 objects are present and the version is correct. */
+   TEST_ASSERT_EQUAL_INT(43, read_schema_version());
+   TEST_ASSERT_EQUAL_INT(43, AUTH_DB_SCHEMA_VERSION);
+
+   /* New columns on memory_entities */
+   TEST_ASSERT_TRUE(column_exists("memory_entities", "canonical_id"));
+   TEST_ASSERT_TRUE(column_exists("memory_entities", "is_user_self"));
+
+   /* New tables */
+   TEST_ASSERT_TRUE(master_object_exists("table", "memory_entity_aliases"));
+   TEST_ASSERT_TRUE(master_object_exists("table", "memory_entity_merge_proposals"));
+
+   /* All four new partial indexes */
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_memory_entities_canonical"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_memory_entities_user_self"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_memory_entity_aliases_user_target"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_merge_proposals_pending"));
+}
+
+static void test_v43_partial_unique_user_self_constraint(void) {
+   /* idx_memory_entities_user_self is a partial UNIQUE index that enforces
+    * "at most one is_user_self=1 row per user".  Verify by attempting to
+    * insert two such rows for the same user — the second must fail.  Two
+    * is_user_self=0 rows must coexist freely (the partial WHERE clause
+    * excludes them from the uniqueness constraint). */
+   int uid = create_and_get_id("kris", "hash", true);
+   TEST_ASSERT_GREATER_THAN(0, uid);
+
+   const char *insert_sql =
+       "INSERT INTO memory_entities (user_id, name, entity_type, canonical_name, is_user_self) "
+       "VALUES (?, ?, 'person', ?, ?)";
+   sqlite3_stmt *stmt = NULL;
+
+   /* First is_user_self=1 row — must succeed. */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
+   sqlite3_bind_int(stmt, 1, uid);
+   sqlite3_bind_text(stmt, 2, "Kristopher Kersey", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "kristopher kersey", -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 4, 1);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(stmt));
+   sqlite3_finalize(stmt);
+
+   /* Second is_user_self=1 row for the same user — must fail with constraint error. */
+   stmt = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
+   sqlite3_bind_int(stmt, 1, uid);
+   sqlite3_bind_text(stmt, 2, "Kris", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "kris", -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 4, 1);
+   int rc = sqlite3_step(stmt);
+   TEST_ASSERT_EQUAL_INT(SQLITE_CONSTRAINT, rc);
+   sqlite3_finalize(stmt);
+
+   /* is_user_self=0 row for the same user — must succeed (excluded by WHERE clause). */
+   stmt = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
+   sqlite3_bind_int(stmt, 1, uid);
+   sqlite3_bind_text(stmt, 2, "Kris", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "kris", -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 4, 0);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(stmt));
+   sqlite3_finalize(stmt);
+
+   /* A second user can independently have an is_user_self=1 row — uniqueness is per-user. */
+   int uid2 = create_and_get_id("alice", "hash2", false);
+   TEST_ASSERT_GREATER_THAN(0, uid2);
+   stmt = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, insert_sql, -1, &stmt, NULL));
+   sqlite3_bind_int(stmt, 1, uid2);
+   sqlite3_bind_text(stmt, 2, "Alice", -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 3, "alice", -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 4, 1);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(stmt));
+   sqlite3_finalize(stmt);
+}
+
+static void test_v43_migration_from_v42(void) {
+   /* setUp gave us :memory: at v43.  This test needs a file path so the DB
+    * survives the shutdown / reinit cycle that drives the migration code
+    * path.  Tear the in-memory DB down, do the round-trip on a /tmp file,
+    * then leave the test in a clean (uninitialized) state — tearDown's
+    * auth_db_shutdown() is a safe no-op when nothing is open. */
+   auth_db_shutdown();
+
+   char db_path[64];
+   snprintf(db_path, sizeof(db_path), "/tmp/dawn_test_v43_migration_XXXXXX");
+   int fd = mkstemp(db_path);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+   close(fd);
+   /* mkstemp leaves a 0-byte file; remove so SQLite creates a fresh DB. */
+   unlink(db_path);
+
+   /* Step 1: fresh init creates v43 schema. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(db_path));
+   TEST_ASSERT_EQUAL_INT(43, read_schema_version());
+
+   /* Insert a user + memory_entities row at the v43 schema; we'll verify
+    * the row survives the round trip. */
+   sqlite3_exec(s_db.db,
+                "INSERT INTO users (username, password_hash, created_at) "
+                "VALUES ('alice', 'hash', 1000)",
+                NULL, NULL, NULL);
+   sqlite3_exec(s_db.db,
+                "INSERT INTO memory_entities (user_id, name, entity_type, "
+                "canonical_name, mention_count) "
+                "VALUES (1, 'Alice', 'person', 'alice', 7)",
+                NULL, NULL, NULL);
+
+   /* Step 2: downgrade to v42.  Drop the v43 tables and indexes, then
+    * recreate memory_entities without canonical_id / is_user_self via the
+    * standard SQLite rename-and-rebuild pattern (DROP COLUMN is blocked by
+    * the canonical_id self-FK).  Foreign keys go OFF for the rebuild so the
+    * memory_relations FK on subject_entity_id doesn't fail during the swap.
+    * Finally, reset schema_version to 42 so the next init sees the DB as
+    * pre-v43 and runs the v43 migration block. */
+   /* PRAGMA legacy_alter_table=ON disables SQLite's "rewrite references in
+    * triggers / views / FK clauses" behaviour during RENAME TO; otherwise the
+    * memory_relations FK on subject_entity_id gets silently rewritten to
+    * point at memory_entities_v42tmp, and after the swap-and-drop the schema
+    * is broken (statements referencing memory_entities will fail to prepare).
+    * Both pragmas must come BEFORE any CREATE/DROP/ALTER in this script. */
+   char *errmsg = NULL;
+   const char *downgrade_sql =
+       "PRAGMA legacy_alter_table=ON;"
+       "PRAGMA foreign_keys=OFF;"
+       "DROP INDEX IF EXISTS idx_merge_proposals_pending;"
+       "DROP INDEX IF EXISTS idx_memory_entity_aliases_user_target;"
+       "DROP INDEX IF EXISTS idx_memory_entities_user_self;"
+       "DROP INDEX IF EXISTS idx_memory_entities_canonical;"
+       "DROP TABLE IF EXISTS memory_entity_merge_proposals;"
+       "DROP TABLE IF EXISTS memory_entity_aliases;"
+       "ALTER TABLE memory_entities RENAME TO memory_entities_v42tmp;"
+       "CREATE TABLE memory_entities ("
+       "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+       "  user_id INTEGER NOT NULL,"
+       "  name TEXT NOT NULL,"
+       "  entity_type TEXT NOT NULL,"
+       "  canonical_name TEXT NOT NULL,"
+       "  embedding BLOB DEFAULT NULL,"
+       "  embedding_norm REAL DEFAULT NULL,"
+       "  photo_id TEXT DEFAULT NULL,"
+       "  first_seen INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+       "  last_seen INTEGER,"
+       "  mention_count INTEGER DEFAULT 1,"
+       "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+       "  UNIQUE(user_id, canonical_name)"
+       ");"
+       "INSERT INTO memory_entities (id, user_id, name, entity_type, canonical_name, "
+       " embedding, embedding_norm, photo_id, first_seen, last_seen, mention_count) "
+       "SELECT id, user_id, name, entity_type, canonical_name, "
+       " embedding, embedding_norm, photo_id, first_seen, last_seen, mention_count "
+       "FROM memory_entities_v42tmp;"
+       "DROP TABLE memory_entities_v42tmp;"
+       "DELETE FROM schema_version;"
+       "INSERT INTO schema_version (version) VALUES (42);"
+       "PRAGMA foreign_keys=ON;"
+       "PRAGMA legacy_alter_table=OFF;";
+   int rc = sqlite3_exec(s_db.db, downgrade_sql, NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      TEST_FAIL_MESSAGE(errmsg ? errmsg : "downgrade failed");
+   }
+   sqlite3_free(errmsg);
+   errmsg = NULL;
+
+   /* Confirm the downgrade worked: v43 columns / tables / indexes are gone. */
+   TEST_ASSERT_FALSE(column_exists("memory_entities", "canonical_id"));
+   TEST_ASSERT_FALSE(column_exists("memory_entities", "is_user_self"));
+   TEST_ASSERT_FALSE(master_object_exists("table", "memory_entity_aliases"));
+   TEST_ASSERT_FALSE(master_object_exists("table", "memory_entity_merge_proposals"));
+   TEST_ASSERT_FALSE(master_object_exists("index", "idx_memory_entities_canonical"));
+   TEST_ASSERT_FALSE(master_object_exists("index", "idx_memory_entities_user_self"));
+   TEST_ASSERT_EQUAL_INT(42, read_schema_version());
+
+   auth_db_shutdown();
+
+   /* Step 3: reinit — the v43 migration block fires, creates the new tables /
+    * columns / indexes, bumps schema_version. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(db_path));
+
+   /* Verify v43 schema is back. */
+   TEST_ASSERT_EQUAL_INT(43, read_schema_version());
+   TEST_ASSERT_TRUE(column_exists("memory_entities", "canonical_id"));
+   TEST_ASSERT_TRUE(column_exists("memory_entities", "is_user_self"));
+   TEST_ASSERT_TRUE(master_object_exists("table", "memory_entity_aliases"));
+   TEST_ASSERT_TRUE(master_object_exists("table", "memory_entity_merge_proposals"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_memory_entities_canonical"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_memory_entities_user_self"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_memory_entity_aliases_user_target"));
+   TEST_ASSERT_TRUE(master_object_exists("index", "idx_merge_proposals_pending"));
+
+   /* Pre-migration data survived: Alice row is still there with the new
+    * columns defaulted (canonical_id NULL, is_user_self 0). */
+   sqlite3_stmt *stmt = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db,
+                                                       "SELECT name, mention_count, canonical_id, "
+                                                       "       is_user_self "
+                                                       "FROM memory_entities WHERE id = 1",
+                                                       -1, &stmt, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(stmt));
+   TEST_ASSERT_EQUAL_STRING("Alice", (const char *)sqlite3_column_text(stmt, 0));
+   TEST_ASSERT_EQUAL_INT(7, sqlite3_column_int(stmt, 1));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(stmt, 2));
+   TEST_ASSERT_EQUAL_INT(0, sqlite3_column_int(stmt, 3));
+   sqlite3_finalize(stmt);
+
+   /* Step 4: shutdown + cleanup.  WAL mode leaves -wal/-shm sidecars; remove
+    * all three so nothing is left in /tmp. */
+   auth_db_shutdown();
+   unlink(db_path);
+   char wal_path[80];
+   snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+   unlink(wal_path);
+   char shm_path[80];
+   snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
+   unlink(shm_path);
+}
+
+/* ============================================================================
  * main
  * ============================================================================ */
 
@@ -494,6 +779,11 @@ int main(void) {
    /* User Settings */
    RUN_TEST(test_user_settings_defaults);
    RUN_TEST(test_user_settings_set_and_get);
+
+   /* v43 schema (entity-merge / user-identity-dedup) */
+   RUN_TEST(test_v43_schema_fresh_install);
+   RUN_TEST(test_v43_partial_unique_user_self_constraint);
+   RUN_TEST(test_v43_migration_from_v42);
 
    return UNITY_END();
 }

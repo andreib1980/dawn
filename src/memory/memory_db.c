@@ -1904,7 +1904,10 @@ static const char *contradictory_opposite(const char *relation) {
    return NULL;
 }
 
-static bool relation_is_exclusive(const char *relation) {
+/* Public-named helper: alias surface (memory_db_alias.c, v43) consults this to
+ * identify open exclusive relations during Stage 5 of the resolver cascade.
+ * EXCLUSIVE_RELATIONS[] stays static here as the source-of-truth list. */
+bool memory_db_relation_is_exclusive(const char *relation) {
    if (!relation)
       return false;
    for (int i = 0; i < EXCLUSIVE_RELATIONS_COUNT; i++) {
@@ -1912,6 +1915,12 @@ static bool relation_is_exclusive(const char *relation) {
          return true;
    }
    return false;
+}
+
+/* Internal-name shim — keeps the existing call sites in this file unchanged
+ * while the public name becomes the canonical entry point. */
+static inline bool relation_is_exclusive(const char *relation) {
+   return memory_db_relation_is_exclusive(relation);
 }
 
 int memory_db_relation_create(int user_id,
@@ -2695,6 +2704,15 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
    sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
    AUTH_DB_UNLOCK();
 
+   /* Invalidate the entity-embedding cache so subsequent reads don't return
+    * phantom entries for the deleted source row.  The invalidator is an
+    * atomic dirty-bit flip — no auth_db lock involvement, no self-deadlock
+    * risk — so it fires safely after AUTH_DB_UNLOCK() per the contract in
+    * docs/ENTITY_MERGE_DESIGN.md §12.  Rollback path skips invalidation
+    * because ROLLBACK reverses the in-progress UPDATEs and the cache state
+    * is consistent with the pre-merge DB. */
+   memory_embeddings_invalidate_entity_cache();
+
    OLOG_INFO("memory_db: merged entity %lld into %lld for user %d", (long long)source_id,
              (long long)target_id, user_id);
    return MEMORY_DB_SUCCESS;
@@ -2707,6 +2725,7 @@ merge_fail:
 }
 
 int memory_db_entity_get_embeddings(int user_id,
+                                    bool include_aliases,
                                     int expected_dims,
                                     int64_t *out_ids,
                                     char out_names[][MEMORY_ENTITY_NAME_MAX],
@@ -2723,9 +2742,13 @@ int memory_db_entity_get_embeddings(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
+   /* Bindings: 1 = user_id, 2 = include_aliases (0/1 — drives the
+    * "(? = 1 OR canonical_id IS NULL)" filter in the prepared SQL),
+    * 3 = LIMIT.  See auth_db_core.c prepare site for the v43 SQL shape. */
    sqlite3_reset(s_db.stmt_memory_entity_get_embeddings);
    sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 1, user_id);
-   sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 2, max);
+   sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 2, include_aliases ? 1 : 0);
+   sqlite3_bind_int(s_db.stmt_memory_entity_get_embeddings, 3, max);
 
    int count = 0;
    int expected_bytes = expected_dims * (int)sizeof(float);

@@ -101,6 +101,7 @@ int memory_db_fact_list_without_embedding(int user_id,
 #include "memory/memory_types.h"
 
 int memory_db_entity_get_embeddings(int user_id,
+                                    bool include_aliases,
                                     int expected_dims,
                                     int64_t *out_ids,
                                     char out_names[][MEMORY_ENTITY_NAME_MAX],
@@ -110,6 +111,7 @@ int memory_db_entity_get_embeddings(int user_id,
                                     int max_count,
                                     int *count_out) {
    (void)user_id;
+   (void)include_aliases;
    (void)expected_dims;
    (void)out_ids;
    (void)out_names;

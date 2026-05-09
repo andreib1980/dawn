@@ -127,7 +127,53 @@ static const char *DDL =
    "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL"
    ");"
    "INSERT INTO memory_relations (user_id, subject_entity_id, relation, object_entity_id) VALUES "
-   "  (1,1,'partner_of',2),(2,3,'employer_of',NULL);";
+   "  (1,1,'partner_of',2),(2,3,'employer_of',NULL);"
+
+   /* v43 alias surface — reset_derived drops both tables.  Seed two rows
+    * for user 1 (one active alias + one already-unlinked) and one row for
+    * user 2 to exercise the FK-isolation invariant.  Plus one pending +
+    * one resolved proposal for user 1. */
+   "CREATE TABLE memory_entity_aliases ("
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+   "  user_id INTEGER NOT NULL,"
+   "  source_entity_id INTEGER,"
+   "  target_entity_id INTEGER NOT NULL,"
+   "  source_canonical_name TEXT NOT NULL,"
+   "  target_canonical_name TEXT NOT NULL,"
+   "  link_kind TEXT NOT NULL,"
+   "  reason TEXT NOT NULL,"
+   "  composite_score REAL,"
+   "  evidence_json TEXT,"
+   "  linked_at INTEGER NOT NULL,"
+   "  consolidated_at INTEGER,"
+   "  unlinked_at INTEGER,"
+   "  unlink_reason TEXT,"
+   "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+   ");"
+   "INSERT INTO memory_entity_aliases (user_id, source_entity_id, target_entity_id, "
+   "  source_canonical_name, target_canonical_name, link_kind, reason, linked_at, unlinked_at) "
+   "  VALUES "
+   "  (1, 1, 2, 'pepper', 'friday', 'soft', 'operator', 100, NULL),"
+   "  (1, 2, 1, 'friday', 'pepper', 'soft', 'operator', 50, 60),"
+   "  (2, 3, 3, 'tony', 'tony', 'soft', 'operator', 200, NULL);"
+
+   "CREATE TABLE memory_entity_merge_proposals ("
+   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+   "  user_id INTEGER NOT NULL,"
+   "  source_entity_id INTEGER NOT NULL,"
+   "  target_entity_id INTEGER NOT NULL,"
+   "  composite_score REAL NOT NULL,"
+   "  evidence_json TEXT NOT NULL,"
+   "  proposed_at INTEGER NOT NULL,"
+   "  resolved_at INTEGER,"
+   "  resolution TEXT,"
+   "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+   ");"
+   "INSERT INTO memory_entity_merge_proposals (user_id, source_entity_id, target_entity_id, "
+   "  composite_score, evidence_json, proposed_at, resolved_at, resolution) VALUES "
+   "  (1, 1, 2, 0.75, '{}', 100, NULL, NULL),"
+   "  (1, 2, 1, 0.80, '{}', 110, 200, 'rejected'),"
+   "  (2, 3, 3, 0.90, '{}', 300, NULL, NULL);";
 /* clang-format on */
 
 static int count_rows(const char *sql, int param) {
@@ -217,6 +263,11 @@ void test_reset_derived_drops_all_five_tables_for_user_a(void) {
    TEST_ASSERT_EQUAL(2, c.entities_deleted);
    TEST_ASSERT_EQUAL(1, c.relations_deleted);
    TEST_ASSERT_EQUAL(2, c.conversations_reset);
+   /* v43 drop-list: both alias rows for user 1 (active + unlinked) and
+    * both proposal rows (pending + resolved) get dropped — reset is
+    * unconditional, not filtered by unlinked_at / resolved_at. */
+   TEST_ASSERT_EQUAL(2, c.aliases_deleted);
+   TEST_ASSERT_EQUAL(2, c.merge_proposals_deleted);
 
    /* Verify rows are gone. */
    TEST_ASSERT_EQUAL(0, count_rows("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?", 1));
@@ -224,6 +275,11 @@ void test_reset_derived_drops_all_five_tables_for_user_a(void) {
    TEST_ASSERT_EQUAL(0, count_rows("SELECT COUNT(*) FROM memory_summaries WHERE user_id = ?", 1));
    TEST_ASSERT_EQUAL(0, count_rows("SELECT COUNT(*) FROM memory_entities WHERE user_id = ?", 1));
    TEST_ASSERT_EQUAL(0, count_rows("SELECT COUNT(*) FROM memory_relations WHERE user_id = ?", 1));
+   TEST_ASSERT_EQUAL(0,
+                     count_rows("SELECT COUNT(*) FROM memory_entity_aliases WHERE user_id = ?", 1));
+   TEST_ASSERT_EQUAL(0, count_rows("SELECT COUNT(*) FROM memory_entity_merge_proposals "
+                                   "WHERE user_id = ?",
+                                   1));
 }
 
 void test_reset_derived_does_not_touch_other_users(void) {
@@ -236,6 +292,12 @@ void test_reset_derived_does_not_touch_other_users(void) {
    TEST_ASSERT_EQUAL(1, count_rows("SELECT COUNT(*) FROM memory_summaries WHERE user_id = ?", 2));
    TEST_ASSERT_EQUAL(1, count_rows("SELECT COUNT(*) FROM memory_entities WHERE user_id = ?", 2));
    TEST_ASSERT_EQUAL(1, count_rows("SELECT COUNT(*) FROM memory_relations WHERE user_id = ?", 2));
+   /* v43: user 2's alias + proposal rows survive the user-1 reset. */
+   TEST_ASSERT_EQUAL(1,
+                     count_rows("SELECT COUNT(*) FROM memory_entity_aliases WHERE user_id = ?", 2));
+   TEST_ASSERT_EQUAL(1, count_rows("SELECT COUNT(*) FROM memory_entity_merge_proposals "
+                                   "WHERE user_id = ?",
+                                   2));
 }
 
 void test_reset_derived_keep_summaries_keeps_summaries(void) {

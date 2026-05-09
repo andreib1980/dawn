@@ -734,6 +734,218 @@
 }
 
 /* =============================================================================
+ * Phase 1 entity-merge — Alias visibility on canonical entity cards
+ *
+ * - .entity-alias-badge: header-inline pill that shows "N aliases" and toggles
+ *   the .entity-aliases panel below the meta row.  Lazy-loads on first
+ *   expand via entity_aliases_request.
+ * - .entity-aliases: container for one alias row per soft-linked source.
+ * - .entity-alias-row: one alias row — confidence badge + name + split.
+ * - .alias-confidence-badge: shared composite-score pill (used here AND in
+ *   the suggested-merges panel).  Color band derives from the score:
+ *     ≥0.90 → high (green) — auto-merge band
+ *     ≥0.70 → mid  (amber) — review band
+ *     <0.70 → low  (gray)  — for unknown/legacy rows where the score is
+ *                            missing (-1 from the DB), the badge falls
+ *                            through to .alias-score-unknown.
+ * ============================================================================= */
+.entity-alias-badge {
+   display: inline-flex;
+   align-items: center;
+   padding: 0.1rem 0.45rem;
+   border-radius: 999px;
+   border: 1px solid rgba(99, 102, 241, 0.3);
+   background: rgba(99, 102, 241, 0.08);
+   color: var(--accent);
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   font-weight: 600;
+   line-height: 1.2;
+   cursor: pointer;
+   transition:
+      background var(--transition-fast),
+      color var(--transition-fast);
+   flex-shrink: 0;
+}
+
+.entity-alias-badge:hover {
+   background: rgba(99, 102, 241, 0.18);
+   color: var(--text-primary);
+}
+
+.entity-alias-badge[aria-expanded='true'] {
+   background: rgba(99, 102, 241, 0.22);
+}
+
+.entity-aliases {
+   margin-top: 0.45rem;
+   padding: 0.4rem 0.5rem;
+   border-left: 2px solid rgba(99, 102, 241, 0.25);
+   border-radius: 4px;
+   background: rgba(99, 102, 241, 0.04);
+}
+
+.entity-aliases-loading,
+.entity-aliases-empty {
+   font-size: 0.78rem;
+   color: var(--text-secondary);
+   font-style: italic;
+}
+
+.entity-alias-row {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.2rem 0;
+   font-size: 0.82rem;
+}
+
+.entity-alias-row + .entity-alias-row {
+   border-top: 1px dashed rgba(148, 163, 184, 0.15);
+}
+
+.entity-alias-name {
+   color: var(--text-primary);
+   font-weight: 500;
+   flex: 1;
+   min-width: 0;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
+.entity-alias-split {
+   font-size: 0.72rem;
+   padding: 0.1rem 0.4rem;
+}
+
+.alias-confidence-badge {
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   min-width: 2.6rem;
+   padding: 0.1rem 0.4rem;
+   border-radius: 4px;
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   font-weight: 600;
+   border: 1px solid;
+   flex-shrink: 0;
+}
+
+.alias-score-high {
+   background: rgba(74, 222, 128, 0.15);
+   color: #4ade80;
+   border-color: rgba(74, 222, 128, 0.3);
+}
+
+.alias-score-mid {
+   background: rgba(251, 191, 36, 0.15);
+   color: #fbbf24;
+   border-color: rgba(251, 191, 36, 0.3);
+}
+
+.alias-score-low,
+.alias-score-unknown {
+   background: rgba(148, 163, 184, 0.12);
+   color: #94a3b8;
+   border-color: rgba(148, 163, 184, 0.25);
+}
+
+/* =============================================================================
+ * Phase 1 entity-merge — Suggested-merges panel
+ *
+ * Sits at the top of the entity list when memory_entity_merge_proposals has
+ * pending rows for this user.  Each row carries source → target plus a
+ * composite-score badge (shared with the alias rows above).
+ * ============================================================================= */
+.merge-proposals-panel {
+   margin: 0 0 0.6rem 0;
+   padding: 0.6rem 0.75rem;
+   border: 1px solid rgba(251, 191, 36, 0.25);
+   border-radius: 6px;
+   background: rgba(251, 191, 36, 0.05);
+}
+
+.merge-proposals-header {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: baseline;
+   justify-content: space-between;
+   gap: 0.5rem;
+   font-weight: 600;
+   color: var(--text-primary);
+   font-size: 0.85rem;
+   margin-bottom: 0.4rem;
+}
+
+.merge-proposals-hint {
+   font-weight: 400;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+}
+
+.merge-proposal {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.35rem 0;
+   font-size: 0.85rem;
+}
+
+.merge-proposal + .merge-proposal {
+   border-top: 1px dashed rgba(148, 163, 184, 0.15);
+}
+
+.merge-proposal-body {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   flex: 1;
+   min-width: 0;
+}
+
+.merge-proposal-pair {
+   display: inline-flex;
+   align-items: center;
+   gap: 0.25rem;
+   color: var(--text-primary);
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+   min-width: 0;
+}
+
+.merge-proposal-source {
+   font-style: italic;
+}
+
+.merge-proposal-target {
+   font-weight: 600;
+}
+
+.merge-proposal-actions {
+   display: flex;
+   gap: 0.3rem;
+   flex-shrink: 0;
+}
+
+.merge-proposal-approve,
+.merge-proposal-reject {
+   padding: 0.15rem 0.55rem;
+   font-size: 0.78rem;
+}
+
+.merge-proposal-approve {
+   color: #4ade80;
+}
+
+.merge-proposal-reject {
+   color: #f87171;
+}
+
+/* =============================================================================
  * Memory Import Modal
  * ============================================================================= */
 .memory-import-modal {

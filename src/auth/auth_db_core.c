@@ -345,7 +345,17 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_memory_summaries_user ON "
     "memory_summaries(user_id, created_at DESC);"
 
-    /* Entity/relation tables (v19) */
+    /* Entity/relation tables (v19).  canonical_id + is_user_self added in v43
+     * for the entity-merge / user-identity-dedup workstream:
+     *   canonical_id  — NULL = self is canonical; non-NULL = soft alias of that
+     *                   row's id.  Read paths use COALESCE(canonical_id, id) +
+     *                   the partial index idx_memory_entities_canonical to
+     *                   enumerate aliases without a JOIN per row.
+     *   is_user_self  — exactly one row per user_id may have this = 1 (the
+     *                   seeded user-identity entity).  Enforced by the partial
+     *                   UNIQUE index idx_memory_entities_user_self below.
+     * Both DEFAULT clauses are literal constants so SQLite takes the O(1)
+     * metadata-only ALTER path on existing DBs. */
     "CREATE TABLE IF NOT EXISTS memory_entities ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  user_id INTEGER NOT NULL,"
@@ -358,10 +368,17 @@ static const char *SCHEMA_SQL =
     "  first_seen INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
     "  last_seen INTEGER,"
     "  mention_count INTEGER DEFAULT 1,"
+    "  canonical_id INTEGER DEFAULT NULL REFERENCES memory_entities(id) ON DELETE SET NULL,"
+    "  is_user_self INTEGER NOT NULL DEFAULT 0,"
     "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  UNIQUE(user_id, canonical_name)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_entities_user ON memory_entities(user_id);"
+    /* idx_memory_entities_canonical (partial, canonical_id IS NOT NULL) and
+     * idx_memory_entities_user_self (partial UNIQUE, is_user_self = 1) are
+     * created by the v43 post-migration index block — same reason as the v33
+     * pattern: on an existing pre-v43 DB the columns don't exist until the
+     * ALTER fires, so the indexes can't live in SCHEMA_SQL. */
 
     /* memory_relations: valid_from/valid_to added in v33.  source_* added in v40.
      * NULL = open-ended (no bound).  "currently true" predicate:
@@ -394,6 +411,55 @@ static const char *SCHEMA_SQL =
     /* idx_memory_relations_user_validity + idx_memory_relations_subject_open are
      * created by the v33 migration block (same reason — runs after the
      * valid_from/valid_to ALTER so the columns exist). */
+
+    /* Entity-alias audit log (v43) — append-only history of soft/hard merges.
+     * Not consulted on hot read paths (those use canonical_id JOIN); this
+     * table answers "why was X linked to Y, and when?" for the WebUI Graph tab
+     * and dawn-admin memory entity history.  source_entity_id is SET NULL on
+     * hard-merge so the row survives the source-row deletion; the preserved
+     * source_canonical_name keeps the audit row self-describing. */
+    "CREATE TABLE IF NOT EXISTS memory_entity_aliases ("
+    "  id                    INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id               INTEGER NOT NULL,"
+    "  source_entity_id      INTEGER,"
+    "  target_entity_id      INTEGER NOT NULL,"
+    "  source_canonical_name TEXT NOT NULL,"
+    "  target_canonical_name TEXT NOT NULL,"
+    "  link_kind             TEXT NOT NULL,"
+    "  reason                TEXT NOT NULL,"
+    "  composite_score       REAL,"
+    "  evidence_json         TEXT,"
+    "  linked_at             INTEGER NOT NULL,"
+    "  consolidated_at       INTEGER,"
+    "  unlinked_at           INTEGER,"
+    "  unlink_reason         TEXT,"
+    "  FOREIGN KEY (user_id)          REFERENCES users(id)            ON DELETE CASCADE,"
+    "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id)  ON DELETE SET NULL,"
+    "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id)  ON DELETE SET NULL"
+    ");"
+    /* idx_memory_entity_aliases_user_target is created by the v43 post-migration
+     * index block so it is established for both fresh installs and upgrades. */
+
+    /* Mid-confidence merge proposal queue (v43) — review band staging for the
+     * auto-merge gate (Phase 2).  Approving a proposal writes the soft link
+     * via the regular alias path; rejecting just stamps resolved_at.  Cleared
+     * by reextract along with memory_entity_aliases — both are derived state. */
+    "CREATE TABLE IF NOT EXISTS memory_entity_merge_proposals ("
+    "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id          INTEGER NOT NULL,"
+    "  source_entity_id INTEGER NOT NULL,"
+    "  target_entity_id INTEGER NOT NULL,"
+    "  composite_score  REAL NOT NULL,"
+    "  evidence_json    TEXT NOT NULL,"
+    "  proposed_at      INTEGER NOT NULL,"
+    "  resolved_at      INTEGER,"
+    "  resolution       TEXT,"
+    "  FOREIGN KEY (user_id)          REFERENCES users(id)            ON DELETE CASCADE,"
+    "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id)  ON DELETE CASCADE,"
+    "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id)  ON DELETE CASCADE"
+    ");"
+    /* idx_merge_proposals_pending is created by the v43 post-migration index
+     * block. */
 
     /* Scheduler events (v18) */
     "CREATE TABLE IF NOT EXISTS scheduled_events ("
@@ -1938,6 +2004,90 @@ static int create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v43 migration: entity-merge / user-identity-dedup workstream.
+    *   memory_entities.canonical_id  — soft alias self-FK (NULL = self is canonical).
+    *                                   ON DELETE SET NULL so dropping a canonical
+    *                                   demotes its aliases to canonical rather than
+    *                                   cascade-deleting them.
+    *   memory_entities.is_user_self  — exactly-one-per-user flag, enforced by the
+    *                                   partial UNIQUE index in the post-migration block.
+    *   memory_entity_aliases         — append-only audit log for soft/hard merges.
+    *   memory_entity_merge_proposals — review band staging for the Phase 2 auto-merge
+    *                                   gate.
+    * Both ALTER ADD COLUMNs use literal-constant defaults (NULL and 0) so SQLite
+    * takes the O(1) metadata-only path — no full-table rewrite under the auth_db
+    * lock at startup.  See docs/ENTITY_MERGE_DESIGN.md §3. */
+   if (current_version >= 1 && current_version < 43) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_entities ADD COLUMN canonical_id INTEGER DEFAULT NULL "
+                        "REFERENCES memory_entities(id) ON DELETE SET NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v43 migration (canonical_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added canonical_id to memory_entities (v43)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE memory_entities ADD COLUMN is_user_self INTEGER NOT NULL DEFAULT 0",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v43 migration (is_user_self) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added is_user_self to memory_entities (v43)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      const char *v43_tables_sql =
+          "CREATE TABLE IF NOT EXISTS memory_entity_aliases ("
+          "  id                    INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id               INTEGER NOT NULL,"
+          "  source_entity_id      INTEGER,"
+          "  target_entity_id      INTEGER NOT NULL,"
+          "  source_canonical_name TEXT NOT NULL,"
+          "  target_canonical_name TEXT NOT NULL,"
+          "  link_kind             TEXT NOT NULL,"
+          "  reason                TEXT NOT NULL,"
+          "  composite_score       REAL,"
+          "  evidence_json         TEXT,"
+          "  linked_at             INTEGER NOT NULL,"
+          "  consolidated_at       INTEGER,"
+          "  unlinked_at           INTEGER,"
+          "  unlink_reason         TEXT,"
+          "  FOREIGN KEY (user_id)          REFERENCES users(id)           ON DELETE CASCADE,"
+          "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
+          "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL"
+          ");"
+          "CREATE TABLE IF NOT EXISTS memory_entity_merge_proposals ("
+          "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id          INTEGER NOT NULL,"
+          "  source_entity_id INTEGER NOT NULL,"
+          "  target_entity_id INTEGER NOT NULL,"
+          "  composite_score  REAL NOT NULL,"
+          "  evidence_json    TEXT NOT NULL,"
+          "  proposed_at      INTEGER NOT NULL,"
+          "  resolved_at      INTEGER,"
+          "  resolution       TEXT,"
+          "  FOREIGN KEY (user_id)          REFERENCES users(id)           ON DELETE CASCADE,"
+          "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
+          "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE"
+          ");";
+
+      rc = sqlite3_exec(s_db.db, v43_tables_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v43 migration (alias tables) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: created memory_entity_aliases + memory_entity_merge_proposals (v43)");
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -1970,9 +2120,9 @@ static int create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
-   /* Indexes on migration-added columns (v33/v34).  Must run here rather than
-    * in SCHEMA_SQL because on an existing pre-migration DB, CREATE TABLE IF
-    * NOT EXISTS is a no-op, so the new columns don't exist until migrations
+   /* Indexes on migration-added columns (v33/v34/v43).  Must run here rather
+    * than in SCHEMA_SQL because on an existing pre-migration DB, CREATE TABLE
+    * IF NOT EXISTS is a no-op, so the new columns don't exist until migrations
     * run.  Migrations also create these indexes but only fire on DBs with
     * current_version >= 1 — fresh installs (version 0) skip all migrations
     * and reach this block instead. */
@@ -1987,6 +2137,40 @@ static int create_schema(const char *db_path) {
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: could not create memory v33/v34 indexes: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v43 indexes.  idx_memory_entities_user_self is a partial UNIQUE index
+    * enforcing the one-self-per-user invariant — a second is_user_self=1 row
+    * for the same user_id will fail the constraint.  The two partial indexes
+    * on memory_entities both depend on v43 columns; the alias / proposal
+    * indexes depend on the v43 tables.  All five are CREATE IF NOT EXISTS so
+    * they're idempotent across fresh-install + migration paths.
+    *
+    * idx_contacts_field_lvalue (functional index on lower(value)) backs the
+    * contacts self-join inside compute_contact_field_overlap.  Without it,
+    * the alias scorer's inner contact-pair JOIN runs O(N²) over a user's
+    * contacts on every score_pair call (Phase 2 will fire that on every
+    * extraction).  With the index it's O(log N) per JOIN.  No schema
+    * version bump needed — index creation is purely an optimization that
+    * back-fills cleanly on the dev's existing DB at next boot. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_entities_canonical "
+                     "ON memory_entities(canonical_id) WHERE canonical_id IS NOT NULL;"
+                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entities_user_self "
+                     "ON memory_entities(user_id) WHERE is_user_self = 1;"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_entity_aliases_user_target "
+                     "ON memory_entity_aliases(user_id, target_entity_id) "
+                     "WHERE unlinked_at IS NULL;"
+                     "CREATE INDEX IF NOT EXISTS idx_merge_proposals_pending "
+                     "ON memory_entity_merge_proposals(user_id, proposed_at) "
+                     "WHERE resolved_at IS NULL;"
+                     "CREATE INDEX IF NOT EXISTS idx_contacts_field_lvalue "
+                     "ON contacts(user_id, field_type, lower(value))",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory v43 indexes: %s", errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
@@ -2997,10 +3181,17 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* canonical_id IS NULL filter (v43): the entity-cache path defaults to
+    * canonical-only.  Aliases (rows with canonical_id IS NOT NULL) are
+    * excluded from the entity-embedding cache so the resolver / focus
+    * adapter pools do not double-count surface-form variants of the same
+    * real-world entity.  Bind position 2 = include_aliases (0 = filter
+    * aliases out, 1 = include).  See docs/ENTITY_MERGE_DESIGN.md §15. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, name, entity_type, embedding, embedding_norm "
                            "FROM memory_entities "
                            "WHERE user_id = ? AND embedding IS NOT NULL "
+                           "  AND (? = 1 OR canonical_id IS NULL) "
                            "ORDER BY mention_count DESC LIMIT ?",
                            -1, &s_db.stmt_memory_entity_get_embeddings, NULL);
    if (rc != SQLITE_OK) {

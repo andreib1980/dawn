@@ -52,6 +52,11 @@ extern "C" {
 #define MEMORY_DB_FAILURE 1
 #define MEMORY_DB_NOT_FOUND 2
 #define MEMORY_DB_DUPLICATE 3
+/* v43 entity-merge: caller passed an entity that's currently a soft alias
+ * to an API that requires a canonical (e.g. memory_db_entity_score_pair).
+ * Distinct from NOT_FOUND so callers can render a helpful "pick its
+ * canonical instead" message. */
+#define MEMORY_DB_INVALID_ALIAS_TARGET 4
 
 /* =============================================================================
  * Provenance

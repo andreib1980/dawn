@@ -641,6 +641,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_core.c
     src/memory/memory_db.c
     src/memory/memory_db_admin.c
+    src/memory/memory_db_alias.c
     src/memory/memory_db_provenance.c
     src/memory/focus_source.c
     src/memory/focus_recency.c

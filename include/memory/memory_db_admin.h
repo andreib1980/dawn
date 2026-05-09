@@ -44,6 +44,8 @@ typedef struct {
    int entities_deleted;
    int relations_deleted;
    int conversations_reset;
+   int aliases_deleted;         /**< v43: memory_entity_aliases rows dropped */
+   int merge_proposals_deleted; /**< v43: memory_entity_merge_proposals rows dropped */
 } memory_db_admin_reset_counts_t;
 
 /**
@@ -63,6 +65,12 @@ typedef struct {
    char provider[16];
    char model[64];
    bool rates_known;
+   /* v43: derived alias state that reset_derived will drop along with the
+    * other memory tables.  Surfaced in the dry-run report so the operator
+    * sees the alias graph they're losing before --confirm.  Populated by
+    * memory_db_admin_estimate_reextract_cost. */
+   int active_aliases;
+   int pending_proposals;
 } memory_db_admin_cost_estimate_t;
 
 /**

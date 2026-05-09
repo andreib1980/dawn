@@ -23,6 +23,11 @@
       summaries: [],
       entities: [],
       allEntities: [], // Keep unfiltered copy for client-side search
+      // Phase 1 entity-merge: per-canonical alias caches keyed by entity id
+      // (-> [{link_id, source_canonical_name, link_kind, composite_score, linked_at}]).
+      aliasesByEntity: {},
+      // Pending merge proposals for the user (Suggested Merges panel).
+      proposals: [],
       activeTab: 'facts',
       searchQuery: '',
       searchTimeout: null,
@@ -137,6 +142,53 @@
       DawnWS.send({
          type: 'merge_memory_entities',
          payload: { source_id: sourceId, target_id: targetId },
+      });
+   }
+
+   /* Phase 1 entity-merge: alias + proposal API surface
+    * (handlers in webui_memory.c: handle_entity_aliases_request etc.) */
+
+   function requestEntityAliases(entityId) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({
+         type: 'entity_aliases_request',
+         payload: { entity_id: entityId },
+      });
+   }
+
+   function requestProposalList() {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({
+         type: 'entity_merge_proposal_list_request',
+         payload: {},
+      });
+   }
+
+   function requestEntityLink(sourceId, targetId, reason) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({
+         type: 'entity_link_request',
+         payload: {
+            source_entity_id: sourceId,
+            target_entity_id: targetId,
+            reason: reason || 'webui-operator',
+         },
+      });
+   }
+
+   function requestEntityUnlink(linkId) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({
+         type: 'entity_unlink_request',
+         payload: { link_id: linkId, reason: 'split-by-operator' },
+      });
+   }
+
+   function requestProposalResolve(proposalId, resolution) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({
+         type: 'entity_proposal_resolve_request',
+         payload: { proposal_id: proposalId, resolution: resolution },
       });
    }
 
@@ -255,6 +307,90 @@
       requestStats();
       memoryState.tabOffset.entities = 0;
       requestEntities(0);
+   }
+
+   /* =============================================================================
+    * Phase 1 entity-merge response handlers
+    * ============================================================================= */
+
+   function handleEntityAliasesResponse(payload) {
+      if (!payload || !payload.success) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload?.error || 'Failed to load aliases', 'error');
+         }
+         return;
+      }
+      const entityId = payload.entity_id;
+      memoryState.aliasesByEntity[entityId] = payload.aliases || [];
+      renderAliasRowsFor(entityId);
+   }
+
+   function handleEntityMergeProposalListResponse(payload) {
+      if (!payload || !payload.success) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload?.error || 'Failed to load merge proposals', 'error');
+         }
+         return;
+      }
+      memoryState.proposals = payload.proposals || [];
+      if (memoryState.activeTab === 'entities') {
+         renderProposalsPanel();
+      }
+   }
+
+   function handleEntityLinkResponse(payload) {
+      if (!payload || !payload.success) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload?.error || 'Soft-link failed', 'error');
+         }
+         return;
+      }
+      if (typeof DawnToast !== 'undefined') {
+         DawnToast.show('Soft alias created', 'success');
+      }
+      requestStats();
+      memoryState.tabOffset.entities = 0;
+      requestEntities(0);
+   }
+
+   function handleEntityUnlinkResponse(payload) {
+      if (!payload || !payload.success) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload?.error || 'Split failed', 'error');
+         }
+         return;
+      }
+      if (typeof DawnToast !== 'undefined') {
+         DawnToast.show('Alias split', 'success');
+      }
+      // Reload entity list and proposals (split surfaces the source as a new canonical).
+      memoryState.aliasesByEntity = {};
+      requestStats();
+      memoryState.tabOffset.entities = 0;
+      requestEntities(0);
+      if (memoryState.activeTab === 'entities') {
+         requestProposalList();
+      }
+   }
+
+   function handleEntityProposalResolveResponse(payload) {
+      if (!payload || !payload.success) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload?.error || 'Resolve failed', 'error');
+         }
+         return;
+      }
+      if (typeof DawnToast !== 'undefined') {
+         const verb = payload.resolution === 'approved' ? 'approved' : 'rejected';
+         DawnToast.show('Proposal ' + verb, 'success');
+      }
+      // Refresh the proposals panel and the entity list (approve creates a new alias).
+      requestProposalList();
+      if (payload.resolution === 'approved') {
+         requestStats();
+         memoryState.tabOffset.entities = 0;
+         requestEntities(0);
+      }
    }
 
    function handleFactsResponse(payload) {
@@ -787,17 +923,139 @@
          showEmptyState(
             memoryState.searchQuery ? 'No entities found' : 'No entities discovered yet'
          );
+         renderProposalsPanel();
          return;
       }
 
       const html = memoryState.entities.map((entity) => renderEntityItem(entity)).join('');
-      memoryElements.list.innerHTML = html;
+      memoryElements.list.innerHTML = renderProposalsPanelHtml() + html;
 
       if (memoryElements.loadMoreBtn) {
          memoryElements.loadMoreBtn.classList.remove('hidden');
          memoryElements.loadMoreBtn.disabled =
             !memoryState.tabHasMore.entities || !!memoryState.searchQuery;
       }
+   }
+
+   /* =============================================================================
+    * Phase 1 entity-merge: Suggested-Merges panel
+    * ============================================================================= */
+
+   /**
+    * Composite-score band → CSS class name.  Defines the color of the
+    * confidence badge on auto-merged aliases and pending proposals.  Bands
+    * are coarse for legibility; numeric values follow MEMORY_ALIAS_AUTO /
+    * REVIEW thresholds in include/memory/memory_db_aliases.h.
+    */
+   function compositeScoreBandClass(score) {
+      if (score == null || score < 0) return 'alias-score-unknown';
+      if (score >= 0.9) return 'alias-score-high';
+      if (score >= 0.7) return 'alias-score-mid';
+      return 'alias-score-low';
+   }
+
+   function renderProposalsPanelHtml() {
+      const proposals = memoryState.proposals || [];
+      if (proposals.length === 0) return '';
+
+      const itemsHtml = proposals
+         .map((p) => {
+            const scoreClass = compositeScoreBandClass(p.composite_score);
+            const scorePct =
+               p.composite_score != null && p.composite_score >= 0
+                  ? Math.round(p.composite_score * 100) + '%'
+                  : '?';
+            return (
+               `<div class="merge-proposal" data-proposal-id="${p.proposal_id}">` +
+               `<div class="merge-proposal-body">` +
+               `<span class="alias-confidence-badge ${scoreClass}" title="composite score">` +
+               escapeHtml(scorePct) +
+               '</span>' +
+               `<span class="merge-proposal-pair">` +
+               `<span class="merge-proposal-source">${escapeHtml(p.source_canonical_name || '?')}</span>` +
+               ' <span class="entity-relation-arrow">→</span> ' +
+               `<span class="merge-proposal-target">${escapeHtml(p.target_canonical_name || '?')}</span>` +
+               '</span>' +
+               '</div>' +
+               '<div class="merge-proposal-actions">' +
+               `<button class="btn-link merge-proposal-approve" ` +
+               `data-proposal-id="${p.proposal_id}">Approve</button>` +
+               `<button class="btn-link merge-proposal-reject" ` +
+               `data-proposal-id="${p.proposal_id}">Reject</button>` +
+               '</div>' +
+               '</div>'
+            );
+         })
+         .join('');
+
+      return (
+         '<div class="merge-proposals-panel">' +
+         '<div class="merge-proposals-header">' +
+         `<span>Suggested merges (${proposals.length})</span>` +
+         '<span class="merge-proposals-hint">Approve to soft-link; reject to dismiss.</span>' +
+         '</div>' +
+         itemsHtml +
+         '</div>'
+      );
+   }
+
+   function renderProposalsPanel() {
+      if (!memoryElements.list) return;
+      // Only re-render the panel in place to avoid disturbing the entity scroll position.
+      const existing = memoryElements.list.querySelector('.merge-proposals-panel');
+      const html = renderProposalsPanelHtml();
+      if (existing) {
+         if (html) {
+            existing.outerHTML = html;
+         } else {
+            existing.remove();
+         }
+      } else if (html) {
+         memoryElements.list.insertAdjacentHTML('afterbegin', html);
+      }
+   }
+
+   /**
+    * Render alias rows for a canonical entity, replacing any existing
+    * placeholder.  Called after handleEntityAliasesResponse populates
+    * memoryState.aliasesByEntity[entityId].
+    */
+   function renderAliasRowsFor(entityId) {
+      if (!memoryElements.list) return;
+      const card = memoryElements.list.querySelector(
+         `.memory-item.entity[data-entity-id="${entityId}"]`
+      );
+      if (!card) return;
+      const slot = card.querySelector('.entity-aliases');
+      if (!slot) return;
+
+      const aliases = memoryState.aliasesByEntity[entityId] || [];
+      if (aliases.length === 0) {
+         slot.innerHTML =
+            '<div class="entity-aliases-empty">No aliases linked to this entity.</div>';
+         return;
+      }
+      slot.innerHTML = aliases
+         .map((a) => {
+            const scoreClass = compositeScoreBandClass(a.composite_score);
+            const scorePct =
+               a.composite_score != null && a.composite_score >= 0
+                  ? Math.round(a.composite_score * 100) + '%'
+                  : '—';
+            const linkKind = a.link_kind || 'soft';
+            return (
+               `<div class="entity-alias-row" data-link-id="${a.link_id}">` +
+               `<span class="alias-confidence-badge ${scoreClass}" ` +
+               `title="composite score / link kind: ${escapeHtml(linkKind)}">` +
+               escapeHtml(scorePct) +
+               '</span>' +
+               `<span class="entity-alias-name">${escapeHtml(a.source_canonical_name || '?')}</span>` +
+               `<button class="btn-link entity-alias-split" data-link-id="${a.link_id}" ` +
+               `title="Split this alias back into a separate entity">Split</button>` +
+               '</div>'
+            );
+         })
+         .join('');
    }
 
    function renderEntityItem(entity) {
@@ -834,14 +1092,28 @@
               '<circle cx="8.5" cy="7" r="4"/></svg> contacts</span>'
             : '';
 
+      // Phase 1 entity-merge: badge + expand slot for soft aliases.
+      const aliasCount = entity.alias_count || 0;
+      const aliasBadgeHtml =
+         aliasCount > 0
+            ? `<button class="entity-alias-badge" data-alias-toggle-id="${entity.id}" ` +
+              `title="Show ${aliasCount} soft alias${aliasCount === 1 ? '' : 'es'}" ` +
+              `aria-expanded="false">${aliasCount} alias${aliasCount === 1 ? '' : 'es'}</button>`
+            : '';
+      const aliasSlotHtml =
+         aliasCount > 0
+            ? `<div class="entity-aliases" data-aliases-for="${entity.id}" hidden></div>`
+            : '';
+
       return (
          `<div class="memory-item entity" data-entity-id="${entity.id}">` +
          `<div class="entity-header">` +
          `<span class="entity-type-badge ${typeClass}">${escapeHtml(entity.entity_type || 'other')}</span>` +
          `<span class="entity-name">${escapeHtml(entity.name)}</span>` +
+         aliasBadgeHtml +
          contactBadgeHtml +
          `<button class="entity-merge-btn" data-merge-entity-id="${entity.id}" ` +
-         `title="Merge into another entity" aria-label="Merge entity">` +
+         `title="Soft-link into another entity (reversible)" aria-label="Merge entity">` +
          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
          `<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/>` +
          `<path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>` +
@@ -856,6 +1128,7 @@
          `<span class="entity-mentions">${entity.mention_count || 0} mentions</span>` +
          (dateStr ? `<span class="memory-item-date">${dateStr}</span>` : '') +
          `</div>` +
+         aliasSlotHtml +
          (relations.length > 0
             ? `<div class="entity-relations">${relationsHtml}${hiddenHtml}${moreHtml}</div>`
             : '') +
@@ -896,7 +1169,9 @@
    function handleListKeydown(e) {
       if (e.key !== 'Enter' && e.key !== ' ') return;
       const target = e.target.closest(
-         '.entity-relation-target, .entity-relations-more, .entity-contact-badge, .entity-merge-btn'
+         '.entity-relation-target, .entity-relations-more, .entity-contact-badge, ' +
+            '.entity-merge-btn, .entity-alias-badge, .entity-alias-split, ' +
+            '.merge-proposal-approve, .merge-proposal-reject'
       );
       if (!target) return;
       e.preventDefault();
@@ -945,6 +1220,50 @@
          e.stopPropagation();
          const sourceId = parseInt(mergeBtn.dataset.mergeEntityId, 10);
          showMergeEntityPicker(sourceId);
+         return;
+      }
+
+      // Phase 1 entity-merge: alias-badge toggle on canonical card
+      const aliasToggle = e.target.closest('.entity-alias-badge');
+      if (aliasToggle) {
+         e.stopPropagation();
+         const entityId = parseInt(aliasToggle.dataset.aliasToggleId, 10);
+         toggleAliasPanel(entityId, aliasToggle);
+         return;
+      }
+
+      // Phase 1 entity-merge: split button on individual alias row
+      const splitBtn = e.target.closest('.entity-alias-split');
+      if (splitBtn) {
+         e.stopPropagation();
+         const linkId = parseInt(splitBtn.dataset.linkId, 10);
+         if (callbacks.showConfirmModal) {
+            callbacks.showConfirmModal('Split this alias?', () => requestEntityUnlink(linkId), {
+               detail:
+                  'The alias will be unlinked and surface again as its own entity. ' +
+                  'You can re-link later via the merge button.',
+               danger: false,
+               okText: 'Split',
+            });
+         } else {
+            requestEntityUnlink(linkId);
+         }
+         return;
+      }
+
+      // Phase 1 entity-merge: proposal approve / reject
+      const approveBtn = e.target.closest('.merge-proposal-approve');
+      if (approveBtn) {
+         e.stopPropagation();
+         const proposalId = parseInt(approveBtn.dataset.proposalId, 10);
+         requestProposalResolve(proposalId, 'approved');
+         return;
+      }
+      const rejectBtn = e.target.closest('.merge-proposal-reject');
+      if (rejectBtn) {
+         e.stopPropagation();
+         const proposalId = parseInt(rejectBtn.dataset.proposalId, 10);
+         requestProposalResolve(proposalId, 'rejected');
          return;
       }
 
@@ -1100,20 +1419,48 @@
 
       if (callbacks.showConfirmModal) {
          callbacks.showConfirmModal(
-            `Merge "${source.name}" into "${target.name}"?`,
+            `Soft-link "${source.name}" → "${target.name}"?`,
             () => {
-               requestMergeEntities(sid, targetId);
+               // Phase 1 entity-merge: WebUI two-click defaults to soft alias.
+               requestEntityLink(sid, targetId, 'webui-operator');
             },
             {
                detail:
-                  `"${source.name}" will be deleted. All contacts and relations ` +
-                  `will transfer to "${target.name}".`,
+                  `"${source.name}" will be marked as a soft alias of "${target.name}". ` +
+                  'Both rows are preserved and the link is reversible — you can split it ' +
+                  'later from the alias panel. Use "dawn-admin memory entity consolidate" ' +
+                  'to make a soft link permanent.',
                danger: false,
-               okText: 'Merge',
+               okText: 'Soft-link',
             }
          );
       } else {
-         requestMergeEntities(sid, targetId);
+         requestEntityLink(sid, targetId, 'webui-operator');
+      }
+   }
+
+   /**
+    * Toggle a canonical entity's alias-expand panel.  Lazy-loads alias rows
+    * on first expand by firing entity_aliases_request; reuses the cached
+    * response on subsequent toggles.
+    */
+   function toggleAliasPanel(entityId, toggleBtn) {
+      if (!memoryElements.list) return;
+      const slot = memoryElements.list.querySelector(`[data-aliases-for="${entityId}"]`);
+      if (!slot) return;
+      const isHidden = slot.hasAttribute('hidden');
+      if (isHidden) {
+         slot.removeAttribute('hidden');
+         if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
+         if (memoryState.aliasesByEntity[entityId]) {
+            renderAliasRowsFor(entityId);
+         } else {
+            slot.innerHTML = '<div class="entity-aliases-loading">Loading…</div>';
+            requestEntityAliases(entityId);
+         }
+      } else {
+         slot.setAttribute('hidden', '');
+         if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'false');
       }
    }
 
@@ -1291,7 +1638,10 @@
             requestSummaries(0);
             break;
          case 'entities':
+            // Reset alias caches; refresh both entity list and proposal queue.
+            memoryState.aliasesByEntity = {};
             requestEntities(0);
+            requestProposalList();
             break;
          case 'contacts':
             if (typeof DawnContacts !== 'undefined') DawnContacts.loadContacts();
@@ -2013,6 +2363,12 @@
       handleDeleteSummaryResponse,
       handleDeleteEntityResponse,
       handleMergeEntityResponse,
+      // Phase 1 entity-merge response handlers
+      handleEntityAliasesResponse,
+      handleEntityMergeProposalListResponse,
+      handleEntityLinkResponse,
+      handleEntityUnlinkResponse,
+      handleEntityProposalResolveResponse,
       handleDeleteAllResponse,
       handleExportResponse,
       handleImportResponse,

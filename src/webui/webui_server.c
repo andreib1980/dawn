@@ -3179,6 +3179,22 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (payload) {
          handle_merge_memory_entities(conn, payload);
       }
+   } else if (strcmp(type, "entity_aliases_request") == 0) {
+      handle_entity_aliases_request(conn, payload);
+   } else if (strcmp(type, "entity_merge_proposal_list_request") == 0) {
+      handle_entity_merge_proposal_list_request(conn, payload);
+   } else if (strcmp(type, "entity_link_request") == 0) {
+      if (payload) {
+         handle_entity_link_request(conn, payload);
+      }
+   } else if (strcmp(type, "entity_unlink_request") == 0) {
+      if (payload) {
+         handle_entity_unlink_request(conn, payload);
+      }
+   } else if (strcmp(type, "entity_proposal_resolve_request") == 0) {
+      if (payload) {
+         handle_entity_proposal_resolve_request(conn, payload);
+      }
    } else if (strcmp(type, "delete_all_memories") == 0) {
       if (payload) {
          handle_delete_all_memories(conn, payload);

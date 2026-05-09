@@ -41,6 +41,7 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_fact_search.h"
@@ -1229,6 +1230,14 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       if (!source_name[0] || !target_name[0])
          return strdup("Error: merge_entities requires both source_name (query) and target_name");
 
+      /* Run prompt-injection filter on both names before any DB lookup —
+       * mirrors what the resolver path will do at extraction time, and
+       * prevents a poisoned name from sliding into a downstream
+       * canonical_name field via a misdirected merge. */
+      if (memory_filter_check(source_name) || memory_filter_check(target_name)) {
+         return strdup("Error: entity name failed prompt-injection filter");
+      }
+
       /* Look up both entities by canonical name */
       char src_canonical[64], tgt_canonical[64];
       memory_make_canonical_name(source_name, src_canonical, sizeof(src_canonical));
@@ -1240,24 +1249,38 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       if (memory_db_entity_get_by_name(user_id, tgt_canonical, &tgt_entity) != MEMORY_DB_SUCCESS)
          return strdup("Error: target entity not found");
 
-      int rc = memory_db_entity_merge(user_id, src_entity.id, tgt_entity.id);
+      /* Soft-link by default (entity-merge Phase 1, design §14): set
+       * canonical_id on the source row + audit-row insert.  The link is
+       * reversible — operators promote to permanent merge via
+       * `dawn-admin memory entity consolidate` (Phase 3). */
+      int64_t link_id = 0;
+      int rc = memory_db_entity_alias_link(user_id, src_entity.id, tgt_entity.id, "soft",
+                                           "llm-tool-action",
+                                           /* composite_score */ -1.0f,
+                                           /* evidence_json */ NULL, &link_id);
       if (rc == MEMORY_DB_SUCCESS) {
          char *result = malloc(768);
          if (result)
             snprintf(result, 768,
-                     "Merged '%s' into '%s'. The '%s' entity has been deleted; "
-                     "all its relations and contacts were transferred to '%s'. "
-                     "Use '%s' for future queries.",
-                     source_name, target_name, source_name, target_name, target_name);
-         return result ? result : strdup("Entities merged successfully.");
+                     "Linked '%s' as a soft alias of '%s' (link id %lld). "
+                     "The '%s' entity is preserved and will be resolved to '%s' on lookup. "
+                     "Use 'split' to undo, or 'dawn-admin memory entity consolidate' to make it "
+                     "permanent.",
+                     source_name, target_name, (long long)link_id, source_name, target_name);
+         return result ? result : strdup("Entities soft-linked.");
       } else if (rc == MEMORY_DB_NOT_FOUND) {
-         /* Race: entity deleted between lookup and merge */
+         /* Race: entity deleted between lookup and link */
          OLOG_WARNING("memory_callback: merge_entities race — entity vanished between lookup and "
-                      "merge (source='%s', target='%s')",
+                      "link (source='%s', target='%s')",
                       source_name, target_name);
          return strdup("Error: one or both entities no longer exist (may have been deleted)");
       } else {
-         return strdup("Error: merge operation failed");
+         /* alias_link refuses self-link, source-with-existing-aliases (would
+          * orphan the equivalence class), and DB failures.  Distinct return
+          * codes aren't surfaced; report the operation refused. */
+         return strdup("Error: cannot link these entities "
+                       "(source may already be a canonical with its own aliases, or "
+                       "source and target are the same)");
       }
    } else if (strcmp(actionName, "delete_contact") == 0) {
       if (!value || !value[0])

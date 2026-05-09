@@ -131,6 +131,18 @@ int memory_db_relation_create(int user_id,
                               const memory_provenance_t *prov);
 
 /**
+ * @brief Returns true if the given relation type is in the EXCLUSIVE_RELATIONS
+ * list (works_at, lives_in, married_to, ...).  Exposed so the entity-merge
+ * alias surface (memory_db_alias.c) can compute exclusive_relation_overlap
+ * without re-listing the source-of-truth array.  Single source of truth lives
+ * in memory_db.c.
+ *
+ * @param relation Relation type string (e.g. "works_at"); may be NULL.
+ * @return true if exclusive, false otherwise (NULL → false).
+ */
+bool memory_db_relation_is_exclusive(const char *relation);
+
+/**
  * @brief Transactional close-and-create: auto-closes any existing open exclusive
  * relation with a different object before inserting the new row.  All work happens
  * under a single BEGIN IMMEDIATE so other workers cannot observe an inconsistent
@@ -322,9 +334,19 @@ int memory_db_entity_get_photo(int user_id,
 int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id);
 
 /**
- * @brief Load all entity embeddings for a user (for cache)
+ * @brief Load all entity embeddings for a user (for cache).
+ *
+ * Defaults to canonical-only: rows with `canonical_id IS NOT NULL` (soft
+ * aliases of another entity, v43) are excluded so the entity-embedding
+ * cache and focus-adapter scratch buffer don't double-count surface-form
+ * variants of the same real-world entity.  Pass @p include_aliases = true
+ * for the future Graph-tab "show all rows" view; production retrieval
+ * paths always pass false.
  *
  * @param user_id User ID
+ * @param include_aliases When false (default in production), filter out rows
+ *                        with canonical_id IS NOT NULL.  When true, include
+ *                        every embedded entity for the user.
  * @param expected_dims Expected embedding dimensions
  * @param out_ids Output: entity IDs
  * @param out_names Output: canonical names
@@ -336,6 +358,7 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id);
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_entity_get_embeddings(int user_id,
+                                    bool include_aliases,
                                     int expected_dims,
                                     int64_t *out_ids,
                                     char out_names[][MEMORY_ENTITY_NAME_MAX],
