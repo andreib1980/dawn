@@ -135,6 +135,41 @@ dawn-admin music list --limit 50
 dawn-admin music rescan
 ```
 
+## Memory
+
+### How do I recategorize "general" facts?
+
+The memory subsystem assigns one of eight categories (personal, professional, relationships, health, interests, practical, preferences, general) to each extracted fact.  Facts created before the categorization feature shipped, or where the embedding-centroid backfill couldn't decide, end up labeled `general`.  This command sends batches of `general` facts to the configured extraction LLM for per-fact classification.
+
+```bash
+dawn-admin memory recategorize-all kris
+```
+
+Runs in the background — fire-and-forget.  Cost is small (one extraction LLM call per ~25 facts, typically a few cents per thousand facts on Claude Haiku).  Watch daemon logs for progress and final per-category distribution.
+
+### How do I re-extract memory from scratch after extraction-prompt or model improvements?
+
+When the extraction prompt, model, or post-processing logic changes meaningfully, derived state (facts, entities, relations, summaries, preferences, embeddings) can become stale relative to what the current pipeline would produce from the same conversations.  Conversations + messages are the source of truth; everything derived can be rebuilt from them.
+
+```bash
+# 1. Dry-run — reports conversation count, message count, estimated cost, provider/model
+dawn-admin memory reextract --user kris
+
+# 2. Review the estimate.  If reasonable, run for real:
+dawn-admin memory reextract --user kris --confirm
+
+# 3. Poll progress (the daemon processes conversations in the background)
+dawn-admin memory reextract-status --user kris
+```
+
+Optional flags:
+
+- `--keep-summaries` — preserve `memory_summaries` rows; useful when only fact extraction changed
+- `--backup-path <path>` — write a SQLite Online Backup of `auth.db` before reset (recommended for first runs)
+- `--max-cost-usd <X>` — abort `--confirm` if the cost estimate exceeds this ceiling
+
+The reset is transactional (`BEGIN IMMEDIATE`) — if anything fails partway, derived state is left untouched.  The re-extraction itself runs through the existing recovery worker, which respects `[memory.recovery]` rate limits.
+
 ## Troubleshooting
 
 ### The daemon isn't responding to dawn-admin commands
