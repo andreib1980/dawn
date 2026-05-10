@@ -68,6 +68,18 @@ extern "C" {
 #define MEMORY_ALIAS_AUTO_THRESHOLD 0.90f
 #define MEMORY_ALIAS_REVIEW_THRESHOLD 0.70f
 
+/* Threshold for promoting an existing entity to is_user_self=1 during
+ * link-user-self when no is_user_self=1 row exists yet (design §8 Path B
+ * step 1).  Sits below the auto-merge threshold because the synthetic
+ * seed has no DB-resident relations, so exclusive_relation_overlap
+ * forfeits to 0 — capping production composite at ~0.45-0.65 even for
+ * a perfect-name match.  Operator has explicitly invoked link-user-self,
+ * so a meaningful match (jaccard or substring + bonus) is sufficient
+ * intent; result reports show what was promoted so operator can split
+ * if wrong.  Tunable via this constant if false-positive rate becomes
+ * an issue post-deployment. */
+#define MEMORY_ALIAS_SELF_PROMOTION_THRESHOLD 0.30f
+
 #define MEMORY_ALIAS_NAME_JACCARD_FLOOR 0.30f
 #define MEMORY_ALIAS_COSINE_FLOOR 0.50f
 
@@ -556,7 +568,12 @@ typedef struct {
 
 typedef struct {
    int64_t self_entity_id; /**< The user-self canonical (existing or just-seeded) */
-   bool self_was_seeded;   /**< true if a fresh row was created vs reused */
+   bool self_was_seeded;   /**< true if a fresh row was created vs reused/promoted */
+   /**< true if an existing entity was promoted (is_user_self=1 set) instead of
+    *   inserting a fresh seed.  Implies !self_was_seeded.  Per design §8 Path B
+    *   step 1: when an existing entity matches the synthetic strongly enough,
+    *   USE that entity as canonical rather than creating a duplicate row. */
+   bool self_was_promoted;
    char self_canonical_name[MEMORY_ENTITY_NAME_MAX];
    int considered; /**< Total entities scored (excludes self) */
    int auto_merged;

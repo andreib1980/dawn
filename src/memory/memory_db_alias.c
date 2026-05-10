@@ -2530,15 +2530,66 @@ static int seed_user_self_entity(int user_id,
 
    int rc = sqlite3_step(stmt);
    if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db_alias: seed user-self failed: %s", sqlite3_errmsg(s_db.db));
+      int err = sqlite3_extended_errcode(s_db.db);
       sqlite3_finalize(stmt);
       AUTH_DB_UNLOCK();
+      /* UNIQUE(user_id, canonical_name) collision — see MEMORY_DB_SELF_NAME_COLLISION
+       * in memory_types.h for resolution path.  Caller surfaces the
+       * actionable hint to the operator. */
+      if (err == SQLITE_CONSTRAINT_UNIQUE || err == SQLITE_CONSTRAINT_PRIMARYKEY) {
+         OLOG_WARNING("memory_db_alias: seed user-self UNIQUE collision on canonical_name "
+                      "'%s' for user %d — composite scored below promotion threshold; "
+                      "operator must promote manually or change real_name",
+                      canonical_name, user_id);
+         return MEMORY_DB_SELF_NAME_COLLISION;
+      }
+      OLOG_ERROR("memory_db_alias: seed user-self failed: %s", sqlite3_errmsg(s_db.db));
       return MEMORY_DB_FAILURE;
    }
    if (out_id)
       *out_id = sqlite3_last_insert_rowid(s_db.db);
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Set is_user_self=1 on an existing entity (Path B step 1 — promote existing
+ * match instead of inserting a fresh seed).  Caller is responsible for
+ * ensuring no other entity for this user currently has is_user_self=1
+ * (the partial UNIQUE index would otherwise block the UPDATE). */
+static int promote_to_user_self_entity(int user_id, int64_t entity_id) {
+   if (entity_id <= 0 || user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "UPDATE memory_entities SET is_user_self = 1 "
+                     "WHERE id = ? AND user_id = ? AND is_user_self = 0";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, entity_id);
+   sqlite3_bind_int(stmt, 2, user_id);
+
+   int rc = sqlite3_step(stmt);
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db_alias: promote-to-user-self failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (changes == 0) {
+      OLOG_WARNING("memory_db_alias: promote-to-user-self matched no rows (entity_id=%lld, "
+                   "user_id=%d, may already be is_user_self=1 or canonical_id != NULL)",
+                   (long long)entity_id, user_id);
+      return MEMORY_DB_NOT_FOUND;
+   }
    return MEMORY_DB_SUCCESS;
 }
 
@@ -2778,12 +2829,12 @@ int memory_alias_link_user_self_run(int user_id,
       strncpy(result->self_canonical_name, self_ent.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
       result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
    } else {
-      /* No is_user_self=1 row exists — seed (commit) or build a synthetic
-       * (dry-run) using the v44 user-identity record.  Phase 1.5 Ckpt D
-       * adds an explicit gate above this point that requires real_name to
-       * be set; for now an empty real_name will produce an empty
-       * canonical_name and the run will degrade gracefully (all candidates
-       * REJECTED). */
+      /* No is_user_self=1 row exists — per design §8 Path B step 1, first
+       * try to find an existing entity that matches the synthetic strongly
+       * (composite ≥ MEMORY_ALIAS_SELF_PROMOTION_THRESHOLD) and promote it
+       * (UPDATE is_user_self=1).  Only if no strong match exists do we seed
+       * a fresh entity.  Phase 1.5 Ckpt D added an explicit real_name gate
+       * above this point; an empty real_name has already returned an error. */
       char display_name[MEMORY_ENTITY_NAME_MAX];
       strncpy(display_name, identity.real_name, sizeof(display_name) - 1);
       display_name[sizeof(display_name) - 1] = '\0';
@@ -2791,32 +2842,105 @@ int memory_alias_link_user_self_run(int user_id,
       char canonical_name[MEMORY_ENTITY_NAME_MAX];
       memory_make_canonical_name(display_name, canonical_name, sizeof(canonical_name));
 
-      if (!dry_run) {
-         if (seed_user_self_entity(user_id, display_name, canonical_name, &self_id) !=
-                 MEMORY_DB_SUCCESS ||
-             self_id <= 0) {
-            return MEMORY_DB_FAILURE;
+      /* Step 1 — search for a promotion candidate via the synthetic resolver.
+       * Reuses the Stage 1-6 cascade with use_synth_self=true; returns the
+       * highest-composite match (or 0 if no candidate cleared the cascade).
+       *
+       * Stage 1 (exact canonical_name match) is a fast-path that bypasses
+       * scoring — composite_score stays 0, but the match itself is the
+       * strongest possible signal (the user's real_name canonicalizes to
+       * an entity that already exists).  Treat Stage 1 as an unconditional
+       * promote-trigger; the composite-threshold gate applies only to
+       * Stage 6 winners (fuzzy matches via name similarity + bonuses). */
+      memory_alias_resolve_t self_resolve;
+      memset(&self_resolve, 0, sizeof(self_resolve));
+      int resolve_rc = memory_db_entity_resolve_alias_for_self(user_id, canonical_name, "person",
+                                                               &self_resolve);
+
+      bool stage1_hit = (resolve_rc == MEMORY_DB_SUCCESS && self_resolve.resolved_id > 0 &&
+                         self_resolve.matched_stage == 1);
+      bool stage6_strong = (resolve_rc == MEMORY_DB_SUCCESS && self_resolve.resolved_id > 0 &&
+                            self_resolve.matched_stage == 6 &&
+                            self_resolve.evidence.composite_score >=
+                                MEMORY_ALIAS_SELF_PROMOTION_THRESHOLD);
+      bool promoted = false;
+      if (stage1_hit || stage6_strong) {
+         /* Strong match — promote it (commit) or report it (dry-run). */
+         if (!dry_run) {
+            int prc = promote_to_user_self_entity(user_id, self_resolve.resolved_id);
+            if (prc != MEMORY_DB_SUCCESS) {
+               return MEMORY_DB_FAILURE;
+            }
+            self_id = self_resolve.resolved_id;
+         } else {
+            self_id = self_resolve.resolved_id;
          }
-         result->self_was_seeded = true;
-      } else {
-         /* Dry-run preview when no canonical exists yet: self_id stays 0
-          * (the report renders "(would create)") and the candidate scoring
-          * loop below uses a synthetic entity for accurate band routing. */
-         self_id = 0;
-         result->self_was_seeded = true;
+         promoted = true;
+         result->self_was_promoted = true;
+         result->self_was_seeded = false;
+
+         /* Pull the canonical_name from the entity row so the report
+          * accurately reflects what got promoted. */
+         memory_entity_t self_ent;
+         if (load_entity_full(user_id, self_id, &self_ent, NULL, NULL) == MEMORY_DB_SUCCESS) {
+            strncpy(result->self_canonical_name, self_ent.canonical_name,
+                    MEMORY_ENTITY_NAME_MAX - 1);
+            result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         } else {
+            strncpy(result->self_canonical_name, canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
+            result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         }
+         result->self_entity_id = self_id;
       }
-      result->self_entity_id = self_id;
-      strncpy(result->self_canonical_name, canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
-      result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+
+      if (!promoted) {
+         /* Step 2 — fall through to fresh seed (commit) or no-self preview (dry-run). */
+         if (!dry_run) {
+            int seed_rc = seed_user_self_entity(user_id, display_name, canonical_name, &self_id);
+            if (seed_rc == MEMORY_DB_SELF_NAME_COLLISION) {
+               return MEMORY_DB_SELF_NAME_COLLISION;
+            }
+            if (seed_rc != MEMORY_DB_SUCCESS || self_id <= 0) {
+               return MEMORY_DB_FAILURE;
+            }
+            result->self_was_seeded = true;
+            result->self_was_promoted = false;
+         } else {
+            /* Dry-run preview when no canonical exists yet: self_id stays 0
+             * (the report renders "(would create)") and the candidate scoring
+             * loop below uses a synthetic entity for accurate band routing. */
+            self_id = 0;
+            result->self_was_seeded = true;
+            result->self_was_promoted = false;
+         }
+         result->self_entity_id = self_id;
+         strncpy(result->self_canonical_name, canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
+         result->self_canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      }
    }
 
-   /* Build the synthetic self-entity for the dry-run-with-no-self path
-    * from the v44 user-identity record (real_name + identity_aliases).
-    * preferred_address is display-only and intentionally not used here. */
-   memory_entity_t synth_self;
+   /* Build the self-entity used for dry-run pair scoring.  Three cases:
+    *   (a) dry-run + no canonical (self_id == 0): build synthetic from
+    *       real_name + identity_aliases (use_synth_self path).
+    *   (b) dry-run + would-promote (self_id > 0 && self_was_promoted):
+    *       load the would-promoted entity but treat it as user_self for
+    *       scoring (the DB UPDATE hasn't fired yet in dry-run, so
+    *       memory_db_entity_score_pair would see is_user_self=0 on
+    *       both sides and the bonus couldn't fire).  Use score_pair_full
+    *       directly with src_is_user_self=true.
+    *   (c) commit (any flavor) or pre-existing canonical: fall through
+    *       to memory_db_entity_score_pair / consider_auto_merge which
+    *       reads is_user_self from the DB directly. */
+   memory_entity_t self_ent_for_dryrun;
    bool use_synth_self = (dry_run && self_id == 0);
+   bool use_promote_dryrun = (dry_run && self_id > 0 && result->self_was_promoted);
    if (use_synth_self) {
-      build_synthetic_self_entity(user_id, &identity, &synth_self);
+      build_synthetic_self_entity(user_id, &identity, &self_ent_for_dryrun);
+   } else if (use_promote_dryrun) {
+      if (load_entity_full(user_id, self_id, &self_ent_for_dryrun, NULL, NULL) !=
+          MEMORY_DB_SUCCESS) {
+         return MEMORY_DB_FAILURE;
+      }
    }
 
    /* Step 2: iterate every other canonical entity for the user. */
@@ -2849,20 +2973,21 @@ int memory_alias_link_user_self_run(int user_id,
       if (dry_run) {
          memory_alias_evidence_t ev;
          memset(&ev, 0, sizeof(ev));
-         if (use_synth_self) {
-            /* Synthetic-self path: bypass score_pair (which requires both
-             * entities to be loadable from DB) and call score_pair_full
-             * directly with the candidate on one side and the synthetic on
-             * the other.  src_is_user_self=false (cand), tgt_is_user_self=
-             * true (synthetic) so user_self_bonus_applies fires when the
-             * cand's canonical_name matches the username substring.
+         if (use_synth_self || use_promote_dryrun) {
+            /* Both dry-run cases use score_pair_full directly so we can
+             * flag the self side as user_self even when the DB doesn't
+             * carry is_user_self=1 yet (synthetic has id=0; promote-dryrun
+             * is "would promote", UPDATE deferred until commit).  This
+             * lets user_self_bonus_applies fire correctly on candidates
+             * whose name matches the username/alias-substring conditions
+             * or who are the "user" allow-list token.
              *
              * Phase 1.5 fold-in: pass the allow-list token flag through
              * for the canonical "user" entity — the unconditional bonus
              * branch fires regardless of whether the operator's username
              * happens to be a substring of "user". */
             bool other_token = (strcmp(cand.canonical_name, "user") == 0);
-            score_pair_full(user_id, &cand, /* src_is_user_self */ false, &synth_self,
+            score_pair_full(user_id, &cand, /* src_is_user_self */ false, &self_ent_for_dryrun,
                             /* tgt_is_user_self */ true, other_token, &ev);
          } else if (memory_db_entity_score_pair(user_id, eid, self_id, &ev) != MEMORY_DB_SUCCESS) {
             if (row)
@@ -2888,31 +3013,65 @@ int memory_alias_link_user_self_run(int user_id,
             result->rejected++;
          }
       } else {
-         memory_alias_evaluate_t eval;
-         memset(&eval, 0, sizeof(eval));
-         if (memory_db_entity_consider_auto_merge(user_id, eid, &eval) != MEMORY_DB_SUCCESS) {
+         /* Commit path: score the candidate against the user-self
+          * specifically, NOT via consider_auto_merge (which would find
+          * the candidate's best generic match — for "llama 3.1" that's
+          * its sibling "llama", not the user-self).  link-user-self
+          * semantics: cluster scoring is always against the chosen
+          * canonical, with band routing to alias_link / proposal. */
+         memory_alias_evidence_t ev;
+         memset(&ev, 0, sizeof(ev));
+         memory_entity_t self_ent;
+         if (load_entity_full(user_id, self_id, &self_ent, NULL, NULL) != MEMORY_DB_SUCCESS) {
             if (row)
                row->outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
             result->rejected++;
             continue;
          }
-         if (row) {
-            row->outcome = eval.outcome;
-            row->composite_score = eval.evidence.composite_score;
-            row->user_self_bonus_applied = eval.evidence.user_self_bonus_applied;
-            row->link_id = eval.link_id;
-            row->proposal_id = eval.proposal_id;
-         }
-         switch (eval.outcome) {
-            case MEMORY_ALIAS_OUTCOME_AUTO_MERGED:
+         /* Allow-list flag: candidate is "user" canonical → unconditional bonus.
+          * Self side is the would-be-canonical; src_is_user_self=false (cand) and
+          * tgt_is_user_self=true (self) so user_self_bonus_applies fires correctly. */
+         bool other_token = (strcmp(cand.canonical_name, "user") == 0);
+         score_pair_full(user_id, &cand, /* src_is_user_self */ false, &self_ent,
+                         /* tgt_is_user_self */ true, other_token, &ev);
+
+         int outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
+         int64_t link_id = 0, proposal_id = 0;
+         if (ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
+            /* Soft-link: alias source (cand) to target (self).  Reason
+             * tag identifies the operator workflow that fired this. */
+            int link_rc = memory_db_entity_alias_link(user_id, eid, self_id, "soft",
+                                                      "link-user-self", ev.composite_score,
+                                                      /* evidence_json */ NULL, &link_id);
+            if (link_rc == MEMORY_DB_SUCCESS) {
+               outcome = MEMORY_ALIAS_OUTCOME_AUTO_MERGED;
                result->auto_merged++;
-               break;
-            case MEMORY_ALIAS_OUTCOME_PROPOSED:
-               result->proposed++;
-               break;
-            default:
+            } else {
+               outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
                result->rejected++;
-               break;
+            }
+         } else if (ev.composite_score >= MEMORY_ALIAS_REVIEW_THRESHOLD) {
+            /* Queue for operator review via the WebUI Suggested-Merges panel. */
+            int prop_rc = insert_merge_proposal(user_id, eid, self_id, ev.composite_score,
+                                                /* evidence_json */ NULL, &proposal_id);
+            if (prop_rc == MEMORY_DB_SUCCESS) {
+               outcome = MEMORY_ALIAS_OUTCOME_PROPOSED;
+               result->proposed++;
+            } else {
+               outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
+               result->rejected++;
+            }
+         } else {
+            outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
+            result->rejected++;
+         }
+
+         if (row) {
+            row->outcome = outcome;
+            row->composite_score = ev.composite_score;
+            row->user_self_bonus_applied = ev.user_self_bonus_applied;
+            row->link_id = link_id;
+            row->proposal_id = proposal_id;
          }
       }
    }

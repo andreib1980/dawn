@@ -63,6 +63,13 @@ extern "C" {
  * from NOT_FOUND so the admin handler can surface a "Configure WebUI
  * Settings → User → Real name" hint instead of a generic error. */
 #define MEMORY_DB_REAL_NAME_REQUIRED 5
+/* v44 entity-merge Phase 1.5 fold-in: link-user-self could not create the
+ * user-self entity because an existing entity already holds the canonicalized
+ * real_name AND scored below MEMORY_ALIAS_SELF_PROMOTION_THRESHOLD against
+ * the synthetic seed.  Operator action required: either promote the colliding
+ * entity manually (`dawn-admin memory entity merge`) or change real_name to
+ * disambiguate.  Surfaces from memory_alias_link_user_self_run() commit path. */
+#define MEMORY_DB_SELF_NAME_COLLISION 6
 
 /* =============================================================================
  * Provenance

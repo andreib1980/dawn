@@ -2851,6 +2851,19 @@ static int handle_memory_entity_link_user_self(int client_fd,
           "link-user-self requires a real_name set. Configure in WebUI Settings → User → Real "
           "name.");
    }
+   if (rc == MEMORY_DB_SELF_NAME_COLLISION) {
+      char msg[512];
+      snprintf(msg, sizeof(msg),
+               "link-user-self could not seed: an entity already exists with canonical_name "
+               "matching your real_name '%s', and it scored below the self-promotion threshold "
+               "(composite < %.2f).  Either promote it manually with "
+               "`dawn-admin memory entity merge --user <u> --source <id> --target <id>` then "
+               "set is_user_self via the WebUI, or change real_name in WebUI Settings → User "
+               "→ Real name to disambiguate.",
+               result->self_canonical_name, (double)MEMORY_ALIAS_SELF_PROMOTION_THRESHOLD);
+      free(result);
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, msg);
+   }
    if (rc != MEMORY_DB_SUCCESS) {
       free(result);
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
@@ -2862,7 +2875,15 @@ static int handle_memory_entity_link_user_self(int client_fd,
    int off = 0;
    off += snprintf(report + off, sizeof(report) - off, "link-user-self for '%s'%s:\n", username,
                    dry_run ? " — DRY RUN" : "");
-   if (result->self_was_seeded) {
+   if (result->self_was_promoted) {
+      /* Existing entity matched the synthetic strongly enough to be promoted
+       * to is_user_self=1 (per design §8 Path B step 1).  In dry-run, no
+       * UPDATE was issued; in commit mode, the entity now carries the flag. */
+      off += snprintf(report + off, sizeof(report) - off,
+                      "  user-self canonical: %s (id=%lld) [%s existing match]\n",
+                      result->self_canonical_name, (long long)result->self_entity_id,
+                      dry_run ? "would promote" : "promoted");
+   } else if (result->self_was_seeded) {
       if (result->self_entity_id > 0) {
          off += snprintf(report + off, sizeof(report) - off,
                          "  user-self canonical: %s (id=%lld) [seeded]\n",
