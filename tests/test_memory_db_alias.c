@@ -1074,16 +1074,86 @@ static void test_entity_list_for_admin_canonical_only_default(void) {
    TEST_ASSERT_EQUAL_INT64(canonical, rows[0].entity_id);
    TEST_ASSERT_FALSE(rows[0].is_alias);
 
-   /* include_aliases=true → both rows surface, alias flagged. */
+   /* include_aliases=true → both rows surface, alias flagged, alias row's
+    * canonical_id points back at the canonical entity (so callers can render
+    * aliases nested under their parent without re-querying). */
    memset(rows, 0, sizeof(rows));
    count = 0;
    rc = memory_db_entity_list_for_admin(g_test_user_id, /* include_aliases */ true, rows, 16,
                                         &count);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(2, count);
-   /* Aliases sorted last per the SQL ORDER BY. */
+   /* Pass-1 canonicals first, Pass-2 aliases appended. */
    TEST_ASSERT_FALSE(rows[0].is_alias);
+   TEST_ASSERT_EQUAL_INT64(0, rows[0].canonical_id);
    TEST_ASSERT_TRUE(rows[1].is_alias);
+   TEST_ASSERT_EQUAL_INT64(canonical, rows[1].canonical_id);
+}
+
+/* Two-pass listing: the canonical pass writes a contiguous prefix of
+ * is_alias=false rows and the alias pass appends a tail of is_alias=true
+ * rows ordered by canonical_id ASC.  The renderer relies on this shape to
+ * scan one contiguous run per canonical and inline its aliases.  Verifies
+ * both the prefix/tail invariant and that each alias row carries its
+ * canonical's id back so the caller does not need a second query. */
+static void test_entity_list_for_admin_alias_tail_carries_canonical_id(void) {
+   /* Two canonicals — Hub has two aliases, Solo has none — so we exercise
+    * both the "canonical with aliases" and "canonical without aliases"
+    * branches in one fixture. */
+   int64_t hub = insert_entity_typed(g_test_user_id, "Hub", "person");
+   int64_t solo = insert_entity_typed(g_test_user_id, "Solo", "person");
+   int64_t alias_a = insert_entity_typed(g_test_user_id, "HubAlt", "person");
+   int64_t alias_b = insert_entity_typed(g_test_user_id, "Hubby", "person");
+   int64_t link_a = 0, link_b = 0;
+   memory_db_entity_alias_link(g_test_user_id, alias_a, hub, "soft", "operator", 0.95f, NULL,
+                               &link_a);
+   memory_db_entity_alias_link(g_test_user_id, alias_b, hub, "soft", "operator", 0.85f, NULL,
+                               &link_b);
+
+   memory_alias_entity_row_t rows[8];
+   int count = 0;
+   int rc = memory_db_entity_list_for_admin(g_test_user_id, /* include_aliases */ true, rows, 8,
+                                            &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(4, count); /* 2 canonicals + 2 aliases */
+
+   /* Prefix: every is_alias=false row precedes every is_alias=true row.
+    * Once we see an alias, every subsequent row must also be an alias. */
+   bool seen_alias = false;
+   for (int i = 0; i < count; i++) {
+      if (rows[i].is_alias) {
+         seen_alias = true;
+         TEST_ASSERT_EQUAL_INT64_MESSAGE(hub, rows[i].canonical_id,
+                                         "alias row missing canonical_id back-reference");
+      } else {
+         TEST_ASSERT_FALSE_MESSAGE(seen_alias, "canonical row appeared after an alias row");
+         TEST_ASSERT_EQUAL_INT64(0, rows[i].canonical_id);
+      }
+   }
+
+   /* Both aliases surfaced and both pointed at hub. */
+   bool saw_alias_a = false, saw_alias_b = false;
+   for (int i = 0; i < count; i++) {
+      if (!rows[i].is_alias)
+         continue;
+      if (rows[i].entity_id == alias_a)
+         saw_alias_a = true;
+      if (rows[i].entity_id == alias_b)
+         saw_alias_b = true;
+   }
+   TEST_ASSERT_TRUE(saw_alias_a);
+   TEST_ASSERT_TRUE(saw_alias_b);
+
+   /* Solo (no aliases) sits in the canonical prefix with canonical_id = 0. */
+   bool saw_solo = false;
+   for (int i = 0; i < count; i++) {
+      if (rows[i].entity_id == solo) {
+         saw_solo = true;
+         TEST_ASSERT_FALSE(rows[i].is_alias);
+         TEST_ASSERT_EQUAL_INT64(0, rows[i].canonical_id);
+      }
+   }
+   TEST_ASSERT_TRUE(saw_solo);
 }
 
 /* ============================================================================
@@ -2172,6 +2242,7 @@ int main(void) {
    RUN_TEST(test_alias_list_helper_returns_active_only);
    RUN_TEST(test_alias_history_helper_includes_unlinked);
    RUN_TEST(test_entity_list_for_admin_canonical_only_default);
+   RUN_TEST(test_entity_list_for_admin_alias_tail_carries_canonical_id);
    RUN_TEST(test_proposal_list_returns_pending_only);
    RUN_TEST(test_proposal_resolve_approved_creates_alias);
 

@@ -2199,20 +2199,13 @@ int memory_db_entity_list_for_admin(int user_id,
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
-   sqlite3_stmt *stmt = NULL;
-   /* Two SQL shapes — canonical-only vs include-aliases-with-aliases-last.
-    * Same column shape; selectable at prepare time so the bound stmt
-    * reflects the requested filter. */
-   const char *sql_canonical = "SELECT id, name, entity_type, mention_count, is_user_self, 0 "
+   /* Pass 1 — canonicals (canonical_id IS NULL), mention_count DESC. */
+   const char *sql_canonical = "SELECT id, name, entity_type, mention_count, is_user_self "
                                "FROM memory_entities "
                                "WHERE user_id = ? AND canonical_id IS NULL "
                                "ORDER BY mention_count DESC, id ASC LIMIT ?";
-   const char *sql_all = "SELECT id, name, entity_type, mention_count, is_user_self, "
-                         "       (canonical_id IS NOT NULL) "
-                         "FROM memory_entities WHERE user_id = ? "
-                         "ORDER BY canonical_id IS NOT NULL, mention_count DESC, id ASC LIMIT ?";
-   if (sqlite3_prepare_v2(s_db.db, include_aliases ? sql_all : sql_canonical, -1, &stmt, NULL) !=
-       SQLITE_OK) {
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql_canonical, -1, &stmt, NULL) != SQLITE_OK) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
@@ -2236,10 +2229,56 @@ int memory_db_entity_list_for_admin(int user_id,
       }
       row->mention_count = sqlite3_column_int(stmt, 3);
       row->is_user_self = sqlite3_column_int(stmt, 4) != 0;
-      row->is_alias = sqlite3_column_int(stmt, 5) != 0;
+      row->is_alias = false;
+      row->canonical_id = 0;
       n++;
    }
    sqlite3_finalize(stmt);
+
+   /* Pass 2 — aliases, ordered by canonical_id so callers can iterate
+    * canonicals and find their aliases by linear scan over a contiguous
+    * tail.  Separate budget from canonicals: with the historic single-query
+    * shape, 254 canonicals saturated max=200 and silently dropped every
+    * alias.  Quota now lives in `max - n`, so the operator's link state
+    * surfaces even on dense user graphs. */
+   if (include_aliases && n < max) {
+      const char *sql_aliases =
+          "SELECT id, name, entity_type, mention_count, is_user_self, canonical_id "
+          "FROM memory_entities "
+          "WHERE user_id = ? AND canonical_id IS NOT NULL "
+          "ORDER BY canonical_id ASC, mention_count DESC, id ASC LIMIT ?";
+      if (sqlite3_prepare_v2(s_db.db, sql_aliases, -1, &stmt, NULL) != SQLITE_OK) {
+         AUTH_DB_UNLOCK();
+         if (count_out)
+            *count_out = n;
+         return MEMORY_DB_FAILURE;
+      }
+      sqlite3_bind_int(stmt, 1, user_id);
+      sqlite3_bind_int(stmt, 2, max - n);
+
+      while (n < max && sqlite3_step(stmt) == SQLITE_ROW) {
+         memory_alias_entity_row_t *row = &out[n];
+         memset(row, 0, sizeof(*row));
+         row->entity_id = sqlite3_column_int64(stmt, 0);
+         const char *name = (const char *)sqlite3_column_text(stmt, 1);
+         if (name) {
+            strncpy(row->name, name, MEMORY_ENTITY_NAME_MAX - 1);
+            row->name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+         }
+         const char *etype = (const char *)sqlite3_column_text(stmt, 2);
+         if (etype) {
+            strncpy(row->entity_type, etype, MEMORY_ENTITY_TYPE_MAX - 1);
+            row->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+         }
+         row->mention_count = sqlite3_column_int(stmt, 3);
+         row->is_user_self = sqlite3_column_int(stmt, 4) != 0;
+         row->canonical_id = sqlite3_column_int64(stmt, 5);
+         row->is_alias = true;
+         n++;
+      }
+      sqlite3_finalize(stmt);
+   }
+
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = n;

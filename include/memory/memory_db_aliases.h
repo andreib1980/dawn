@@ -404,7 +404,8 @@ typedef struct {
    char entity_type[MEMORY_ENTITY_TYPE_MAX];
    int mention_count;
    bool is_user_self;
-   bool is_alias; /**< true if canonical_id IS NOT NULL */
+   bool is_alias;        /**< true if canonical_id IS NOT NULL */
+   int64_t canonical_id; /**< parent canonical's id when is_alias=true; 0 otherwise */
 } memory_alias_entity_row_t;
 
 /**
@@ -441,15 +442,32 @@ int memory_db_entity_alias_history(int user_id,
                                    int *count_out);
 
 /**
- * @brief List entities for the user, mention_count DESC.  Defaults to
- * canonical-only; pass @p include_aliases = true to surface both canonical
- * and alias rows (aliases sorted last).
+ * @brief List entities for the user.  Default mode is canonical-only,
+ * mention_count DESC.  When @p include_aliases is true the function runs a
+ * second pass for aliases (canonical_id IS NOT NULL) ordered by canonical_id
+ * ASC, so the caller can render aliases nested under their canonical without
+ * starving them out of the row budget — the historic single-query path
+ * truncated all aliases off the tail when the canonical count saturated the
+ * @p max slots.  Aliases are appended after canonicals and have their parent
+ * canonical's id in @p canonical_id.
+ *
+ * @p include_aliases is API-clarity, not a perf flag — Pass 2's overhead at
+ * typical scale is one prepared statement and a few hundred rows, dwarfed
+ * by the lock-and-prepare cost of Pass 1.  Pass `false` only when the
+ * caller has no use for alias rows (e.g., legacy callers that pre-date the
+ * soft-merge surface).
  *
  * @param user_id User ID
- * @param include_aliases When true, include rows where canonical_id IS NOT NULL
+ * @param include_aliases When true, append alias rows (canonical_id != 0) after
+ *                        the canonicals.
  * @param out Output array
- * @param max Maximum results
- * @param count_out Output: number populated
+ * @param max Maximum results across both passes
+ * @param count_out Output: number populated.  Undefined on a non-SUCCESS
+ *                  return — callers must check the return code before
+ *                  trusting this value (currently `*count_out` is left
+ *                  holding any partial Pass-1 count if Pass-2 prepare
+ *                  fails, but that is an implementation detail not a
+ *                  contract).
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_entity_list_for_admin(int user_id,

@@ -532,24 +532,14 @@
          return;
       }
 
-      // Store search results
+      // All four record types now searched server-side, so we get full-DB
+      // hits regardless of how much the user has paginated through.  The
+      // older client-side filter on `allPreferences` / `allEntities` only
+      // saw the loaded-page subset and silently missed past-page matches.
       memoryState.facts = payload.facts || [];
       memoryState.summaries = payload.summaries || [];
-
-      // Filter preferences client-side (not searched server-side)
-      const query = memoryState.searchQuery.toLowerCase();
-      memoryState.preferences = memoryState.allPreferences.filter(
-         (p) =>
-            (p.category && p.category.toLowerCase().includes(query)) ||
-            (p.value && p.value.toLowerCase().includes(query))
-      );
-
-      // Filter entities client-side
-      memoryState.entities = memoryState.allEntities.filter(
-         (e) =>
-            (e.name && e.name.toLowerCase().includes(query)) ||
-            (e.entity_type && e.entity_type.toLowerCase().includes(query))
-      );
+      memoryState.preferences = payload.preferences || [];
+      memoryState.entities = payload.entities || [];
 
       // Render search results based on active tab
       if (memoryState.activeTab === 'facts') {

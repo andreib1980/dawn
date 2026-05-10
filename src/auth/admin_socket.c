@@ -2761,6 +2761,32 @@ static int handle_memory_entity_history(int client_fd, const char *payload, uint
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
 }
 
+/* Saturating snprintf accumulator.  Plain `off += snprintf(buf+off, cap-off,
+ * ...)` is a foot-gun: snprintf returns the *would-have-written* length
+ * (which can exceed the supplied size on truncation), so off can drift past
+ * `cap`.  The next iteration then computes `cap - off` as size_t, underflows
+ * to ~SIZE_MAX, and snprintf happily writes well past the buffer end on the
+ * stack.  This helper clamps `*off` to at most `cap - 1` so the buffer-size
+ * argument to subsequent snprintf calls is always non-negative.  Returns
+ * the new `*off` value as a convenience for callers that prefer a single
+ * expression.  `cap` must include the trailing NUL slot. */
+static int report_off_advance(int *off, int written, int cap) {
+   if (written < 0)
+      return *off; /* encoding error — leave unchanged */
+   if (*off >= cap - 1)
+      return *off; /* already saturated */
+   if (written >= cap - *off)
+      *off = cap - 1; /* truncation: clamp to leave room for NUL only */
+   else
+      *off += written;
+   return *off;
+}
+
+/* Cap matched to the typical DAP user — most graphs sit under a few hundred
+ * canonicals.  Heap-allocated (~48 KB at 96 B/row) so we do not trip the
+ * admin handler's modest stack budget. */
+#define ENTITY_LIST_MAX_ROWS 512
+
 static int handle_memory_entity_list(int client_fd, const char *payload, uint16_t payload_len) {
    uint8_t flags = 0;
    int64_t unused1 = 0, unused2 = 0;
@@ -2774,28 +2800,152 @@ static int handle_memory_entity_list(int client_fd, const char *payload, uint16_
    if (resolve_username_to_user(client_fd, username, &user) != 0)
       return 1;
 
-   memory_alias_entity_row_t rows[200];
+   memory_alias_entity_row_t *rows = calloc(ENTITY_LIST_MAX_ROWS, sizeof(*rows));
+   if (!rows) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "List allocation failed");
+   }
    int count = 0;
-   if (memory_db_entity_list_for_admin(user.id, show_aliases, rows, 200, &count) !=
+   if (memory_db_entity_list_for_admin(user.id, show_aliases, rows, ENTITY_LIST_MAX_ROWS, &count) !=
        MEMORY_DB_SUCCESS) {
+      free(rows);
       return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "List query failed");
    }
 
    char report[ADMIN_MSG_CONTENT_MAX + 1];
-   int off = snprintf(report, sizeof(report), "Entities for user '%s'%s:\n", username,
-                      show_aliases ? " (canonical + aliases)" : " (canonical only)");
-   for (int i = 0; i < count && off < (int)sizeof(report) - 128; i++) {
-      off += snprintf(report + off, sizeof(report) - off, "  [%lld] %s (%s, mentions=%d)%s%s\n",
-                      (long long)rows[i].entity_id, rows[i].name[0] ? rows[i].name : "(unnamed)",
-                      rows[i].entity_type[0] ? rows[i].entity_type : "?", rows[i].mention_count,
-                      rows[i].is_user_self ? " [user-self]" : "",
-                      rows[i].is_alias ? " [alias]" : "");
+   int off = 0;
+   report_off_advance(&off,
+                      snprintf(report, sizeof(report), "Entities for user '%s'%s:\n", username,
+                               show_aliases ? " (canonical + aliases)" : " (canonical only)"),
+                      (int)sizeof(report));
+
+   /* Aliases live in the contiguous tail (Pass 2 in
+    * memory_db_entity_list_for_admin); find the boundary so we can iterate
+    * canonicals and inline their aliases without re-querying. */
+   int alias_start = count;
+   for (int i = 0; i < count; i++) {
+      if (rows[i].is_alias) {
+         alias_start = i;
+         break;
+      }
    }
+
+   /* The report buffer is fixed (4 KB).  Reserve ~160 B for the trailing
+    * "...truncated" footer so we surface the cut, never silently overflow.
+    * Longest possible footer is ~95 B at 4-digit counts ("...truncated:
+    * 9999 more canonicals, 9999 more aliases not shown — message buffer
+    * full)\n"); 160 leaves comfortable headroom.  All `off` advancement
+    * routes through report_off_advance() so a runaway snprintf return
+    * cannot push `off` past `sizeof(report) - 1`, which would underflow
+    * `sizeof(report) - off` as size_t and overflow the stack buffer. */
+   const int kFooterReserve = 160;
+   int rendered_canonicals = 0;
+   int rendered_aliases = 0;
+   bool overflowed = false;
+
+   for (int i = 0; i < alias_start; i++) {
+      if (off >= (int)sizeof(report) - kFooterReserve) {
+         overflowed = true;
+         break;
+      }
+      report_off_advance(
+          &off,
+          snprintf(report + off, sizeof(report) - off, "  [%lld] %s (%s, mentions=%d)%s\n",
+                   (long long)rows[i].entity_id, rows[i].name[0] ? rows[i].name : "(unnamed)",
+                   rows[i].entity_type[0] ? rows[i].entity_type : "?", rows[i].mention_count,
+                   rows[i].is_user_self ? " [user-self]" : ""),
+          (int)sizeof(report));
+      rendered_canonicals++;
+
+      if (show_aliases) {
+         /* Aliases are sorted by canonical_id ASC, so all rows for this
+          * canonical form a contiguous run within the alias tail. */
+         for (int j = alias_start; j < count; j++) {
+            if (rows[j].canonical_id != rows[i].entity_id)
+               continue;
+            if (off >= (int)sizeof(report) - kFooterReserve) {
+               overflowed = true;
+               break;
+            }
+            report_off_advance(
+                &off,
+                snprintf(report + off, sizeof(report) - off,
+                         "      ↳ [%lld] %s (%s, mentions=%d) [alias]\n",
+                         (long long)rows[j].entity_id, rows[j].name[0] ? rows[j].name : "(unnamed)",
+                         rows[j].entity_type[0] ? rows[j].entity_type : "?", rows[j].mention_count),
+                (int)sizeof(report));
+            rendered_aliases++;
+         }
+         if (overflowed)
+            break;
+      }
+   }
+
+   /* Orphan aliases — canonical was not in the rendered set (either the
+    * canonical lives past max, or its row was overflow-trimmed).  Emit the
+    * remaining aliases under a distinct heading so cluster state is visible
+    * even on the unhappy path. */
+   if (show_aliases && !overflowed) {
+      bool emitted_orphan_header = false;
+      for (int j = alias_start; j < count; j++) {
+         bool found = false;
+         for (int i = 0; i < alias_start; i++) {
+            if (rows[i].entity_id == rows[j].canonical_id) {
+               found = true;
+               break;
+            }
+         }
+         if (found)
+            continue; /* already rendered nested under the canonical */
+         if (off >= (int)sizeof(report) - kFooterReserve) {
+            overflowed = true;
+            break;
+         }
+         if (!emitted_orphan_header) {
+            report_off_advance(&off,
+                               snprintf(report + off, sizeof(report) - off,
+                                        "Aliases whose canonical was not in this listing:\n"),
+                               (int)sizeof(report));
+            emitted_orphan_header = true;
+            /* Re-check budget after the header emission — header + alias
+             * line together can exceed the reserve in the worst case. */
+            if (off >= (int)sizeof(report) - kFooterReserve) {
+               overflowed = true;
+               break;
+            }
+         }
+         report_off_advance(&off,
+                            snprintf(report + off, sizeof(report) - off,
+                                     "  [%lld] %s (%s, mentions=%d) → canonical [%lld]\n",
+                                     (long long)rows[j].entity_id,
+                                     rows[j].name[0] ? rows[j].name : "(unnamed)",
+                                     rows[j].entity_type[0] ? rows[j].entity_type : "?",
+                                     rows[j].mention_count, (long long)rows[j].canonical_id),
+                            (int)sizeof(report));
+         rendered_aliases++;
+      }
+   }
+
    if (count == 0) {
       snprintf(report, sizeof(report), "No entities for user '%s'.", username);
-   } else if (count == 200) {
-      off += snprintf(report + off, sizeof(report) - off, "  …(truncated at 200 entries)\n");
+   } else if (overflowed) {
+      int unrendered_canonicals = alias_start - rendered_canonicals;
+      int unrendered_aliases = (count - alias_start) - rendered_aliases;
+      report_off_advance(
+          &off,
+          snprintf(report + off, sizeof(report) - off,
+                   "  …(truncated: %d more canonical%s, %d more alias%s not shown — message "
+                   "buffer full)\n",
+                   unrendered_canonicals, unrendered_canonicals == 1 ? "" : "s", unrendered_aliases,
+                   unrendered_aliases == 1 ? "" : "es"),
+          (int)sizeof(report));
+   } else if (count == ENTITY_LIST_MAX_ROWS) {
+      report_off_advance(&off,
+                         snprintf(report + off, sizeof(report) - off,
+                                  "  …(query capped at %d rows — DB has more entities)\n",
+                                  ENTITY_LIST_MAX_ROWS),
+                         (int)sizeof(report));
    }
+   free(rows);
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
 }
 

@@ -304,6 +304,155 @@ void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payloa
  * ============================================================================= */
 
 /**
+ * @brief Serialize a preference array to a JSON array.  Shared by the
+ * paginated list handler and the search handler so both surface the
+ * same field shape and a single source of truth lives here.
+ */
+static json_object *build_preferences_json_array(const memory_preference_t *prefs, int count) {
+   json_object *prefs_array = json_object_new_array();
+   for (int i = 0; i < count; i++) {
+      json_object *pref_obj = json_object_new_object();
+      json_object_object_add(pref_obj, "id", json_object_new_int64(prefs[i].id));
+      json_object_object_add(pref_obj, "category", json_object_new_string(prefs[i].category));
+      json_object_object_add(pref_obj, "value", json_object_new_string(prefs[i].value));
+      json_object_object_add(pref_obj, "confidence", json_object_new_double(prefs[i].confidence));
+      json_object_object_add(pref_obj, "source", json_object_new_string(prefs[i].source));
+      json_object_object_add(pref_obj, "created_at", json_object_new_int64(prefs[i].created_at));
+      json_object_object_add(pref_obj, "updated_at", json_object_new_int64(prefs[i].updated_at));
+      json_object_object_add(pref_obj, "reinforcement_count",
+                             json_object_new_int(prefs[i].reinforcement_count));
+      json_object_array_add(prefs_array, pref_obj);
+   }
+   return prefs_array;
+}
+
+/**
+ * @brief Serialize an entity array to a JSON array, enriched with
+ * Phase 1 entity-merge alias summaries (drop alias rows, attach
+ * `alias_count` to canonicals) and relation bulk-load (emit each
+ * entity's outgoing + incoming edges inline).  Shared by the
+ * paginated list handler and the search handler.
+ *
+ * Pulls alias summary + relation set in two queries regardless of
+ * @p count; duplicating these on each search keystroke is acceptable
+ * at the dev's 264-entity scale, and the alternative — caching them
+ * in the connection — leaks state across tabs.
+ */
+#define ENTITIES_JSON_ALIAS_SUMMARY_MAX 512
+#define ENTITIES_JSON_RELATIONS_MAX 400
+static json_object *build_entities_json_array(int user_id,
+                                              const memory_entity_t *entities,
+                                              int count) {
+   memory_alias_summary_row_t alias_summary[ENTITIES_JSON_ALIAS_SUMMARY_MAX];
+   int alias_summary_count = 0;
+   /* Initialize relations array unconditionally so subsequent indexed reads
+    * cannot hit uninitialized stack data on any future caller path that
+    * skips the SQL load. */
+   memory_relation_t all_rels[ENTITIES_JSON_RELATIONS_MAX];
+   memset(all_rels, 0, sizeof(all_rels));
+   int total_rels = 0;
+
+   /* Skip both bulk queries when there are no entities to enrich — an
+    * empty entity-search keystroke runs through this helper roughly every
+    * 300 ms while the user types.  Trims one prepare/step/finalize per
+    * empty keystroke and one mutex acquisition. */
+   if (count > 0) {
+      memory_db_entity_alias_summary(user_id, alias_summary, ENTITIES_JSON_ALIAS_SUMMARY_MAX,
+                                     &alias_summary_count);
+      memory_db_relation_list_all_by_user(user_id, all_rels, ENTITIES_JSON_RELATIONS_MAX,
+                                          &total_rels);
+      /* Bulk relation pull is bounded by ENTITIES_JSON_RELATIONS_MAX —
+       * a graph denser than that loses tail edges silently from rendered
+       * cards.  Surface a warning so the operator knows to bump the cap
+       * (or switch to a paginated edge query) before the UI starts mis-
+       * representing the user's data.  Not user-facing yet; when this
+       * fires in practice we add a `relations_truncated` JSON field and
+       * an entity-card banner. */
+      if (total_rels >= ENTITIES_JSON_RELATIONS_MAX) {
+         OLOG_WARNING("entities_json: relation pull saturated cap %d for user %d — entity cards "
+                      "may be missing edges",
+                      ENTITIES_JSON_RELATIONS_MAX, user_id);
+      }
+   }
+
+   json_object *entities_array = json_object_new_array();
+   for (int i = 0; i < count; i++) {
+      bool is_alias = false;
+      for (int a = 0; a < alias_summary_count; a++) {
+         if (alias_summary[a].alias_entity_id == entities[i].id) {
+            is_alias = true;
+            break;
+         }
+      }
+      if (is_alias) {
+         continue;
+      }
+
+      int alias_count = 0;
+      for (int a = 0; a < alias_summary_count; a++) {
+         if (alias_summary[a].canonical_entity_id == entities[i].id) {
+            alias_count++;
+         }
+      }
+
+      json_object *entity_obj = json_object_new_object();
+      json_object_object_add(entity_obj, "id", json_object_new_int64(entities[i].id));
+      json_object_object_add(entity_obj, "name", json_object_new_string(entities[i].name));
+      json_object_object_add(entity_obj, "entity_type",
+                             json_object_new_string(entities[i].entity_type));
+      json_object_object_add(entity_obj, "mention_count",
+                             json_object_new_int(entities[i].mention_count));
+      json_object_object_add(entity_obj, "alias_count", json_object_new_int(alias_count));
+      json_object_object_add(entity_obj, "first_seen",
+                             json_object_new_int64(entities[i].first_seen));
+      json_object_object_add(entity_obj, "last_seen", json_object_new_int64(entities[i].last_seen));
+
+      json_object *relations_array = json_object_new_array();
+
+      for (int r = 0; r < total_rels; r++) {
+         if (all_rels[r].subject_entity_id != entities[i].id)
+            continue;
+         json_object *rel_obj = json_object_new_object();
+         json_object_object_add(rel_obj, "relation", json_object_new_string(all_rels[r].relation));
+         json_object_object_add(rel_obj, "object_name",
+                                json_object_new_string(all_rels[r].object_name));
+         json_object_object_add(rel_obj, "object_entity_id",
+                                json_object_new_int64(all_rels[r].object_entity_id));
+         json_object_object_add(rel_obj, "direction", json_object_new_string("out"));
+         json_object_object_add(rel_obj, "confidence",
+                                json_object_new_double(all_rels[r].confidence));
+         json_object_array_add(relations_array, rel_obj);
+      }
+
+      for (int r = 0; r < total_rels; r++) {
+         if (all_rels[r].object_entity_id != entities[i].id)
+            continue;
+         const char *subj_name = "";
+         for (int e = 0; e < count; e++) {
+            if (entities[e].id == all_rels[r].subject_entity_id) {
+               subj_name = entities[e].name;
+               break;
+            }
+         }
+         json_object *rel_obj = json_object_new_object();
+         json_object_object_add(rel_obj, "relation", json_object_new_string(all_rels[r].relation));
+         json_object_object_add(rel_obj, "object_name", json_object_new_string(subj_name));
+         json_object_object_add(rel_obj, "object_entity_id",
+                                json_object_new_int64(all_rels[r].subject_entity_id));
+         json_object_object_add(rel_obj, "direction", json_object_new_string("in"));
+         json_object_object_add(rel_obj, "confidence",
+                                json_object_new_double(all_rels[r].confidence));
+         json_object_array_add(relations_array, rel_obj);
+      }
+
+      json_object_object_add(entity_obj, "relations", relations_array);
+      json_object_array_add(entities_array, entity_obj);
+   }
+
+   return entities_array;
+}
+
+/**
  * @brief List memory preferences for the current user
  */
 void handle_list_memory_preferences(ws_connection_t *conn, struct json_object *payload) {
@@ -342,24 +491,9 @@ void handle_list_memory_preferences(ws_connection_t *conn, struct json_object *p
    int rc = memory_db_pref_list(conn->auth_user_id, prefs, limit, offset, &count);
 
    if (rc == MEMORY_DB_SUCCESS) {
-      json_object *prefs_array = json_object_new_array();
-      for (int i = 0; i < count; i++) {
-         json_object *pref_obj = json_object_new_object();
-         json_object_object_add(pref_obj, "id", json_object_new_int64(prefs[i].id));
-         json_object_object_add(pref_obj, "category", json_object_new_string(prefs[i].category));
-         json_object_object_add(pref_obj, "value", json_object_new_string(prefs[i].value));
-         json_object_object_add(pref_obj, "confidence",
-                                json_object_new_double(prefs[i].confidence));
-         json_object_object_add(pref_obj, "source", json_object_new_string(prefs[i].source));
-         json_object_object_add(pref_obj, "created_at", json_object_new_int64(prefs[i].created_at));
-         json_object_object_add(pref_obj, "updated_at", json_object_new_int64(prefs[i].updated_at));
-         json_object_object_add(pref_obj, "reinforcement_count",
-                                json_object_new_int(prefs[i].reinforcement_count));
-         json_object_array_add(prefs_array, pref_obj);
-      }
-
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "preferences", prefs_array);
+      json_object_object_add(resp_payload, "preferences",
+                             build_preferences_json_array(prefs, count));
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
       json_object_object_add(resp_payload, "has_more", json_object_new_boolean(count == limit));
    } else {
@@ -584,114 +718,10 @@ void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payl
    int count = 0;
    int rc = memory_db_entity_list(conn->auth_user_id, entities, limit, offset, &count);
 
-   /* Phase 1 entity-merge: pull the user's alias summary so canonical cards
-    * surface an `alias_count` and so alias rows are dropped from the listing
-    * (UX requirement — without this, both Jon and Jonathan render as
-    * top-level cards even though Jon is a soft alias). */
-#define MAX_ALIAS_SUMMARY 512
-   memory_alias_summary_row_t alias_summary[MAX_ALIAS_SUMMARY];
-   int alias_summary_count = 0;
    if (rc == MEMORY_DB_SUCCESS) {
-      memory_db_entity_alias_summary(conn->auth_user_id, alias_summary, MAX_ALIAS_SUMMARY,
-                                     &alias_summary_count);
-   }
-
-/* Bulk-load all relations in a single query (avoids N+1 per-entity queries) */
-#define MAX_RELATIONS_BULK 400
-   memory_relation_t all_rels[MAX_RELATIONS_BULK];
-   int total_rels = 0;
-   if (rc == MEMORY_DB_SUCCESS && count > 0) {
-      memset(all_rels, 0, sizeof(all_rels));
-      memory_db_relation_list_all_by_user(conn->auth_user_id, all_rels, MAX_RELATIONS_BULK,
-                                          &total_rels);
-   }
-
-   if (rc == MEMORY_DB_SUCCESS) {
-      json_object *entities_array = json_object_new_array();
-      for (int i = 0; i < count; i++) {
-         /* Skip alias rows — they're surfaced via the canonical's expand
-          * panel instead of as standalone cards. */
-         bool is_alias = false;
-         for (int a = 0; a < alias_summary_count; a++) {
-            if (alias_summary[a].alias_entity_id == entities[i].id) {
-               is_alias = true;
-               break;
-            }
-         }
-         if (is_alias) {
-            continue;
-         }
-
-         /* Count aliases pointing at this canonical for the badge. */
-         int alias_count = 0;
-         for (int a = 0; a < alias_summary_count; a++) {
-            if (alias_summary[a].canonical_entity_id == entities[i].id) {
-               alias_count++;
-            }
-         }
-
-         json_object *entity_obj = json_object_new_object();
-         json_object_object_add(entity_obj, "id", json_object_new_int64(entities[i].id));
-         json_object_object_add(entity_obj, "name", json_object_new_string(entities[i].name));
-         json_object_object_add(entity_obj, "entity_type",
-                                json_object_new_string(entities[i].entity_type));
-         json_object_object_add(entity_obj, "mention_count",
-                                json_object_new_int(entities[i].mention_count));
-         json_object_object_add(entity_obj, "alias_count", json_object_new_int(alias_count));
-         json_object_object_add(entity_obj, "first_seen",
-                                json_object_new_int64(entities[i].first_seen));
-         json_object_object_add(entity_obj, "last_seen",
-                                json_object_new_int64(entities[i].last_seen));
-
-         json_object *relations_array = json_object_new_array();
-
-         /* Scan bulk relations: outgoing (this entity is subject) */
-         for (int r = 0; r < total_rels; r++) {
-            if (all_rels[r].subject_entity_id != entities[i].id)
-               continue;
-            json_object *rel_obj = json_object_new_object();
-            json_object_object_add(rel_obj, "relation",
-                                   json_object_new_string(all_rels[r].relation));
-            json_object_object_add(rel_obj, "object_name",
-                                   json_object_new_string(all_rels[r].object_name));
-            json_object_object_add(rel_obj, "object_entity_id",
-                                   json_object_new_int64(all_rels[r].object_entity_id));
-            json_object_object_add(rel_obj, "direction", json_object_new_string("out"));
-            json_object_object_add(rel_obj, "confidence",
-                                   json_object_new_double(all_rels[r].confidence));
-            json_object_array_add(relations_array, rel_obj);
-         }
-
-         /* Scan bulk relations: incoming (this entity is object) */
-         for (int r = 0; r < total_rels; r++) {
-            if (all_rels[r].object_entity_id != entities[i].id)
-               continue;
-            /* For incoming, find subject entity name */
-            const char *subj_name = "";
-            for (int e = 0; e < count; e++) {
-               if (entities[e].id == all_rels[r].subject_entity_id) {
-                  subj_name = entities[e].name;
-                  break;
-               }
-            }
-            json_object *rel_obj = json_object_new_object();
-            json_object_object_add(rel_obj, "relation",
-                                   json_object_new_string(all_rels[r].relation));
-            json_object_object_add(rel_obj, "object_name", json_object_new_string(subj_name));
-            json_object_object_add(rel_obj, "object_entity_id",
-                                   json_object_new_int64(all_rels[r].subject_entity_id));
-            json_object_object_add(rel_obj, "direction", json_object_new_string("in"));
-            json_object_object_add(rel_obj, "confidence",
-                                   json_object_new_double(all_rels[r].confidence));
-            json_object_array_add(relations_array, rel_obj);
-         }
-
-         json_object_object_add(entity_obj, "relations", relations_array);
-         json_object_array_add(entities_array, entity_obj);
-      }
-
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "entities", entities_array);
+      json_object_object_add(resp_payload, "entities",
+                             build_entities_json_array(conn->auth_user_id, entities, count));
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
       json_object_object_add(resp_payload, "has_more", json_object_new_boolean(count == limit));
    } else {
@@ -861,21 +891,34 @@ void handle_search_memory(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
-   /* Search facts */
+   /* Search all four record types in parallel.  The frontend used to
+    * filter preferences and entities client-side over only the
+    * paginated-in subset, so anything past the first page silently
+    * vanished from search hits.  Backend search closes that gap. */
    memory_fact_t facts[MAX_MEMORY_LIMIT];
    memset(facts, 0, sizeof(facts));
    int count = 0;
    int rc1 = memory_db_fact_search(conn->auth_user_id, query, facts, MAX_MEMORY_LIMIT, &count);
 
-   /* Also search summaries */
    memory_summary_t summaries[MEMORY_MAX_SUMMARIES];
    memset(summaries, 0, sizeof(summaries));
    int summary_count = 0;
    int rc2 = memory_db_summary_search(conn->auth_user_id, query, summaries, MEMORY_MAX_SUMMARIES,
                                       &summary_count);
 
-   if (rc1 == MEMORY_DB_SUCCESS && rc2 == MEMORY_DB_SUCCESS) {
-      /* Build facts array */
+   memory_preference_t prefs[MAX_MEMORY_LIMIT];
+   memset(prefs, 0, sizeof(prefs));
+   int pref_count = 0;
+   int rc3 = memory_db_pref_search(conn->auth_user_id, query, prefs, MAX_MEMORY_LIMIT, &pref_count);
+
+   memory_entity_t entities[MAX_MEMORY_LIMIT];
+   memset(entities, 0, sizeof(entities));
+   int entity_count = 0;
+   int rc4 = memory_db_entity_search(conn->auth_user_id, query, entities, MAX_MEMORY_LIMIT,
+                                     &entity_count);
+
+   if (rc1 == MEMORY_DB_SUCCESS && rc2 == MEMORY_DB_SUCCESS && rc3 == MEMORY_DB_SUCCESS &&
+       rc4 == MEMORY_DB_SUCCESS) {
       json_object *facts_array = json_object_new_array();
       for (int i = 0; i < count; i++) {
          json_object *fact_obj = json_object_new_object();
@@ -888,7 +931,6 @@ void handle_search_memory(ws_connection_t *conn, struct json_object *payload) {
          json_object_array_add(facts_array, fact_obj);
       }
 
-      /* Build summaries array */
       json_object *summaries_array = json_object_new_array();
       for (int i = 0; i < summary_count; i++) {
          json_object *summary_obj = json_object_new_object();
@@ -904,8 +946,14 @@ void handle_search_memory(ws_connection_t *conn, struct json_object *payload) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "facts", facts_array);
       json_object_object_add(resp_payload, "summaries", summaries_array);
+      json_object_object_add(resp_payload, "preferences",
+                             build_preferences_json_array(prefs, pref_count));
+      json_object_object_add(resp_payload, "entities",
+                             build_entities_json_array(conn->auth_user_id, entities, entity_count));
       json_object_object_add(resp_payload, "fact_count", json_object_new_int(count));
       json_object_object_add(resp_payload, "summary_count", json_object_new_int(summary_count));
+      json_object_object_add(resp_payload, "pref_count", json_object_new_int(pref_count));
+      json_object_object_add(resp_payload, "entity_count", json_object_new_int(entity_count));
    } else {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error", json_object_new_string("Search failed"));
