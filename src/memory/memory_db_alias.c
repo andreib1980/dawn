@@ -350,6 +350,22 @@ int memory_alias_canonical_priority_compare_self(const memory_entity_t *a,
    return memory_alias_canonical_priority_compare(a, b);
 }
 
+int memory_alias_row_compare_by_composite_desc(const void *a, const void *b) {
+   const memory_alias_link_user_self_row_t *ra = (const memory_alias_link_user_self_row_t *)a;
+   const memory_alias_link_user_self_row_t *rb = (const memory_alias_link_user_self_row_t *)b;
+   /* composite_score DESC */
+   if (ra->composite_score > rb->composite_score)
+      return -1;
+   if (ra->composite_score < rb->composite_score)
+      return 1;
+   /* entity_id ASC tiebreak — deterministic ordering for equal-score rows. */
+   if (ra->entity_id < rb->entity_id)
+      return -1;
+   if (ra->entity_id > rb->entity_id)
+      return 1;
+   return 0;
+}
+
 /* =============================================================================
  * DB-accessing helpers
  *
@@ -638,18 +654,75 @@ static float compute_contact_field_overlap(int user_id, int64_t a_id, int64_t b_
    return overlap;
 }
 
+/* Forward decl — definition lives further down (build_synthetic_self_entity
+ * area).  Used here in user_self_bonus_applies for the alias-substring
+ * branch (Phase 1.5 fold-in #2). */
+static void trim_trailing_partial_utf8(char *buf);
+
+/* Parse identity_aliases (newline-separated, raw user input) into a
+ * canonicalized list.  Each non-empty line is trimmed, run through
+ * memory_make_canonical_name, deduped case-insensitively against earlier
+ * entries, and stored in @p out[i].  Modifies @p raw in place via
+ * strtok_r — caller must pass a writable buffer. */
+static void parse_canonical_alias_list(char *raw,
+                                       char out[][MEMORY_ENTITY_NAME_MAX],
+                                       int max,
+                                       int *out_count) {
+   *out_count = 0;
+   if (!raw || !*raw || max <= 0)
+      return;
+
+   char *save = NULL;
+   for (char *line = strtok_r(raw, "\n", &save); line != NULL && *out_count < max;
+        line = strtok_r(NULL, "\n", &save)) {
+      while (*line == ' ' || *line == '\t' || *line == '\r')
+         line++;
+      char *end = line + strlen(line);
+      while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+         end--;
+      *end = '\0';
+      if (*line == '\0')
+         continue;
+
+      char canon[MEMORY_ENTITY_NAME_MAX];
+      memory_make_canonical_name(line, canon, sizeof(canon));
+      if (!canon[0])
+         continue;
+
+      bool dup = false;
+      for (int i = 0; i < *out_count; i++) {
+         if (strcmp(out[i], canon) == 0) {
+            dup = true;
+            break;
+         }
+      }
+      if (dup)
+         continue;
+
+      strncpy(out[*out_count], canon, MEMORY_ENTITY_NAME_MAX - 1);
+      out[*out_count][MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      (*out_count)++;
+   }
+}
+
 /* Determine whether the user_self_bonus applies between two entities.
  * Bonus fires when one side has is_user_self = 1 AND the other side has
- * user-identity signal — any of:
+ * user-identity signal — any of (cheap-to-expensive):
  *   1. The "other" side is an allow-listed self-reference token (the
  *      "user" canonical entity, flagged at synth_self_allow_list_user
- *      time).  This branch is unconditional; it fires regardless of
- *      whether the operator's username matches.
+ *      time).  Unconditional; fires regardless of operator config.
  *   2. contact_overlap_fired (email/phone overlap on the contact_t
  *      surface — strong identity signal).
  *   3. The operator's username canonical is a substring of the other
- *      side's canonical_name.
- * Conditions 1-3 are checked in cheap-to-expensive order. */
+ *      side's canonical_name.  Catches dev=username case directly.
+ *   4. One of the operator's seeded identity_aliases (from
+ *      users.identity_aliases) is a substring of the other side's
+ *      canonical_name.  Catches the realistic Path A case where the
+ *      operator's username is generic ("admin") but they've configured
+ *      aliases like "Jon" — "Jon" is a substring of "Jon Smith" and
+ *      of candidate-name "jon", so the bonus fires for both.
+ * Conditions ordered cheapest-first; alias-substring last because it
+ * does an extra DB load + parse vs the username path's single load. */
 static bool user_self_bonus_applies(int user_id,
                                     bool a_is_user_self,
                                     bool b_is_user_self,
@@ -665,7 +738,7 @@ static bool user_self_bonus_applies(int user_id,
    if (!other_canon || !*other_canon)
       return false;
 
-   /* Allow-listed self-reference token (currently just "user"): the
+   /* (1) Allow-listed self-reference token (currently just "user"): the
     * Phase 1.5 brief specifies this branch fires regardless of any
     * username/alias substring conditions, so the dev's actual case
     * (username "admin" or "jon" with a "user" entity in the cluster)
@@ -673,19 +746,39 @@ static bool user_self_bonus_applies(int user_id,
    if (other_is_allow_list_token)
       return true;
 
-   /* Email / phone overlap is a strong user-identity signal — fire on it. */
+   /* (2) Email / phone overlap is a strong user-identity signal. */
    if (contact_overlap_fired)
       return true;
 
-   /* Username substring match on canonical_name. */
+   /* (3) Username substring match on canonical_name. */
    char username_canonical[MEMORY_ENTITY_NAME_MAX];
-   if (get_user_username_canonical(user_id, username_canonical, sizeof(username_canonical)) !=
-       MEMORY_DB_SUCCESS) {
-      return false;
+   if (get_user_username_canonical(user_id, username_canonical, sizeof(username_canonical)) ==
+           MEMORY_DB_SUCCESS &&
+       *username_canonical && strstr(other_canon, username_canonical) != NULL) {
+      return true;
    }
-   if (!*username_canonical)
-      return false;
-   return strstr(other_canon, username_canonical) != NULL;
+
+   /* (4) Identity-alias substring match.  Loads users.identity_aliases,
+    * parses + canonicalizes, checks each non-empty alias as a substring
+    * of @p other_canon.  This is the headline Path-A path for clusters
+    * like "Jon" / "Jon Smith" / "smithfabrications@example.com" when
+    * the operator has configured identity_aliases via WebUI Settings →
+    * User → Aliases. */
+   auth_user_identity_t identity;
+   if (auth_db_get_user_identity(user_id, &identity) == AUTH_DB_SUCCESS &&
+       identity.identity_aliases[0] != '\0') {
+      trim_trailing_partial_utf8(identity.identity_aliases);
+      char aliases[16][MEMORY_ENTITY_NAME_MAX];
+      int alias_count = 0;
+      parse_canonical_alias_list(identity.identity_aliases, aliases, 16, &alias_count);
+      for (int i = 0; i < alias_count; i++) {
+         if (aliases[i][0] && strstr(other_canon, aliases[i]) != NULL) {
+            return true;
+         }
+      }
+   }
+
+   return false;
 }
 
 /* =============================================================================

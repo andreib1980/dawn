@@ -2891,13 +2891,21 @@ static int handle_memory_entity_link_user_self(int client_fd,
                    "  Considered: %d  |  Auto-merged: %d  |  Proposed: %d  |  Rejected: %d\n",
                    result->considered, result->auto_merged, result->proposed, result->rejected);
 
+   /* Sort rows by composite_score DESC (mention_count DESC tiebreak) so the
+    * dry-run "Below threshold" section surfaces the closest-match candidates
+    * first, instead of high-mention-count generic entities like "user" /
+    * "dawn" burying the actual cluster members.  In-place sort is fine —
+    * the result struct is rendered immediately after this and freed. */
+   qsort(result->rows, result->row_count, sizeof(*result->rows),
+         memory_alias_row_compare_by_composite_desc);
+
    /* Render rows in three sections: auto-merged, proposed, rejected (top 10). */
    for (int section = 0; section < 3 && off < (int)sizeof(report) - 128; section++) {
       int target_outcome = (section == 0)   ? MEMORY_ALIAS_OUTCOME_AUTO_MERGED
                            : (section == 1) ? MEMORY_ALIAS_OUTCOME_PROPOSED
                                             : MEMORY_ALIAS_OUTCOME_REJECTED;
       int section_count = 0;
-      int max_rows = (target_outcome == MEMORY_ALIAS_OUTCOME_REJECTED) ? 5 : 20;
+      int max_rows = (target_outcome == MEMORY_ALIAS_OUTCOME_REJECTED) ? 10 : 20;
       for (int i = 0;
            i < result->row_count && section_count < max_rows && off < (int)sizeof(report) - 96;
            i++) {

@@ -594,6 +594,20 @@ int memory_alias_link_user_self_run(int user_id,
                                     memory_alias_link_user_self_result_t *result);
 
 /**
+ * @brief qsort()-shaped comparator for memory_alias_link_user_self_row_t.
+ *
+ * Sorts rows by composite_score DESC, with mention_count DESC tiebreak.
+ * Used by the dry-run report renderer to surface closest-match candidates
+ * first (otherwise high-mention generic entities like "user" / "dawn"
+ * appear before actual cluster members in the rejected-section listing).
+ *
+ * @param a const memory_alias_link_user_self_row_t *
+ * @param b const memory_alias_link_user_self_row_t *
+ * @return negative / 0 / positive per qsort(3) contract
+ */
+int memory_alias_row_compare_by_composite_desc(const void *a, const void *b);
+
+/**
  * @brief Compare two entities by the canonical_priority tuple — TYPE-AND-AGE
  * AXES ONLY.
  *

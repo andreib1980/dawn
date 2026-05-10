@@ -1787,6 +1787,75 @@ static void test_resolve_for_self_user_allow_list_bonus_fires_for_realistic_user
    TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, res.evidence.composite_score);
 }
 
+/* Phase 1.5 fold-in #2 — user_self_bonus alias-substring branch.
+ *
+ * The original brief specified three firing conditions for the bonus:
+ * (1) username substring match, (2) seeded alias substring, (3) email_is.
+ * Phase 1.5 shipped (1) + (3) but missed (2).  This test pins the
+ * alias-substring path: with username "jon" (setUp default — already in
+ * the candidate via condition 1) we use a candidate that does NOT
+ * substring "jon" to isolate the alias signal.  Setting alias
+ * "smithfabrications" + candidate canonical "smithfabrications@example.com"
+ * exercises (2) without the username path firing.
+ *
+ * Negative sibling — alias "smithfabrications" + unrelated candidate
+ * "shelley" (not a substring of any alias) — bonus must NOT fire.
+ */
+static void test_user_self_bonus_fires_via_alias_substring(void) {
+   /* Set identity_aliases without any token that overlaps the candidate's
+    * canonical_name through the username path. */
+   auth_user_identity_t id = { 0 };
+   strncpy(id.real_name, "Jonathan Smith", sizeof(id.real_name) - 1);
+   strncpy(id.identity_aliases, "smithfabrications\nteam-lead", sizeof(id.identity_aliases) - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   /* Candidate canonical contains "smithfabrications" but does NOT contain
+    * the operator's username "jon" — isolates the alias-substring path. */
+   int64_t email_ent = insert_entity_typed(g_test_user_id, "smithfabrications@example.com",
+                                           "thing");
+   (void)email_ent; /* used implicitly via the resolver's full-table scan */
+
+   const char *synth_canonical = "jonathan smith smithfabrications team-lead";
+   memory_alias_resolve_t res;
+   memset(&res, 0, sizeof(res));
+   int rc = memory_db_entity_resolve_alias_for_self(g_test_user_id, synth_canonical, "person",
+                                                    &res);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(6, res.matched_stage);
+   /* Bonus must fire — the only firing path here is alias-substring
+    * (condition 4), since "jon" is not a substring of
+    * "smithfabrications@example.com" and the candidate isn't an
+    * allow-list token or contact-overlap match. */
+   TEST_ASSERT_TRUE(res.evidence.user_self_bonus_applied);
+   TEST_ASSERT_GREATER_THAN_FLOAT(0.0f, res.evidence.composite_score);
+}
+
+static void test_user_self_bonus_no_alias_match_no_bonus(void) {
+   /* Negative case: aliases set, but no alias is a substring of the
+    * candidate's canonical_name.  Username "jon" is also not a
+    * substring of the candidate.  Bonus must NOT fire. */
+   auth_user_identity_t id = { 0 };
+   strncpy(id.real_name, "Jonathan Smith", sizeof(id.real_name) - 1);
+   strncpy(id.identity_aliases, "smithfabrications\nteam-lead", sizeof(id.identity_aliases) - 1);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
+
+   /* "shelley" — no overlap with any alias or with username "jon". */
+   int64_t shelley_ent = insert_entity_typed(g_test_user_id, "shelley", "person");
+   (void)shelley_ent;
+
+   const char *synth_canonical = "jonathan smith smithfabrications team-lead";
+   memory_alias_resolve_t res;
+   memset(&res, 0, sizeof(res));
+   int rc = memory_db_entity_resolve_alias_for_self(g_test_user_id, synth_canonical, "person",
+                                                    &res);
+   /* Either no resolution (all candidates dropped) or resolution to a
+    * different candidate without the bonus.  Pin the negative directly:
+    * if shelley scored, its bonus must not have fired. */
+   if (rc == MEMORY_DB_SUCCESS && res.resolved_id == shelley_ent) {
+      TEST_ASSERT_FALSE(res.evidence.user_self_bonus_applied);
+   }
+}
+
 /* ============================================================================
  * Phase 1.5 Ckpt D: link-user-self real_name gate + cluster integration
  *
@@ -2028,6 +2097,8 @@ int main(void) {
 
    /* Phase 1.5 fold-in: allow-list token unconditionally fires bonus */
    RUN_TEST(test_resolve_for_self_user_allow_list_bonus_fires_for_realistic_username);
+   RUN_TEST(test_user_self_bonus_fires_via_alias_substring);
+   RUN_TEST(test_user_self_bonus_no_alias_match_no_bonus);
 
    /* Phase 1.5 Ckpt D: link-user-self gate + cluster integration */
    RUN_TEST(test_link_user_self_refuses_null_real_name);
