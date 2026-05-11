@@ -48,9 +48,11 @@
  * connect, lws, or SSL calls in the call chain):
  *   - document_db_chunk_search_load — cache-only
  *
- * Filter-on-retrieval is FRAMEWORK-OWNED.  This adapter does NOT call
- * `memory_filter_check()` — `focus_compose()` re-checks every
- * candidate unconditionally before pool entry.
+ * Filter-on-retrieval is FRAMEWORK-OWNED + trust-tier-gated.  This
+ * adapter does NOT call `memory_filter_check()` — `focus_compose()`
+ * decides based on `source_type`.  Document chunks are
+ * FOCUS_SOURCE_EXTERNAL (user-uploaded, trusted) and pass through
+ * without filtering.
  */
 
 #include <stdbool.h>

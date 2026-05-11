@@ -31,9 +31,12 @@
  *   - memory_summary   (requires_embedding=false) — keyword search over
  *                      summaries created within the last 30 days
  *
- * Filter-on-retrieval is FRAMEWORK-OWNED.  Adapters do NOT call
- * `memory_filter_check()` — `focus_compose()` re-checks every candidate
- * unconditionally before pool entry.
+ * Filter-on-retrieval is FRAMEWORK-OWNED + trust-tier-gated.  Adapters
+ * do NOT call `memory_filter_check()` — `focus_compose()` decides based
+ * on the adapter's `source_type` whether to filter.  Memory adapters
+ * here are FOCUS_SOURCE_INTERNAL → skipped at retrieval (filtered at
+ * extraction-time ingestion gate is the model).  See trust-tier comment
+ * in src/memory/focus_source.c::focus_compose for the full rationale.
  *
  * Memory ownership: each adapter mallocs the candidate array AND each
  * candidate's `text` + `item_id`.  Framework owns on SUCCESS.  On

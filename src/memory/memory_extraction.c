@@ -541,11 +541,13 @@ static void process_extraction_response(int user_id,
                category = validate_fact_category(json_object_get_string(cat_obj));
             }
 
-            /* Check for injection patterns before storing */
-            if (memory_filter_check(text)) {
-               OLOG_WARNING("memory_extraction: blocked injection in extracted fact");
-               continue;
-            }
+            /* No substring filter on extracted facts: this text is the
+             * extraction LLM's paraphrase, not raw user input.  Per the
+             * trust-tier model (see atlas/dawn/memory/INJECTION_FILTER.md
+             * §"Filtering at the trust boundary, not after paraphrase"),
+             * filtering already-paraphrased content gives high false
+             * positives on legitimate technical-vocabulary discussion
+             * with no proportional security gain. */
 
             /* Embedding-first paraphrase dedup gate.  Embed once on the stack
              * for both dedup scoring and storage so the per-fact embed cost
@@ -690,10 +692,9 @@ static void process_extraction_response(int user_id,
                confidence = (float)json_object_get_double(conf_obj);
             }
 
-            if (memory_filter_check(value) || memory_filter_check(category)) {
-               OLOG_WARNING("memory_extraction: blocked injection in extracted preference");
-               continue;
-            }
+            /* No substring filter — LLM-paraphrased preference text.
+             * See trust-tier rationale at the top extraction filter
+             * comment / atlas INJECTION_FILTER.md §"Trust boundary". */
 
             memory_db_pref_upsert(user_id, category, value, confidence, "inferred", prov);
             OLOG_INFO("memory_extraction: stored preference: %s=%s", category, value);
@@ -714,10 +715,7 @@ static void process_extraction_response(int user_id,
             const char *old_fact = json_object_get_string(old_obj);
             const char *new_fact = json_object_get_string(new_obj);
 
-            if (memory_filter_check(new_fact)) {
-               OLOG_WARNING("memory_extraction: blocked injection in extracted correction");
-               continue;
-            }
+            /* No substring filter — LLM-paraphrased correction text. */
 
             /* Find and supersede old fact */
             memory_fact_t similar[3];
@@ -778,10 +776,7 @@ static void process_extraction_response(int user_id,
          if (!type_valid)
             ent_type = "thing";
 
-         if (memory_filter_check(ent_name)) {
-            OLOG_WARNING("memory_extraction: blocked injection in entity name");
-            continue;
-         }
+         /* No substring filter — LLM-emitted entity name (paraphrase). */
 
          char canonical[MEMORY_ENTITY_NAME_MAX];
          memory_make_canonical_name(ent_name, canonical, sizeof(canonical));
@@ -836,11 +831,7 @@ static void process_extraction_response(int user_id,
          if (!subj_name || !rel_type || !obj_name)
             continue;
 
-         if (memory_filter_check(subj_name) || memory_filter_check(rel_type) ||
-             memory_filter_check(obj_name)) {
-            OLOG_WARNING("memory_extraction: blocked injection in relation");
-            continue;
-         }
+         /* No substring filter — LLM-emitted relation triple (paraphrase). */
 
          /* Resolve subject entity from local map, fallback to upsert */
          char subj_canonical[MEMORY_ENTITY_NAME_MAX];
@@ -949,7 +940,8 @@ static void process_extraction_response(int user_id,
          size_t trem = MEMORY_TOPICS_MAX;
          for (int i = 0; i < count && trem > 1; i++) {
             const char *topic = json_object_get_string(json_object_array_get_idx(topics_arr, i));
-            if (topic && !memory_filter_check(topic)) {
+            /* No substring filter — LLM-emitted topic string. */
+            if (topic && topic[0] != '\0') {
                if (toff > 0) {
                   BUF_PRINTF(topics, toff, trem, ", ");
                }
@@ -958,9 +950,11 @@ static void process_extraction_response(int user_id,
          }
       }
 
-      if (memory_filter_check(summary)) {
-         OLOG_WARNING("memory_extraction: blocked injection in summary");
-      } else {
+      /* No substring filter on summary — LLM-paraphrased timeline of the
+       * conversation.  See trust-tier rationale in atlas
+       * INJECTION_FILTER.md §"Filtering at the trust boundary, not after
+       * paraphrase". */
+      {
          int64_t summary_id = 0;
          int crc = memory_db_summary_create_at(user_id, session_id, summary, topics, "neutral",
                                                message_count, duration_seconds, prov,

@@ -88,11 +88,9 @@ static int process_batch(memory_fact_t *facts,
       return FAILURE;
 
    for (int i = 0; i < count; i++) {
-      if (memory_filter_check(facts[i].fact_text)) {
-         OLOG_WARNING("memory_recategorize: skipping fact %lld (injection filter)",
-                      (long long)facts[i].id);
-         continue;
-      }
+      /* No substring filter — re-reading already-stored LLM-paraphrased
+       * facts.  Trust-tier model puts the filter at the ingestion
+       * boundary, not at internal re-processing of trusted memory data. */
       struct json_object *item = json_object_new_object();
       json_object_object_add(item, "id", json_object_new_int64(facts[i].id));
       json_object_object_add(item, "text", json_object_new_string(facts[i].fact_text));

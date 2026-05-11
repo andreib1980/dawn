@@ -77,11 +77,12 @@
  *   - calendar_db_occurrences_in_range     (calendar_db.c:649)
  *   - calendar_db_occurrences_search       (calendar_db.c:725)
  *
- * Filter-on-retrieval is FRAMEWORK-OWNED.  This adapter does NOT
- * call `memory_filter_check()` — `focus_compose()` re-checks every
- * candidate unconditionally before pool entry.  Calendar event
- * summaries / descriptions are user-influenceable (via CalDAV
- * upstream); the framework filter is the load-bearing gate.
+ * Filter-on-retrieval is FRAMEWORK-OWNED + trust-tier-gated.  This
+ * adapter does NOT call `memory_filter_check()` — `focus_compose()`
+ * decides based on `source_type`.  Calendar events are
+ * FOCUS_SOURCE_EXTERNAL (the user owns their CalDAV account) and pass
+ * through without filtering.  If a multi-user calendar-share threat
+ * model ever applies, reclassify as FOCUS_SOURCE_USER_CONTENT.
  */
 
 #include <math.h>

@@ -249,14 +249,12 @@ static int store_summary_only(int user_id,
       json_object_put(root);
       return FAILURE;
    }
-   if (memory_filter_check(summary)) {
-      OLOG_WARNING("memory_summarize_missing: blocked injection in summary for conv %lld",
-                   (long long)conv_id);
-      json_object_put(root);
-      return FAILURE;
-   }
+   /* No substring filter on summary text — LLM-paraphrased.
+    * See atlas INJECTION_FILTER.md §"Filtering at the trust boundary,
+    * not after paraphrase" for the trust-tier rationale. */
 
-   /* Topics — same filtered comma-join as live extractor. */
+   /* Topics — LLM-emitted strings, no substring filter for the same
+    * trust-tier reason as the summary. */
    char topics[MEMORY_TOPICS_MAX] = { 0 };
    struct json_object *topics_arr = NULL;
    if (json_object_object_get_ex(root, "topics", &topics_arr) &&
@@ -266,7 +264,7 @@ static int store_summary_only(int user_id,
       size_t trem = MEMORY_TOPICS_MAX;
       for (int i = 0; i < n && trem > 1; i++) {
          const char *t = json_object_get_string(json_object_array_get_idx(topics_arr, i));
-         if (t && !memory_filter_check(t)) {
+         if (t && t[0] != '\0') {
             if (toff > 0) {
                BUF_PRINTF(topics, toff, trem, ", ");
             }
