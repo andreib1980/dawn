@@ -42,6 +42,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_filter.h"
 #include "memory/memory_types.h"
@@ -50,7 +51,7 @@
  * Extraction Prompt Template
  * ============================================================================= */
 
-static const char *EXTRACTION_PROMPT_TEMPLATE =
+const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "Analyze this conversation and extract user information in JSON format.\n\n"
     "%s" /* Optional "Conversation anchor: YYYY-MM-DD\n\n" line — empty when no anchor known */
     "CONVERSATION:\n%s\n\n"
@@ -83,7 +84,14 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "\"valid_from\": \"YYYY-MM-DD or YYYY (optional)\", "
     "\"valid_to\": \"YYYY-MM-DD or YYYY (optional)\"}\n"
     "  ],\n"
-    "  \"summary\": \"1-2 sentence conversation summary\",\n"
+    "  \"summary\": \"3-5 sentence conversation summary, up to ~1500 chars, "
+    "covering: (a) the topics discussed, (b) key parameters or values mentioned "
+    "(names, places, dates, amounts, model/product names, URLs), (c) decisions "
+    "or conclusions reached, and (d) outcomes or follow-up actions.  This "
+    "summary is the timeline-of-record for the conversation and may be the "
+    "only thing future sessions can retrieve about what happened here, so "
+    "preserve enough detail to answer 'what did we discuss / decide / do "
+    "about X' weeks later.\",\n"
     "  \"title\": \"short conversation title, max 40 chars\",\n"
     "  \"topics\": [\"topic1\", \"topic2\"]\n"
     "}\n\n"
@@ -103,6 +111,19 @@ static const char *EXTRACTION_PROMPT_TEMPLATE =
     "- Use short, simple categories for preferences (e.g., \"verbosity\", \"humor\", "
     "\"formality\", \"detail_level\", \"units\", \"theme\")\n"
     "- Only include facts that are specific to this user, not general knowledge\n"
+    "- DO NOT extract interaction-event facts that describe what the user did "
+    "with the assistant in this conversation rather than durable user state. "
+    "REJECT phrasings like \"User asked about X\", \"User inquired about Y\", "
+    "\"User requested Z from the assistant\", \"User wanted to know about W\", "
+    "\"User looked up V\" — these describe a single transient interaction, "
+    "not a fact about the user that persists past this session.  KEEP "
+    "durable state — what the user IS, HAS, LIKES, BELIEVES, KNOWS, OWNS, "
+    "or has DONE in their life — even when the conversation surfaces it via "
+    "a question.  Example: from the same turn \"User asked which weather "
+    "API DAWN uses\", reject the meta-fact but emit no fact at all (the "
+    "question reveals nothing durable).  From \"User asked about gold "
+    "prices because they invest in precious metals\", reject the \"asked "
+    "about\" wrapper and emit \"User invests in precious metals\".\n"
     "- High confidence (0.8-1.0) for explicit statements, lower for inferences\n"
     "- List corrections if new information contradicts existing profile\n"
     "- Extract named entities (people, pets, places, organizations) mentioned by the user\n"
@@ -450,6 +471,17 @@ static void process_extraction_response(int user_id,
       return;
    }
 
+   /* Pre-warm the per-user fact embedding cache once at extraction entry so
+    * the per-fact paraphrase-dedup gate hits warm cache on its first call.
+    * Cold-load latency (~5-15ms at the dev's ~1200-fact scale) is paid here
+    * on the async sleep-consolidation worker rather than mid-loop where it
+    * would compete with the per-fact embed step.  No-op for users with
+    * already-warm cache; failure is silent — the gate falls back to "no
+    * match" rather than blocking extraction. */
+   if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available()) {
+      memory_embeddings_warm_cache(user_id);
+   }
+
    /* Extract JSON from response (handles markdown blocks, preamble text, etc.) */
    struct json_object *root = memory_extraction_parse_json(response_text);
    if (!root) {
@@ -494,42 +526,125 @@ static void process_extraction_response(int user_id,
                continue;
             }
 
-            /* Check for duplicates before storing */
-            memory_fact_t similar[3];
-            int similar_count = 0;
-            memory_db_fact_find_similar(user_id, text, similar, 3, &similar_count);
-
-            if (similar_count == 0) {
-               int64_t fact_id = 0;
-               memory_db_fact_create(user_id, text, confidence, source, category, prov, &fact_id);
-               OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
-               /* Embed the new fact for semantic search */
-               if (fact_id > 0 && memory_embeddings_available()) {
-                  memory_embeddings_embed_and_store(user_id, fact_id, text);
+            /* Embedding-first paraphrase dedup gate.  Embed once on the stack
+             * for both dedup scoring and storage so the per-fact embed cost
+             * is paid exactly once.  On a hit, bump confidence + extend
+             * provenance on the existing fact; on a miss, create + store the
+             * pre-computed vector + append to the warm cache so subsequent
+             * facts in this loop also get scored against the new row.
+             *
+             * The old LIKE-based prefilter (`memory_db_fact_find_similar`)
+             * is retained ONLY as a fallback for when embeddings are
+             * unavailable or the gate is disabled — embedding scan is
+             * strictly more accurate (catches subject-swap "Kris" vs "User"
+             * paraphrases that LIKE misses) and at sub-millisecond scan
+             * time it is no more expensive at the dev's scale. */
+            bool gate_used_embedding = false;
+            if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available()) {
+               float vec[MAX_EMBEDDING_DIMS];
+               int dims = 0;
+               if (memory_embeddings_embed(text, vec, &dims) == SUCCESS && dims > 0) {
+                  gate_used_embedding = true;
+                  int64_t matched_id = 0;
+                  float score = 0.0f;
+                  memory_embeddings_nearest_fact(user_id, vec, dims,
+                                                 g_config.memory.paraphrase_dedup_threshold,
+                                                 &matched_id, &score);
+                  if (matched_id > 0) {
+                     /* Paraphrase hit — merge into the existing fact.
+                      * Read current confidence (matched_id is already
+                      * scoped to this user via the cache lookup) and bump
+                      * by +0.1 capped at 1.0, mirroring the legacy LIKE
+                      * fallback's reinforcement semantics. */
+                     memory_fact_t existing = { 0 };
+                     if (memory_db_fact_get(matched_id, &existing) == MEMORY_DB_SUCCESS) {
+                        float new_conf = existing.confidence + 0.1f;
+                        if (new_conf > 1.0f)
+                           new_conf = 1.0f;
+                        memory_db_fact_update_confidence(matched_id, new_conf);
+                     } else {
+                        /* Couldn't read existing — still bump above the
+                         * 0.7 inferred default so retrieval is reinforced. */
+                        memory_db_fact_update_confidence(matched_id, 0.8f);
+                     }
+                     /* Extend provenance so retrieval can attribute the
+                      * fact to this newer mention as well. */
+                     if (prov && prov->conv_id > 0) {
+                        memory_db_fact_provenance_extend(matched_id, user_id, prov->conv_id,
+                                                         prov->msg_id_start, prov->msg_id_end);
+                     }
+                     OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
+                               "score=%.3f: %s",
+                               (long long)matched_id, (double)score, text);
+                     /* Record matched fact in map so downstream relations
+                      * still link to it. */
+                     if (fact_map_count < FACT_MAP_MAX) {
+                        snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
+                        fact_map[fact_map_count].id = matched_id;
+                        fact_map_count++;
+                     }
+                     continue; /* next extracted fact */
+                  }
+                  /* No paraphrase — create + store + cache-append. */
+                  int64_t fact_id = 0;
+                  memory_db_fact_create(user_id, text, confidence, source, category, prov,
+                                        &fact_id);
+                  OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
+                  if (fact_id > 0) {
+                     memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
+                     if (fact_map_count < FACT_MAP_MAX) {
+                        snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
+                        fact_map[fact_map_count].id = fact_id;
+                        fact_map_count++;
+                     } else {
+                        OLOG_WARNING("memory_extraction: fact_map full (%d), "
+                                     "relation linkage unavailable for: %s",
+                                     FACT_MAP_MAX, text);
+                     }
+                  }
+                  continue; /* next extracted fact */
                }
-               /* Record in fact map for relation linkage */
-               if (fact_id > 0) {
+               /* Embed call failed — fall through to LIKE fallback below. */
+            }
+
+            /* Fallback path — embeddings unavailable, dedup disabled, or
+             * embed call failed.  Uses the legacy LIKE-pattern dedup so
+             * extraction still works on deployments without an embedding
+             * provider. */
+            if (!gate_used_embedding) {
+               memory_fact_t similar[3];
+               int similar_count = 0;
+               memory_db_fact_find_similar(user_id, text, similar, 3, &similar_count);
+
+               if (similar_count == 0) {
+                  int64_t fact_id = 0;
+                  memory_db_fact_create(user_id, text, confidence, source, category, prov,
+                                        &fact_id);
+                  OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
+                  if (fact_id > 0 && memory_embeddings_available()) {
+                     memory_embeddings_embed_and_store(user_id, fact_id, text);
+                  }
+                  if (fact_id > 0) {
+                     if (fact_map_count < FACT_MAP_MAX) {
+                        snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
+                        fact_map[fact_map_count].id = fact_id;
+                        fact_map_count++;
+                     } else {
+                        OLOG_WARNING("memory_extraction: fact_map full (%d), "
+                                     "relation linkage unavailable for: %s",
+                                     FACT_MAP_MAX, text);
+                     }
+                  }
+               } else {
+                  float new_conf = similar[0].confidence + 0.1f;
+                  if (new_conf > 1.0f)
+                     new_conf = 1.0f;
+                  memory_db_fact_update_confidence(similar[0].id, new_conf);
                   if (fact_map_count < FACT_MAP_MAX) {
                      snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
-                     fact_map[fact_map_count].id = fact_id;
+                     fact_map[fact_map_count].id = similar[0].id;
                      fact_map_count++;
-                  } else {
-                     OLOG_WARNING("memory_extraction: fact_map full (%d), "
-                                  "relation linkage unavailable for: %s",
-                                  FACT_MAP_MAX, text);
                   }
-               }
-            } else {
-               /* Update confidence of existing similar fact */
-               float new_conf = similar[0].confidence + 0.1f;
-               if (new_conf > 1.0f)
-                  new_conf = 1.0f;
-               memory_db_fact_update_confidence(similar[0].id, new_conf);
-               /* Record existing fact in map so relations can still link to it */
-               if (fact_map_count < FACT_MAP_MAX) {
-                  snprintf(fact_map[fact_map_count].text, MEMORY_FACT_TEXT_MAX, "%s", text);
-                  fact_map[fact_map_count].id = similar[0].id;
-                  fact_map_count++;
                }
             }
          }
@@ -824,8 +939,15 @@ static void process_extraction_response(int user_id,
       if (memory_filter_check(summary)) {
          OLOG_WARNING("memory_extraction: blocked injection in summary");
       } else {
-         memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
-                                  duration_seconds, prov, NULL);
+         int64_t summary_id = 0;
+         int crc = memory_db_summary_create(user_id, session_id, summary, topics, "neutral",
+                                            message_count, duration_seconds, prov, &summary_id);
+         if (crc == MEMORY_DB_SUCCESS && summary_id > 0) {
+            /* Embed-at-create so the semantic summary adapter sees this
+             * row immediately.  Failure is silent — the recompute worker
+             * picks up unembedded rows on next boot. */
+            (void)memory_embeddings_embed_and_store_summary(user_id, summary_id, summary);
+         }
          OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
       }
    }
@@ -920,8 +1042,8 @@ static void *extraction_thread(void *arg) {
 
    /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
     * three "%s" format specifiers plus a small safety margin; expand if more
-    * placeholders are added to EXTRACTION_PROMPT_TEMPLATE. */
-   size_t prompt_size = strlen(EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
+    * placeholders are added to MEMORY_EXTRACTION_PROMPT_TEMPLATE. */
+   size_t prompt_size = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
                         strlen(ctx->conversation_json) + strlen(existing_profile) + 100;
    char *prompt = malloc(prompt_size);
    if (!prompt) {
@@ -929,8 +1051,8 @@ static void *extraction_thread(void *arg) {
       goto cleanup;
    }
 
-   snprintf(prompt, prompt_size, EXTRACTION_PROMPT_TEMPLATE, anchor_line, ctx->conversation_json,
-            existing_profile);
+   snprintf(prompt, prompt_size, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor_line,
+            ctx->conversation_json, existing_profile);
 
    /* Call LLM for extraction using configured provider/model */
    char *response = NULL;
@@ -1266,7 +1388,7 @@ bool memory_extraction_in_progress(int user_id) {
 }
 
 size_t memory_extraction_get_template_size_chars(void) {
-   return strlen(EXTRACTION_PROMPT_TEMPLATE);
+   return strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE);
 }
 
 int memory_extraction_resolve_config(llm_resolved_config_t *cfg,

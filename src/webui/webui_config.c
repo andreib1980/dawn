@@ -781,6 +781,14 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       CONFIG_CLAMP(config->memory.temporal_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.category_threshold, 0.05f, 0.95f);
 
+      /* Paraphrase dedup gate (TOML-tunable, not surfaced in main settings
+       * panel — calibration knob, not a casual user toggle). */
+      JSON_TO_CONFIG_BOOL(section, "paraphrase_dedup_enabled",
+                          config->memory.paraphrase_dedup_enabled);
+      JSON_TO_CONFIG_DOUBLE(section, "paraphrase_dedup_threshold",
+                            config->memory.paraphrase_dedup_threshold);
+      CONFIG_CLAMP(config->memory.paraphrase_dedup_threshold, 0.5f, 1.0f);
+
       /* Extraction recovery settings */
       JSON_TO_CONFIG_BOOL(section, "recovery_enabled", config->memory.recovery_enabled);
       JSON_TO_CONFIG_INT(section, "recovery_idle_threshold_seconds",

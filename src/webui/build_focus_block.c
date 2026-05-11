@@ -406,9 +406,31 @@ int build_focus_block(int user_id,
     * browser tabs that actually consume it.  history_mutex was
     * released back at line ~346; broadcast iterates a separate
     * registry mutex.  conv_id == 0 disables — the SESSION_START
-    * refresh_all_prompts path passes 0 (no user-visible turn). */
-   if (conv_id > 0)
-      webui_broadcast_context_injection(user_id, conv_id, turn_id, &result);
+    * refresh_all_prompts path passes 0 (no user-visible turn).
+    *
+    * First-turn race fix: dawn_build_prompt() captures conv_id near
+    * the top of prompt assembly, but on a fresh-chat first turn the
+    * WebUI client sends `new_conversation` AFTER `text_input` — the
+    * main thread's handler may not have set `active_conversation_id`
+    * on the connection yet at the moment the worker thread captured
+    * it (observed live: ~47ms gap between text_input dispatch and
+    * new_conversation handler completing).  By the time we reach this
+    * broadcast site, the embed + focus_compose + dedup work has
+    * elapsed ~100ms+, more than enough for the main thread to have
+    * finished the parallel new_conversation request.  Re-read from
+    * the dispatch session here and prefer the live value; fall back
+    * to the captured conv_id when the live read is still 0 (e.g.
+    * SESSION_START refresh paths that legitimately have no active
+    * conversation, or tests with no dispatch session published). */
+   int64_t broadcast_conv_id = conv_id;
+   session_t *dispatch = session_get_dispatch_session();
+   if (dispatch != NULL) {
+      int64_t live_conv = webui_get_active_conversation_id(dispatch);
+      if (live_conv > 0)
+         broadcast_conv_id = live_conv;
+   }
+   if (broadcast_conv_id > 0)
+      webui_broadcast_context_injection(user_id, broadcast_conv_id, turn_id, &result);
 
    log_focus_summary(user_turn_text, result.candidate_count, result.rejection_count,
                      dedup_suppressed, monotonic_ms_now() - t_start);

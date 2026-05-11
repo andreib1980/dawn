@@ -597,6 +597,51 @@ admin_resp_code_t admin_client_memory_recategorize(int fd,
                                                    size_t resp_len);
 
 /**
+ * @brief Bulk-delete pre-existing meta-fact rows by LIKE pattern.
+ *
+ * Targets interaction-event entries (e.g. "User asked about X") that were
+ * stored before the May 2026 prompt fix added the explicit reject-meta-
+ * facts guideline.  Patterns are hardcoded server-side; the operator only
+ * controls username + dry-run flag.  Default mode is dry-run (count + sample
+ * surfaced, nothing written) — pass dry_run=false to execute.
+ *
+ * @param fd Connected socket FD.
+ * @param username Target user.
+ * @param dry_run When true, count only; when false, delete matched rows.
+ * @param response Output buffer for daemon response text.
+ * @param resp_len Size of response buffer.
+ * @return Response code from daemon.
+ */
+admin_resp_code_t admin_client_memory_cleanup_meta_facts(int fd,
+                                                         const char *username,
+                                                         bool dry_run,
+                                                         char *response,
+                                                         size_t resp_len);
+
+/**
+ * @brief Summarize-missing — backfill summary rows for conversations whose
+ * extraction never produced one.  Dry-run (the default) reports the count;
+ * --confirm starts a background worker on the daemon that loops through the
+ * missing-summary set, runs the canonical extraction prompt per conversation,
+ * and stores summary+topics only.  Progress is logged on the daemon; the
+ * synchronous response is the start/dry-run banner.
+ *
+ * @param fd         Connected socket FD.
+ * @param username   Target user.
+ * @param dry_run    When true, return count only; when false, start the worker.
+ * @param max_count  Cap on conversations processed this run (0 = unlimited).
+ * @param response   Output buffer for daemon response text.
+ * @param resp_len   Size of response buffer.
+ * @return Response code from daemon.
+ */
+admin_resp_code_t admin_client_memory_summarize_missing(int fd,
+                                                        const char *username,
+                                                        bool dry_run,
+                                                        uint32_t max_count,
+                                                        char *response,
+                                                        size_t resp_len);
+
+/**
  * @brief Reextract — drop derived memory tables for a user and re-extract.
  *
  * Wire format encoded in this function — see admin_socket.h

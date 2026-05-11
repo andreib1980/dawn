@@ -92,6 +92,12 @@ static void print_usage(const char *prog) {
    fprintf(stderr, "\nMemory Management:\n");
    fprintf(stderr, "  memory recategorize-all <user>     LLM-classify 'general' facts\n");
    fprintf(stderr,
+           "  memory cleanup-meta-facts --user <u> [--dry-run|--confirm-delete]\n"
+           "                                     Bulk-delete pre-existing meta-fact rows\n");
+   fprintf(stderr, "  memory summarize-missing --user <u> [--dry-run|--confirm] [--max N]\n"
+                   "                                     Backfill summaries for conversations\n"
+                   "                                     that never produced a summary row\n");
+   fprintf(stderr,
            "  memory reextract --user <user> [--confirm] [--keep-summaries]\n"
            "                    [--backup-path <path>] [--max-cost-usd <X>]\n"
            "                                       Drop derived memory tables and re-extract.\n"
@@ -1710,6 +1716,13 @@ int main(int argc, char *argv[]) {
                  "[--backup-path <path>] [--max-cost-usd <X>]\n",
                  argv[0]);
          fprintf(stderr, "       %s memory reextract-status --user <username>\n", argv[0]);
+         fprintf(stderr,
+                 "       %s memory cleanup-meta-facts --user <u> [--dry-run|--confirm-delete]\n",
+                 argv[0]);
+         fprintf(stderr,
+                 "       %s memory summarize-missing --user <u> [--dry-run|--confirm] "
+                 "[--max N]\n",
+                 argv[0]);
          return 1;
       }
       const char *subcmd = argv[2];
@@ -1721,6 +1734,97 @@ int main(int argc, char *argv[]) {
             return 1;
          }
          return cmd_memory_recategorize(argv[3]);
+      }
+
+      if (strcmp(subcmd, "cleanup-meta-facts") == 0) {
+         const char *username = NULL;
+         bool dry_run = true; /* default: dry-run, require --confirm-delete to execute */
+         for (int i = 3; i < argc; i++) {
+            const char *arg = argv[i];
+            if (strcmp(arg, "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (strcmp(arg, "--dry-run") == 0) {
+               dry_run = true;
+            } else if (strcmp(arg, "--confirm-delete") == 0) {
+               dry_run = false;
+            } else {
+               fprintf(stderr, "Error: Unknown option for memory cleanup-meta-facts: %s\n", arg);
+               return 1;
+            }
+         }
+         if (!username || !username[0]) {
+            fprintf(stderr, "Error: --user <username> is required\n");
+            fprintf(stderr,
+                    "Usage: %s memory cleanup-meta-facts --user <u> [--dry-run|"
+                    "--confirm-delete]\n",
+                    argv[0]);
+            return 1;
+         }
+
+         int fd = admin_client_connect();
+         if (fd < 0)
+            return 1;
+         char response[1024];
+         admin_resp_code_t resp = admin_client_memory_cleanup_meta_facts(fd, username, dry_run,
+                                                                         response,
+                                                                         sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "summarize-missing") == 0) {
+         const char *username = NULL;
+         bool dry_run = true; /* default: count-only, require --confirm to start worker */
+         uint32_t max_count = 0;
+         for (int i = 3; i < argc; i++) {
+            const char *arg = argv[i];
+            if (strcmp(arg, "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (strcmp(arg, "--dry-run") == 0) {
+               dry_run = true;
+            } else if (strcmp(arg, "--confirm") == 0) {
+               dry_run = false;
+            } else if (strcmp(arg, "--max") == 0 && i + 1 < argc) {
+               char *endp = NULL;
+               unsigned long v = strtoul(argv[++i], &endp, 10);
+               if (!endp || *endp != '\0' || v > UINT32_MAX) {
+                  fprintf(stderr, "Error: --max requires a non-negative integer\n");
+                  return 1;
+               }
+               max_count = (uint32_t)v;
+            } else {
+               fprintf(stderr, "Error: Unknown option for memory summarize-missing: %s\n", arg);
+               return 1;
+            }
+         }
+         if (!username || !username[0]) {
+            fprintf(stderr, "Error: --user <username> is required\n");
+            fprintf(stderr,
+                    "Usage: %s memory summarize-missing --user <u> [--dry-run|--confirm] "
+                    "[--max N]\n",
+                    argv[0]);
+            return 1;
+         }
+
+         int fd = admin_client_connect();
+         if (fd < 0)
+            return 1;
+         char response[1024];
+         admin_resp_code_t resp = admin_client_memory_summarize_missing(fd, username, dry_run,
+                                                                        max_count, response,
+                                                                        sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
       }
 
       if (strcmp(subcmd, "reextract") == 0 || strcmp(subcmd, "reextract-status") == 0) {

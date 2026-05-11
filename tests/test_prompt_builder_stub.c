@@ -300,6 +300,16 @@ pb_broadcast_mock_t *pb_broadcast_state(void) {
    return &s_broadcast;
 }
 
+/* webui_get_active_conversation_id stub — build_focus_block calls this
+ * just before the broadcast to re-read the dispatching session's active
+ * conv id (first-turn race fix).  Tests do not publish a dispatch session,
+ * so session_get_dispatch_session() returns NULL and this stub never fires
+ * — but the symbol must resolve at link time. */
+int64_t webui_get_active_conversation_id(struct session *session) {
+   (void)session;
+   return 0;
+}
+
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,

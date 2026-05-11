@@ -301,6 +301,12 @@ void config_set_defaults(dawn_config_t *config) {
     * expressions (parser returns "not found", no boost applied).  Safe default. */
    config->memory.temporal_weight = 0.20f;
    config->memory.category_threshold = 0.25f;
+   /* Paraphrase-dedup gate: 0.92 is conservative — calibrated for bge-small-
+    * en-v1.5-int8 to favor precision over recall (false merges cost more
+    * than false misses).  Tune via benchmarks/bench_paraphrase_calibration.py
+    * if the embedder is swapped. */
+   config->memory.paraphrase_dedup_enabled = true;
+   config->memory.paraphrase_dedup_threshold = 0.92f;
 
    /* Extraction recovery: re-extract conversations stuck idle past the threshold. */
    config->memory.recovery_enabled = true;
@@ -314,14 +320,28 @@ void config_set_defaults(dawn_config_t *config) {
     * doc §"Phase 1 — Per-Turn Focus" TOML block. */
    config->memory.focus_injection.enabled = false;
    config->memory.focus_injection.focus_budget_tokens = 1024;
-   config->memory.focus_injection.top_k = 8;
+   /* top_k bumped 8 → 12 (May 2026, post-Step-3 semantic summary adapter).
+    * With summaries newly competing for the per-turn budget, top_k=8 was
+    * filled by facts alone and starved every other source.  Live testing
+    * on a 271-summary corpus shows 12 lets memory_summary + memory_entity
+    * + memory_relation all surface alongside facts.  Re-bench when Phase
+    * 1j fixtures get summary-relevant probes. */
+   config->memory.focus_injection.top_k = 12;
    config->memory.focus_injection.min_score = 0.4f;
    config->memory.focus_injection.classifier_enabled = false;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
     * Probe Component 6 fix-rate lifted 7/11 → 11/11 across all three
     * providers (anthropic / openai / local) on the v2 fixtures.  See
     * docs/PHASE_1J_TUNING_LOG.md for rationale and the bench-validated
-    * pathologies these weights resolve. */
+    * pathologies these weights resolve.
+    *
+    * Open tension (May 2026, post-Step-3): live testing on a corpus with
+    * historical summaries suggests w_rec=0.3 ranks recent semantic summary
+    * matches better than 0.15 (the right summary leads the pool instead of
+    * sitting second).  Phase 1j bench evidence still trumps anecdote, so
+    * the default stays 0.15; operators who care about freshly-extracted
+    * summary surfacing can override in dawn.toml until Phase 1j gains a
+    * summary-relevant probe and re-tunes. */
    config->memory.focus_injection.weight_semantic = 1.0f;
    config->memory.focus_injection.weight_recency = 0.15f;
    config->memory.focus_injection.weight_importance = 1.0f;
@@ -329,7 +349,14 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.source_weights.memory_fact = 1.0f;
    config->memory.focus_injection.source_weights.memory_entity = 0.9f;
    config->memory.focus_injection.source_weights.memory_relation = 0.85f;
-   config->memory.focus_injection.source_weights.memory_summary = 0.7f;
+   /* memory_summary bumped 0.7 → 1.0 (May 2026, post-Step-3).  The 0.7
+    * value was a first-cut guess from before the semantic summary adapter
+    * landed; at 0.7 summaries lost the ranking competition to facts on
+    * every turn even when cosine was strong, so they never surfaced in
+    * the per-turn injection.  Parity with memory_fact (1.0) lets them
+    * compete on raw signal quality.  Re-bench when Phase 1j gains a
+    * summary-relevant probe. */
+   config->memory.focus_injection.source_weights.memory_summary = 1.0f;
    config->memory.focus_injection.source_weights.document_chunk = 0.7f;
    config->memory.focus_injection.source_weights.calendar_event = 0.6f;
    config->memory.focus_injection.source_weights.recent_email = 0.5f;

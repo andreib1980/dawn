@@ -474,8 +474,12 @@
 # enabled = false                     # Master enable
 # focus_budget_tokens = 1024          # Token cap on the assembled focus block.
                                       # Range: 256 - 4096
-# top_k = 8                           # Maximum candidates retained after ranking.
-                                      # Range: 1 - 64
+# top_k = 12                          # Maximum candidates retained after ranking.
+                                      # Range: 1 - 64.  Bumped 8 → 12 (May 2026,
+                                      # post-Step-3 semantic summary adapter):
+                                      # at 8 facts filled every slot and starved
+                                      # summaries/entities/relations from
+                                      # surfacing per turn.
 # min_score = 0.4                     # Floor — anything below is dropped.
                                       # Range: 0.0 - 1.0
 # classifier_enabled = false          # RAGRoute-style source classifier
@@ -486,6 +490,15 @@
                                       # 1.0 and dropped w_rec 0.3 → 0.15 — Probe
                                       # Component 6 fix-rate 7/11 → 11/11 across
                                       # anthropic / openai / local providers.
+                                      #
+                                      # Open tension (post-Step-3): live testing
+                                      # on a corpus with historical summaries
+                                      # suggests w_rec = 0.3 ranks recent
+                                      # semantic-matched summaries above legacy
+                                      # paraphrase-ladder facts.  Try 0.3 in
+                                      # summary-heavy deployments until Phase 1j
+                                      # gains a summary-relevant probe and
+                                      # formally re-tunes.
 # weight_source = 1.0                 # Multiplier on per-source weights below.
 
 [memory.focus_injection.source_weights]
@@ -494,7 +507,13 @@
 # memory_fact = 1.0
 # memory_entity = 0.9
 # memory_relation = 0.85
-# memory_summary = 0.7
+# memory_summary = 1.0                # Bumped 0.7 → 1.0 (May 2026, post-Step-3).
+                                      # The 0.7 was a guess from before the
+                                      # semantic summary adapter shipped; at 0.7
+                                      # summaries lost the ranking competition
+                                      # to facts on every turn even when cosine
+                                      # was strong.  Parity with memory_fact
+                                      # lets summaries compete on raw signal.
 # document_chunk = 0.7
 # calendar_event = 0.6
 # recent_email = 0.5

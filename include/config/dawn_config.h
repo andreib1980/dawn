@@ -519,6 +519,18 @@ typedef struct {
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */
    float category_threshold;
+   /* Paraphrase-dedup gate at extraction time.  Replaces the old LIKE-based
+    * fact-similar prefilter with an embedding-cosine check: if a newly
+    * extracted fact's embedding scores >= paraphrase_dedup_threshold
+    * against any existing fact in the user's cache, the new fact is merged
+    * into the existing one (confidence bumped, provenance extended) instead
+    * of being stored.  Set paraphrase_dedup_enabled = false to bypass the
+    * gate entirely (kill switch when calibration is in flight or false
+    * positives are observed).  Threshold band is conservative — false-
+    * merge cost (lost distinct fact) > false-miss cost (a duplicate row),
+    * so calibrate for precision. */
+   bool paraphrase_dedup_enabled;
+   float paraphrase_dedup_threshold;
 
    /* Extraction recovery — re-runs memory extraction on conversations whose
     * `last_extracted_msg_count` < `message_count` after the configured idle

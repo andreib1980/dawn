@@ -105,6 +105,75 @@ int memory_embeddings_embed(const char *text, float *out, int *out_dims);
 int memory_embeddings_embed_and_store(int user_id, int64_t fact_id, const char *text);
 
 /**
+ * @brief Store a pre-embedded vector for a fact, then update the in-memory
+ * cache directly (instead of invalidating it).
+ *
+ * Companion to memory_embeddings_nearest_fact() in the extraction-time
+ * paraphrase-dedup loop.  The caller embeds the fact text once for both
+ * dedup scoring and storage, avoiding the second embed call that
+ * memory_embeddings_embed_and_store() would otherwise pay.  This variant
+ * also appends to the per-user fact cache instead of invalidating it, so
+ * an N-fact extraction loop does not pay N cache-reload cycles against
+ * SQLite.
+ *
+ * If cache append fails (e.g. EMBEDDING_SEARCH_CAP reached or user
+ * mismatch), the function falls back to invalidating the cache so the
+ * next access reloads fresh.
+ *
+ * @param user_id User who owns the fact (for ownership check on the DB write)
+ * @param fact_id Fact ID to update — the row must already exist
+ * @param vec Pre-computed embedding vector
+ * @param dims Vector dimensions (must match memory_embeddings_dims())
+ * @return 0 on success, non-zero on failure
+ */
+int memory_embeddings_store_precomputed(int user_id, int64_t fact_id, const float *vec, int dims);
+
+/**
+ * @brief Pre-warm the per-user fact embedding cache.
+ *
+ * Loads (or refreshes if dirty) the cache for @p user_id.  The dedup loop
+ * in memory_extraction.c calls this once at the top of
+ * process_extraction_response(), so the first nearest_fact() lookup hits
+ * a warm cache rather than paying one-time DB-load latency on the
+ * extraction worker thread.  Idempotent — already-valid same-user cache
+ * is a no-op.
+ *
+ * @param user_id User ID whose fact cache to load
+ * @return 0 on success (cache is now warm), non-zero on failure
+ */
+int memory_embeddings_warm_cache(int user_id);
+
+/**
+ * @brief Find the highest-scoring fact-cache match against a precomputed
+ * embedding, returning early on the first match >= @p threshold.
+ *
+ * Designed for the extraction-time paraphrase-dedup gate: the gate just
+ * needs ANY match above threshold (not the absolute best), so we exit on
+ * first hit instead of walking the entire cache.  The caller embeds the
+ * fact text OUTSIDE any lock; this function acquires the cache mutex
+ * internally for the cosine scan only, keeping the critical section
+ * sub-millisecond at the dev's ~1200-fact scale.
+ *
+ * Treats facts without embeddings (norm == 0) as no-match — silently
+ * skipped rather than failing the call.
+ *
+ * @param user_id User ID whose fact cache to scan
+ * @param query_vec Pre-computed query embedding
+ * @param query_dims Query embedding dimensions (must match cache dims)
+ * @param threshold Minimum cosine score to count as a match (e.g. 0.92)
+ * @param matched_id_out Output: fact_id of the match, or 0 if no match
+ * @param score_out Output: cosine score of the match, or 0.0f if no match
+ * @return MEMORY_DB_SUCCESS (with @p matched_id_out=0 if no match), or
+ *         MEMORY_DB_FAILURE on cache load error / dim mismatch
+ */
+int memory_embeddings_nearest_fact(int user_id,
+                                   const float *query_vec,
+                                   int query_dims,
+                                   float threshold,
+                                   int64_t *matched_id_out,
+                                   float *score_out);
+
+/**
  * @brief Perform hybrid keyword + vector search
  *
  * Combines keyword search scores with vector cosine similarity.
@@ -143,6 +212,23 @@ void memory_embeddings_invalidate_cache(void);
  * @return 0 on success, non-zero on failure
  */
 int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, const char *text);
+
+/**
+ * @brief Generate embedding and store it for a summary row.
+ *
+ * Convenience wrapper paralleling memory_embeddings_embed_and_store for
+ * facts.  Used by the live extractor (immediately after a successful
+ * memory_db_summary_create) and the summarize-missing backfill worker so
+ * every summary row lands with an embedding without a deferred recompute
+ * pass.  No-op if the embedding engine is unavailable — the recompute
+ * worker will pick it up on next boot.
+ *
+ * @param user_id     owning user ID
+ * @param summary_id  summary row ID
+ * @param text        summary text to embed
+ * @return SUCCESS on store, FAILURE on embed or DB error
+ */
+int memory_embeddings_embed_and_store_summary(int user_id, int64_t summary_id, const char *text);
 
 /**
  * @brief Invalidate the entity embedding cache

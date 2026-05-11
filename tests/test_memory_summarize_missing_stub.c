@@ -1,0 +1,160 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Stubs for test_memory_summarize_missing.
+ *
+ * The unit test only exercises memory_summarize_missing_count + the
+ * start/stop input-validation paths, not the worker body.  Every symbol
+ * here is link-time only.  An abort() guard in each LLM / storage stub
+ * makes it loud if a future test accidentally drags the worker path in
+ * without supplying real implementations.
+ */
+
+#define AUTH_DB_INTERNAL_ALLOWED
+
+#include <pthread.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "auth/auth_db.h"
+#include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
+#include "dawn_error.h"
+#include "memory/memory_db.h"
+#include "memory/memory_extraction.h"
+#include "memory/memory_history_loader.h"
+#include "memory/memory_types.h"
+
+/* Globals required by anything that pulls memory headers. */
+auth_db_state_t s_db = {
+   .db = NULL,
+   .mutex = PTHREAD_MUTEX_INITIALIZER,
+   .initialized = false,
+};
+dawn_config_t g_config;
+
+/* memory_extraction_resolve_config — abort guard so unintended worker
+ * invocations are immediately obvious. */
+int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
+                                     char *model_buf,
+                                     size_t model_buf_sz,
+                                     char *endpoint_buf,
+                                     size_t endpoint_buf_sz,
+                                     const char *log_prefix) {
+   (void)cfg;
+   (void)model_buf;
+   (void)model_buf_sz;
+   (void)endpoint_buf;
+   (void)endpoint_buf_sz;
+   (void)log_prefix;
+   fprintf(stderr, "memory_extraction_resolve_config stub: worker path is not under test\n");
+   abort();
+}
+
+/* memory_extraction_parse_json — same abort guard. */
+struct json_object *memory_extraction_parse_json(const char *response) {
+   (void)response;
+   fprintf(stderr, "memory_extraction_parse_json stub invoked\n");
+   abort();
+}
+
+/* MEMORY_EXTRACTION_PROMPT_TEMPLATE definition (the test_extraction binary
+ * provides its own; here we just need a definition so summarize_missing.c
+ * links).  Empty string is enough — the worker never runs in this test. */
+const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE = "";
+
+/* History loader — no-op stubs (worker is not under test). */
+struct json_object *memory_history_load_from_db(int64_t conv_id,
+                                                int user_id,
+                                                size_t *text_len_out) {
+   (void)conv_id;
+   (void)user_id;
+   if (text_len_out)
+      *text_len_out = 0;
+   return NULL;
+}
+
+/* Conversation DB stubs.  conv_db_get_anchor_date returns NOT_FOUND-ish so
+ * the worker would build no anchor line; conv_db_get_max_msg_id likewise
+ * returns 0.  Neither is reached in the count-only tests. */
+int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
+   (void)conv_id;
+   if (anchor_out)
+      *anchor_out = 0;
+   return AUTH_DB_FAILURE;
+}
+
+int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
+   (void)conv_id;
+   (void)user_id;
+   if (max_id_out)
+      *max_id_out = 0;
+   return AUTH_DB_FAILURE;
+}
+
+/* memory_db_summary_create — abort, worker storage path. */
+int memory_db_summary_create(int user_id,
+                             const char *session_id,
+                             const char *summary,
+                             const char *topics,
+                             const char *sentiment,
+                             int message_count,
+                             int duration_seconds,
+                             const memory_provenance_t *prov,
+                             int64_t *id_out) {
+   (void)user_id;
+   (void)session_id;
+   (void)summary;
+   (void)topics;
+   (void)sentiment;
+   (void)message_count;
+   (void)duration_seconds;
+   (void)prov;
+   (void)id_out;
+   fprintf(stderr, "memory_db_summary_create stub invoked\n");
+   abort();
+}
+
+/* memory_filter_check — never triggered in count-only tests; provide a
+ * pass-through. */
+int memory_filter_check(const char *text) {
+   (void)text;
+   return 0;
+}
+
+/* llm_chat_completion_with_config — abort guard.  Signature must match the
+ * header exactly (const char ** + const size_t * for the attachments
+ * tuple) or the linker / compiler rejects the redeclaration. */
+char *llm_chat_completion_with_config(struct json_object *conversation_history,
+                                      const char *prompt,
+                                      const char **image_paths,
+                                      const size_t *image_sizes,
+                                      int num_images,
+                                      const llm_resolved_config_t *cfg) {
+   (void)conversation_history;
+   (void)prompt;
+   (void)image_paths;
+   (void)image_sizes;
+   (void)num_images;
+   (void)cfg;
+   fprintf(stderr, "llm_chat_completion_with_config stub invoked\n");
+   abort();
+}

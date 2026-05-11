@@ -1300,6 +1300,10 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->memory.extraction_model));
    json_object_object_add(memory, "extraction_timeout_ms",
                           json_object_new_int(config->memory.extraction_timeout_ms));
+   json_object_object_add(memory, "paraphrase_dedup_enabled",
+                          json_object_new_boolean(config->memory.paraphrase_dedup_enabled));
+   json_object_object_add(memory, "paraphrase_dedup_threshold",
+                          json_object_new_double(config->memory.paraphrase_dedup_threshold));
    json_object_object_add(memory, "pruning_enabled",
                           json_object_new_boolean(config->memory.pruning_enabled));
    json_object_object_add(memory, "prune_superseded_days",
@@ -1927,6 +1931,9 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "extraction_provider = \"%s\"\n", config->memory.extraction_provider);
    fprintf(fp, "extraction_model = \"%s\"\n", config->memory.extraction_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
+   fprintf(fp, "paraphrase_dedup_enabled = %s\n",
+           config->memory.paraphrase_dedup_enabled ? "true" : "false");
+   fprintf(fp, "paraphrase_dedup_threshold = %.2f\n", config->memory.paraphrase_dedup_threshold);
    fprintf(fp, "pruning_enabled = %s\n", config->memory.pruning_enabled ? "true" : "false");
    fprintf(fp, "prune_superseded_days = %d\n", config->memory.prune_superseded_days);
    fprintf(fp, "prune_stale_days = %d\n", config->memory.prune_stale_days);

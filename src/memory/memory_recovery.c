@@ -40,6 +40,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_history_loader.h"
 
 /* Per-conversation timeouts.  Block on a single extraction up to this long
  * before moving on; a stuck/hanging extraction shouldn't pin the recovery
@@ -93,130 +94,6 @@ typedef struct {
    int count;
    int capacity;
 } stuck_list_t;
-
-typedef struct {
-   struct json_object *array;
-   size_t total_text_len; /* chars across all message contents post-image-strip */
-} history_build_ctx_t;
-
-/**
- * @brief Strip inline base64 image markers from message text.
- *
- * DAWN encodes image attachments in stored messages as
- * `[IMAGE:data:image/<fmt>;base64,<...>]` markers, sometimes hundreds of KB
- * of base64 in a single message.  Feeding those raw to the extraction LLM
- * blows past context windows and is unparseable text anyway.  This helper
- * scans `src` and writes a copy to a newly-malloc'd buffer with each marker
- * replaced by `[image]` (8 chars).  The base64 alphabet contains no `]`, so
- * a linear scan terminates correctly.
- *
- * @return Owned NUL-terminated string (caller frees), or NULL on OOM.
- */
-static char *strip_image_markers(const char *src) {
-   if (!src) {
-      return strdup("");
-   }
-   size_t in_len = strlen(src);
-   /* Worst case (no markers) keeps the source byte-for-byte. */
-   char *dst = malloc(in_len + 1);
-   if (!dst) {
-      return NULL;
-   }
-   const char *p = src;
-   char *q = dst;
-   while (*p) {
-      if (strncmp(p, "[IMAGE:", 7) == 0) {
-         const char *close = strchr(p + 7, ']');
-         if (close) {
-            memcpy(q, "[image]", 7);
-            q += 7;
-            p = close + 1;
-            continue;
-         }
-         /* Unterminated marker — copy the rest verbatim and stop. */
-      }
-      *q++ = *p++;
-   }
-   *q = '\0';
-   return dst;
-}
-
-/**
- * @brief json_object array assembler used as conv_db_get_messages callback.
- *
- * Strips inline image markers from each message's content before adding it
- * to the history, and accumulates the total post-strip text length so the
- * caller can decide whether the history has enough substance to extract
- * from.
- *
- * Returns non-zero on allocation failure to abort iteration — silently
- * dropping messages would feed a truncated history to extraction.
- */
-static int append_message_to_history(const conversation_message_t *msg, void *ctx_ptr) {
-   history_build_ctx_t *ctx = (history_build_ctx_t *)ctx_ptr;
-   if (!ctx || !ctx->array || !msg) {
-      return 0;
-   }
-
-   char *stripped = strip_image_markers(msg->content);
-   if (!stripped) {
-      OLOG_WARNING("memory_recovery: OOM stripping message content; aborting iteration");
-      return 1;
-   }
-
-   struct json_object *entry = json_object_new_object();
-   struct json_object *role = json_object_new_string(msg->role);
-   struct json_object *content = json_object_new_string(stripped);
-   if (!entry || !role || !content) {
-      OLOG_WARNING("memory_recovery: OOM building history; aborting iteration");
-      if (entry)
-         json_object_put(entry);
-      if (role)
-         json_object_put(role);
-      if (content)
-         json_object_put(content);
-      free(stripped);
-      return 1;
-   }
-   ctx->total_text_len += strlen(stripped);
-   free(stripped);
-
-   json_object_object_add(entry, "role", role);
-   json_object_object_add(entry, "content", content);
-   json_object_object_add(entry, "id", json_object_new_int64(msg->id));
-   json_object_array_add(ctx->array, entry);
-   return 0;
-}
-
-/**
- * @brief Reconstruct conversation history from the messages table.
- *
- * @param conv_id          conversation ID
- * @param user_id          owning user ID
- * @param text_len_out     (optional) total post-image-strip text length across
- *                         all messages — used to decide if the conversation
- *                         has enough substantive content to extract from.
- * @return Owned json_object array (caller calls json_object_put), or NULL.
- */
-static struct json_object *load_history_from_db(int64_t conv_id,
-                                                int user_id,
-                                                size_t *text_len_out) {
-   history_build_ctx_t ctx = { .array = json_object_new_array(), .total_text_len = 0 };
-   if (!ctx.array) {
-      return NULL;
-   }
-
-   int rc = conv_db_get_messages(conv_id, user_id, append_message_to_history, &ctx);
-   if (rc != AUTH_DB_SUCCESS) {
-      json_object_put(ctx.array);
-      return NULL;
-   }
-   if (text_len_out) {
-      *text_len_out = ctx.total_text_len;
-   }
-
-   return ctx.array;
-}
 
 /**
  * @brief Query stuck conversations matching the recovery criteria.
@@ -342,7 +219,8 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
    }
 
    size_t total_text_len = 0;
-   struct json_object *history = load_history_from_db(row->conv_id, row->user_id, &total_text_len);
+   struct json_object *history = memory_history_load_from_db(row->conv_id, row->user_id,
+                                                             &total_text_len);
    if (!history) {
       OLOG_WARNING("memory_recovery: failed to load history for conv %lld",
                    (long long)row->conv_id);

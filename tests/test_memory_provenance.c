@@ -72,6 +72,12 @@ static const char *DDL =
    ");"
    "INSERT INTO conversations (id, user_id, is_private) VALUES (10, 1, 0);"
    "INSERT INTO conversations (id, user_id, is_private) VALUES (20, 1, 1);"  /* private */
+   /* Extra conversations seeded for the provenance-extend test cases —
+    * memory_facts.source_conversation_id has a FK that's enforced when
+    * PRAGMA foreign_keys=ON, so the "newer conv replaces" branch needs a
+    * pre-existing target. */
+   "INSERT INTO conversations (id, user_id, is_private) VALUES (25, 1, 0);"
+   "INSERT INTO conversations (id, user_id, is_private) VALUES (30, 1, 0);"
 
    "CREATE TABLE IF NOT EXISTS messages ("
    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -175,6 +181,17 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return FAILURE;
 
+   /* memory_db_fact_get is used by the new provenance-extend + cleanup-meta-
+    * facts tests to verify row-level state.  Production DDL keeps these
+    * columns; mirror that here. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts WHERE id = ?",
+       -1, &s_db.stmt_memory_fact_get, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_preferences (user_id, category, value, confidence, source, created_at, "
@@ -231,6 +248,8 @@ static void close_db(void) {
    s_db.initialized = false;
    if (s_db.stmt_memory_fact_create)
       sqlite3_finalize(s_db.stmt_memory_fact_create);
+   if (s_db.stmt_memory_fact_get)
+      sqlite3_finalize(s_db.stmt_memory_fact_get);
    if (s_db.stmt_memory_pref_upsert)
       sqlite3_finalize(s_db.stmt_memory_pref_upsert);
    if (s_db.stmt_memory_summary_create)
@@ -238,6 +257,7 @@ static void close_db(void) {
    if (s_db.stmt_conv_set_last_extracted)
       sqlite3_finalize(s_db.stmt_conv_set_last_extracted);
    s_db.stmt_memory_fact_create = NULL;
+   s_db.stmt_memory_fact_get = NULL;
    s_db.stmt_memory_pref_upsert = NULL;
    s_db.stmt_memory_summary_create = NULL;
    s_db.stmt_conv_set_last_extracted = NULL;
@@ -656,6 +676,180 @@ void test_facts_get_sources_n_chunked_succeeds(void) {
    TEST_ASSERT_EQUAL(101, end[50]);
 }
 
+/* =============================================================================
+ * memory_db_fact_provenance_extend (paraphrase-dedup write path).
+ *
+ * Four branches matter:
+ *   1. Fact has no prior provenance — adopt the new triple wholesale.
+ *   2. Same conv as existing — widen msg range (start = min, end = max).
+ *   3. Newer conv than existing — replace.
+ *   4. Older conv than existing — no-op (most-recent-wins semantics).
+ * Plus: ownership check, missing-fact check.
+ * ============================================================================= */
+
+void test_provenance_extend_adopts_when_no_prior(void) {
+   /* No-prov fact (NULL prov on create). */
+   int64_t id = 0;
+   memory_db_fact_create(1, "User likes hiking", 0.8f, "inferred", "interests", NULL, &id);
+   TEST_ASSERT_GREATER_THAN(0, id);
+
+   int rc = memory_db_fact_provenance_extend(id, 1, /* new_conv */ 10, /* start */ 100,
+                                             /* end */ 105);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+
+   int64_t conv = 0, s = 0, e = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get_source(id, 1, &conv, &s, &e));
+   TEST_ASSERT_EQUAL(10, conv);
+   TEST_ASSERT_EQUAL(100, s);
+   TEST_ASSERT_EQUAL(105, e);
+}
+
+void test_provenance_extend_same_conv_widens_range(void) {
+   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 105 };
+   int64_t id = 0;
+   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", "personal", &prov, &id);
+   TEST_ASSERT_GREATER_THAN(0, id);
+
+   /* Newer mention in same conv at messages 200-210 — widen to 100..210. */
+   int rc = memory_db_fact_provenance_extend(id, 1, 10, 200, 210);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+
+   int64_t conv = 0, s = 0, e = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get_source(id, 1, &conv, &s, &e));
+   TEST_ASSERT_EQUAL(10, conv);
+   TEST_ASSERT_EQUAL(100, s); /* start preserved (min) */
+   TEST_ASSERT_EQUAL(210, e); /* end advanced (max) */
+
+   /* Earlier mention in the same conv at messages 50-99 — start should
+    * shrink to 50, end stays at 210. */
+   rc = memory_db_fact_provenance_extend(id, 1, 10, 50, 99);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get_source(id, 1, &conv, &s, &e));
+   TEST_ASSERT_EQUAL(50, s);
+   TEST_ASSERT_EQUAL(210, e);
+}
+
+void test_provenance_extend_newer_conv_replaces(void) {
+   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 105 };
+   int64_t id = 0;
+   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", "personal", &prov, &id);
+   TEST_ASSERT_GREATER_THAN(0, id);
+
+   /* New mention in conv 25 (later) — replace the whole triple. */
+   int rc = memory_db_fact_provenance_extend(id, 1, 25, 500, 502);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+
+   int64_t conv = 0, s = 0, e = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get_source(id, 1, &conv, &s, &e));
+   TEST_ASSERT_EQUAL(25, conv);
+   TEST_ASSERT_EQUAL(500, s);
+   TEST_ASSERT_EQUAL(502, e);
+}
+
+void test_provenance_extend_older_conv_is_noop(void) {
+   memory_provenance_t prov = { .conv_id = 25, .msg_id_start = 500, .msg_id_end = 502 };
+   int64_t id = 0;
+   memory_db_fact_create(1, "User works at Netsurion", 0.9f, "explicit", "professional", &prov,
+                         &id);
+   TEST_ASSERT_GREATER_THAN(0, id);
+
+   /* Older conv 10 — should NOT overwrite the more-recent conv 25. */
+   int rc = memory_db_fact_provenance_extend(id, 1, 10, 100, 105);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+
+   int64_t conv = 0, s = 0, e = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get_source(id, 1, &conv, &s, &e));
+   TEST_ASSERT_EQUAL(25, conv); /* unchanged */
+   TEST_ASSERT_EQUAL(500, s);
+   TEST_ASSERT_EQUAL(502, e);
+}
+
+void test_provenance_extend_wrong_user_returns_not_found(void) {
+   memory_provenance_t prov = { .conv_id = 10, .msg_id_start = 100, .msg_id_end = 105 };
+   int64_t id = 0;
+   memory_db_fact_create(1, "User likes coffee", 0.9f, "explicit", "preferences", &prov, &id);
+   TEST_ASSERT_GREATER_THAN(0, id);
+
+   /* Wrong user must fail without modifying the row. */
+   int rc = memory_db_fact_provenance_extend(id, /* wrong user */ 99, 25, 500, 502);
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, rc);
+
+   int64_t conv = 0, s = 0, e = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get_source(id, 1, &conv, &s, &e));
+   TEST_ASSERT_EQUAL(10, conv); /* unchanged */
+}
+
+void test_provenance_extend_missing_fact_returns_not_found(void) {
+   int rc = memory_db_fact_provenance_extend(999999, 1, 10, 100, 105);
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, rc);
+}
+
+/* =============================================================================
+ * memory_db_facts_delete_by_patterns (cleanup-meta-facts admin command).
+ *
+ * Verifies pattern-based bulk delete with dry-run, multi-pattern, user
+ * scoping, and parameterized LIKE escape behavior.
+ * ============================================================================= */
+
+void test_cleanup_meta_facts_dry_run_counts_without_delete(void) {
+   int64_t id1 = 0, id2 = 0, id3 = 0;
+   memory_db_fact_create(1, "User asked about gold prices", 0.7f, "inferred", "general", NULL,
+                         &id1);
+   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", "personal", NULL, &id2);
+   memory_db_fact_create(1, "User inquired about lights", 0.7f, "inferred", "general", NULL, &id3);
+
+   const char *patterns[] = { "User asked%", "User inquired%" };
+   int matched = -1;
+   int rc = memory_db_facts_delete_by_patterns(1, patterns, 2, /* dry_run */ true, &matched);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(2, matched);
+
+   /* All three rows should still be present. */
+   memory_fact_t got = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id2, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id3, &got));
+}
+
+void test_cleanup_meta_facts_commit_deletes_matches_only(void) {
+   int64_t id_meta1 = 0, id_meta2 = 0, id_keep = 0, id_other_user = 0;
+   memory_db_fact_create(1, "User asked about weather", 0.7f, "inferred", "general", NULL,
+                         &id_meta1);
+   memory_db_fact_create(1, "User requested weather info", 0.7f, "inferred", "general", NULL,
+                         &id_meta2);
+   memory_db_fact_create(1, "User lives in Atlanta", 0.9f, "explicit", "personal", NULL, &id_keep);
+   /* Scope check — user 2's matching row must NOT be touched. */
+   memory_db_fact_create(2, "User asked about something", 0.7f, "inferred", "general", NULL,
+                         &id_other_user);
+
+   const char *patterns[] = { "User asked%", "User requested%" };
+   int deleted = -1;
+   int rc = memory_db_facts_delete_by_patterns(1, patterns, 2, /* dry_run */ false, &deleted);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(2, deleted);
+
+   memory_fact_t got = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_meta1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_meta2, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id_keep, &got));
+   /* Other user's row preserved. */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id_other_user, &got));
+}
+
+void test_cleanup_meta_facts_no_match_returns_zero(void) {
+   int64_t id = 0;
+   memory_db_fact_create(1, "User has 3 children", 0.9f, "explicit", "personal", NULL, &id);
+
+   const char *patterns[] = { "Nonexistent prefix%" };
+   int matched = -1;
+   int rc = memory_db_facts_delete_by_patterns(1, patterns, 1, /* dry_run */ false, &matched);
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL(0, matched);
+
+   memory_fact_t got = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id, &got));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_fact_create_with_source_roundtrip);
@@ -687,5 +881,19 @@ int main(void) {
 
    /* Pin the facts batch reader against the same chunked-success contract. */
    RUN_TEST(test_facts_get_sources_n_chunked_succeeds);
+
+   /* Provenance extend (paraphrase-dedup write path) — 6 cases. */
+   RUN_TEST(test_provenance_extend_adopts_when_no_prior);
+   RUN_TEST(test_provenance_extend_same_conv_widens_range);
+   RUN_TEST(test_provenance_extend_newer_conv_replaces);
+   RUN_TEST(test_provenance_extend_older_conv_is_noop);
+   RUN_TEST(test_provenance_extend_wrong_user_returns_not_found);
+   RUN_TEST(test_provenance_extend_missing_fact_returns_not_found);
+
+   /* cleanup-meta-facts pattern-based delete — 3 cases. */
+   RUN_TEST(test_cleanup_meta_facts_dry_run_counts_without_delete);
+   RUN_TEST(test_cleanup_meta_facts_commit_deletes_matches_only);
+   RUN_TEST(test_cleanup_meta_facts_no_match_returns_zero);
+
    return UNITY_END();
 }

@@ -1367,6 +1367,62 @@ admin_resp_code_t admin_client_memory_recategorize(int fd,
    return recv_text_response(fd, response, resp_len);
 }
 
+#ifndef ADMIN_MEM_CLEANUP_FLAG_DRY_RUN
+#define ADMIN_MEM_CLEANUP_FLAG_DRY_RUN 0x01
+#endif
+
+admin_resp_code_t admin_client_memory_cleanup_meta_facts(int fd,
+                                                         const char *username,
+                                                         bool dry_run,
+                                                         char *response,
+                                                         size_t resp_len) {
+   if (!username || !username[0])
+      return ADMIN_RESP_FAILURE;
+   size_t ulen = strlen(username);
+   if (ulen == 0 || ulen >= 64)
+      return ADMIN_RESP_FAILURE;
+
+   /* Wire format: byte 0 = flags, bytes 1..N = username. */
+   uint8_t buf[128];
+   buf[0] = (uint8_t)(dry_run ? ADMIN_MEM_CLEANUP_FLAG_DRY_RUN : 0);
+   memcpy(buf + 1, username, ulen);
+   uint16_t total = (uint16_t)(1 + ulen);
+
+   if (send_message(fd, ADMIN_MSG_MEMORY_CLEANUP_META_FACTS, (const char *)buf, total) != 0)
+      return ADMIN_RESP_SERVICE_ERROR;
+   return recv_text_response(fd, response, resp_len);
+}
+
+/* Server uses the same dry-run bit position as cleanup-meta-facts; keep the
+ * #define explicit here so the wire-format bytes are obvious. */
+#ifndef ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN
+#define ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN 0x01
+#endif
+
+admin_resp_code_t admin_client_memory_summarize_missing(int fd,
+                                                        const char *username,
+                                                        bool dry_run,
+                                                        uint32_t max_count,
+                                                        char *response,
+                                                        size_t resp_len) {
+   if (!username || !username[0])
+      return ADMIN_RESP_FAILURE;
+   size_t ulen = strlen(username);
+   if (ulen == 0 || ulen >= 64)
+      return ADMIN_RESP_FAILURE;
+
+   /* Wire format: byte 0 = flags, bytes 1..4 = max_count (LE), bytes 5..N = username. */
+   uint8_t buf[128];
+   buf[0] = (uint8_t)(dry_run ? ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN : 0);
+   memcpy(buf + 1, &max_count, sizeof(max_count));
+   memcpy(buf + 5, username, ulen);
+   uint16_t total = (uint16_t)(5 + ulen);
+
+   if (send_message(fd, ADMIN_MSG_MEMORY_SUMMARIZE_MISSING, (const char *)buf, total) != 0)
+      return ADMIN_RESP_SERVICE_ERROR;
+   return recv_text_response(fd, response, resp_len);
+}
+
 /* Encode the binary reextract payload (see admin_socket.h
  * "MEMORY_REEXTRACT payload" block).  Returns the populated payload
  * length, or 0 on validation failure. */

@@ -642,6 +642,127 @@ int memory_embeddings_embed_and_store(int user_id, int64_t fact_id, const char *
    return rc;
 }
 
+/* Internal: append a pre-embedded fact to the in-memory cache without
+ * invalidating it, so an N-fact extraction loop does not pay N cache
+ * reloads against SQLite.  Returns 0 on append, non-zero on any reason
+ * the cache cannot accept the row (capacity / user mismatch / dims
+ * mismatch / cache invalid) — callers should treat non-zero as
+ * "fall back to invalidate so the next access reloads fresh." */
+static int cache_append_locked(int user_id,
+                               int64_t fact_id,
+                               const float *vec,
+                               int dims,
+                               int64_t created_at,
+                               float norm) {
+   if (!s_cache.valid || s_cache.user_id != user_id || s_cache.dims != dims)
+      return FAILURE;
+   if (s_cache.count >= s_cache.capacity)
+      return FAILURE;
+
+   int idx = s_cache.count;
+   s_cache.ids[idx] = fact_id;
+   memcpy(s_cache.embeddings + (size_t)idx * (size_t)dims, vec, (size_t)dims * sizeof(float));
+   s_cache.norms[idx] = norm;
+   s_cache.created_ats[idx] = created_at;
+   s_cache.count++;
+   return SUCCESS;
+}
+
+int memory_embeddings_store_precomputed(int user_id, int64_t fact_id, const float *vec, int dims) {
+   if (!vec || dims <= 0)
+      return FAILURE;
+
+   float norm = memory_embeddings_l2_norm(vec, dims);
+
+   int rc = memory_db_fact_update_embedding(user_id, fact_id, vec, dims, norm);
+   if (rc != MEMORY_DB_SUCCESS)
+      return rc;
+
+   /* Try to append directly into the warm cache so a multi-fact extraction
+    * loop avoids the N cache-reload cycles that invalidate-then-reload would
+    * cause.  On any reason the cache cannot accept the row (over capacity,
+    * different user warm, dim mismatch, cache cold), fall back to invalidate
+    * so the next access reloads fresh.  Either path leaves the cache in a
+    * correct state. */
+   pthread_mutex_lock(&s_cache.mutex);
+   int append_rc = cache_append_locked(user_id, fact_id, vec, dims, time(NULL), norm);
+   pthread_mutex_unlock(&s_cache.mutex);
+
+   if (append_rc != SUCCESS) {
+      memory_embeddings_invalidate_cache();
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_embeddings_warm_cache(int user_id) {
+   pthread_mutex_lock(&s_cache.mutex);
+   int rc = cache_load(user_id);
+   pthread_mutex_unlock(&s_cache.mutex);
+   return rc;
+}
+
+int memory_embeddings_nearest_fact(int user_id,
+                                   const float *query_vec,
+                                   int query_dims,
+                                   float threshold,
+                                   int64_t *matched_id_out,
+                                   float *score_out) {
+   if (matched_id_out)
+      *matched_id_out = 0;
+   if (score_out)
+      *score_out = 0.0f;
+   if (!query_vec || query_dims <= 0)
+      return MEMORY_DB_FAILURE;
+
+   float query_norm = memory_embeddings_l2_norm(query_vec, query_dims);
+   if (query_norm < 1e-6f)
+      return MEMORY_DB_SUCCESS; /* zero vector — no match, but not an error */
+
+   pthread_mutex_lock(&s_cache.mutex);
+   if (cache_load(user_id) != 0) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      return MEMORY_DB_FAILURE;
+   }
+
+   if (s_cache.dims != query_dims) {
+      /* Dimension mismatch — provider swap mid-flight, or stale cache.
+       * Treat as no-match rather than failing the gate; the embedding-
+       * recompute worker will resync the cache shortly. */
+      pthread_mutex_unlock(&s_cache.mutex);
+      return MEMORY_DB_SUCCESS;
+   }
+
+   /* Walk the cache exiting on first match >= threshold.  We do not need
+    * the absolute best match — the gate's purpose is to detect that ANY
+    * existing fact paraphrases the new one.  Early-exit halves the
+    * average critical section on the hit path. */
+   int64_t best_id = 0;
+   float best_score = 0.0f;
+   for (int i = 0; i < s_cache.count; i++) {
+      /* Skip facts without embeddings — pre-bge-small-swap rows that
+       * have not yet been recompute-worker'd will have norm == 0. */
+      if (s_cache.norms[i] < 1e-6f)
+         continue;
+      float cosine = memory_embeddings_cosine_with_norms(
+          query_vec, s_cache.embeddings + (size_t)i * (size_t)query_dims, query_dims, query_norm,
+          s_cache.norms[i]);
+      if (cosine >= threshold) {
+         best_id = s_cache.ids[i];
+         best_score = cosine;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_cache.mutex);
+
+   if (best_id != 0) {
+      if (matched_id_out)
+         *matched_id_out = best_id;
+      if (score_out)
+         *score_out = best_score;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
 /* =============================================================================
  * Entity Embedding Support
  * ============================================================================= */
@@ -730,6 +851,23 @@ int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, con
 
 void memory_embeddings_invalidate_entity_cache(void) {
    atomic_store(&s_entity_cache.dirty, true);
+}
+
+int memory_embeddings_embed_and_store_summary(int user_id, int64_t summary_id, const char *text) {
+   if (!embedding_engine_available() || !text || !text[0])
+      return FAILURE;
+
+   float embedding[MAX_EMBEDDING_DIMS];
+   int dims = 0;
+
+   int rc = embedding_engine_embed(text, embedding, MAX_EMBEDDING_DIMS, &dims);
+   if (rc != 0 || dims <= 0)
+      return FAILURE;
+
+   /* No cache to invalidate — memory_db_summary_search_semantic scans the
+    * table directly each call (corpus is small).  Norm is recomputed
+    * inside the scan, so we don't pass one. */
+   return memory_db_summary_update_embedding(user_id, summary_id, embedding, dims);
 }
 
 void memory_embeddings_invalidate_all(void) {

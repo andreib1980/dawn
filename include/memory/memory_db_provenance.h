@@ -77,6 +77,44 @@ int memory_db_fact_get_source(int64_t fact_id,
                               int64_t *end_out);
 
 /**
+ * @brief Extend a fact's source provenance with a new (conv_id, start, end)
+ * triple, called when extraction-time paraphrase dedup merges a new mention
+ * into an existing fact.
+ *
+ * Per-conversation merge semantics:
+ *   - If the existing conv_id == @p new_conv_id: widen the message range
+ *     (start = min(existing, new), end = max(existing, new)) so the
+ *     provenance covers all messages in the conversation that mention
+ *     the fact.
+ *   - If the existing conv_id is 0 (no provenance recorded — legacy row,
+ *     voice path, or explicit remember): adopt the new triple wholesale.
+ *   - If the existing conv_id != @p new_conv_id: replace with the new
+ *     triple iff @p new_conv_id is greater (later) than existing — the
+ *     "where did you hear that?" question is best answered by the most
+ *     recent reinforcement.  Older mentions are silently dropped from
+ *     this single-slot provenance schema.
+ *
+ * Schema rationale: `memory_facts` has one (conv_id, start, end) triple
+ * per row.  Multi-source provenance would require a side table; deferred
+ * until the cost shows up in practice.  Most-recent-mention is the
+ * pragmatic single-slot policy.
+ *
+ * @param fact_id Fact ID to update
+ * @param user_id Owning user (ownership check)
+ * @param new_conv_id Conversation ID of the new mention (must be > 0)
+ * @param new_msg_start First message ID in the new mention's range
+ * @param new_msg_end Last message ID in the new mention's range
+ * @return MEMORY_DB_SUCCESS on update or no-op (older mention skipped),
+ *         MEMORY_DB_NOT_FOUND on missing fact / wrong owner,
+ *         MEMORY_DB_FAILURE on SQL error
+ */
+int memory_db_fact_provenance_extend(int64_t fact_id,
+                                     int user_id,
+                                     int64_t new_conv_id,
+                                     int64_t new_msg_start,
+                                     int64_t new_msg_end);
+
+/**
  * @brief Batch-fetch provenance for up to `n` facts in a single lock cycle (v40).
  *
  * Replaces N sequential calls to `memory_db_fact_get_source()` in list paths.

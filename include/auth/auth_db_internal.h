@@ -48,7 +48,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 44
+#define AUTH_DB_SCHEMA_VERSION 46
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -195,6 +195,14 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_update_embedding;
    sqlite3_stmt *stmt_memory_fact_get_embeddings;
    sqlite3_stmt *stmt_memory_fact_list_without_embedding;
+
+   /* Summary-embedding statements (v45) — used by the semantic summary
+    * adapter and the recompute worker.  None of these need a fact-style
+    * cache: the per-user summary count is small (hundreds for the dev),
+    * so a single locked scan per query is sub-millisecond. */
+   sqlite3_stmt *stmt_memory_summary_update_embedding;
+   sqlite3_stmt *stmt_memory_summary_scan_embeddings;
+   sqlite3_stmt *stmt_memory_summary_list_without_embedding;
 
    /* === Satellite mapping statements (auth_db_satellite.c) === */
    sqlite3_stmt *stmt_satellite_upsert;

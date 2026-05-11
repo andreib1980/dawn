@@ -383,6 +383,101 @@ static int recompute_entities_for_user(int user_id) {
 }
 
 /* =============================================================================
+ * Summary recomputation pass for one user (v45)
+ *
+ * Same shape as recompute_facts_for_user, but scans memory_summaries and
+ * uses memory_embeddings_embed_and_store_summary.  Embedding column is
+ * nullable so a freshly-added column on an existing DB starts NULL for
+ * every row — this pass writes them all on the first model swap (or first
+ * boot after v45 ships).
+ * ============================================================================= */
+
+static int recompute_summaries_for_user(int user_id) {
+   int batch_size = g_config.memory.recompute_batch_size;
+   if (batch_size <= 0)
+      batch_size = RECOMPUTE_BATCH;
+
+   recompute_row_t *rows = malloc((size_t)batch_size * sizeof(recompute_row_t));
+   if (!rows)
+      return FAILURE;
+
+   int64_t cursor_id = 0;
+   int total_done = 0;
+   int loops = 0;
+
+   while (!atomic_load(&s_shutdown)) {
+      int batch_count = 0;
+      int64_t batch_max_id = cursor_id;
+
+      pthread_mutex_lock(&s_db.mutex);
+      if (!s_db.initialized) {
+         pthread_mutex_unlock(&s_db.mutex);
+         free(rows);
+         return FAILURE;
+      }
+
+      sqlite3_stmt *stmt = NULL;
+      int rc = sqlite3_prepare_v2(s_db.db,
+                                  "SELECT id, summary FROM memory_summaries "
+                                  "WHERE user_id = ? AND id > ? "
+                                  "ORDER BY id ASC LIMIT ?",
+                                  -1, &stmt, NULL);
+      if (rc != SQLITE_OK) {
+         pthread_mutex_unlock(&s_db.mutex);
+         free(rows);
+         return FAILURE;
+      }
+      sqlite3_bind_int(stmt, 1, user_id);
+      sqlite3_bind_int64(stmt, 2, cursor_id);
+      sqlite3_bind_int(stmt, 3, batch_size);
+
+      while (batch_count < batch_size && sqlite3_step(stmt) == SQLITE_ROW) {
+         int64_t row_id = sqlite3_column_int64(stmt, 0);
+         const char *text = (const char *)sqlite3_column_text(stmt, 1);
+         if (row_id > batch_max_id)
+            batch_max_id = row_id;
+         rows[batch_count].id = row_id;
+         if (text)
+            strncpy(rows[batch_count].text, text, RECOMPUTE_TEXT_MAX - 1);
+         else
+            rows[batch_count].text[0] = '\0';
+         batch_count++;
+      }
+      cursor_id = batch_max_id;
+      sqlite3_finalize(stmt);
+      pthread_mutex_unlock(&s_db.mutex);
+
+      if (batch_count == 0)
+         break;
+
+      for (int i = 0; i < batch_count && !atomic_load(&s_shutdown); i++) {
+         if (rows[i].text[0] == '\0')
+            continue;
+         if (memory_embeddings_embed_and_store_summary(user_id, rows[i].id, rows[i].text) ==
+             SUCCESS) {
+            total_done++;
+            atomic_fetch_add(&s_done, 1);
+         }
+         int sleep_ms = g_config.memory.recompute_batch_sleep_ms;
+         if (sleep_ms > 0)
+            usleep((useconds_t)sleep_ms * 1000u);
+      }
+
+      if (batch_count < batch_size)
+         break;
+
+      if (++loops > 100000) {
+         OLOG_WARNING("memory_embed_recompute: summary loop guard tripped (user %d)", user_id);
+         break;
+      }
+   }
+
+   free(rows);
+   OLOG_INFO("memory_embed_recompute: summaries done user=%d recomputed=%d", user_id, total_done);
+   return SUCCESS;
+}
+
+/* =============================================================================
  * Document chunk recomputation pass (deferred lower-priority pass)
  * ============================================================================= */
 
@@ -545,15 +640,33 @@ static void *recompute_thread_fn(void *arg) {
       if (atomic_load(&s_shutdown))
          break;
 
-      /* Mark this user current only after BOTH passes succeed.
-       * If either failed, leave embeddings_model_id NULL so next start retries. */
-      if (facts_ok && entities_ok) {
+      bool summaries_ok = (recompute_summaries_for_user(uid) == SUCCESS);
+
+      if (atomic_load(&s_shutdown))
+         break;
+
+      /* Mark this user current only after ALL THREE passes succeed.
+       * If any failed, leave embeddings_model_id NULL so next start retries.
+       *
+       * Trade-off: a summaries-only failure today re-runs facts + entities
+       * on the next boot too.  At per-user scales the dev has measured
+       * (~2k facts + 300 entities + 270 summaries), the wasted re-embed
+       * cost is small (~tens of seconds) and the simpler single-flag
+       * design avoids divergence between which pass succeeded and when
+       * the user gets to see semantic results for that pass.  When per-
+       * pass independence matters (large multi-user deployments where a
+       * single failure across thousands of facts is expensive to redo),
+       * split into facts_embeddings_model_id / entities_embeddings_model_id /
+       * summaries_embeddings_model_id columns and gate each pass's skip-
+       * check on the corresponding column.  Not blocking. */
+      if (facts_ok && entities_ok && summaries_ok) {
          user_set_model_id(uid);
          OLOG_INFO("memory_embed_recompute: user=%d fully re-indexed", uid);
       } else {
-         OLOG_WARNING("memory_embed_recompute: user=%d incomplete (facts=%s entities=%s), "
-                      "will retry on next start",
-                      uid, facts_ok ? "ok" : "failed", entities_ok ? "ok" : "failed");
+         OLOG_WARNING("memory_embed_recompute: user=%d incomplete (facts=%s entities=%s "
+                      "summaries=%s), will retry on next start",
+                      uid, facts_ok ? "ok" : "failed", entities_ok ? "ok" : "failed",
+                      summaries_ok ? "ok" : "failed");
       }
    }
 

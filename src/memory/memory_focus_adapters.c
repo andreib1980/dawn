@@ -770,16 +770,48 @@ static int relation_adapter_query(int user_id,
 }
 
 /* =============================================================================
- * Summary adapter
+ * Summary adapter — hybrid keyword + semantic
  *
  * source_id          = "memory_summary"
  * source_type        = FOCUS_SOURCE_INTERNAL
- * requires_embedding = false
+ * requires_embedding = false  (semantic path is best-effort; keyword still
+ *                              fires when no embedding is available)
  *
- * Single joined-keyword query (matches existing memory_callback.c
- * pattern; do NOT loop per-keyword).  30-day lookback default; v2
- * adds a semantic-search path when query_embedding is non-NULL.
+ * Strategy: always run keyword search; additionally run semantic search
+ * when a query_embedding is available.  Merge results by summary id and
+ * score with semantic-dominant arithmetic (cosine wins when present;
+ * keyword presence supplies a floor so a keyword hit without an embedded
+ * row still surfaces).
+ *
+ * Why hybrid: keyword catches exact-token matches that low-dim embeddings
+ * sometimes miss; semantic catches paraphrase, summarized-topic-by-name,
+ * and "do I have a summary discussing X" intent that keyword cannot.
+ * The live conversation transcript captured before Step 3 showed zero
+ * summary surfacings across 8 turns under keyword-only, validating the
+ * upgrade.
  * ============================================================================= */
+
+/* Score floor for a pure keyword-only match (no embedding row).  Picked to
+ * sit below typical genuine-match cosine (~0.55+) while staying above noise
+ * floor — keeps keyword as the fallback signal when semantic fails.
+ *
+ * TODO(phase-1j-style bench tune): this is a first-cut value with no bench
+ * evidence behind it.  Once the summary adapter is exercised by the focus-
+ * injection bench harness, treat 0.4 the same way ENTITY_IMPORTANCE_BASE /
+ * RELATION_TOP_SUBJECTS are treated above — bench-driven tuning, possible
+ * promotion to g_config if a per-deployment knob proves useful. */
+#define SUMMARY_KEYWORD_FLOOR_SCORE 0.4f
+
+/* Max merged-result buffer.  Comfortably exceeds the 10-cap per-source
+ * pull so merging 10 keyword + 10 semantic cannot overflow. */
+#define SUMMARY_MERGE_BUFLEN 32
+
+/* Internal merged-result row. */
+typedef struct {
+   memory_summary_t summary;
+   float score;
+} summary_merge_entry_t;
+
 static int summary_adapter_query(int user_id,
                                  bool include_private,
                                  const char *query_text,
@@ -790,43 +822,107 @@ static int summary_adapter_query(int user_id,
                                  focus_candidate_t **out_candidates,
                                  int *out_count) {
    (void)include_private; /* Same 1f gap as fact adapter */
-   (void)query_embedding; /* v2: add semantic-search path here */
-   (void)embed_dim;
    *out_candidates = NULL;
    *out_count = 0;
    if (max_candidates <= 0 || query_text == NULL || query_text[0] == '\0')
       return SUCCESS;
 
    const int cap = (max_candidates > 10) ? 10 : max_candidates;
-   memory_summary_t summaries[10];
-   int n = 0;
    const time_t since_ts = now - SUMMARY_LOOKBACK_SECONDS;
-   if (memory_db_summary_search_since(user_id, query_text, since_ts, summaries, cap, &n) !=
+
+   /* Keyword path — existing search-since helper. */
+   memory_summary_t kw_summaries[10];
+   int kw_n = 0;
+   if (memory_db_summary_search_since(user_id, query_text, since_ts, kw_summaries, cap, &kw_n) !=
        MEMORY_DB_SUCCESS) {
       return FAILURE;
    }
-   if (n <= 0)
+
+   /* Semantic path — only runs when caller supplied an embedded query.
+    * Failure is non-fatal: warn and fall back to keyword-only results. */
+   memory_summary_t sem_summaries[10];
+   float sem_scores[10] = { 0 };
+   int sem_n = 0;
+   if (query_embedding != NULL && embed_dim > 0) {
+      int rc = memory_db_summary_search_semantic(user_id, query_embedding, (int)embed_dim, since_ts,
+                                                 cap, /* max_scan */ 256, sem_summaries, sem_scores,
+                                                 &sem_n);
+      if (rc != MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("summary_adapter: semantic search failed for user %d; keyword-only this turn",
+                      user_id);
+         sem_n = 0;
+      }
+   }
+
+   if (kw_n <= 0 && sem_n <= 0)
       return SUCCESS;
 
-   /* Defense-in-depth user_id post-check. */
-   int kept = 0;
-   for (int i = 0; i < n; i++) {
-      if (summaries[i].user_id != user_id) {
-         OLOG_ERROR("summary_adapter: summary_id=%lld owned by user_id=%d (expected %d) — skipping",
-                    (long long)summaries[i].id, summaries[i].user_id, user_id);
+   /* Merge by summary id.  O(kw_n * sem_n) is fine at N <= 10 each. */
+   summary_merge_entry_t merged[SUMMARY_MERGE_BUFLEN];
+   int m = 0;
+
+   for (int i = 0; i < kw_n && m < SUMMARY_MERGE_BUFLEN; i++) {
+      if (kw_summaries[i].user_id != user_id) {
+         OLOG_ERROR("summary_adapter: keyword summary_id=%lld owned by user_id=%d (expected %d) — "
+                    "skipping",
+                    (long long)kw_summaries[i].id, kw_summaries[i].user_id, user_id);
          continue;
       }
-      if (kept != i)
-         summaries[kept] = summaries[i];
-      kept++;
+      merged[m].summary = kw_summaries[i];
+      merged[m].score = SUMMARY_KEYWORD_FLOOR_SCORE;
+      m++;
    }
-   if (kept <= 0)
+
+   for (int i = 0; i < sem_n && m < SUMMARY_MERGE_BUFLEN; i++) {
+      if (sem_summaries[i].user_id != user_id) {
+         OLOG_ERROR("summary_adapter: semantic summary_id=%lld owned by user_id=%d (expected %d) — "
+                    "skipping",
+                    (long long)sem_summaries[i].id, sem_summaries[i].user_id, user_id);
+         continue;
+      }
+      /* Already present from keyword? Promote score to the higher of the
+       * two signals (cosine almost always wins on genuine matches). */
+      int existing = -1;
+      for (int j = 0; j < m; j++) {
+         if (merged[j].summary.id == sem_summaries[i].id) {
+            existing = j;
+            break;
+         }
+      }
+      if (existing >= 0) {
+         if (sem_scores[i] > merged[existing].score)
+            merged[existing].score = sem_scores[i];
+         continue;
+      }
+      merged[m].summary = sem_summaries[i];
+      merged[m].score = sem_scores[i];
+      m++;
+   }
+
+   if (m <= 0)
       return SUCCESS;
 
-   int64_t summary_ids[10];
-   int64_t conv_ids[10] = { 0 }, starts[10] = { 0 }, ends[10] = { 0 };
+   /* Sort by score descending — insertion sort at N <= 32. */
+   for (int i = 1; i < m; i++) {
+      summary_merge_entry_t tmp = merged[i];
+      int j = i - 1;
+      while (j >= 0 && merged[j].score < tmp.score) {
+         merged[j + 1] = merged[j];
+         j--;
+      }
+      merged[j + 1] = tmp;
+   }
+
+   /* Truncate to requested cap. */
+   const int kept = (m > cap) ? cap : m;
+
+   /* Batch provenance lookup. */
+   int64_t summary_ids[SUMMARY_MERGE_BUFLEN];
+   int64_t conv_ids[SUMMARY_MERGE_BUFLEN] = { 0 };
+   int64_t starts[SUMMARY_MERGE_BUFLEN] = { 0 };
+   int64_t ends[SUMMARY_MERGE_BUFLEN] = { 0 };
    for (int i = 0; i < kept; i++)
-      summary_ids[i] = summaries[i].id;
+      summary_ids[i] = merged[i].summary.id;
    memory_db_summaries_get_sources(user_id, summary_ids, kept, conv_ids, starts, ends);
 
    focus_candidate_t *out = calloc((size_t)kept, sizeof(*out));
@@ -839,17 +935,18 @@ static int summary_adapter_query(int user_id,
    int produced = 0;
    for (int i = 0; i < kept; i++) {
       char item_id[FOCUS_ITEM_ID_BUFLEN];
-      if (focus_candidate_format_item_id(item_id, sizeof(item_id), "summary", summaries[i].id) !=
-          SUCCESS) {
+      if (focus_candidate_format_item_id(item_id, sizeof(item_id), "summary",
+                                         merged[i].summary.id) != SUCCESS) {
          focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          return FAILURE;
       }
-      const float recency = focus_recency_decay_uniform(summaries[i].created_at, now);
-      const float importance = summaries[i].consolidated ? SUMMARY_IMPORTANCE_CONSOLIDATED
-                                                         : SUMMARY_IMPORTANCE_NORMAL;
+      const float recency = focus_recency_decay_uniform(merged[i].summary.created_at, now);
+      const float importance = merged[i].summary.consolidated ? SUMMARY_IMPORTANCE_CONSOLIDATED
+                                                              : SUMMARY_IMPORTANCE_NORMAL;
       if (focus_candidate_init(&out[produced], "memory_summary", FOCUS_SOURCE_INTERNAL,
-                               summaries[i].summary, item_id, summaries[i].created_at,
-                               FOCUS_SCORE_NA, recency, importance, &truncated_warned) != SUCCESS) {
+                               merged[i].summary.summary, item_id, merged[i].summary.created_at,
+                               merged[i].score, recency, importance,
+                               &truncated_warned) != SUCCESS) {
          focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
          return FAILURE;
       }

@@ -346,6 +346,12 @@ static const char *SCHEMA_SQL =
     "   source_conversation_id INTEGER DEFAULT NULL,"
     "   source_msg_id_start    INTEGER DEFAULT NULL,"
     "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    /* embedding (v45): packed float32 vector for semantic summary search.
+     * NULL until embed-at-create fires (or recompute worker backfills on
+     * model swap).  The summary adapter (memory_focus_adapters.c) hybrids
+     * keyword + cosine when this is populated; NULL rows fall back to
+     * keyword-only matching. */
+    "   embedding BLOB DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
@@ -2145,6 +2151,54 @@ static int create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v45: semantic search on memory_summaries.  Adds an `embedding BLOB`
+    * column on memory_summaries (NULL default — existing rows stay
+    * unembedded; the recompute worker backfills on next boot the same way
+    * it handles facts and entities after a model swap).
+    *
+    * Literal-constant default → SQLite's O(1) ALTER fast path, no row
+    * rewrite. */
+   if (current_version >= 1 && current_version < 45) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_summaries ADD COLUMN embedding BLOB DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v45 migration (memory_summaries.embedding) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added embedding column to memory_summaries (v45)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v46: force a recompute pass for every user so the v45-added summary
+    * embedding column gets backfilled.  The recompute worker's model_id
+    * gate only fires when the embedding *model* changes — adding a new
+    * embedding column doesn't change that, so without this nudge the
+    * historical summaries stay unembedded indefinitely and the semantic
+    * summary adapter only sees rows created after v45 ships.
+    *
+    * Side effect: every user's facts + entities also get re-embedded.
+    * Wasted work, but bounded (the dev's ~2k facts + 300 entities + 270
+    * summaries take ~10 seconds total against the local ONNX engine).
+    * Justified by avoiding the per-pass-metadata refactor that the
+    * recompute "all-three-or-redo-all" trade-off comment in
+    * src/memory/memory_embed_recompute.c references. */
+   if (current_version >= 1 && current_version < 46) {
+      rc = sqlite3_exec(s_db.db, "UPDATE users SET embeddings_model_id = NULL", NULL, NULL,
+                        &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v46 migration (reset embeddings_model_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: reset users.embeddings_model_id to trigger v45 summary "
+                   "embedding backfill (v46)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3203,6 +3257,49 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Summary-embedding statements (v45).  No embedding_norm column on
+    * memory_summaries — at the per-user summary scale (hundreds) we
+    * recompute norms inside the scan instead of paying for the storage. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_summaries SET embedding = ? "
+                           "WHERE id = ? AND user_id = ?",
+                           -1, &s_db.stmt_memory_summary_update_embedding, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare summary_update_embedding failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Scan-with-embeddings (id + blob only).  Cosine ranking in
+    * memory_db_summary_search_semantic happens in two passes: this scan
+    * ranks survivors by cosine without materialising the long summary /
+    * topics text for every row; a second WHERE id = ? fetch inside the
+    * helper pulls full rows for the top-K survivors only.  Same temporal
+    * slice as the keyword search_since path (created_at >= ?).
+    * ORDER BY created_at DESC means when max_scan eventually trips
+    * (at >1k summaries per user), recency wins — the user is more likely
+    * to query recent topics than year-old ones. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, embedding FROM memory_summaries "
+                           "WHERE user_id = ? AND created_at >= ? AND embedding IS NOT NULL "
+                           "ORDER BY created_at DESC LIMIT ?",
+                           -1, &s_db.stmt_memory_summary_scan_embeddings, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare summary_scan_embeddings failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, summary FROM memory_summaries "
+                           "WHERE user_id = ? "
+                           "AND (embedding IS NULL OR length(embedding)/4 != ?) "
+                           "ORDER BY created_at ASC LIMIT ?",
+                           -1, &s_db.stmt_memory_summary_list_without_embedding, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare summary_list_without_embedding failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* Entity graph statements */
    rc = sqlite3_prepare_v2(
        s_db.db,
@@ -4246,6 +4343,12 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_get_embeddings);
    if (s_db.stmt_memory_fact_list_without_embedding)
       sqlite3_finalize(s_db.stmt_memory_fact_list_without_embedding);
+   if (s_db.stmt_memory_summary_update_embedding)
+      sqlite3_finalize(s_db.stmt_memory_summary_update_embedding);
+   if (s_db.stmt_memory_summary_scan_embeddings)
+      sqlite3_finalize(s_db.stmt_memory_summary_scan_embeddings);
+   if (s_db.stmt_memory_summary_list_without_embedding)
+      sqlite3_finalize(s_db.stmt_memory_summary_list_without_embedding);
 
    /* Entity graph statements */
    if (s_db.stmt_memory_entity_upsert)

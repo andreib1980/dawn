@@ -304,3 +304,113 @@ int memory_db_prefs_get_sources(int user_id,
    return batch_get_sources(user_id, "p", "memory_preferences", pref_ids, n, out_conv_ids,
                             out_starts, out_ends);
 }
+
+/* =============================================================================
+ * Provenance extend (paraphrase-dedup write path).
+ *
+ * Single-statement read-modify-write under the auth_db mutex.  Same-conv
+ * branch widens the message range; cross-conv branch keeps most-recent.
+ * Older or equal cross-conv mentions are silent no-ops so the dedup loop
+ * does not bounce a fact's provenance back and forth on retroactive
+ * extractions.
+ * ============================================================================= */
+
+int memory_db_fact_provenance_extend(int64_t fact_id,
+                                     int user_id,
+                                     int64_t new_conv_id,
+                                     int64_t new_msg_start,
+                                     int64_t new_msg_end) {
+   if (new_conv_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Read existing provenance + ownership in one statement. */
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT user_id, source_conversation_id, "
+                               "       source_msg_id_start, source_msg_id_end "
+                               "FROM memory_facts WHERE id = ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, fact_id);
+   rc = sqlite3_step(stmt);
+   if (rc != SQLITE_ROW) {
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_NOT_FOUND;
+   }
+   int owner = sqlite3_column_int(stmt, 0);
+   bool had_conv = (sqlite3_column_type(stmt, 1) != SQLITE_NULL);
+   int64_t cur_conv = had_conv ? sqlite3_column_int64(stmt, 1) : 0;
+   int64_t cur_start = (sqlite3_column_type(stmt, 2) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 2)
+                                                                     : 0;
+   int64_t cur_end = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3)
+                                                                   : 0;
+   sqlite3_finalize(stmt);
+
+   if (owner != user_id) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_NOT_FOUND;
+   }
+
+   int64_t write_conv = cur_conv;
+   int64_t write_start = cur_start;
+   int64_t write_end = cur_end;
+
+   if (!had_conv || cur_conv == 0) {
+      /* No prior provenance — adopt the new triple wholesale. */
+      write_conv = new_conv_id;
+      write_start = new_msg_start;
+      write_end = new_msg_end;
+   } else if (cur_conv == new_conv_id) {
+      /* Same conversation — widen to cover all messages that mention the
+       * fact within that conversation. */
+      if (new_msg_start > 0 && (write_start == 0 || new_msg_start < write_start))
+         write_start = new_msg_start;
+      if (new_msg_end > write_end)
+         write_end = new_msg_end;
+   } else if (new_conv_id > cur_conv) {
+      /* More recent conversation reinforces the fact — replace.  Older
+       * mention's provenance is dropped from this single-slot schema. */
+      write_conv = new_conv_id;
+      write_start = new_msg_start;
+      write_end = new_msg_end;
+   } else {
+      /* Older or equal mention — keep existing provenance. */
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_SUCCESS;
+   }
+
+   /* No-op if nothing actually changed (defensive — same-conv with start
+    * already covering and end not advanced). */
+   if (write_conv == cur_conv && write_start == cur_start && write_end == cur_end) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_SUCCESS;
+   }
+
+   sqlite3_stmt *upd = NULL;
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET source_conversation_id = ?, "
+                           "source_msg_id_start = ?, source_msg_id_end = ? "
+                           "WHERE id = ? AND user_id = ?",
+                           -1, &upd, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int64(upd, 1, write_conv);
+   sqlite3_bind_int64(upd, 2, write_start);
+   sqlite3_bind_int64(upd, 3, write_end);
+   sqlite3_bind_int64(upd, 4, fact_id);
+   sqlite3_bind_int(upd, 5, user_id);
+   rc = sqlite3_step(upd);
+   sqlite3_finalize(upd);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE)
+      return MEMORY_DB_FAILURE;
+   return MEMORY_DB_SUCCESS;
+}

@@ -181,6 +181,18 @@ typedef enum {
    ADMIN_MSG_MEMORY_ENTITY_HISTORY_STATUS = 0x8C, /**< RESERVED (Phase 2 async) */
    ADMIN_MSG_MEMORY_ENTITY_LIST_STATUS = 0x8D,    /**< RESERVED (Phase 2 async) */
    ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF_STATUS = 0x8E, /**< RESERVED (Phase 2 async) */
+
+   /* Phase 6.6: Memory cleanup utilities. */
+   ADMIN_MSG_MEMORY_CLEANUP_META_FACTS = 0x8F, /**< Bulk-delete meta-fact rows by LIKE pattern */
+
+   /* Phase 6.7: Summary backfill — re-issue the extraction prompt for
+    * conversations that never produced a memory_summaries row (typically
+    * because an LLM error or a stricter early prompt dropped the summary
+    * field), storing summary/topics only.  Use `memory reextract` for a
+    * full re-extraction. */
+   ADMIN_MSG_MEMORY_SUMMARIZE_MISSING = 0x90,
+
+   /* Next free memory opcode: 0x91. */
 } admin_msg_type_t;
 
 /**

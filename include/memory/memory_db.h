@@ -281,6 +281,26 @@ int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_
  */
 int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence, int *count_out);
 
+/**
+ * @brief Bulk-delete facts whose `fact_text` matches any of the given LIKE
+ * patterns.  Used by the `dawn-admin memory cleanup-meta-facts` admin
+ * command to drop interaction-event "meta-facts" (e.g. `User asked%`,
+ * `User inquired%`, `User requested%`) that the May 2026 prompt fix now
+ * blocks at extraction time but that pre-existing rows still carry.
+ *
+ * @param user_id User ID (rows scoped to this user only)
+ * @param patterns SQL LIKE patterns, ESCAPE '\\' (e.g. "User asked%")
+ * @param n_patterns Length of patterns array (1..64)
+ * @param dry_run When true, count matches but do not delete
+ * @param count_out Output: matched (dry-run) or deleted (commit) count
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_facts_delete_by_patterns(int user_id,
+                                       const char *const *patterns,
+                                       int n_patterns,
+                                       bool dry_run,
+                                       int *count_out);
+
 /* =============================================================================
  * Decay and Maintenance Operations (Phase 5)
  * ============================================================================= */
@@ -581,6 +601,89 @@ int memory_db_summary_search(int user_id,
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
  */
 int memory_db_summary_delete(int64_t summary_id, int user_id);
+
+/* =============================================================================
+ * Summary Embedding Operations (v45 — semantic summary adapter)
+ * ============================================================================= */
+
+/**
+ * @brief Store an embedding vector for a summary row.
+ *
+ * Mirrors memory_db_fact_update_embedding.  The norm is not stored on
+ * summaries — it's recomputed inside the semantic scan because the
+ * per-user summary count is small enough that the saving isn't worth
+ * an extra column.
+ *
+ * @param user_id     owning user ID (ownership filter)
+ * @param summary_id  summary row ID
+ * @param embedding   float vector to store
+ * @param dims        vector dimensions (must be > 0)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_FAILURE
+ */
+int memory_db_summary_update_embedding(int user_id,
+                                       int64_t summary_id,
+                                       const float *embedding,
+                                       int dims);
+
+/**
+ * @brief Semantic top-N search over user's embedded summaries.
+ *
+ * Locked single-pass scan: loads each row with an embedding of matching
+ * dimensions, scores it against @p query_vec by cosine similarity, and
+ * keeps the top-N by score.  Caller passes the embedded query vector;
+ * dimension mismatches are silently skipped (the recompute worker will
+ * eventually rewrite them on a model swap).
+ *
+ * Designed for hybrid + keyword merging — the adapter combines this
+ * output with the keyword search and re-ranks.
+ *
+ * @param user_id        owning user ID
+ * @param query_vec      pre-computed query embedding (caller owns)
+ * @param query_dims     query embedding dimensions
+ * @param since_ts       lower bound on created_at (0 = no bound)
+ * @param max_summaries  cap on returned summaries.  Internally clamped to
+ *                       MEMORY_SUMMARY_SEMANTIC_TOPK_CAP (16) to keep the
+ *                       stack-resident ranking buffer small enough for
+ *                       the per-turn focus-injection path.
+ * @param max_scan       cap on rows actually inspected by the scan
+ *                       (defense against pathological per-user counts)
+ * @param out_summaries  output array of memory_summary_t (caller allocates)
+ * @param out_scores     output array of cosine scores aligned with out_summaries
+ * @param count_out      number of returned matches
+ * @return MEMORY_DB_SUCCESS / MEMORY_DB_FAILURE
+ */
+int memory_db_summary_search_semantic(int user_id,
+                                      const float *query_vec,
+                                      int query_dims,
+                                      time_t since_ts,
+                                      int max_summaries,
+                                      int max_scan,
+                                      memory_summary_t *out_summaries,
+                                      float *out_scores,
+                                      int *count_out);
+
+/**
+ * @brief List summaries missing an embedding (or with stale dimensions).
+ *
+ * Used by the recompute worker on model swap.  Returns the row id and
+ * summary text — caller embeds the text and stores via
+ * memory_db_summary_update_embedding().
+ *
+ * @param user_id        owning user ID
+ * @param expected_dims  the dimensions the active engine produces
+ * @param out_ids        output array of summary IDs (caller allocates)
+ * @param out_texts      output array of summary text strings;
+ *                       caller-allocated `char[max_count][MEMORY_SUMMARY_MAX]`
+ * @param max_count      cap on returned rows
+ * @param count_out      number of returned rows
+ * @return MEMORY_DB_SUCCESS / MEMORY_DB_FAILURE
+ */
+int memory_db_summary_list_without_embedding(int user_id,
+                                             int expected_dims,
+                                             int64_t *out_ids,
+                                             char (*out_texts)[MEMORY_SUMMARY_MAX],
+                                             int max_count,
+                                             int *count_out);
 
 /* =============================================================================
  * Utility Operations

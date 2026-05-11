@@ -42,6 +42,14 @@ dawn_config_t g_config;
 void memory_embeddings_invalidate_all(void) {
 }
 
+/* Stubs for the dirty-flag invalidators called from memory_db.c.  Tests
+ * exercise the SQL path directly and never inspect cache state, so these
+ * are link-time only. */
+void memory_embeddings_invalidate_cache(void) {
+}
+void memory_embeddings_invalidate_entity_cache(void) {
+}
+
 /* Stub: check is_private column directly via the existing s_db handle. */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    (void)user_id;

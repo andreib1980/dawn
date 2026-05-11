@@ -674,6 +674,119 @@ int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence
    return MEMORY_DB_SUCCESS;
 }
 
+int memory_db_facts_delete_by_patterns(int user_id,
+                                       const char *const *patterns,
+                                       int n_patterns,
+                                       bool dry_run,
+                                       int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!patterns || n_patterns <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Build a single statement: SELECT count first (for both modes — surface
+    * the would-delete count even on dry-run), then conditionally DELETE.
+    * Patterns OR'd via repeated `fact_text LIKE ?` clauses, all under the
+    * same user_id scope.  ESCAPE '\\' lets a future caller embed literal
+    * %/_ via backslash without surprise.
+    *
+    * Cap at MAX_DELETE_PATTERNS to keep the SQL prepared-statement size
+    * bounded and prevent a malicious admin client from constructing a
+    * multi-MB query.  64 is well above what any caller actually needs. */
+   const int MAX_DELETE_PATTERNS = 64;
+   if (n_patterns > MAX_DELETE_PATTERNS) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   /* Construct WHERE clause: " AND (fact_text LIKE ? ESCAPE '\\' OR ... )"
+    * Worst case at MAX=64: ~30 bytes/pattern × 64 + base = ~2 KB.  Use a
+    * fixed buffer comfortably larger. */
+   char where_buf[4096];
+   int off = snprintf(where_buf, sizeof(where_buf), "(");
+   for (int i = 0; i < n_patterns; i++) {
+      int n = snprintf(where_buf + off, sizeof(where_buf) - off, "%sfact_text LIKE ? ESCAPE '\\'",
+                       i == 0 ? "" : " OR ");
+      if (n < 0 || n >= (int)(sizeof(where_buf) - off)) {
+         AUTH_DB_UNLOCK();
+         return MEMORY_DB_FAILURE;
+      }
+      off += n;
+   }
+   if (off + 2 >= (int)sizeof(where_buf)) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   where_buf[off++] = ')';
+   where_buf[off] = '\0';
+
+   /* COUNT pass — needed for both --dry-run report and post-DELETE
+    * confirmation; SQLite's `changes()` after DELETE would give us the
+    * same number on the actual-delete path, but running COUNT first lets
+    * the dry-run path skip the DELETE entirely. */
+   char sql[5120];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM memory_facts WHERE user_id = ? AND %s",
+            where_buf);
+   sqlite3_stmt *count_stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &count_stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(count_stmt, 1, user_id);
+   for (int i = 0; i < n_patterns; i++) {
+      sqlite3_bind_text(count_stmt, 2 + i, patterns[i], -1, SQLITE_STATIC);
+   }
+
+   int matched = 0;
+   if (sqlite3_step(count_stmt) == SQLITE_ROW)
+      matched = sqlite3_column_int(count_stmt, 0);
+   sqlite3_finalize(count_stmt);
+
+   if (dry_run || matched == 0) {
+      AUTH_DB_UNLOCK();
+      if (count_out)
+         *count_out = matched;
+      return MEMORY_DB_SUCCESS;
+   }
+
+   /* DELETE pass.  Run in an explicit transaction so a mid-statement
+    * failure does not leave the table partially trimmed. */
+   snprintf(sql, sizeof(sql), "DELETE FROM memory_facts WHERE user_id = ? AND %s", where_buf);
+   sqlite3_stmt *del_stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &del_stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+   sqlite3_bind_int(del_stmt, 1, user_id);
+   for (int i = 0; i < n_patterns; i++) {
+      sqlite3_bind_text(del_stmt, 2 + i, patterns[i], -1, SQLITE_STATIC);
+   }
+   int rc = sqlite3_step(del_stmt);
+   int deleted = sqlite3_changes(s_db.db);
+   sqlite3_finalize(del_stmt);
+
+   if (rc != SQLITE_DONE) {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+   AUTH_DB_UNLOCK();
+
+   /* Cache invalidation — embedding cache holds (id, embedding) pairs that
+    * are now stale.  Mark dirty so the next access reloads. */
+   memory_embeddings_invalidate_cache();
+
+   if (count_out)
+      *count_out = deleted;
+   OLOG_INFO("memory_db: cleanup_meta_facts deleted %d rows for user %d (n_patterns=%d)", deleted,
+             user_id, n_patterns);
+   return MEMORY_DB_SUCCESS;
+}
+
 /* =============================================================================
  * Date-Filtered Queries
  * ============================================================================= */
@@ -1137,6 +1250,274 @@ int memory_db_summary_delete(int64_t summary_id, int user_id) {
       return MEMORY_DB_FAILURE;
    }
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+/* =============================================================================
+ * Summary Embedding Operations (v45 — semantic summary adapter)
+ *
+ * Norms are recomputed inside the scan rather than persisted alongside the
+ * blob.  At the per-user summary scale (hundreds), a one-shot norm pass
+ * over each row's float vector is cheaper than the schema churn an extra
+ * column would cost, and keeps memory_db_summary_update_embedding
+ * symmetric with how the recompute worker writes (vector-only).
+ * ============================================================================= */
+
+int memory_db_summary_update_embedding(int user_id,
+                                       int64_t summary_id,
+                                       const float *embedding,
+                                       int dims) {
+   if (!embedding || dims <= 0 || user_id <= 0 || summary_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_reset(s_db.stmt_memory_summary_update_embedding);
+   sqlite3_bind_blob(s_db.stmt_memory_summary_update_embedding, 1, embedding,
+                     dims * (int)sizeof(float), SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_memory_summary_update_embedding, 2, summary_id);
+   sqlite3_bind_int(s_db.stmt_memory_summary_update_embedding, 3, user_id);
+
+   int rc = sqlite3_step(s_db.stmt_memory_summary_update_embedding);
+   sqlite3_reset(s_db.stmt_memory_summary_update_embedding);
+
+   AUTH_DB_UNLOCK();
+
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: summary_update_embedding failed for id %ld: %s", (long)summary_id,
+                 sqlite3_errmsg(s_db.db));
+      return MEMORY_DB_FAILURE;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Inline cosine helper.  Inputs are assumed non-NULL with identical dims;
+ * callers validate before invoking.  Returns 0.0f if either norm is zero. */
+static float summary_cosine(const float *a, float a_norm, const float *b, float b_norm, int dims) {
+   if (a_norm <= 0.0f || b_norm <= 0.0f)
+      return 0.0f;
+   float dot = 0.0f;
+   for (int i = 0; i < dims; i++) {
+      dot += a[i] * b[i];
+   }
+   return dot / (a_norm * b_norm);
+}
+
+/* Compile-time top-K cap.  Heap entries hold only {id, score} (12 bytes),
+ * so the entire ranking buffer is ~192 bytes regardless of K — safe on
+ * 256 KB pthread stacks.  Full memory_summary_t rows (~3 KB each) are
+ * fetched in a second pass for the K survivors only, instead of being
+ * copied into a heap slot at every admission.  This both shrinks the
+ * stack footprint (~154 KB → 192 B) and skips the strncpy storm under
+ * the auth_db lock for non-survivor rows. */
+#define MEMORY_SUMMARY_SEMANTIC_TOPK_CAP 16
+
+typedef struct {
+   int64_t id;
+   float score;
+} summary_id_score_t;
+
+int memory_db_summary_search_semantic(int user_id,
+                                      const float *query_vec,
+                                      int query_dims,
+                                      time_t since_ts,
+                                      int max_summaries,
+                                      int max_scan,
+                                      memory_summary_t *out_summaries,
+                                      float *out_scores,
+                                      int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!query_vec || query_dims <= 0 || max_summaries <= 0 || !out_summaries || !out_scores ||
+       user_id <= 0)
+      return MEMORY_DB_FAILURE;
+   if (max_scan <= 0)
+      max_scan = 256;
+   if (max_summaries > MEMORY_SUMMARY_SEMANTIC_TOPK_CAP)
+      max_summaries = MEMORY_SUMMARY_SEMANTIC_TOPK_CAP;
+
+   float q_norm = memory_embeddings_l2_norm(query_vec, query_dims);
+   if (q_norm <= 0.0f) {
+      /* Zero-norm query → nothing to compare against. */
+      return MEMORY_DB_SUCCESS;
+   }
+
+   const int expected_bytes = query_dims * (int)sizeof(float);
+
+   /* Top-K ranking buffer — id + score only.  Min-heap semantics via
+    * linear scan to find evictee (K ≤ 16, sub-microsecond).  Sorted to
+    * descending order after the scan completes. */
+   summary_id_score_t heap[MEMORY_SUMMARY_SEMANTIC_TOPK_CAP];
+   int heap_n = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* PASS 1 — cosine-rank scan.  The scan SQL was reduced to (id, embedding)
+    * only, so SQLite doesn't materialise the long summary / topics text for
+    * every row when we're just doing cosine.  Full rows are fetched in
+    * pass 2 for survivors only. */
+   sqlite3_reset(s_db.stmt_memory_summary_scan_embeddings);
+   sqlite3_bind_int(s_db.stmt_memory_summary_scan_embeddings, 1, user_id);
+   sqlite3_bind_int64(s_db.stmt_memory_summary_scan_embeddings, 2, (sqlite3_int64)since_ts);
+   sqlite3_bind_int(s_db.stmt_memory_summary_scan_embeddings, 3, max_scan);
+
+   int rows_seen = 0;
+   while (rows_seen < max_scan &&
+          sqlite3_step(s_db.stmt_memory_summary_scan_embeddings) == SQLITE_ROW) {
+      rows_seen++;
+
+      int blob_bytes = sqlite3_column_bytes(s_db.stmt_memory_summary_scan_embeddings, 1);
+      if (blob_bytes != expected_bytes) {
+         /* Dimension mismatch — recompute worker will catch up. */
+         continue;
+      }
+      const void *blob = sqlite3_column_blob(s_db.stmt_memory_summary_scan_embeddings, 1);
+      if (!blob)
+         continue;
+
+      const float *row_vec = (const float *)blob;
+      float row_norm = memory_embeddings_l2_norm(row_vec, query_dims);
+      float score = summary_cosine(query_vec, q_norm, row_vec, row_norm, query_dims);
+
+      int min_idx = 0;
+      if (heap_n >= max_summaries) {
+         for (int i = 1; i < heap_n; i++) {
+            if (heap[i].score < heap[min_idx].score)
+               min_idx = i;
+         }
+         if (score <= heap[min_idx].score)
+            continue;
+      } else {
+         min_idx = heap_n;
+         heap_n++;
+      }
+
+      heap[min_idx].id = sqlite3_column_int64(s_db.stmt_memory_summary_scan_embeddings, 0);
+      heap[min_idx].score = score;
+   }
+
+   sqlite3_reset(s_db.stmt_memory_summary_scan_embeddings);
+
+   if (heap_n <= 0) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_SUCCESS;
+   }
+
+   /* Sort survivors by descending score before the row-fetch pass so the
+    * out_summaries[] array lands in the order the caller expects. */
+   for (int i = 1; i < heap_n; i++) {
+      summary_id_score_t tmp = heap[i];
+      int j = i - 1;
+      while (j >= 0 && heap[j].score < tmp.score) {
+         heap[j + 1] = heap[j];
+         j--;
+      }
+      heap[j + 1] = tmp;
+   }
+
+   /* PASS 2 — fetch the full row for each survivor.  Inline-prepared
+    * one-shot statement keeps the change scoped to this function; per-call
+    * prepare cost (~10 μs) is negligible against the cosine scan that
+    * already ran.  The user_id bind is defense-in-depth — the scan already
+    * filtered to user_id, but this guards against a re-bound id mismatch.
+    *
+    * If a row was deleted between pass 1 and pass 2 (we hold the auth_db
+    * lock across both, so this can't happen in practice — but the code is
+    * tolerant), we simply produce fewer survivors than the heap held. */
+   sqlite3_stmt *fetch = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT id, user_id, session_id, summary, topics, sentiment, "
+                               "       created_at, message_count, duration_seconds, consolidated "
+                               "FROM memory_summaries WHERE id = ? AND user_id = ?",
+                               -1, &fetch, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("memory_db: summary_search_semantic prepare fetch failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+
+   int produced = 0;
+   for (int i = 0; i < heap_n; i++) {
+      sqlite3_reset(fetch);
+      sqlite3_bind_int64(fetch, 1, heap[i].id);
+      sqlite3_bind_int(fetch, 2, user_id);
+
+      if (sqlite3_step(fetch) != SQLITE_ROW) {
+         /* Row vanished between passes — skip and continue. */
+         continue;
+      }
+
+      memory_summary_t *s = &out_summaries[produced];
+      memset(s, 0, sizeof(*s));
+      s->id = sqlite3_column_int64(fetch, 0);
+      s->user_id = sqlite3_column_int(fetch, 1);
+      const unsigned char *sid = sqlite3_column_text(fetch, 2);
+      if (sid)
+         strncpy(s->session_id, (const char *)sid, sizeof(s->session_id) - 1);
+      const unsigned char *txt = sqlite3_column_text(fetch, 3);
+      if (txt)
+         strncpy(s->summary, (const char *)txt, sizeof(s->summary) - 1);
+      const unsigned char *topics = sqlite3_column_text(fetch, 4);
+      if (topics)
+         strncpy(s->topics, (const char *)topics, sizeof(s->topics) - 1);
+      const unsigned char *sent = sqlite3_column_text(fetch, 5);
+      if (sent)
+         strncpy(s->sentiment, (const char *)sent, sizeof(s->sentiment) - 1);
+      s->created_at = (time_t)sqlite3_column_int64(fetch, 6);
+      s->message_count = sqlite3_column_int(fetch, 7);
+      s->duration_seconds = sqlite3_column_int(fetch, 8);
+      s->consolidated = (sqlite3_column_int(fetch, 9) != 0);
+
+      out_scores[produced] = heap[i].score;
+      produced++;
+   }
+
+   sqlite3_finalize(fetch);
+   AUTH_DB_UNLOCK();
+
+   if (count_out)
+      *count_out = produced;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_summary_list_without_embedding(int user_id,
+                                             int expected_dims,
+                                             int64_t *out_ids,
+                                             char (*out_texts)[MEMORY_SUMMARY_MAX],
+                                             int max_count,
+                                             int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_ids || !out_texts || max_count <= 0 || expected_dims <= 0 || user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_reset(s_db.stmt_memory_summary_list_without_embedding);
+   sqlite3_bind_int(s_db.stmt_memory_summary_list_without_embedding, 1, user_id);
+   sqlite3_bind_int(s_db.stmt_memory_summary_list_without_embedding, 2, expected_dims);
+   sqlite3_bind_int(s_db.stmt_memory_summary_list_without_embedding, 3, max_count);
+
+   int n = 0;
+   while (n < max_count &&
+          sqlite3_step(s_db.stmt_memory_summary_list_without_embedding) == SQLITE_ROW) {
+      out_ids[n] = sqlite3_column_int64(s_db.stmt_memory_summary_list_without_embedding, 0);
+      const unsigned char *txt = sqlite3_column_text(
+          s_db.stmt_memory_summary_list_without_embedding, 1);
+      if (txt) {
+         strncpy(out_texts[n], (const char *)txt, MEMORY_SUMMARY_MAX - 1);
+         out_texts[n][MEMORY_SUMMARY_MAX - 1] = '\0';
+      } else {
+         out_texts[n][0] = '\0';
+      }
+      n++;
+   }
+
+   sqlite3_reset(s_db.stmt_memory_summary_list_without_embedding);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
 }
 
 /* =============================================================================

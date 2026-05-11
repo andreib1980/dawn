@@ -55,6 +55,7 @@
 #include "memory/memory_db_entities.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_recategorize.h"
+#include "memory/memory_summarize_missing.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -117,6 +118,9 @@ static int handle_list_conversations(int client_fd, const char *payload, uint16_
 static int handle_get_conversation(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_delete_conversation(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len);
+static int handle_memory_cleanup_meta_facts(int client_fd,
+                                            const char *payload,
+                                            uint16_t payload_len);
 static int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
 static int handle_memory_entity_merge(int client_fd, const char *payload, uint16_t payload_len);
@@ -127,6 +131,9 @@ static int handle_memory_entity_list(int client_fd, const char *payload, uint16_
 static int handle_memory_entity_link_user_self(int client_fd,
                                                const char *payload,
                                                uint16_t payload_len);
+static int handle_memory_summarize_missing(int client_fd,
+                                           const char *payload,
+                                           uint16_t payload_len);
 static int send_response(int client_fd, admin_resp_code_t code);
 static int send_text_response(int client_fd, admin_resp_code_t code, const char *text);
 static int send_list_response(int client_fd,
@@ -2265,6 +2272,168 @@ static int handle_memory_recategorize(int client_fd, const char *payload, uint16
 }
 
 /* =============================================================================
+ * Memory cleanup_meta_facts — bulk-delete interaction-event "meta-facts"
+ * pre-existing in the DB before the May 2026 prompt fix that blocks them
+ * at extraction time.
+ *
+ * Payload wire format:
+ *   Byte 0:        flags (bit 0 = ADMIN_MEM_CLEANUP_FLAG_DRY_RUN)
+ *   Byte 1..:      username string (length = payload_len - 1)
+ *
+ * Default LIKE patterns are hardcoded server-side — `User asked%`,
+ * `User inquired%`, `User requested%`, `user asked%`, `user inquired%`,
+ * `user requested%` (lowercase forms cover historical extraction-prompt
+ * variations).  Custom-pattern injection from the operator deferred until
+ * the use case appears.
+ * ============================================================================= */
+
+#define ADMIN_MEM_CLEANUP_FLAG_DRY_RUN 0x01
+
+static int handle_memory_cleanup_meta_facts(int client_fd,
+                                            const char *payload,
+                                            uint16_t payload_len) {
+   if (payload_len < 2 || payload_len >= AUTH_USERNAME_MAX + 1) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid cleanup payload");
+   }
+   uint8_t flags = (uint8_t)payload[0];
+   bool dry_run = (flags & ADMIN_MEM_CLEANUP_FLAG_DRY_RUN) != 0;
+
+   uint16_t uname_len = payload_len - 1;
+   if (uname_len == 0 || uname_len >= AUTH_USERNAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[AUTH_USERNAME_MAX];
+   memcpy(username, payload + 1, uname_len);
+   username[uname_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "User not found");
+   }
+
+   /* Default meta-fact pattern set.  Mixed-case variants cover historical
+    * extraction-prompt drift (the prompt has flipped between "User" and
+    * "user" leading-cap over months of edits). */
+   static const char *const k_default_patterns[] = {
+      "User asked%",     "User inquired%", "User requested%", "User wanted to know%",
+      "User looked up%", "user asked%",    "user inquired%",  "user requested%",
+   };
+   const int n_patterns = (int)(sizeof(k_default_patterns) / sizeof(k_default_patterns[0]));
+
+   int matched = 0;
+   int rc = memory_db_facts_delete_by_patterns(user.id, k_default_patterns, n_patterns, dry_run,
+                                               &matched);
+   if (rc != MEMORY_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "cleanup_meta_facts query failed");
+   }
+
+   char msg[512];
+   if (dry_run) {
+      snprintf(msg, sizeof(msg),
+               "Dry run: %d meta-fact rows match for user '%s'.\n"
+               "Patterns: User asked%%, User inquired%%, User requested%%, User wanted to "
+               "know%%, User looked up%%, plus lowercase variants.\n"
+               "Re-run without --dry-run (--confirm-delete) to delete.",
+               matched, username);
+   } else {
+      snprintf(msg, sizeof(msg), "Deleted %d meta-fact rows for user '%s'.", matched, username);
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}
+
+/* =============================================================================
+ * Memory summarize-missing — backfill summary rows for conversations whose
+ * extraction never produced one.  Mirrors the recategorize pattern: dry-run
+ * preview returns the pending count, --confirm spawns a background worker
+ * that loops over the missing-summary set, runs the canonical extraction
+ * prompt per conversation, and stores summary+topics only.
+ *
+ * Payload wire format (matches the recategorize/cleanup pattern):
+ *   Byte 0:        flags (bit 0 = ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN)
+ *   Byte 1..4:     max_count (uint32_t little-endian; 0 = unlimited)
+ *   Byte 5..:      username string (length = payload_len - 5)
+ * ============================================================================= */
+
+#define ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN 0x01
+
+static int handle_memory_summarize_missing(int client_fd,
+                                           const char *payload,
+                                           uint16_t payload_len) {
+   /* Minimum: 1 (flags) + 4 (max_count) + 1 (username char) = 6 bytes. */
+   if (payload_len < 6) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid summarize-missing payload");
+   }
+   uint8_t flags = (uint8_t)payload[0];
+   bool dry_run = (flags & ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN) != 0;
+
+   uint32_t max_count = 0;
+   memcpy(&max_count, payload + 1, sizeof(max_count));
+
+   uint16_t uname_len = payload_len - 5;
+   if (uname_len == 0 || uname_len >= AUTH_USERNAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[AUTH_USERNAME_MAX];
+   memcpy(username, payload + 5, uname_len);
+   username[uname_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "User not found");
+   }
+
+   int pending = 0;
+   if (memory_summarize_missing_count(user.id, &pending) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "Failed to count missing summaries");
+   }
+   if (pending == 0) {
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS,
+                                "No conversations missing summaries");
+   }
+
+   if (dry_run) {
+      char msg[256];
+      if (max_count > 0) {
+         snprintf(msg, sizeof(msg),
+                  "Dry run: %d conversations missing summaries for user '%s' "
+                  "(would process up to %u).  Re-run with --confirm to start.",
+                  pending, username, max_count);
+      } else {
+         snprintf(msg, sizeof(msg),
+                  "Dry run: %d conversations missing summaries for user '%s'.  "
+                  "Re-run with --confirm to start.",
+                  pending, username);
+      }
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+   }
+
+   if (memory_summarize_missing_is_running()) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Summarize-missing already running");
+   }
+
+   if (memory_summarize_missing_start(user.id, max_count) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "Failed to start summarize-missing worker");
+   }
+
+   char msg[256];
+   if (max_count > 0) {
+      snprintf(msg, sizeof(msg),
+               "Summarize-missing started for user '%s': %d pending, processing up to %u "
+               "(progress in daemon logs).",
+               username, pending, max_count);
+   } else {
+      snprintf(msg, sizeof(msg),
+               "Summarize-missing started for user '%s': %d pending "
+               "(progress in daemon logs).",
+               username, pending);
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}
+
+/* =============================================================================
  * Memory reextract — drop derived memory tables + reset extraction
  * cursors + spawn recovery worker.  See memory_db_admin.{c,h}.
  * ============================================================================= */
@@ -3260,6 +3429,14 @@ static int handle_client(int client_fd) {
 
       case ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF:
          return handle_memory_entity_link_user_self(client_fd, payload, header.payload_len);
+
+      /* Phase 6.6: Memory cleanup utilities */
+      case ADMIN_MSG_MEMORY_CLEANUP_META_FACTS:
+         return handle_memory_cleanup_meta_facts(client_fd, payload, header.payload_len);
+
+      /* Phase 6.7: Summary backfill */
+      case ADMIN_MSG_MEMORY_SUMMARIZE_MISSING:
+         return handle_memory_summarize_missing(client_fd, payload, header.payload_len);
 
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);

@@ -106,6 +106,7 @@
 #include "memory/memory_embeddings.h"
 #include "memory/memory_focus_adapters.h"
 #include "memory/memory_recategorize.h"
+#include "memory/memory_summarize_missing.h"
 #include "tools/external_focus_adapters.h"
 #ifdef ENABLE_AUTH
 #include "auth/admin_socket.h"
@@ -3841,11 +3842,26 @@ server_shutdown:
 #endif
 
 #ifdef ENABLE_AUTH
-   /* Shutdown auth subsystem in reverse initialization order */
+   /* Shutdown auth subsystem in reverse initialization order.  All memory
+    * workers stop BEFORE admin_socket_shutdown so an in-flight admin
+    * command can complete its synchronous response path, AND before
+    * auth_db_shutdown since every worker reads SQLite through s_db.
+    *
+    * Workers grouped together (recovery / recategorize / summarize-missing
+    * / reextract) — all four are admin-triggered or boot-triggered and
+    * compile under ENABLE_AUTH only; calling their _stop()s on a non-AUTH
+    * build is dead code at best.  Recompute worker is part of the same
+    * group; auth_maintenance is its own concern. */
    OLOG_INFO("Shutdown: memory_recovery_stop");
    memory_recovery_stop();
    OLOG_INFO("Shutdown: memory_embed_recompute_stop");
    memory_embed_recompute_stop();
+   OLOG_INFO("Shutdown: memory_recategorize_stop");
+   memory_recategorize_stop();
+   OLOG_INFO("Shutdown: memory_summarize_missing_stop");
+   memory_summarize_missing_stop();
+   OLOG_INFO("Shutdown: memory_db_admin_stop_reextract_worker");
+   memory_db_admin_stop_reextract_worker();
    OLOG_INFO("Shutdown: auth_maintenance_stop");
    auth_maintenance_stop();
    OLOG_INFO("Shutdown: admin_socket_shutdown");
@@ -3855,10 +3871,6 @@ server_shutdown:
    OLOG_INFO("Shutdown: auth_crypto_shutdown");
    auth_crypto_shutdown();
 #endif
-   OLOG_INFO("Shutdown: memory_recategorize_stop");
-   memory_recategorize_stop();
-   OLOG_INFO("Shutdown: memory_db_admin_stop_reextract_worker");
-   memory_db_admin_stop_reextract_worker();
    OLOG_INFO("Shutdown: memory_embeddings_cleanup");
    memory_embeddings_cleanup();
    OLOG_INFO("Shutdown: embedding_engine_cleanup");
