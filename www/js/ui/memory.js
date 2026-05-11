@@ -23,11 +23,6 @@
       summaries: [],
       entities: [],
       allEntities: [], // Keep unfiltered copy for client-side search
-      // Phase 1 entity-merge: per-canonical alias caches keyed by entity id
-      // (-> [{link_id, source_canonical_name, link_kind, composite_score, linked_at}]).
-      aliasesByEntity: {},
-      // Pending merge proposals for the user (Suggested Merges panel).
-      proposals: [],
       activeTab: 'facts',
       searchQuery: '',
       searchTimeout: null,
@@ -137,60 +132,9 @@
       });
    }
 
-   function requestMergeEntities(sourceId, targetId) {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      DawnWS.send({
-         type: 'merge_memory_entities',
-         payload: { source_id: sourceId, target_id: targetId },
-      });
-   }
-
-   /* Phase 1 entity-merge: alias + proposal API surface
-    * (handlers in webui_memory.c: handle_entity_aliases_request etc.) */
-
-   function requestEntityAliases(entityId) {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      DawnWS.send({
-         type: 'entity_aliases_request',
-         payload: { entity_id: entityId },
-      });
-   }
-
-   function requestProposalList() {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      DawnWS.send({
-         type: 'entity_merge_proposal_list_request',
-         payload: {},
-      });
-   }
-
-   function requestEntityLink(sourceId, targetId, reason) {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      DawnWS.send({
-         type: 'entity_link_request',
-         payload: {
-            source_entity_id: sourceId,
-            target_entity_id: targetId,
-            reason: reason || 'webui-operator',
-         },
-      });
-   }
-
-   function requestEntityUnlink(linkId) {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      DawnWS.send({
-         type: 'entity_unlink_request',
-         payload: { link_id: linkId, reason: 'split-by-operator' },
-      });
-   }
-
-   function requestProposalResolve(proposalId, resolution) {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      DawnWS.send({
-         type: 'entity_proposal_resolve_request',
-         payload: { proposal_id: proposalId, resolution: resolution },
-      });
-   }
+   /* Phase 1 entity-merge alias + proposal request senders live in
+    * www/js/ui/memory_aliases.js — see DawnMemoryAliases.{requestProposalList,
+    * tryHandleClick} for the public surface. */
 
    function requestSearch(query) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
@@ -292,105 +236,26 @@
       requestEntities(0);
    }
 
+   /* Phase 1 entity-merge response handlers — thin forwarders that preserve
+    * the DawnMemory.handle*Response surface dawn.js dispatches against, while
+    * the real work lives in www/js/ui/memory_aliases.js. */
    function handleMergeEntityResponse(payload) {
-      if (!payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(payload.error || 'Failed to merge entities', 'error');
-         }
-         return;
-      }
-
-      if (typeof DawnToast !== 'undefined') {
-         DawnToast.show('Entities merged', 'success');
-      }
-
-      requestStats();
-      memoryState.tabOffset.entities = 0;
-      requestEntities(0);
+      if (window.DawnMemoryAliases) DawnMemoryAliases.handleMergeResponse(payload);
    }
-
-   /* =============================================================================
-    * Phase 1 entity-merge response handlers
-    * ============================================================================= */
-
    function handleEntityAliasesResponse(payload) {
-      if (!payload || !payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(payload?.error || 'Failed to load aliases', 'error');
-         }
-         return;
-      }
-      const entityId = payload.entity_id;
-      memoryState.aliasesByEntity[entityId] = payload.aliases || [];
-      renderAliasRowsFor(entityId);
+      if (window.DawnMemoryAliases) DawnMemoryAliases.handleAliasesResponse(payload);
    }
-
    function handleEntityMergeProposalListResponse(payload) {
-      if (!payload || !payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(payload?.error || 'Failed to load merge proposals', 'error');
-         }
-         return;
-      }
-      memoryState.proposals = payload.proposals || [];
-      if (memoryState.activeTab === 'entities') {
-         renderProposalsPanel();
-      }
+      if (window.DawnMemoryAliases) DawnMemoryAliases.handleProposalListResponse(payload);
    }
-
    function handleEntityLinkResponse(payload) {
-      if (!payload || !payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(payload?.error || 'Soft-link failed', 'error');
-         }
-         return;
-      }
-      if (typeof DawnToast !== 'undefined') {
-         DawnToast.show('Soft alias created', 'success');
-      }
-      requestStats();
-      memoryState.tabOffset.entities = 0;
-      requestEntities(0);
+      if (window.DawnMemoryAliases) DawnMemoryAliases.handleLinkResponse(payload);
    }
-
    function handleEntityUnlinkResponse(payload) {
-      if (!payload || !payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(payload?.error || 'Split failed', 'error');
-         }
-         return;
-      }
-      if (typeof DawnToast !== 'undefined') {
-         DawnToast.show('Alias split', 'success');
-      }
-      // Reload entity list and proposals (split surfaces the source as a new canonical).
-      memoryState.aliasesByEntity = {};
-      requestStats();
-      memoryState.tabOffset.entities = 0;
-      requestEntities(0);
-      if (memoryState.activeTab === 'entities') {
-         requestProposalList();
-      }
+      if (window.DawnMemoryAliases) DawnMemoryAliases.handleUnlinkResponse(payload);
    }
-
    function handleEntityProposalResolveResponse(payload) {
-      if (!payload || !payload.success) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show(payload?.error || 'Resolve failed', 'error');
-         }
-         return;
-      }
-      if (typeof DawnToast !== 'undefined') {
-         const verb = payload.resolution === 'approved' ? 'approved' : 'rejected';
-         DawnToast.show('Proposal ' + verb, 'success');
-      }
-      // Refresh the proposals panel and the entity list (approve creates a new alias).
-      requestProposalList();
-      if (payload.resolution === 'approved') {
-         requestStats();
-         memoryState.tabOffset.entities = 0;
-         requestEntities(0);
-      }
+      if (window.DawnMemoryAliases) DawnMemoryAliases.handleProposalResolveResponse(payload);
    }
 
    function handleFactsResponse(payload) {
@@ -913,139 +778,21 @@
          showEmptyState(
             memoryState.searchQuery ? 'No entities found' : 'No entities discovered yet'
          );
-         renderProposalsPanel();
+         if (window.DawnMemoryAliases) DawnMemoryAliases.renderProposalsPanel();
          return;
       }
 
       const html = memoryState.entities.map((entity) => renderEntityItem(entity)).join('');
-      memoryElements.list.innerHTML = renderProposalsPanelHtml() + html;
+      memoryElements.list.innerHTML = html;
+      /* Prepend the Phase 1 Suggested-Merges panel (no-op if there are no
+       * pending proposals).  Lives in www/js/ui/memory_aliases.js. */
+      if (window.DawnMemoryAliases) DawnMemoryAliases.renderProposalsPanel();
 
       if (memoryElements.loadMoreBtn) {
          memoryElements.loadMoreBtn.classList.remove('hidden');
          memoryElements.loadMoreBtn.disabled =
             !memoryState.tabHasMore.entities || !!memoryState.searchQuery;
       }
-   }
-
-   /* =============================================================================
-    * Phase 1 entity-merge: Suggested-Merges panel
-    * ============================================================================= */
-
-   /**
-    * Composite-score band → CSS class name.  Defines the color of the
-    * confidence badge on auto-merged aliases and pending proposals.  Bands
-    * are coarse for legibility; numeric values follow MEMORY_ALIAS_AUTO /
-    * REVIEW thresholds in include/memory/memory_db_aliases.h.
-    */
-   function compositeScoreBandClass(score) {
-      if (score == null || score < 0) return 'alias-score-unknown';
-      if (score >= 0.9) return 'alias-score-high';
-      if (score >= 0.7) return 'alias-score-mid';
-      return 'alias-score-low';
-   }
-
-   function renderProposalsPanelHtml() {
-      const proposals = memoryState.proposals || [];
-      if (proposals.length === 0) return '';
-
-      const itemsHtml = proposals
-         .map((p) => {
-            const scoreClass = compositeScoreBandClass(p.composite_score);
-            const scorePct =
-               p.composite_score != null && p.composite_score >= 0
-                  ? Math.round(p.composite_score * 100) + '%'
-                  : '?';
-            return (
-               `<div class="merge-proposal" data-proposal-id="${p.proposal_id}">` +
-               `<div class="merge-proposal-body">` +
-               `<span class="alias-confidence-badge ${scoreClass}" title="composite score">` +
-               escapeHtml(scorePct) +
-               '</span>' +
-               `<span class="merge-proposal-pair">` +
-               `<span class="merge-proposal-source">${escapeHtml(p.source_canonical_name || '?')}</span>` +
-               ' <span class="entity-relation-arrow">→</span> ' +
-               `<span class="merge-proposal-target">${escapeHtml(p.target_canonical_name || '?')}</span>` +
-               '</span>' +
-               '</div>' +
-               '<div class="merge-proposal-actions">' +
-               `<button class="btn-link merge-proposal-approve" ` +
-               `data-proposal-id="${p.proposal_id}">Approve</button>` +
-               `<button class="btn-link merge-proposal-reject" ` +
-               `data-proposal-id="${p.proposal_id}">Reject</button>` +
-               '</div>' +
-               '</div>'
-            );
-         })
-         .join('');
-
-      return (
-         '<div class="merge-proposals-panel">' +
-         '<div class="merge-proposals-header">' +
-         `<span>Suggested merges (${proposals.length})</span>` +
-         '<span class="merge-proposals-hint">Approve to soft-link; reject to dismiss.</span>' +
-         '</div>' +
-         itemsHtml +
-         '</div>'
-      );
-   }
-
-   function renderProposalsPanel() {
-      if (!memoryElements.list) return;
-      // Only re-render the panel in place to avoid disturbing the entity scroll position.
-      const existing = memoryElements.list.querySelector('.merge-proposals-panel');
-      const html = renderProposalsPanelHtml();
-      if (existing) {
-         if (html) {
-            existing.outerHTML = html;
-         } else {
-            existing.remove();
-         }
-      } else if (html) {
-         memoryElements.list.insertAdjacentHTML('afterbegin', html);
-      }
-   }
-
-   /**
-    * Render alias rows for a canonical entity, replacing any existing
-    * placeholder.  Called after handleEntityAliasesResponse populates
-    * memoryState.aliasesByEntity[entityId].
-    */
-   function renderAliasRowsFor(entityId) {
-      if (!memoryElements.list) return;
-      const card = memoryElements.list.querySelector(
-         `.memory-item.entity[data-entity-id="${entityId}"]`
-      );
-      if (!card) return;
-      const slot = card.querySelector('.entity-aliases');
-      if (!slot) return;
-
-      const aliases = memoryState.aliasesByEntity[entityId] || [];
-      if (aliases.length === 0) {
-         slot.innerHTML =
-            '<div class="entity-aliases-empty">No aliases linked to this entity.</div>';
-         return;
-      }
-      slot.innerHTML = aliases
-         .map((a) => {
-            const scoreClass = compositeScoreBandClass(a.composite_score);
-            const scorePct =
-               a.composite_score != null && a.composite_score >= 0
-                  ? Math.round(a.composite_score * 100) + '%'
-                  : '—';
-            const linkKind = a.link_kind || 'soft';
-            return (
-               `<div class="entity-alias-row" data-link-id="${a.link_id}">` +
-               `<span class="alias-confidence-badge ${scoreClass}" ` +
-               `title="composite score / link kind: ${escapeHtml(linkKind)}">` +
-               escapeHtml(scorePct) +
-               '</span>' +
-               `<span class="entity-alias-name">${escapeHtml(a.source_canonical_name || '?')}</span>` +
-               `<button class="btn-link entity-alias-split" data-link-id="${a.link_id}" ` +
-               `title="Split this alias back into a separate entity">Split</button>` +
-               '</div>'
-            );
-         })
-         .join('');
    }
 
    function renderEntityItem(entity) {
@@ -1169,6 +916,18 @@
    }
 
    function handleListClick(e) {
+      /* Phase 1 entity-merge dispatch — runs FIRST so that:
+       *   (a) when merge mode is active, a click on any non-source entity
+       *       card lands as the target even on its relation-target /
+       *       +N-more / contact-badge / merge-button children;
+       *   (b) clicks on alias affordances (merge-btn, alias-badge,
+       *       split, proposal approve/reject) get caught regardless of
+       *       what they're nested inside.
+       * Lives in www/js/ui/memory_aliases.js. */
+      if (window.DawnMemoryAliases && DawnMemoryAliases.tryHandleClick(e)) {
+         return;
+      }
+
       // Handle relation target clicks (scroll to entity)
       const relTarget = e.target.closest('.entity-relation-target');
       if (relTarget) {
@@ -1202,72 +961,6 @@
             DawnContacts.filterByEntity(entityId, entityName);
          }
          return;
-      }
-
-      // Handle merge button click — enter/cancel merge mode
-      const mergeBtn = e.target.closest('.entity-merge-btn');
-      if (mergeBtn) {
-         e.stopPropagation();
-         const sourceId = parseInt(mergeBtn.dataset.mergeEntityId, 10);
-         showMergeEntityPicker(sourceId);
-         return;
-      }
-
-      // Phase 1 entity-merge: alias-badge toggle on canonical card
-      const aliasToggle = e.target.closest('.entity-alias-badge');
-      if (aliasToggle) {
-         e.stopPropagation();
-         const entityId = parseInt(aliasToggle.dataset.aliasToggleId, 10);
-         toggleAliasPanel(entityId, aliasToggle);
-         return;
-      }
-
-      // Phase 1 entity-merge: split button on individual alias row
-      const splitBtn = e.target.closest('.entity-alias-split');
-      if (splitBtn) {
-         e.stopPropagation();
-         const linkId = parseInt(splitBtn.dataset.linkId, 10);
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal('Split this alias?', () => requestEntityUnlink(linkId), {
-               detail:
-                  'The alias will be unlinked and surface again as its own entity. ' +
-                  'You can re-link later via the merge button.',
-               danger: false,
-               okText: 'Split',
-            });
-         } else {
-            requestEntityUnlink(linkId);
-         }
-         return;
-      }
-
-      // Phase 1 entity-merge: proposal approve / reject
-      const approveBtn = e.target.closest('.merge-proposal-approve');
-      if (approveBtn) {
-         e.stopPropagation();
-         const proposalId = parseInt(approveBtn.dataset.proposalId, 10);
-         requestProposalResolve(proposalId, 'approved');
-         return;
-      }
-      const rejectBtn = e.target.closest('.merge-proposal-reject');
-      if (rejectBtn) {
-         e.stopPropagation();
-         const proposalId = parseInt(rejectBtn.dataset.proposalId, 10);
-         requestProposalResolve(proposalId, 'rejected');
-         return;
-      }
-
-      // If in merge mode, clicking an entity selects it as target
-      if (mergeSourceId) {
-         const entityEl = e.target.closest('.memory-item.entity');
-         if (entityEl) {
-            e.stopPropagation();
-            const targetId = parseInt(entityEl.dataset.entityId, 10);
-            if (targetId && targetId !== mergeSourceId) {
-               handleMergeTargetClick(targetId);
-            }
-            return;
-         }
       }
 
       // "show source" button
@@ -1350,110 +1043,6 @@
       }
    }
 
-   let mergeSourceId = null;
-
-   function showMergeEntityPicker(sourceId) {
-      const source = memoryState.allEntities.find((e) => e.id === sourceId);
-      if (!source) return;
-
-      if (memoryState.allEntities.length < 2) {
-         if (typeof DawnToast !== 'undefined') {
-            DawnToast.show('No other entities to merge with', 'info');
-         }
-         return;
-      }
-
-      // If clicking the same merge button again, cancel merge mode
-      if (mergeSourceId === sourceId) {
-         cancelMergeMode();
-         return;
-      }
-
-      // Enter merge mode: highlight source, wait for target click
-      mergeSourceId = sourceId;
-      if (memoryElements.list) {
-         // Add merge-source class to highlight
-         const sourceEl = memoryElements.list.querySelector(
-            `.memory-item.entity[data-entity-id="${sourceId}"]`
-         );
-         if (sourceEl) sourceEl.classList.add('merge-source');
-         // Add merge-mode to list so other entities show merge-target cursor
-         memoryElements.list.classList.add('merge-mode');
-      }
-      if (typeof DawnToast !== 'undefined') {
-         DawnToast.show(
-            `Select target entity to merge "${source.name}" into, or click merge again to cancel`,
-            'info'
-         );
-      }
-   }
-
-   function cancelMergeMode() {
-      if (memoryElements.list) {
-         memoryElements.list.classList.remove('merge-mode');
-         const sourceEl = memoryElements.list.querySelector('.merge-source');
-         if (sourceEl) sourceEl.classList.remove('merge-source');
-      }
-      mergeSourceId = null;
-   }
-
-   function handleMergeTargetClick(targetId) {
-      if (!mergeSourceId || mergeSourceId === targetId) return;
-
-      const source = memoryState.allEntities.find((e) => e.id === mergeSourceId);
-      const target = memoryState.allEntities.find((e) => e.id === targetId);
-      if (!source || !target) return;
-
-      const sid = mergeSourceId;
-      cancelMergeMode();
-
-      if (callbacks.showConfirmModal) {
-         callbacks.showConfirmModal(
-            `Soft-link "${source.name}" → "${target.name}"?`,
-            () => {
-               // Phase 1 entity-merge: WebUI two-click defaults to soft alias.
-               requestEntityLink(sid, targetId, 'webui-operator');
-            },
-            {
-               detail:
-                  `"${source.name}" will be marked as a soft alias of "${target.name}". ` +
-                  'Both rows are preserved and the link is reversible — you can split it ' +
-                  'later from the alias panel. Use "dawn-admin memory entity consolidate" ' +
-                  'to make a soft link permanent.',
-               danger: false,
-               okText: 'Soft-link',
-            }
-         );
-      } else {
-         requestEntityLink(sid, targetId, 'webui-operator');
-      }
-   }
-
-   /**
-    * Toggle a canonical entity's alias-expand panel.  Lazy-loads alias rows
-    * on first expand by firing entity_aliases_request; reuses the cached
-    * response on subsequent toggles.
-    */
-   function toggleAliasPanel(entityId, toggleBtn) {
-      if (!memoryElements.list) return;
-      const slot = memoryElements.list.querySelector(`[data-aliases-for="${entityId}"]`);
-      if (!slot) return;
-      const isHidden = slot.hasAttribute('hidden');
-      if (isHidden) {
-         slot.removeAttribute('hidden');
-         if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
-         if (memoryState.aliasesByEntity[entityId]) {
-            renderAliasRowsFor(entityId);
-         } else {
-            slot.innerHTML = '<div class="entity-aliases-loading">Loading…</div>';
-            requestEntityAliases(entityId);
-         }
-      } else {
-         slot.setAttribute('hidden', '');
-         if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'false');
-      }
-   }
-
    function scrollToEntity(entityId) {
       if (!memoryElements.list) return;
       const el = memoryElements.list.querySelector(
@@ -1504,7 +1093,7 @@
    function close() {
       if (!memoryElements.popover) return;
 
-      cancelMergeMode();
+      if (window.DawnMemoryAliases) DawnMemoryAliases.cancelMergeMode();
       memoryElements.popover.classList.add('hidden');
       memoryElements.btn.classList.remove('active');
 
@@ -1575,7 +1164,7 @@
    function switchTab(tabName) {
       if (memoryState.activeTab === tabName) return;
 
-      cancelMergeMode();
+      if (window.DawnMemoryAliases) DawnMemoryAliases.cancelMergeMode();
       memoryState.activeTab = tabName;
 
       // Update tab buttons
@@ -1628,10 +1217,10 @@
             requestSummaries(0);
             break;
          case 'entities':
-            // Reset alias caches; refresh both entity list and proposal queue.
-            memoryState.aliasesByEntity = {};
+            /* Refresh both entity list and proposal queue.  Alias cache reset
+             * is owned by DawnMemoryAliases (memory_aliases.js). */
             requestEntities(0);
-            requestProposalList();
+            if (window.DawnMemoryAliases) DawnMemoryAliases.requestProposalList();
             break;
          case 'contacts':
             if (typeof DawnContacts !== 'undefined') DawnContacts.loadContacts();
@@ -2259,6 +1848,24 @@
       if (!memoryElements.btn || !memoryElements.popover) {
          console.warn('DawnMemory: Required elements not found');
          return;
+      }
+
+      /* Phase 1 entity-merge UI: hand the alias module shared refs.
+       * onEntitiesChanged is the canonical post-mutation refresh path
+       * (re-pull stats + first entity page). */
+      if (window.DawnMemoryAliases) {
+         DawnMemoryAliases.init({
+            memoryState: memoryState,
+            memoryElements: memoryElements,
+            callbacks: callbacks,
+            escapeHtml: escapeHtml,
+            isEntitiesTabActive: () => memoryState.activeTab === 'entities',
+            onEntitiesChanged: () => {
+               requestStats();
+               memoryState.tabOffset.entities = 0;
+               requestEntities(0);
+            },
+         });
       }
 
       // Set up event delegation for delete buttons (single listener)

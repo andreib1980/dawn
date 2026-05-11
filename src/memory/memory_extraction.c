@@ -42,6 +42,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_filter.h"
@@ -795,6 +796,49 @@ static void process_extraction_response(int user_id,
          /* Embed only newly created entities */
          if (was_created && memory_embeddings_available()) {
             memory_embeddings_embed_and_store_entity(eid, user_id, ent_name);
+         }
+
+         /* Phase 2 entity-merge: auto-merge gate.  Runs only on freshly-
+          * created entities — the resolver cascade is the candidate for
+          * detecting that a new surface form (e.g. "Kris") is actually a
+          * variant of an existing canonical (e.g. "Kristopher Kersey").
+          * Composite ≥ MEMORY_ALIAS_AUTO_THRESHOLD (0.90) soft-links;
+          * composite ≥ MEMORY_ALIAS_REVIEW_THRESHOLD (0.70) queues a
+          * proposal for operator review; below 0.70 the entity stays as
+          * its own canonical.  Conservative thresholds first-ship —
+          * calibrate against the dev corpus before loosening.  Existing-
+          * entity merges (the new graph state may push an older entity
+          * past the threshold) happen via the offline propose-merges
+          * sweep or the WebUI operator path, not here. */
+         if (was_created) {
+            memory_alias_evaluate_t eval = { 0 };
+            int merge_rc = memory_db_entity_consider_auto_merge(user_id, eid, &eval);
+            if (merge_rc == MEMORY_DB_SUCCESS) {
+               if (eval.outcome == MEMORY_ALIAS_OUTCOME_AUTO_MERGED) {
+                  OLOG_INFO("memory_extraction: alias auto-merged %ld → %ld (composite=%.2f)",
+                            (long)eid, (long)eval.target_entity_id,
+                            (double)eval.evidence.composite_score);
+                  /* Use the canonical id for downstream relation FKs so
+                   * relations attach to the canonical row directly.  The
+                   * alias row still exists with canonical_id pointing at
+                   * target_entity_id; existing queries that JOIN through
+                   * canonical_id continue to work either way. */
+                  eid = eval.target_entity_id;
+               } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_PROPOSED) {
+                  OLOG_INFO("memory_extraction: alias proposed %ld → %ld (composite=%.2f)",
+                            (long)eid, (long)eval.target_entity_id,
+                            (double)eval.evidence.composite_score);
+               }
+               /* REJECTED and NO_CANDIDATES outcomes are silent — the
+                * entity stays as its own canonical. */
+            } else if (merge_rc != MEMORY_DB_NOT_FOUND) {
+               /* NOT_FOUND can happen if the entity was deleted between
+                * upsert and resolve; treat as a non-error skip.  Other
+                * failures are unexpected — log so operators can spot a
+                * resolver-side regression. */
+               OLOG_WARNING("memory_extraction: consider_auto_merge failed for entity %ld",
+                            (long)eid);
+            }
          }
 
          /* Add to local map */
