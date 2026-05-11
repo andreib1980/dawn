@@ -309,8 +309,31 @@ int focus_compose(int user_id,
       OLOG_DEBUG("focus_source: adapter '%s' returned %d candidates (cap=%d)", a->source_id,
                  adapter_count, per_source_max_candidates);
 
-      /* Filter-on-retrieval (UNCONDITIONAL — even if adapter pre-filtered)
-       * + defensive cap on per-source survivor count. */
+      /* Filter-on-retrieval — gated by source trust tier (see
+       * focus_source.h trust-model comment).  Three-way classification:
+       *
+       *   INTERNAL     (memory facts/entities/relations/summaries):
+       *                already filtered at extraction-time ingestion
+       *                (memory_extraction.c, memory_callback.c::remember,
+       *                llm_silent_observe.c, webui_memory.c import paths).
+       *                Re-filtering here is wasted work AND would
+       *                false-positive on LLM-paraphrased technical
+       *                vocabulary that survived extraction's filter.
+       *
+       *   EXTERNAL     (document chunks, calendar events): user-trusted —
+       *                user uploaded the doc / authenticated the calendar
+       *                account.  Their own content can mention "api key"
+       *                or "system prompt" without being an injection
+       *                attempt.  Pre-fix: 4-6 false rejections per turn
+       *                on innocent uploaded docs.
+       *
+       *   USER_CONTENT (email body, future inbound feeds): attacker can
+       *                send the user email — this IS the threat model
+       *                the filter exists for.  No-op today (no adapter
+       *                wired) but the gate stays armed.
+       *
+       * Defensive cap on per-source survivor count applies regardless. */
+      const bool filter_this_source = (a->source_type == FOCUS_SOURCE_USER_CONTENT);
       int survived = 0;
       const int survive_cap = per_source_max_candidates;
       for (int i = 0; i < adapter_count; i++) {
@@ -323,7 +346,7 @@ int focus_compose(int user_id,
             continue;
          }
 
-         if (memory_filter_check(c->text)) {
+         if (filter_this_source && memory_filter_check(c->text)) {
             /* Counter only — never log the offending text. */
             rejection_bump(out_result, a->source_id);
             candidate_release(c);

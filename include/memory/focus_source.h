@@ -301,7 +301,15 @@ int focus_register_source(const focus_source_adapter_t *adapter);
  *        - Skip if `requires_embedding && query_embedding == NULL`.
  *        - Call adapter with all positional parameters.
  *        - Reject candidates whose text matches the memory injection
- *          filter (unconditional — adapter pre-filtering is best-effort).
+ *          filter — gated by source trust tier.  INTERNAL items are
+ *          filtered at extraction-time ingestion (see memory_filter.h
+ *          call sites in memory_extraction.c / memory_callback.c /
+ *          llm_silent_observe.c / webui_memory.c).  EXTERNAL items
+ *          are user-trusted (uploaded docs / authenticated calendar
+ *          accounts) — filtering at retrieval would false-positive on
+ *          the user's own content.  Only USER_CONTENT (potentially-
+ *          attacker-controlled inbound feeds like email body) passes
+ *          through the retrieval-time filter check.
  *        - Defensively cap survivors per adapter at `per_source_max_candidates`.
  *   2. Rank survivors by `final_score = w_sem*sem + w_rec*rec +
  *      w_imp*imp + w_src*source_weight(source_id)`.  Sort descending;
