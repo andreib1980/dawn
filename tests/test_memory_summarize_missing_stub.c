@@ -102,6 +102,13 @@ int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
    return AUTH_DB_FAILURE;
 }
 
+int conv_db_get_created_at(int64_t conv_id, int64_t *created_at_out) {
+   (void)conv_id;
+   if (created_at_out)
+      *created_at_out = 0; /* worker treats 0 as "no override", uses NOW() */
+   return AUTH_DB_NOT_FOUND;
+}
+
 int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
    (void)conv_id;
    (void)user_id;
@@ -110,16 +117,17 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
    return AUTH_DB_FAILURE;
 }
 
-/* memory_db_summary_create — abort, worker storage path. */
-int memory_db_summary_create(int user_id,
-                             const char *session_id,
-                             const char *summary,
-                             const char *topics,
-                             const char *sentiment,
-                             int message_count,
-                             int duration_seconds,
-                             const memory_provenance_t *prov,
-                             int64_t *id_out) {
+/* memory_db_summary_create_at — abort, worker storage path. */
+int memory_db_summary_create_at(int user_id,
+                                const char *session_id,
+                                const char *summary,
+                                const char *topics,
+                                const char *sentiment,
+                                int message_count,
+                                int duration_seconds,
+                                const memory_provenance_t *prov,
+                                int64_t created_at_override,
+                                int64_t *id_out) {
    (void)user_id;
    (void)session_id;
    (void)summary;
@@ -128,8 +136,23 @@ int memory_db_summary_create(int user_id,
    (void)message_count;
    (void)duration_seconds;
    (void)prov;
+   (void)created_at_override;
    (void)id_out;
-   fprintf(stderr, "memory_db_summary_create stub invoked\n");
+   fprintf(stderr, "memory_db_summary_create_at stub invoked\n");
+   abort();
+}
+
+/* memory_embeddings_embed_and_store_summary — abort.  Live extraction +
+ * summarize-missing both call this post-create; the count-only test
+ * paths never exercise the store path so this should never fire.  If it
+ * does, the test is exercising an unexpected branch. */
+int memory_embeddings_embed_and_store_summary(int user_id,
+                                              int64_t summary_id,
+                                              const char *summary_text) {
+   (void)user_id;
+   (void)summary_id;
+   (void)summary_text;
+   fprintf(stderr, "memory_embeddings_embed_and_store_summary stub invoked\n");
    abort();
 }
 

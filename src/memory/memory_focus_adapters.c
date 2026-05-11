@@ -52,6 +52,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/focus_candidate_helpers.h"
@@ -839,14 +840,23 @@ static int summary_adapter_query(int user_id,
    }
 
    /* Semantic path — only runs when caller supplied an embedded query.
-    * Failure is non-fatal: warn and fall back to keyword-only results. */
+    * Failure is non-fatal: warn and fall back to keyword-only results.
+    *
+    * summary_max_scan: cosine ranking pre-filter cap.  Original
+    * hardcoded 256 broke when a full reextract clustered every summary's
+    * created_at into a narrow window and the
+    * ORDER BY created_at DESC LIMIT 256 in the scan SQL chopped off
+    * oldest-extracted rows.  Now config-driven (default 4096); operators
+    * can bump above 4096 if their corpus grows past that. */
    memory_summary_t sem_summaries[10];
    float sem_scores[10] = { 0 };
    int sem_n = 0;
    if (query_embedding != NULL && embed_dim > 0) {
+      const int scan_cap = (g_config.memory.focus_injection.summary_max_scan > 0)
+                               ? g_config.memory.focus_injection.summary_max_scan
+                               : MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
       int rc = memory_db_summary_search_semantic(user_id, query_embedding, (int)embed_dim, since_ts,
-                                                 cap, /* max_scan */ 256, sem_summaries, sem_scores,
-                                                 &sem_n);
+                                                 cap, scan_cap, sem_summaries, sem_scores, &sem_n);
       if (rc != MEMORY_DB_SUCCESS) {
          OLOG_WARNING("summary_adapter: semantic search failed for user %d; keyword-only this turn",
                       user_id);

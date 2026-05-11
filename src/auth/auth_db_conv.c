@@ -839,6 +839,38 @@ int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
    return AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_get_created_at(int64_t conv_id, int64_t *created_at_out) {
+   if (conv_id <= 0 || !created_at_out) {
+      return AUTH_DB_FAILURE;
+   }
+
+   *created_at_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   const char *sql = "SELECT created_at FROM conversations WHERE id = ?";
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   sqlite3_bind_int64(stmt, 1, conv_id);
+
+   rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *created_at_out = sqlite3_column_int64(stmt, 0);
+      sqlite3_finalize(stmt);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_SUCCESS;
+   }
+
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_NOT_FOUND;
+}
+
 int conv_db_force_anchor_date_unsafe(int64_t conv_id, int user_id, int64_t anchor) {
    if (conv_id <= 0 || user_id <= 0 || anchor < 0) {
       return AUTH_DB_FAILURE;

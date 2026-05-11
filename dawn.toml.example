@@ -480,6 +480,17 @@
                                       # at 8 facts filled every slot and starved
                                       # summaries/entities/relations from
                                       # surfacing per turn.
+# summary_max_scan = 4096              # Rows the semantic summary adapter
+                                      # inspects per turn before the cosine
+                                      # ranking heap.  Range: 256 - 16384.
+                                      # Original 256 broke when a full
+                                      # `dawn-admin memory reextract`
+                                      # clustered every summary's created_at
+                                      # into a narrow window — recency-
+                                      # ordered LIMIT dropped the oldest-
+                                      # extracted rows.  Bump above 4096
+                                      # only if your corpus crosses that
+                                      # threshold and you observe drops.
 # min_score = 0.4                     # Floor — anything below is dropped.
                                       # Range: 0.0 - 1.0
 # classifier_enabled = false          # RAGRoute-style source classifier

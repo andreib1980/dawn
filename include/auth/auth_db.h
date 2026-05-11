@@ -1267,6 +1267,23 @@ int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
 int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out);
 
 /**
+ * @brief Fetch the conversation's created_at timestamp.
+ *
+ * Used by memory extraction to time-stamp derived records (facts,
+ * summaries) with the source conversation's creation time rather than
+ * "now".  This keeps the natural temporal spread that recency-based
+ * retrieval relies on intact across a full `dawn-admin memory reextract`
+ * — otherwise every record in the corpus collapses into the reextract
+ * window and recency-ordered LIMITs / weight_recency tiebreaks all
+ * degenerate.
+ *
+ * @param conv_id Conversation ID
+ * @param created_at_out Output: epoch seconds; 0 if conv has no created_at
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int conv_db_get_created_at(int64_t conv_id, int64_t *created_at_out);
+
+/**
  * @brief Force-set the conversation's anchor date (v42; bench-only, unsafe)
  *
  * Production must NEVER call this — anchor_date is populated once at insert

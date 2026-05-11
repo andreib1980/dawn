@@ -482,6 +482,27 @@ static void process_extraction_response(int user_id,
       memory_embeddings_warm_cache(user_id);
    }
 
+   /* Look up the source conversation's created_at ONCE so every fact /
+    * summary inserted below inherits the conv's actual creation time
+    * rather than `now`.  Without this, a full `dawn-admin memory
+    * reextract` collapses every record's created_at into the reextract
+    * window, breaking recency-ordered LIMITs (semantic scan, keyword
+    * search_since) and weight_recency tiebreaks downstream.  0 = caller
+    * didn't supply a conv (e.g. legacy session_id-only path) — the
+    * downstream _at variants treat 0 as "use NOW()" and behave like the
+    * old API.  NOT_FOUND is silent (conv deleted mid-extraction, or
+    * legacy row pre-dating the column); FAILURE surfaces because it
+    * usually signals a real DB issue worth investigating. */
+   int64_t conv_created_at = 0;
+   if (conversation_id > 0) {
+      int lookup_rc = conv_db_get_created_at(conversation_id, &conv_created_at);
+      if (lookup_rc != AUTH_DB_SUCCESS && lookup_rc != AUTH_DB_NOT_FOUND) {
+         OLOG_WARNING("memory_extraction: conv_db_get_created_at failed for conv %lld (rc=%d) — "
+                      "facts/summaries will use NOW() instead of conv time",
+                      (long long)conversation_id, lookup_rc);
+      }
+   }
+
    /* Extract JSON from response (handles markdown blocks, preamble text, etc.) */
    struct json_object *root = memory_extraction_parse_json(response_text);
    if (!root) {
@@ -587,8 +608,8 @@ static void process_extraction_response(int user_id,
                   }
                   /* No paraphrase — create + store + cache-append. */
                   int64_t fact_id = 0;
-                  memory_db_fact_create(user_id, text, confidence, source, category, prov,
-                                        &fact_id);
+                  memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
+                                           conv_created_at, &fact_id);
                   OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
                   if (fact_id > 0) {
                      memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
@@ -618,8 +639,8 @@ static void process_extraction_response(int user_id,
 
                if (similar_count == 0) {
                   int64_t fact_id = 0;
-                  memory_db_fact_create(user_id, text, confidence, source, category, prov,
-                                        &fact_id);
+                  memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
+                                           conv_created_at, &fact_id);
                   OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
                   if (fact_id > 0 && memory_embeddings_available()) {
                      memory_embeddings_embed_and_store(user_id, fact_id, text);
@@ -706,7 +727,8 @@ static void process_extraction_response(int user_id,
             if (similar_count > 0) {
                /* Create new fact and supersede old one */
                int64_t new_id = 0;
-               memory_db_fact_create(user_id, new_fact, 0.9f, "explicit", NULL, prov, &new_id);
+               memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", NULL, prov,
+                                        conv_created_at, &new_id);
                if (new_id > 0) {
                   memory_db_fact_supersede(similar[0].id, new_id);
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
@@ -940,8 +962,9 @@ static void process_extraction_response(int user_id,
          OLOG_WARNING("memory_extraction: blocked injection in summary");
       } else {
          int64_t summary_id = 0;
-         int crc = memory_db_summary_create(user_id, session_id, summary, topics, "neutral",
-                                            message_count, duration_seconds, prov, &summary_id);
+         int crc = memory_db_summary_create_at(user_id, session_id, summary, topics, "neutral",
+                                               message_count, duration_seconds, prov,
+                                               conv_created_at, &summary_id);
          if (crc == MEMORY_DB_SUCCESS && summary_id > 0) {
             /* Embed-at-create so the semantic summary adapter sees this
              * row immediately.  Failure is silent — the recompute worker

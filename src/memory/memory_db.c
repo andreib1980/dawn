@@ -209,13 +209,14 @@ static void populate_summary_from_row(sqlite3_stmt *stmt, memory_summary_t *summ
  * Fact Operations
  * ============================================================================= */
 
-int memory_db_fact_create(int user_id,
-                          const char *fact_text,
-                          float confidence,
-                          const char *source,
-                          const char *category,
-                          const memory_provenance_t *prov,
-                          int64_t *id_out) {
+int memory_db_fact_create_at(int user_id,
+                             const char *fact_text,
+                             float confidence,
+                             const char *source,
+                             const char *category,
+                             const memory_provenance_t *prov,
+                             int64_t created_at_override,
+                             int64_t *id_out) {
    if (id_out)
       *id_out = 0;
    if (!fact_text || !source) {
@@ -226,6 +227,12 @@ int memory_db_fact_create(int user_id,
     * but we explicitly bind to keep the SQL pure (no default-fallback ambiguity
     * across SQLite versions). */
    const char *cat = (category && *category) ? category : "general";
+
+   /* 0 sentinel = "use NOW()".  Callers that want extraction-time temporal
+    * fidelity pass the source conversation's created_at; everyone else gets
+    * the legacy time(NULL) behavior.  int64_t matches anchor_date /
+    * valid_from / on-disk SQLite column type for consistency. */
+   const int64_t created_at = (created_at_override > 0) ? created_at_override : (int64_t)time(NULL);
 
    /* Compute normalized hash for deduplication */
    uint32_t normalized_hash = memory_normalize_and_hash(fact_text);
@@ -239,7 +246,7 @@ int memory_db_fact_create(int user_id,
    sqlite3_bind_double(stmt, 3, confidence);
    sqlite3_bind_text(stmt, 4, source, -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 5, cat, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 6, (int64_t)time(NULL));
+   sqlite3_bind_int64(stmt, 6, created_at);
    sqlite3_bind_int64(stmt, 7, (int64_t)normalized_hash);
    bind_provenance(stmt, 8, prov);
 
@@ -261,6 +268,17 @@ int memory_db_fact_create(int user_id,
    OLOG_INFO("memory_db: created fact %ld for user %d (hash=%u, category=%s)", (long)id, user_id,
              normalized_hash, cat);
    return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_fact_create(int user_id,
+                          const char *fact_text,
+                          float confidence,
+                          const char *source,
+                          const char *category,
+                          const memory_provenance_t *prov,
+                          int64_t *id_out) {
+   return memory_db_fact_create_at(user_id, fact_text, confidence, source, category, prov,
+                                   /*created_at_override*/ 0, id_out);
 }
 
 /* Category-filtered keyword search.  Pre-filters at the SQL level so the embedding
@@ -1091,20 +1109,24 @@ int memory_db_pref_delete(int user_id, const char *category) {
  * Summary Operations
  * ============================================================================= */
 
-int memory_db_summary_create(int user_id,
-                             const char *session_id,
-                             const char *summary,
-                             const char *topics,
-                             const char *sentiment,
-                             int message_count,
-                             int duration_seconds,
-                             const memory_provenance_t *prov,
-                             int64_t *id_out) {
+int memory_db_summary_create_at(int user_id,
+                                const char *session_id,
+                                const char *summary,
+                                const char *topics,
+                                const char *sentiment,
+                                int message_count,
+                                int duration_seconds,
+                                const memory_provenance_t *prov,
+                                int64_t created_at_override,
+                                int64_t *id_out) {
    if (id_out)
       *id_out = 0;
    if (!session_id || !summary) {
       return MEMORY_DB_FAILURE;
    }
+
+   /* 0 sentinel = "use NOW()".  See memory_db_fact_create_at comment. */
+   const int64_t created_at = (created_at_override > 0) ? created_at_override : (int64_t)time(NULL);
 
    AUTH_DB_LOCK_OR_FAIL();
 
@@ -1115,7 +1137,7 @@ int memory_db_summary_create(int user_id,
    sqlite3_bind_text(stmt, 3, summary, -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 4, topics ? topics : "", -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 5, sentiment ? sentiment : "neutral", -1, SQLITE_STATIC);
-   sqlite3_bind_int64(stmt, 6, (int64_t)time(NULL));
+   sqlite3_bind_int64(stmt, 6, created_at);
    sqlite3_bind_int(stmt, 7, message_count);
    sqlite3_bind_int(stmt, 8, duration_seconds);
    bind_provenance(stmt, 9, prov);
@@ -1137,6 +1159,20 @@ int memory_db_summary_create(int user_id,
 
    OLOG_INFO("memory_db: created summary %ld for user %d", (long)id, user_id);
    return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_summary_create(int user_id,
+                             const char *session_id,
+                             const char *summary,
+                             const char *topics,
+                             const char *sentiment,
+                             int message_count,
+                             int duration_seconds,
+                             const memory_provenance_t *prov,
+                             int64_t *id_out) {
+   return memory_db_summary_create_at(user_id, session_id, summary, topics, sentiment,
+                                      message_count, duration_seconds, prov,
+                                      /*created_at_override*/ 0, id_out);
 }
 
 int memory_db_summary_list(int user_id,
@@ -1331,7 +1367,7 @@ int memory_db_summary_search_semantic(int user_id,
        user_id <= 0)
       return MEMORY_DB_FAILURE;
    if (max_scan <= 0)
-      max_scan = 256;
+      max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    if (max_summaries > MEMORY_SUMMARY_SEMANTIC_TOPK_CAP)
       max_summaries = MEMORY_SUMMARY_SEMANTIC_TOPK_CAP;
 

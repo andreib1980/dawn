@@ -453,7 +453,11 @@ typedef struct {
                                Agents / CrewAI three-factor formula */
    float weight_recency;
    float weight_importance;
-   float weight_source; /* Multiplier on per-source weights below */
+   float weight_source;  /* Multiplier on per-source weights below */
+   int summary_max_scan; /* Rows the semantic summary adapter inspects
+                            per turn before the cosine ranking heap.
+                            Bump above 4096 only if a user's corpus
+                            grows past that and the cliff causes drops. */
    focus_source_weights_t source_weights;
    focus_dedup_config_t dedup;
 } focus_injection_config_t;

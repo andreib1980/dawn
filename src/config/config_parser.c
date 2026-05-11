@@ -1249,6 +1249,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       static const char *const focus_keys[] = { "enabled",
                                                 "focus_budget_tokens",
                                                 "top_k",
+                                                "summary_max_scan",
                                                 "min_score",
                                                 "classifier_enabled",
                                                 "weight_semantic",
@@ -1264,6 +1265,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_BOOL(focus, "enabled", fi->enabled);
       PARSE_INT(focus, "focus_budget_tokens", fi->focus_budget_tokens);
       PARSE_INT(focus, "top_k", fi->top_k);
+      PARSE_INT(focus, "summary_max_scan", fi->summary_max_scan);
       PARSE_DOUBLE(focus, "min_score", fi->min_score);
       PARSE_BOOL(focus, "classifier_enabled", fi->classifier_enabled);
       PARSE_DOUBLE(focus, "weight_semantic", fi->weight_semantic);

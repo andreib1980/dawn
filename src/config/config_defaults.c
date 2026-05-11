@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "memory/memory_db.h"
 
 /* =============================================================================
  * Global Configuration Instances
@@ -329,6 +330,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.top_k = 12;
    config->memory.focus_injection.min_score = 0.4f;
    config->memory.focus_injection.classifier_enabled = false;
+   config->memory.focus_injection.summary_max_scan = MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT;
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
     * Probe Component 6 fix-rate lifted 7/11 → 11/11 across all three
     * providers (anthropic / openai / local) on the v2 fixtures.  See

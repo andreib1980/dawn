@@ -1377,6 +1377,7 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(focus, "focus_budget_tokens",
                              json_object_new_int(fi->focus_budget_tokens));
       json_object_object_add(focus, "top_k", json_object_new_int(fi->top_k));
+      json_object_object_add(focus, "summary_max_scan", json_object_new_int(fi->summary_max_scan));
       json_object_object_add(focus, "min_score", json_object_new_double(fi->min_score));
       json_object_object_add(focus, "classifier_enabled",
                              json_object_new_boolean(fi->classifier_enabled));
@@ -2000,6 +2001,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "enabled = %s\n", fi->enabled ? "true" : "false");
       fprintf(fp, "focus_budget_tokens = %d\n", fi->focus_budget_tokens);
       fprintf(fp, "top_k = %d\n", fi->top_k);
+      fprintf(fp, "summary_max_scan = %d\n", fi->summary_max_scan);
       fprintf(fp, "min_score = %.2f\n", fi->min_score);
       fprintf(fp, "classifier_enabled = %s\n", fi->classifier_enabled ? "true" : "false");
       fprintf(fp, "weight_semantic = %.2f\n", fi->weight_semantic);

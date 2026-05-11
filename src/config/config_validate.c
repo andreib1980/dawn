@@ -167,6 +167,8 @@ int config_validate(const dawn_config_t *config,
    VALIDATE_RANGE_INT("memory.focus_injection.focus_budget_tokens",
                       config->memory.focus_injection.focus_budget_tokens, 256, 4096);
    VALIDATE_RANGE_INT("memory.focus_injection.top_k", config->memory.focus_injection.top_k, 1, 64);
+   VALIDATE_RANGE_INT("memory.focus_injection.summary_max_scan",
+                      config->memory.focus_injection.summary_max_scan, 256, 16384);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.min_score",
                         config->memory.focus_injection.min_score, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_semantic",

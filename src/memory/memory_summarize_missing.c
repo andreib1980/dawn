@@ -291,10 +291,26 @@ static int store_summary_only(int user_id,
       prov.msg_id_end = max_msg_id;
    }
 
+   /* Inherit the conversation's created_at so backfilled summaries land at
+    * the conv's actual time, not the worker run time.  Keeps recency-based
+    * retrieval signals correct after a backfill pass.  NOT_FOUND is silent
+    * (the eligibility query already requires the conv exists; a race with
+    * deletion is acceptable); FAILURE surfaces because it usually signals
+    * a real DB issue worth investigating. */
+   int64_t conv_created_at = 0;
+   int lookup_rc = conv_db_get_created_at(conv_id, &conv_created_at);
+   if (lookup_rc != AUTH_DB_SUCCESS && lookup_rc != AUTH_DB_NOT_FOUND) {
+      OLOG_WARNING(
+          "memory_summarize_missing: conv_db_get_created_at failed for conv %lld (rc=%d) — "
+          "summary will use NOW() instead of conv time",
+          (long long)conv_id, lookup_rc);
+   }
+
    int64_t summary_id = 0;
-   int rc = memory_db_summary_create(user_id, session_id, summary, topics, "neutral", message_count,
-                                     duration_seconds, prov.msg_id_end > 0 ? &prov : NULL,
-                                     &summary_id);
+   int rc = memory_db_summary_create_at(user_id, session_id, summary, topics, "neutral",
+                                        message_count, duration_seconds,
+                                        prov.msg_id_end > 0 ? &prov : NULL, conv_created_at,
+                                        &summary_id);
    if (rc != MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_summarize_missing: store failed for conv %lld (rc=%d)",
                    (long long)conv_id, rc);

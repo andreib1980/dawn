@@ -76,6 +76,28 @@ int memory_db_fact_create(int user_id,
                           int64_t *id_out);
 
 /**
+ * @brief Create a fact with an explicit created_at timestamp.
+ *
+ * Same semantics as memory_db_fact_create, except the caller controls the
+ * created_at value.  Used by extraction paths that want the new row to
+ * inherit the source conversation's creation time so a full reextract
+ * preserves the natural temporal spread that recency-based retrieval
+ * relies on (LIMIT-by-recency, weight_recency tiebreaks).
+ *
+ * @param created_at_override Unix epoch seconds. 0 = use time(NULL).
+ *
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE.
+ */
+int memory_db_fact_create_at(int user_id,
+                             const char *fact_text,
+                             float confidence,
+                             const char *source,
+                             const char *category,
+                             const memory_provenance_t *prov,
+                             int64_t created_at_override,
+                             int64_t *id_out);
+
+/**
  * @brief Search facts by keyword, restricted to one category (v34).
  *
  * Pre-filters at the SQL level so hybrid scoring downstream only sees facts
@@ -550,6 +572,29 @@ int memory_db_summary_create(int user_id,
                              int64_t *id_out);
 
 /**
+ * @brief Create a summary with an explicit created_at timestamp.
+ *
+ * Same semantics as memory_db_summary_create except the caller controls the
+ * created_at value.  Used by extraction paths so a full reextract preserves
+ * the natural temporal spread that recency-based retrieval relies on
+ * (LIMIT-by-recency in semantic + keyword scans, weight_recency tiebreaks).
+ *
+ * @param created_at_override Unix epoch seconds. 0 = use time(NULL).
+ *
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE.
+ */
+int memory_db_summary_create_at(int user_id,
+                                const char *session_id,
+                                const char *summary,
+                                const char *topics,
+                                const char *sentiment,
+                                int message_count,
+                                int duration_seconds,
+                                const memory_provenance_t *prov,
+                                int64_t created_at_override,
+                                int64_t *id_out);
+
+/**
  * @brief List recent summaries for a user
  *
  * Only returns non-consolidated summaries.
@@ -625,6 +670,16 @@ int memory_db_summary_update_embedding(int user_id,
                                        const float *embedding,
                                        int dims);
 
+/* Default scan cap for memory_db_summary_search_semantic.  Sized so a
+ * single full reextract event (which clusters every summary's created_at
+ * into a narrow window) cannot drop oldest-extracted summaries outside
+ * the cosine ranking pool — the original 256 cap broke specifically
+ * because of this.  At 4096 × 384-float vectors per row the scan stays
+ * sub-millisecond on Jetson; corpora past this size should bump
+ * memory.focus_injection.summary_max_scan in config rather than the
+ * compile-time default. */
+#define MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT 4096
+
 /**
  * @brief Semantic top-N search over user's embedded summaries.
  *
@@ -646,7 +701,8 @@ int memory_db_summary_update_embedding(int user_id,
  *                       stack-resident ranking buffer small enough for
  *                       the per-turn focus-injection path.
  * @param max_scan       cap on rows actually inspected by the scan
- *                       (defense against pathological per-user counts)
+ *                       (defense against pathological per-user counts).
+ *                       Pass 0 to use MEMORY_SUMMARY_SEMANTIC_SCAN_CAP_DEFAULT.
  * @param out_summaries  output array of memory_summary_t (caller allocates)
  * @param out_scores     output array of cosine scores aligned with out_summaries
  * @param count_out      number of returned matches
