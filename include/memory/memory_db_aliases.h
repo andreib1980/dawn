@@ -62,11 +62,28 @@ extern "C" {
 #endif
 
 /* =============================================================================
- * Composite scoring constants (first-ship; configurable in Phase 2)
+ * Composite scoring constants
+ *
+ * AUTO/REVIEW thresholds are RUNTIME-CONFIGURABLE via dawn.toml's
+ * [memory.entity_merge] section (`auto_threshold`, `review_threshold`).
+ * Production routing in `memory_db_entity_consider_auto_merge` reads
+ * `g_config.memory.entity_merge_*_threshold`, NOT these constants.
+ *
+ * The #defines below are retained as:
+ *   1. Test-reference values for unit tests that fix g_config to known
+ *      defaults via config_set_defaults().
+ *   2. Historical baseline ("first-ship" values when the config gate
+ *      landed) — the runtime defaults in config_defaults.c match these
+ *      for AUTO (0.90) but DIVERGE for REVIEW (runtime default 0.50,
+ *      down from the original compile-time 0.70).  See the rationale
+ *      in dawn.toml.example §[memory.entity_merge].
+ *
+ * If you bump AUTO_THRESHOLD here, also bump the runtime default in
+ * config_defaults.c and the SETTINGS_SCHEMA range minimum.
  * ============================================================================= */
 
 #define MEMORY_ALIAS_AUTO_THRESHOLD 0.90f
-#define MEMORY_ALIAS_REVIEW_THRESHOLD 0.70f
+#define MEMORY_ALIAS_REVIEW_THRESHOLD 0.70f /* historical default — runtime default is 0.50 */
 
 /* Threshold for promoting an existing entity to is_user_self=1 during
  * link-user-self when no is_user_self=1 row exists yet (design §8 Path B
@@ -250,19 +267,30 @@ int memory_db_entity_score_pair(int user_id,
  * @brief Run the auto-merge gate against an existing entity.
  *
  * Loads @p entity_id, runs the resolver cascade (excluding entity_id from
- * its own candidate pool), and routes by composite score:
- *   - composite ≥ MEMORY_ALIAS_AUTO_THRESHOLD   → soft link via
- *                                                 memory_db_entity_alias_link()
- *   - composite ≥ MEMORY_ALIAS_REVIEW_THRESHOLD → proposal row inserted
- *   - else                                      → no DB write
+ * its own candidate pool), and routes by composite score against the
+ * RUNTIME-CONFIGURABLE thresholds in `[memory.entity_merge]`:
+ *   - composite ≥ `auto_threshold`   (default 0.90) → soft link via
+ *                                                     memory_db_entity_alias_link()
+ *   - composite ≥ `review_threshold` (default 0.50) → proposal row inserted
+ *                                                     for operator approval via
+ *                                                     the WebUI Suggested-
+ *                                                     Merges panel
+ *   - else                                         → no DB write
+ *
+ * Propose-all-in-band: when AUTO doesn't fire, EVERY candidate scoring
+ * ≥ review_threshold gets its own proposal row (not just the winner) so
+ * operators can triage the full set in the UI.
  *
  * Phase 1 invokes this from the explicit operator paths (link-user-self,
  * the manual merge tool action).  Phase 2 wires it into
- * `process_extraction_response` after fresh entity creation.
+ * `process_extraction_response` after fresh entity creation +
+ * post-relations storage.
  *
  * @param user_id User ID (ownership is verified)
  * @param entity_id The freshly-created or operator-supplied candidate
- * @param out_eval Output: populated on SUCCESS regardless of outcome
+ * @param out_eval Output: populated on SUCCESS regardless of outcome.
+ *                 `target_entity_id` is the winning candidate; `proposal_id`
+ *                 is the first inserted proposal when outcome=PROPOSED.
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
  */
 int memory_db_entity_consider_auto_merge(int user_id,
@@ -506,6 +534,85 @@ int memory_db_proposal_list_pending(int user_id,
                                     memory_alias_proposal_row_t *out,
                                     int max,
                                     int *count_out);
+
+/**
+ * @brief Count pending merge proposals for a user (resolved_at IS NULL).
+ *
+ * Lightweight COUNT(*) for the WebUI proposal-pending dot indicator and
+ * any other path that just wants the cardinality without the full row
+ * payload.  Cheap because of idx_memory_entity_merge_proposals_pending
+ * (partial index on resolved_at IS NULL).
+ *
+ * @param user_id    User ID
+ * @param count_out  Output: number of pending proposals
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE (count_out left at 0)
+ */
+int memory_db_proposal_count_pending(int user_id, int *count_out);
+
+/**
+ * @brief Auto-promote a freshly-extracted entity to is_user_self=1 when its
+ * canonical name matches the user's real_name (or one of their identity
+ * aliases) AND no user_self row exists yet for the user.
+ *
+ * Called at extraction time so clean installs get the user_self_bonus
+ * applied automatically — the `dawn-admin memory entity link-user-self`
+ * CLI becomes optional rather than required.  Idempotent: no-op when a
+ * user_self already exists or when the user has no real_name configured.
+ * Compares canonical forms (memory_make_canonical_name applied to both
+ * sides) so casing / whitespace variations don't miss the match.
+ *
+ * Identity_aliases (newline-separated) are also tried — `Kris` vs
+ * `Kristopher Kersey` works if either is the canonical and the other is
+ * a configured alias.
+ *
+ * @param user_id          User ID
+ * @param entity_id        The fresh entity being evaluated
+ * @param canonical_name   Pre-computed canonical (lowercased) form
+ * @param out_promoted     Optional: set true if the row was promoted
+ * @return MEMORY_DB_SUCCESS even when no-op; MEMORY_DB_FAILURE on real error
+ */
+/**
+ * @brief Look up the user_self anchor entity id for @p user_id.
+ *
+ * Thin getter over the partial UNIQUE index on memory_entities.is_user_self.
+ * Returns the entity id of the row with is_user_self=1 for the user, or
+ * 0 if no anchor has been set yet.  Used by extraction-time gates that
+ * want to skip the auto-promote helper once an anchor exists (saving
+ * N redundant lock acquisitions per extraction).
+ *
+ * @param user_id   User ID
+ * @param out_id    Output: entity id (0 if no anchor)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id);
+
+int memory_db_entity_maybe_auto_promote_user_self(int user_id,
+                                                  int64_t entity_id,
+                                                  const char *canonical_name,
+                                                  bool *out_promoted);
+
+/**
+ * @brief Sweep existing entities for one matching the user's real_name (or
+ * an identity_alias) and promote it to is_user_self=1.
+ *
+ * Counterpart to memory_db_entity_maybe_auto_promote_user_self() for the
+ * case where real_name is set AFTER entities have already been created
+ * (the common WebUI flow: operator goes to Settings, fills in their real
+ * name, expects the system to recognise their existing canonical without
+ * having to run a CLI command).  No-op when a user_self already exists
+ * or no matching canonical is found — the maybe-promote helper will pick
+ * it up at the next extraction.
+ *
+ * Does NOT propose merges for related entities — that's still the
+ * link-user-self CLI's job for the heavy cluster-resolution flow.  This
+ * helper does only the surgical "this row is me" promotion.
+ *
+ * @param user_id        User ID
+ * @param out_promoted   Optional: set true if a row was promoted
+ * @return MEMORY_DB_SUCCESS regardless of outcome (caller treats no-op
+ *         as success); MEMORY_DB_FAILURE only on real DB errors
+ */
+int memory_db_entity_auto_promote_user_self_by_real_name(int user_id, bool *out_promoted);
 
 /**
  * @brief Resolve a pending merge proposal.

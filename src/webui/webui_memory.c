@@ -1866,4 +1866,10 @@ void handle_entity_proposal_resolve_request(ws_connection_t *conn, struct json_o
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
+
+   /* Broadcast new pending count so the memory-icon dot toggles off when
+    * this was the last open proposal (or stays lit for remaining ones). */
+   if (rc == MEMORY_DB_SUCCESS) {
+      webui_broadcast_memory_proposals_changed(conn->auth_user_id);
+   }
 }

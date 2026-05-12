@@ -1416,6 +1416,18 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(memory, "focus_injection", focus);
    }
 
+   /* [memory.entity_merge] — Phase 2 auto-merge gate */
+   {
+      json_object *emerge = json_object_new_object();
+      json_object_object_add(emerge, "enabled",
+                             json_object_new_boolean(config->memory.entity_merge_enabled));
+      json_object_object_add(emerge, "auto_threshold",
+                             json_object_new_double(config->memory.entity_merge_auto_threshold));
+      json_object_object_add(emerge, "review_threshold",
+                             json_object_new_double(config->memory.entity_merge_review_threshold));
+      json_object_object_add(memory, "entity_merge", emerge);
+   }
+
    json_object_object_add(root, "memory", memory);
 
    /* [shutdown] */
@@ -2023,6 +2035,11 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "recent_window_turns = %d\n", fi->dedup.recent_window_turns);
       fprintf(fp, "score_uplift_factor = %.2f\n", fi->dedup.score_uplift_factor);
    }
+
+   fprintf(fp, "\n[memory.entity_merge]\n");
+   fprintf(fp, "enabled = %s\n", config->memory.entity_merge_enabled ? "true" : "false");
+   fprintf(fp, "auto_threshold = %.2f\n", config->memory.entity_merge_auto_threshold);
+   fprintf(fp, "review_threshold = %.2f\n", config->memory.entity_merge_review_threshold);
 
    fprintf(fp, "\n[debug]\n");
    fprintf(fp, "mic_record = %s\n", config->debug.mic_record ? "true" : "false");

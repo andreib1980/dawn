@@ -218,6 +218,18 @@
                   DawnState.authState.username = msg.payload.username || '';
                   DawnSettings.updateAuthVisibility();
                }
+               /* Phase 2 entity-merge: prime the memory-icon dot with the
+                * current pending-proposal count once the session is auth'd.
+                * Without this the dot stays dark on page-refresh until the
+                * next extraction creates a new proposal — even if there are
+                * already pending rows from earlier sessions. */
+               if (
+                  msg.payload.authenticated &&
+                  window.DawnMemoryAliases &&
+                  typeof DawnMemoryAliases.requestProposalList === 'function'
+               ) {
+                  DawnMemoryAliases.requestProposalList();
+               }
                // Request full config to populate LLM controls
                DawnSettings.requestConfig();
                // Restore active conversation context (backend session may have lost it on restart)
@@ -561,6 +573,15 @@
                break;
             case 'entity_proposal_resolve_response':
                DawnMemory.handleEntityProposalResolveResponse(msg.payload);
+               break;
+            case 'memory_proposals_changed':
+               /* Server-pushed pending-proposal count.  Phase 2: lights up
+                * the memory-icon dot when count > 0, clears when zero. */
+               if (window.DawnMemoryAliases) {
+                  DawnMemoryAliases.setProposalPendingCount(
+                     msg.payload && typeof msg.payload.count === 'number' ? msg.payload.count : 0
+                  );
+               }
                break;
             case 'delete_all_memories_response':
                DawnMemory.handleDeleteAllResponse(msg.payload);

@@ -187,6 +187,16 @@ dawn_add_unit_test(test_memory_db_alias
            ${SRC_ROOT}/src/memory/memory_db_alias.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
+           # WARNING: keep config_defaults.c a leaf module — it is linked
+           # into this test target so test setUp can call config_set_defaults
+           # to seed g_config with real runtime values (otherwise the
+           # entity_merge_*_threshold reads at runtime route every >0
+           # composite to PROPOSED).  If config_defaults ever grows a call
+           # into the LLM / audio / scheduler subsystems, those will pull
+           # in as link-time deps here and this test target will need new
+           # stubs.  Watch for transitive-include creep on every config
+           # surface change.
+           ${SRC_ROOT}/src/config/config_defaults.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m
    LABEL   ci)

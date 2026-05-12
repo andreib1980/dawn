@@ -457,6 +457,72 @@ static int64_t find_fact_for_relation(const extraction_fact_entry_t *fmap,
 }
 
 /* =============================================================================
+ * Helper: Phase 2 auto-merge gate sweep
+ *
+ * Iterates each was_created entity captured during the entity loop and runs
+ * the resolver cascade against the current graph state.  Runs AFTER the
+ * relations loop in process_extraction_response so the cascade's
+ * exclusive_relation_overlap signal sees this turn's freshly-stored
+ * relations.  Routes by composite band (auto / review / silent reject)
+ * and broadcasts ONCE at the end if any proposal was queued (rather than
+ * per-entity, which would emit redundant DB queries + lock acquisitions
+ * + UI dot-restart flicker).
+ *
+ * No-op when entity_merge_enabled = false in config.
+ * ============================================================================= */
+
+static void apply_phase2_merge_gate(int user_id, const int64_t *fresh_ids, int fresh_count) {
+   if (!g_config.memory.entity_merge_enabled || fresh_count <= 0)
+      return;
+
+   bool any_proposed = false;
+   for (int i = 0; i < fresh_count; i++) {
+      int64_t fid = fresh_ids[i];
+      memory_alias_evaluate_t eval = { 0 };
+      int merge_rc = memory_db_entity_consider_auto_merge(user_id, fid, &eval);
+      if (merge_rc == MEMORY_DB_SUCCESS) {
+         if (eval.outcome == MEMORY_ALIAS_OUTCOME_AUTO_MERGED) {
+            OLOG_INFO("memory_extraction: alias auto-merged %ld → %ld (composite=%.2f)", (long)fid,
+                      (long)eval.target_entity_id, (double)eval.evidence.composite_score);
+         } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_PROPOSED) {
+            OLOG_INFO("memory_extraction: alias proposed %ld → %ld (composite=%.2f)", (long)fid,
+                      (long)eval.target_entity_id, (double)eval.evidence.composite_score);
+            any_proposed = true;
+         } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_REJECTED && eval.target_entity_id > 0) {
+            /* Cascade found a candidate but composite was below the
+             * runtime review_threshold.  Useful operator signal:
+             * distinguishes "no candidate at all" (NO_CANDIDATES,
+             * silent) from "candidate considered, rejected".  Makes the
+             * Stage 2 substring rescue path observable end-to-end. */
+            OLOG_INFO("memory_extraction: alias considered %ld → %ld but below "
+                      "threshold (composite=%.2f)",
+                      (long)fid, (long)eval.target_entity_id,
+                      (double)eval.evidence.composite_score);
+         }
+         /* NO_CANDIDATES is silent — the common case where the cascade
+          * finds nothing comparable for the fresh entity. */
+      } else if (merge_rc != MEMORY_DB_NOT_FOUND) {
+         /* NOT_FOUND can happen if the entity was deleted between upsert
+          * and resolve; treat as a non-error skip.  Other failures are
+          * unexpected — log so operators can spot a resolver-side
+          * regression. */
+         OLOG_WARNING("memory_extraction: consider_auto_merge failed for entity %ld", (long)fid);
+      }
+   }
+
+   /* Single coalesced broadcast at the end of the sweep.  Without this
+    * coalesce, N fresh entities producing proposals would fire N back-
+    * to-back broadcasts — each with its own COUNT(*) query + auth_db
+    * lock acquisition + conn registry lock + per-connection strdup —
+    * and the WebUI dot animation would restart N times. */
+   if (any_proposed) {
+#ifdef ENABLE_WEBUI
+      webui_broadcast_memory_proposals_changed(user_id);
+#endif
+   }
+}
+
+/* =============================================================================
  * Helper: Parse extraction response
  * ============================================================================= */
 
@@ -749,6 +815,30 @@ static void process_extraction_response(int user_id,
    } entity_map[ENTITY_MAP_MAX];
    int entity_map_count = 0;
 
+   /* Track was_created entity IDs so the Phase 2 auto-merge gate can fire
+    * AFTER relations are stored — the exclusive_relation_overlap signal
+    * needs the new entity's relations in place to score correctly.  Running
+    * the gate inline during entity upsert always saw 0 relation overlap
+    * (relations are processed in the next loop), making the substring
+    * rescue path land below threshold on cases that should propose. */
+   int64_t fresh_entity_ids[ENTITY_MAP_MAX];
+   int fresh_entity_count = 0;
+
+   /* Per-extraction cache for the auto-promote-user_self check.  Without
+    * it, every was_created entity does its own find_user_self_id query
+    * just to bail when the anchor is already set.  Seeding once at the
+    * top + flipping to true on first successful promotion keeps the gate
+    * cost at one lock acquisition per extraction in steady state instead
+    * of N per fresh-entity. */
+   bool user_self_already_exists = false;
+   {
+      int64_t self_id_probe = 0;
+      if (memory_db_entity_get_user_self_id(user_id, &self_id_probe) == MEMORY_DB_SUCCESS &&
+          self_id_probe > 0) {
+         user_self_already_exists = true;
+      }
+   }
+
    struct json_object *entities_arr;
    if (json_object_object_get_ex(root, "entities", &entities_arr)) {
       int count = json_object_array_length(entities_arr);
@@ -798,47 +888,36 @@ static void process_extraction_response(int user_id,
             memory_embeddings_embed_and_store_entity(eid, user_id, ent_name);
          }
 
-         /* Phase 2 entity-merge: auto-merge gate.  Runs only on freshly-
-          * created entities — the resolver cascade is the candidate for
-          * detecting that a new surface form (e.g. "Kris") is actually a
-          * variant of an existing canonical (e.g. "Kristopher Kersey").
-          * Composite ≥ MEMORY_ALIAS_AUTO_THRESHOLD (0.90) soft-links;
-          * composite ≥ MEMORY_ALIAS_REVIEW_THRESHOLD (0.70) queues a
-          * proposal for operator review; below 0.70 the entity stays as
-          * its own canonical.  Conservative thresholds first-ship —
-          * calibrate against the dev corpus before loosening.  Existing-
-          * entity merges (the new graph state may push an older entity
-          * past the threshold) happen via the offline propose-merges
-          * sweep or the WebUI operator path, not here. */
+         /* Track was_created for the post-relations Phase 2 gate sweep.
+          * The gate runs after the relations loop below so the resolver
+          * sees this entity's relations when computing
+          * exclusive_relation_overlap (the dominant signal for legitimate
+          * same-person matches like "Shelley Kersey" ↔ "Shelley").  When
+          * the array fills, log the drop so operators can see Phase 2 is
+          * missing entities — matches the existing entity_map overflow
+          * warning shape so the two paths feel symmetric. */
          if (was_created) {
-            memory_alias_evaluate_t eval = { 0 };
-            int merge_rc = memory_db_entity_consider_auto_merge(user_id, eid, &eval);
-            if (merge_rc == MEMORY_DB_SUCCESS) {
-               if (eval.outcome == MEMORY_ALIAS_OUTCOME_AUTO_MERGED) {
-                  OLOG_INFO("memory_extraction: alias auto-merged %ld → %ld (composite=%.2f)",
-                            (long)eid, (long)eval.target_entity_id,
-                            (double)eval.evidence.composite_score);
-                  /* Use the canonical id for downstream relation FKs so
-                   * relations attach to the canonical row directly.  The
-                   * alias row still exists with canonical_id pointing at
-                   * target_entity_id; existing queries that JOIN through
-                   * canonical_id continue to work either way. */
-                  eid = eval.target_entity_id;
-               } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_PROPOSED) {
-                  OLOG_INFO("memory_extraction: alias proposed %ld → %ld (composite=%.2f)",
-                            (long)eid, (long)eval.target_entity_id,
-                            (double)eval.evidence.composite_score);
-               }
-               /* REJECTED and NO_CANDIDATES outcomes are silent — the
-                * entity stays as its own canonical. */
-            } else if (merge_rc != MEMORY_DB_NOT_FOUND) {
-               /* NOT_FOUND can happen if the entity was deleted between
-                * upsert and resolve; treat as a non-error skip.  Other
-                * failures are unexpected — log so operators can spot a
-                * resolver-side regression. */
-               OLOG_WARNING("memory_extraction: consider_auto_merge failed for entity %ld",
-                            (long)eid);
+            if (fresh_entity_count < ENTITY_MAP_MAX) {
+               fresh_entity_ids[fresh_entity_count++] = eid;
+            } else {
+               OLOG_WARNING("memory_extraction: fresh-entity gate array full (max %d), Phase 2 "
+                            "skipped for '%s'",
+                            ENTITY_MAP_MAX, ent_name);
             }
+         }
+
+         /* Auto-promote to is_user_self=1 when canonical matches the
+          * user's real_name and no self-anchor exists yet.  Lets clean
+          * installs get the user_self_bonus applied without requiring
+          * `dawn-admin memory entity link-user-self` as a setup step.
+          * Skipped once the per-extraction user_self check below confirms
+          * an anchor already exists — saves a lock acquisition per fresh
+          * entity once the user_self is set in steady state. */
+         if (was_created && !user_self_already_exists) {
+            bool promoted = false;
+            memory_db_entity_maybe_auto_promote_user_self(user_id, eid, canonical, &promoted);
+            if (promoted)
+               user_self_already_exists = true;
          }
 
          /* Add to local map */
@@ -965,6 +1044,13 @@ static void process_extraction_response(int user_id,
          }
       }
    }
+
+   /* Phase 2 auto-merge gate.  Extracted into apply_phase2_merge_gate
+    * so process_extraction_response stays at a manageable size and so
+    * the broadcast can be coalesced once across all fresh entities (vs
+    * one broadcast per proposal, which thrashes the DB lock + UI dot).
+    * See the helper's header comment for the full design rationale. */
+   apply_phase2_merge_gate(user_id, fresh_entity_ids, fresh_entity_count);
 
    /* Invalidate entity embedding cache once after all extractions */
    if (entity_map_count > 0) {

@@ -41,6 +41,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_entities.h"
@@ -58,6 +59,12 @@ static int g_test_user_id = 0;
 void setUp(void) {
    auth_db_init(":memory:");
    g_alias_test_entity_cache_invalidations = 0;
+
+   /* Initialize global config so the resolver's runtime-config threshold
+    * reads (g_config.memory.entity_merge_*) see the real defaults.
+    * Without this the zero-init g_config would set auto/review to 0.0,
+    * causing every candidate above 0.0 to propose. */
+   config_set_defaults(&g_config);
 
    /* Create a single test user.  All entity tests scope by user_id. */
    auth_db_create_user("jon", "hash", true);
@@ -185,6 +192,49 @@ static int count_active_aliases_for_target(int64_t target_id) {
    }
    sqlite3_finalize(stmt);
    return n;
+}
+
+/* Count pending merge-proposal rows with the given source entity.  Used by
+ * the propose-all-in-band tests to verify the cascade fires multiple
+ * proposals when several candidates clear the review threshold. */
+static int count_pending_proposals_from_source(int64_t source_id) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT COUNT(*) FROM memory_entity_merge_proposals "
+                      "WHERE source_entity_id = ? AND resolved_at IS NULL",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int64(stmt, 1, source_id);
+   int n = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      n = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   return n;
+}
+
+/* Check whether an entity row has is_user_self = 1.  Tests use this to
+ * verify the auto-promote helpers. */
+static bool entity_is_user_self(int64_t entity_id) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT is_user_self FROM memory_entities WHERE id = ?", -1, &stmt,
+                      NULL);
+   sqlite3_bind_int64(stmt, 1, entity_id);
+   bool flag = false;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      flag = sqlite3_column_int(stmt, 0) != 0;
+   }
+   sqlite3_finalize(stmt);
+   return flag;
+}
+
+/* Set the user's real_name (Phase 1.5+).  Tests use this to drive the
+ * auto-promote-by-real-name path. */
+static void set_user_real_name(int user_id, const char *real_name) {
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, real_name, AUTH_REAL_NAME_MAX - 1);
+   id.real_name[AUTH_REAL_NAME_MAX - 1] = '\0';
+   auth_db_set_user_identity(user_id, &id);
 }
 
 /* ============================================================================
@@ -634,6 +684,295 @@ static void test_consider_auto_merge_rejected(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_REJECTED, eval.outcome);
    TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(inbound));
+}
+
+/* Phase 2 substring rescue — forward direction: inbound is the short form
+ * ("kris"), existing canonical is the long form ("kristopher kersey").
+ * Stage 2's per-token LIKE search finds "kristopher kersey" as a hit for
+ * token "kris" (it contains "kris" as a char-substring), but jaccard("kris",
+ * "kristopher kersey") = 0 because they share no whole-word tokens — below
+ * the 0.30 floor.  The forward substring rescue admits the candidate so the
+ * pair reaches Stage 6 scoring.  Without enough other signals it lands as
+ * REJECTED, but `eval.target_entity_id` is set, confirming the cascade
+ * found and scored it (vs NO_CANDIDATES if rescue didn't fire). */
+static void test_consider_auto_merge_substring_rescue_forward(void) {
+   int64_t long_form = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Kris", "person");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   /* Candidate was generated and scored — proves Stage 2 forward rescue
+    * fired.  Without it, outcome would be NO_CANDIDATES with target=0. */
+   TEST_ASSERT_EQUAL_INT64(long_form, eval.target_entity_id);
+   TEST_ASSERT_TRUE(eval.evidence.name_substring_bonus_applied);
+   /* Stubbed cosine + no relations/contacts → composite below review.
+    * Type=person both, jaccard=0, substring=+0.10, type_match=+0.05 ≈ 0.15. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_REJECTED, eval.outcome);
+}
+
+/* Phase 2 substring rescue — reverse direction: existing canonical is the
+ * short form ("kris"), inbound is the long form ("kristopher kersey").
+ * Stage 2's per-token LIKE search tokenises inbound into ["kristopher",
+ * "kersey"] and finds NEITHER inside "kris" — so the forward pass produces
+ * an empty candidate pool.  Stage 2b reverse-substring sweep finds "kris"
+ * because its canonical_name is a char-substring of "kristopher kersey".
+ * Without Stage 2b, this case is NO_CANDIDATES (the gap that lets short-
+ * form duplicates survive when the long form arrives later). */
+static void test_consider_auto_merge_substring_rescue_reverse(void) {
+   int64_t short_form = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   /* Without Stage 2b this would be NO_CANDIDATES; reverse rescue admits
+    * "kris" so the cascade scores the pair and surfaces the target. */
+   TEST_ASSERT_EQUAL_INT64(short_form, eval.target_entity_id);
+   TEST_ASSERT_TRUE(eval.evidence.name_substring_bonus_applied);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_REJECTED, eval.outcome);
+}
+
+/* Phase 2 substring rescue + supporting signals: short ↔ long variant with
+ * shared user-self + works_at exclusive relation crosses the review band.
+ * Models the dev's real "Kris" ↔ "Kristopher Kersey" cluster where the
+ * Phase 2 gate should propose the merge for operator review.
+ *
+ * Composite breakdown (Stage 4 cosine stubbed to 0):
+ *   0.30*0   (jaccard)        + 0
+ *   0.30*0   (cosine stubbed) + 0
+ *   0.25*1   (works_at)       + 0.25
+ *   0.10*0   (no contact)     + 0
+ *   0.05*1   (both person)    + 0.05
+ *   +0.10    (substring)
+ *   +0.20    (user_self)
+ *                              ────────
+ *                              = 0.60 — still below review (0.70).
+ * Add contact overlap to push over: 0.60 + 0.10 = 0.70 → PROPOSED. */
+static void test_consider_auto_merge_substring_rescue_into_review(void) {
+   int64_t self = insert_entity_typed(g_test_user_id, "Kris", "person");
+   mark_entity_user_self(self);
+   int64_t company = insert_entity_typed(g_test_user_id, "Netsurion", "org");
+   insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
+   insert_contact(g_test_user_id, self, "email", "kris.kersey@gmail.com");
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
+   insert_contact(g_test_user_id, inbound, "email", "kris.kersey@gmail.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_PROPOSED, eval.outcome);
+   TEST_ASSERT_EQUAL_INT64(self, eval.target_entity_id);
+   TEST_ASSERT_GREATER_THAN(0, eval.proposal_id);
+   /* Assert against the runtime threshold (the actual routing gate), not
+    * the historical compile-time constant.  Otherwise this test would
+    * keep agreeing with stale documentation if the runtime default ever
+    * diverges from MEMORY_ALIAS_REVIEW_THRESHOLD. */
+   TEST_ASSERT_GREATER_OR_EQUAL_FLOAT((float)g_config.memory.entity_merge_review_threshold,
+                                      eval.evidence.composite_score);
+   /* No alias write — operator review required. */
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(inbound));
+}
+
+/* Phase 2 propose-all-in-band: cascade returns ALL Stage-6-scored
+ * candidates above review_threshold (not just the winner) so an inbound
+ * with multiple legitimate matches gets a separate proposal row for each.
+ * Models the dev's real case where "Kristopher Kersey" matches both "Kris"
+ * (same person) AND "Shelley Kersey" (related entity via shared "kersey"
+ * token); the prior winner-only path silently dropped the secondary
+ * candidate.  False positives are an operator-click away from rejection
+ * in the WebUI Suggested-Merges panel — the cost asymmetry favors recall
+ * over precision here. */
+static void test_consider_auto_merge_proposes_multiple_in_band(void) {
+   /* Two distinct candidates that should BOTH cross review_threshold
+    * (0.50 in config defaults).  Build them with non-overlapping signals
+    * so the cascade has to score each independently.
+    *
+    * Candidate A (the user-self winner): "Kris" with shared works_at +
+    * shared email + user_self bonus → composite ≈ 0.30*0 (jaccard) +
+    * 0.30*0 (cosine stubbed) + 0.25*1 (works_at) + 0.10*1 (email) +
+    * 0.05*1 (type_match) + 0.10 (substring) + 0.20 (user_self) = 0.70.
+    *
+    * Candidate B (the secondary token match): "Some Other Kersey" person
+    * sharing the "kersey" token → name_jaccard 0.5, no relations/contacts,
+    * type_match, no user_self.  Composite = 0.30*0.5 + 0 + 0.05 (type) =
+    * 0.20.  Below 0.50 — won't propose.  Damn, need more signal.
+    *
+    * Simpler shape: two user-self-eligible candidates.  Set both target
+    * entities is_user_self... no, only one can be.  Stronger approach:
+    * give both candidates exclusive_relation_overlap + type_match +
+    * substring.  Composite = 0.25 + 0.05 + 0.10 = 0.40.  Still under.
+    *
+    * To force two distinct above-threshold candidates without leaning on
+    * user_self: each candidate gets a shared works_at (relation overlap
+    * 1.0 = 0.25), shared email contact (0.10), type_match (0.05),
+    * substring (0.10), and we drop review_threshold via config to 0.30
+    * for THIS test only (restored after).  Composite = 0.50 each →
+    * both cross. */
+   int64_t employer = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
+
+   int64_t target_a = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t target_b = insert_entity_typed(g_test_user_id, "Kerseyfab", "person");
+   insert_open_relation(g_test_user_id, target_a, "works_at", employer, NULL);
+   insert_open_relation(g_test_user_id, target_b, "works_at", employer, NULL);
+   insert_contact(g_test_user_id, target_a, "email", "shared@example.com");
+   insert_contact(g_test_user_id, target_b, "email", "shared@example.com");
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Kris Kerseyfab", "person");
+   insert_open_relation(g_test_user_id, inbound, "works_at", employer, NULL);
+   insert_contact(g_test_user_id, inbound, "email", "shared@example.com");
+
+   /* Test-scoped threshold drop.  Restore in tearDown via setUp re-init. */
+   float saved_review = g_config.memory.entity_merge_review_threshold;
+   g_config.memory.entity_merge_review_threshold = 0.30f;
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_PROPOSED, eval.outcome);
+
+   /* The key assertion: BOTH targets received proposals.  Without the
+    * propose-all-in-band refactor only the winner would be queued. */
+   TEST_ASSERT_EQUAL_INT(2, count_pending_proposals_from_source(inbound));
+
+   g_config.memory.entity_merge_review_threshold = saved_review;
+}
+
+/* Phase 2 auto-merge wins outright — when the winner crosses
+ * auto_threshold the source becomes a soft alias of it.  No secondary
+ * proposals should fire (the source can't be in multiple equivalence
+ * classes).  Verifies the propose-all-in-band code path correctly
+ * short-circuits when AUTO fires. */
+static void test_consider_auto_merge_auto_short_circuits_proposals(void) {
+   int64_t self = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   mark_entity_user_self(self);
+   int64_t company = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
+   insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
+   insert_contact(g_test_user_id, self, "email", "smithfab@example.com");
+
+   /* Strong inbound mirroring the auto_merged test, plus a SECOND
+    * weakly-related candidate that would have been proposed under the
+    * old winner-or-nothing branch — verify it stays unqueued because
+    * the AUTO path doesn't iterate the runner-up list. */
+   int64_t weak_candidate = insert_entity_typed(g_test_user_id, "Jonathan Doe", "person");
+   insert_open_relation(g_test_user_id, weak_candidate, "works_at", company, NULL);
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith 2", "person");
+   insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
+   insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_AUTO_MERGED, eval.outcome);
+   /* AUTO writes an alias_link, not a proposal — both counts reflect this. */
+   TEST_ASSERT_EQUAL_INT(0, count_pending_proposals_from_source(inbound));
+   TEST_ASSERT_EQUAL_INT64(self, get_entity_canonical_id(inbound));
+}
+
+/* ============================================================================
+ * Phase 2 auto-promote user_self at extraction time / by real_name sweep
+ *
+ * These cover the "no CLI required" UX: when real_name is set in user
+ * settings, a matching canonical (existing or freshly-extracted) gets
+ * is_user_self=1 automatically — eliminating the `dawn-admin memory
+ * entity link-user-self` setup step for clean installs.
+ * ============================================================================ */
+
+static void test_auto_promote_user_self_at_extraction_time(void) {
+   /* Operator set their real_name BEFORE any matching entity existed.
+    * Later, extraction creates the entity.  maybe_auto_promote_user_self
+    * fires inline and flips is_user_self=1. */
+   set_user_real_name(g_test_user_id, "Kristopher Kersey");
+
+   int64_t fresh = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   TEST_ASSERT_FALSE(entity_is_user_self(fresh));
+
+   bool promoted = false;
+   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh,
+                                                          "kristopher kersey", &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(promoted);
+   TEST_ASSERT_TRUE(entity_is_user_self(fresh));
+}
+
+static void test_auto_promote_user_self_by_real_name_sweep(void) {
+   /* Pre-existing canonical matches real_name.  Operator now sets
+    * real_name via Settings → the by-real-name sweep finds and promotes
+    * the canonical without needing any extraction to fire. */
+   int64_t existing = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   set_user_real_name(g_test_user_id, "Kristopher Kersey");
+
+   bool promoted = false;
+   int rc = memory_db_entity_auto_promote_user_self_by_real_name(g_test_user_id, &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(promoted);
+   TEST_ASSERT_TRUE(entity_is_user_self(existing));
+}
+
+static void test_auto_promote_no_op_when_user_self_exists(void) {
+   /* Idempotency: a user_self anchor already exists.  Neither helper
+    * should touch is_user_self on any other row. */
+   int64_t already_self = insert_entity_typed(g_test_user_id, "Kris", "person");
+   mark_entity_user_self(already_self);
+   set_user_real_name(g_test_user_id, "Kristopher Kersey");
+
+   int64_t fresh = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   bool promoted = false;
+
+   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh,
+                                                          "kristopher kersey", &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(promoted);
+   TEST_ASSERT_FALSE(entity_is_user_self(fresh));
+   TEST_ASSERT_TRUE(entity_is_user_self(already_self));
+
+   promoted = true; /* deliberately non-zero so we catch a stale set */
+   rc = memory_db_entity_auto_promote_user_self_by_real_name(g_test_user_id, &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(promoted);
+}
+
+static void test_auto_promote_no_op_when_real_name_unset(void) {
+   /* Operator never configured real_name — both helpers should silently
+    * succeed without promoting anything.  This is the cold-start case
+    * (account exists, identity not yet entered). */
+   int64_t fresh = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+
+   bool promoted = true;
+   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh,
+                                                          "kristopher kersey", &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(promoted);
+   TEST_ASSERT_FALSE(entity_is_user_self(fresh));
+
+   promoted = true;
+   rc = memory_db_entity_auto_promote_user_self_by_real_name(g_test_user_id, &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(promoted);
+}
+
+static void test_auto_promote_matches_identity_alias(void) {
+   /* Canonical doesn't match real_name directly but DOES match one of
+    * the operator's configured identity aliases.  The sweep should still
+    * find and promote it.  Models the dev's real config: real_name =
+    * "Kristopher Kersey" with alias "Kris" on a corpus where only "Kris"
+    * was ever extracted as a canonical. */
+   int64_t existing = insert_entity_typed(g_test_user_id, "Kris", "person");
+
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Kristopher Kersey", AUTH_REAL_NAME_MAX - 1);
+   strncpy(id.identity_aliases, "Kris\nKristopher", AUTH_IDENTITY_ALIASES_MAX - 1);
+   auth_db_set_user_identity(g_test_user_id, &id);
+
+   bool promoted = false;
+   int rc = memory_db_entity_auto_promote_user_self_by_real_name(g_test_user_id, &promoted);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(promoted);
+   TEST_ASSERT_TRUE(entity_is_user_self(existing));
 }
 
 /* ============================================================================
@@ -2221,6 +2560,16 @@ int main(void) {
    RUN_TEST(test_consider_auto_merge_auto_merged);
    RUN_TEST(test_consider_auto_merge_proposed);
    RUN_TEST(test_consider_auto_merge_rejected);
+   RUN_TEST(test_consider_auto_merge_substring_rescue_forward);
+   RUN_TEST(test_consider_auto_merge_substring_rescue_reverse);
+   RUN_TEST(test_consider_auto_merge_substring_rescue_into_review);
+   RUN_TEST(test_consider_auto_merge_proposes_multiple_in_band);
+   RUN_TEST(test_consider_auto_merge_auto_short_circuits_proposals);
+   RUN_TEST(test_auto_promote_user_self_at_extraction_time);
+   RUN_TEST(test_auto_promote_user_self_by_real_name_sweep);
+   RUN_TEST(test_auto_promote_no_op_when_user_self_exists);
+   RUN_TEST(test_auto_promote_no_op_when_real_name_unset);
+   RUN_TEST(test_auto_promote_matches_identity_alias);
 
    /* alias_link / alias_unlink */
    RUN_TEST(test_alias_link_writes_canonical_id_and_audit);

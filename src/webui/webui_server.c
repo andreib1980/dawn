@@ -44,6 +44,7 @@
 
 #include "memory/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
 #include "memory/focus_source.h"            /* focus_compose_result_t */
+#include "memory/memory_db_aliases.h"       /* memory_db_proposal_count_pending */
 #include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
 
@@ -6930,6 +6931,53 @@ void webui_broadcast_memory_notice(int user_id, const char *level, const char *m
 
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast memory notice (%s) to %d client(s)", level, sent);
+   }
+}
+
+void webui_broadcast_memory_proposals_changed(int user_id) {
+   if (user_id <= 0)
+      return;
+
+   /* Re-fetch the count via the memory-db helper so the broadcast is
+    * race-free against concurrent inserts/resolves.  Pending = resolved_at
+    * IS NULL. */
+   int pending = 0;
+   memory_db_proposal_count_pending(user_id, &pending);
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("memory_proposals_changed"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "count", json_object_new_int(pending));
+   json_object_object_add(root, "payload", payload);
+
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      if (conn->auth_user_id != user_id)
+         continue;
+
+      char *json_copy = strdup(json_str);
+      if (!json_copy)
+         continue;
+
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   json_object_put(root);
+
+   if (sent > 0) {
+      OLOG_INFO("WebUI: Broadcast memory_proposals_changed (count=%d) to %d client(s)", pending,
+                sent);
    }
 }
 

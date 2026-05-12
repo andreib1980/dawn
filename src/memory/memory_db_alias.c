@@ -27,11 +27,13 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 
+#include <assert.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
@@ -39,6 +41,13 @@
 #include "memory/memory_db_entities.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
+
+/* Tripwire: the cascade's insertion sort on the scored array (see
+ * cascade_internal) is justified by N being tiny.  If MEMORY_ALIAS_STAGE5_
+ * MAX_CANDIDATES ever bumps above 16, the O(N²) cost becomes worth
+ * replacing with a partial heap-sort.  Catch the bump at compile time. */
+_Static_assert(MEMORY_ALIAS_STAGE5_MAX_CANDIDATES <= 16,
+               "scored-array insertion sort assumes small N (<=16)");
 
 /* =============================================================================
  * Tokenizer (pure-function helpers shared by Stage 2 and the Jaccard signal)
@@ -1032,8 +1041,21 @@ static int stage2_candidates(int user_id,
       } else {
          overlap = memory_alias_compute_name_jaccard(canonical_name, e.canonical_name);
       }
-      if (overlap < MEMORY_ALIAS_NAME_JACCARD_FLOOR)
-         continue;
+      if (overlap < MEMORY_ALIAS_NAME_JACCARD_FLOOR) {
+         /* Substring rescue (Phase 2): short ↔ long name variants like
+          * "kris" ⊂ "kristopher kersey" or "shelley" ⊂ "shelley kersey"
+          * have Jaccard ≈ 0 (no shared whole-word tokens) and would be
+          * dropped here before Stage 4's embedding match can fire.  Admit
+          * them as candidates when one canonical is a character-level
+          * substring of the other so Stages 4-6 can score them properly.
+          * The +0.10 substring bonus in Stage 6 then lifts the composite
+          * into the review (≥0.70) or auto (≥0.90) band ONLY when other
+          * signals (embedding cosine, exclusive-relation overlap, contact
+          * field overlap) corroborate — substring alone won't merge
+          * unrelated names that happen to share a prefix. */
+         if (!memory_alias_compute_name_substring(canonical_name, e.canonical_name))
+            continue;
+      }
 
       alias_candidate_t *c = &out[*out_count];
       c->entity_id = e.id;
@@ -1045,6 +1067,124 @@ static int stage2_candidates(int user_id,
       c->first_seen = e.first_seen;
       c->is_user_self = is_self;
       c->name_jaccard = overlap;
+      c->embedding_cosine = 0.0f;
+      (*out_count)++;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Stage 2b: reverse-substring candidate generator.  Finds entities whose
+ * canonical_name is a char-level substring of @p canonical_name (e.g.,
+ * existing "kris" entity when inbound is "kristopher kersey").  The forward
+ * stage2_candidates() pathway tokenises the inbound and runs LIKE '%token%'
+ * for each, which only finds entities containing one of the inbound's
+ * tokens.  That misses the short-form-already-exists, long-form-arrives-
+ * later case entirely — the existing "Kris" row never contains "kristopher"
+ * or "kersey".  This helper closes the gap.
+ *
+ * Idempotent against pre-added seen_ids.  Appends to @p out up to @p max.
+ * Skips alias rows (canonical_id IS NULL filter) so the resolver stays on
+ * canonicals only.  Capped via ORDER BY mention_count DESC so high-traffic
+ * canonicals win when the inbound is unusually long and many short names
+ * happen to fit.  No-op when inbound canonical_name is empty or already
+ * past the candidate cap. */
+/* Inbound shorter than this can't usefully match any candidate via
+ * reverse-substring: there's nothing meaningful Stage 2b can find that
+ * Stage 2's forward per-token search didn't already pick up.  Skipping
+ * also avoids the per-extraction scan cost for short queries.  The cap
+ * is per-character (post-canonicalization), not per-token. */
+#define MEMORY_ALIAS_STAGE2B_MIN_INBOUND_LEN 8
+
+static int stage2_reverse_substring_candidates(int user_id,
+                                               const char *canonical_name,
+                                               int64_t exclude_id,
+                                               alias_candidate_t *out,
+                                               int max,
+                                               int *out_count) {
+   if (!canonical_name || !*canonical_name || max <= 0 || *out_count >= max)
+      return MEMORY_DB_SUCCESS;
+
+   /* Short-inbound skip — substring scan on a 4-char inbound finds
+    * 1-3 char fragments that aren't real candidates. */
+   size_t inbound_len = strlen(canonical_name);
+   if (inbound_len < MEMORY_ALIAS_STAGE2B_MIN_INBOUND_LEN)
+      return MEMORY_DB_SUCCESS;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *stmt = NULL;
+   /* instr(?, canonical_name) > 0 means canonical_name appears as a
+    * substring inside the inbound.  Two length predicates bound the scan:
+    *   length(canonical_name) > 1           — guards trivial 1-char hits
+    *   length(canonical_name) <= length(?)  — a canonical longer than the
+    *                                          inbound can't be a substring
+    *                                          of it; lets the planner drop
+    *                                          obviously-too-long rows
+    *                                          without running instr().
+    * Both are unindexable scalar predicates so they don't change the row-
+    * scan plan, but they cut instr() calls roughly in half on a real
+    * corpus where canonical lengths vary widely.  Excludes the inbound
+    * itself and any soft-aliases (canonical_id IS NOT NULL). */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id FROM memory_entities "
+                          "WHERE user_id = ? AND id != ? AND canonical_id IS NULL "
+                          "  AND length(canonical_name) > 1 "
+                          "  AND length(canonical_name) <= ? "
+                          "  AND instr(?, canonical_name) > 0 "
+                          "ORDER BY mention_count DESC "
+                          "LIMIT ?",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, exclude_id);
+   sqlite3_bind_int(stmt, 3, (int)inbound_len);
+   sqlite3_bind_text(stmt, 4, canonical_name, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int(stmt, 5, max);
+
+   int64_t hits[MEMORY_ALIAS_STAGE2_MAX_CANDIDATES];
+   int hit_count = 0;
+   while (hit_count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+      hits[hit_count++] = sqlite3_column_int64(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   /* Append unique hits to the candidate pool, skipping those already
+    * present from the forward pass. */
+   for (int i = 0; i < hit_count && *out_count < max; i++) {
+      bool dup = false;
+      for (int p = 0; p < *out_count; p++) {
+         if (out[p].entity_id == hits[i]) {
+            dup = true;
+            break;
+         }
+      }
+      if (dup)
+         continue;
+
+      memory_entity_t e;
+      bool is_self = false;
+      int64_t canon_id = 0;
+      if (load_entity_full(user_id, hits[i], &e, &canon_id, &is_self) != MEMORY_DB_SUCCESS)
+         continue;
+      if (canon_id != 0)
+         continue; /* defensive: alias filter already in SQL, but re-check */
+
+      alias_candidate_t *c = &out[*out_count];
+      c->entity_id = e.id;
+      strncpy(c->canonical_name, e.canonical_name, MEMORY_ENTITY_NAME_MAX - 1);
+      c->canonical_name[MEMORY_ENTITY_NAME_MAX - 1] = '\0';
+      strncpy(c->entity_type, e.entity_type, MEMORY_ENTITY_TYPE_MAX - 1);
+      c->entity_type[MEMORY_ENTITY_TYPE_MAX - 1] = '\0';
+      c->mention_count = e.mention_count;
+      c->first_seen = e.first_seen;
+      c->is_user_self = is_self;
+      c->is_user_self_token = false;
+      /* name_jaccard stays at 0 — the candidate didn't earn it via Stage 2's
+       * forward Jaccard.  Stage 6's pair scoring re-computes it anyway. */
+      c->name_jaccard = 0.0f;
       c->embedding_cosine = 0.0f;
       (*out_count)++;
    }
@@ -1222,6 +1362,15 @@ static void synth_self_allow_list_user(int user_id,
    (*count)++;
 }
 
+/* Per-candidate Stage-6 score record.  Used by cascade_internal's optional
+ * `out_scored` array so consider_auto_merge can propose every candidate above
+ * the review threshold (not just the cascade winner).  Sorted by composite
+ * DESC after cascade_internal returns. */
+typedef struct {
+   int64_t entity_id;
+   memory_alias_evidence_t evidence;
+} scored_candidate_t;
+
 static int cascade_internal(int user_id,
                             const char *canonical_name,
                             const char *entity_type,
@@ -1230,7 +1379,12 @@ static int cascade_internal(int user_id,
                             bool use_synth_self,
                             int64_t *out_winner_id,
                             int *out_matched_stage,
-                            memory_alias_evidence_t *out_evidence) {
+                            memory_alias_evidence_t *out_evidence,
+                            scored_candidate_t *out_scored,
+                            int out_scored_max,
+                            int *out_scored_count) {
+   if (out_scored_count)
+      *out_scored_count = 0;
    *out_winner_id = 0;
    *out_matched_stage = 0;
    memset(out_evidence, 0, sizeof(*out_evidence));
@@ -1257,6 +1411,16 @@ static int cascade_internal(int user_id,
    }
    stage2_candidates(user_id, canonical_name, inbound_id, use_synth_self, cands,
                      MEMORY_ALIAS_STAGE2_MAX_CANDIDATES, &cand_count);
+   /* Stage 2b: reverse-substring sweep — finds short-form canonicals
+    * (existing "kris") when the inbound is a long form ("kristopher
+    * kersey") whose tokens don't appear in any shorter canonical's name.
+    * Skipped in synth_self mode: that path uses directional Jaccard
+    * specifically tuned for the verbose synthetic seed and the "user"
+    * allow-list already covers the short-form case for user-self. */
+   if (!use_synth_self) {
+      stage2_reverse_substring_candidates(user_id, canonical_name, inbound_id, cands,
+                                          MEMORY_ALIAS_STAGE2_MAX_CANDIDATES, &cand_count);
+   }
    if (cand_count == 0)
       return MEMORY_DB_SUCCESS; /* clean miss */
 
@@ -1341,6 +1505,32 @@ static int cascade_internal(int user_id,
          best_idx = i;
          best_ev = ev;
       }
+
+      /* Also remember EVERY scored candidate for the multi-proposal path.
+       * Bounded by out_scored_max; we drop late entries when the array is
+       * full (the cascade already truncates to STAGE5_MAX_CANDIDATES so the
+       * total is small). */
+      if (out_scored && out_scored_count && *out_scored_count < out_scored_max) {
+         out_scored[*out_scored_count].entity_id = cands[i].entity_id;
+         out_scored[*out_scored_count].evidence = ev;
+         (*out_scored_count)++;
+      }
+   }
+
+   /* Sort the scored array by composite DESC so callers can iterate from
+    * strongest match to weakest without re-sorting.  Insertion sort —
+    * MEMORY_ALIAS_STAGE5_MAX_CANDIDATES is tiny so the O(n²) cost is
+    * negligible and keeps the routine alloc-free. */
+   if (out_scored && out_scored_count && *out_scored_count > 1) {
+      for (int i = 1; i < *out_scored_count; i++) {
+         scored_candidate_t tmp = out_scored[i];
+         int j = i - 1;
+         while (j >= 0 && out_scored[j].evidence.composite_score < tmp.evidence.composite_score) {
+            out_scored[j + 1] = out_scored[j];
+            j--;
+         }
+         out_scored[j + 1] = tmp;
+      }
    }
 
    if (best_idx >= 0 && best_composite > 0.0f) {
@@ -1374,7 +1564,8 @@ int memory_db_entity_resolve_alias(int user_id,
 
    int rc = cascade_internal(user_id, canonical_name, entity_type ? entity_type : "thing",
                              /* inbound_id */ 0, /* inbound_is_user_self */ false,
-                             /* use_synth_self */ false, &winner_id, &matched_stage, &ev);
+                             /* use_synth_self */ false, &winner_id, &matched_stage, &ev,
+                             /* out_scored */ NULL, 0, NULL);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
 
@@ -1391,8 +1582,10 @@ int memory_db_entity_resolve_alias(int user_id,
     * auto-merge threshold.  Mid-confidence (review band) and below are
     * "no resolution" from the resolver's perspective — the caller should
     * still fall through to upsert; consider_auto_merge() handles the
-    * proposal-queue case. */
-   if (matched_stage == 6 && ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
+    * proposal-queue case.  Runtime config overrides the compile-time
+    * fallback default. */
+   if (matched_stage == 6 &&
+       ev.composite_score >= (float)g_config.memory.entity_merge_auto_threshold) {
       out_resolution->resolved_id = winner_id;
       out_resolution->matched_stage = 6;
       out_resolution->evidence = ev;
@@ -1421,7 +1614,8 @@ int memory_db_entity_resolve_alias_for_self(int user_id,
     * "synthetic" means here). */
    int rc = cascade_internal(user_id, canonical_name, entity_type ? entity_type : "person",
                              /* inbound_id */ 0, /* inbound_is_user_self */ true,
-                             /* use_synth_self */ true, &winner_id, &matched_stage, &ev);
+                             /* use_synth_self */ true, &winner_id, &matched_stage, &ev,
+                             /* out_scored */ NULL, 0, NULL);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
 
@@ -1528,9 +1722,16 @@ int memory_db_entity_consider_auto_merge(int user_id,
    memory_alias_evidence_t ev;
    memset(&ev, 0, sizeof(ev));
 
+   /* Capture every scored candidate so we can propose ALL above review
+    * (not just the winner) when auto-merge doesn't fire.  Sized to match
+    * MEMORY_ALIAS_STAGE5_MAX_CANDIDATES so the cascade never has to drop
+    * scored survivors before we see them. */
+   scored_candidate_t scored[MEMORY_ALIAS_STAGE5_MAX_CANDIDATES];
+   int scored_count = 0;
+
    rc = cascade_internal(user_id, inbound.canonical_name, inbound.entity_type, entity_id,
                          inbound_is_self, /* use_synth_self */ false, &winner_id, &matched_stage,
-                         &ev);
+                         &ev, scored, MEMORY_ALIAS_STAGE5_MAX_CANDIDATES, &scored_count);
    if (rc != MEMORY_DB_SUCCESS)
       return rc;
 
@@ -1558,8 +1759,13 @@ int memory_db_entity_consider_auto_merge(int user_id,
       return MEMORY_DB_SUCCESS;
    }
 
-   /* Threshold band routing. */
-   if (ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
+   const float auto_thresh = (float)g_config.memory.entity_merge_auto_threshold;
+   const float review_thresh = (float)g_config.memory.entity_merge_review_threshold;
+
+   /* Auto-merge: winner crosses auto threshold.  Sole outcome — the
+    * source becomes an alias of the winner, so other "would-be" proposals
+    * are moot.  Soft-link writes happen here. */
+   if (ev.composite_score >= auto_thresh) {
       int64_t link_id = 0;
       int link_rc = memory_db_entity_alias_link(user_id, entity_id, winner_id, "soft", "auto-merge",
                                                 ev.composite_score, NULL, &link_id);
@@ -1574,15 +1780,46 @@ int memory_db_entity_consider_auto_merge(int user_id,
       return MEMORY_DB_SUCCESS;
    }
 
-   if (ev.composite_score >= MEMORY_ALIAS_REVIEW_THRESHOLD) {
+   /* No auto-merge: propose EVERY candidate above review_threshold, not
+    * just the winner.  The previous "best-match-wins" semantics hid
+    * secondary legitimate matches — e.g. "Kristopher Kersey" matches both
+    * "Kris" (same person) AND "Shelley Kersey" (related entity); the
+    * winner-only path picked one and silently discarded the other.  False-
+    * positive cost is one click to reject in the Suggested-Merges UI, so
+    * we trade precision for recall here.  Stage-1 short-circuit ALREADY
+    * synthesized a fake evidence struct above (composite=1.0); it goes
+    * through the AUTO branch and never reaches this code path. */
+   int proposed_count = 0;
+   int64_t first_proposal_id = 0;
+   for (int i = 0; i < scored_count; i++) {
+      if (scored[i].evidence.composite_score < review_thresh)
+         break; /* sorted DESC, nothing more above threshold */
+      if (scored[i].entity_id == entity_id)
+         continue; /* self-link guard (cascade should already exclude) */
+      if (scored[i].evidence.type_veto_fired)
+         continue; /* type mismatch — don't propose */
+
       int64_t prop_id = 0;
-      if (insert_merge_proposal(user_id, entity_id, winner_id, ev.composite_score, NULL,
+      if (insert_merge_proposal(user_id, entity_id, scored[i].entity_id,
+                                scored[i].evidence.composite_score, NULL,
                                 &prop_id) == MEMORY_DB_SUCCESS) {
-         out_eval->outcome = MEMORY_ALIAS_OUTCOME_PROPOSED;
-         out_eval->proposal_id = prop_id;
-      } else {
-         out_eval->outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
+         proposed_count++;
+         if (first_proposal_id == 0)
+            first_proposal_id = prop_id;
+         if (scored[i].entity_id != winner_id) {
+            /* Log secondary proposals so operators can see the multi-
+             * proposal behavior in extraction logs.  The winner gets
+             * logged by the caller (memory_extraction.c) via out_eval. */
+            OLOG_INFO("memory_db_alias: also proposed %lld → %lld (composite=%.2f)",
+                      (long long)entity_id, (long long)scored[i].entity_id,
+                      (double)scored[i].evidence.composite_score);
+         }
       }
+   }
+
+   if (proposed_count > 0) {
+      out_eval->outcome = MEMORY_ALIAS_OUTCOME_PROPOSED;
+      out_eval->proposal_id = first_proposal_id;
       return MEMORY_DB_SUCCESS;
    }
 
@@ -2347,6 +2584,235 @@ int memory_db_entity_alias_summary(int user_id,
  * will be the dominant producer once it ships.
  * ============================================================================= */
 
+int memory_db_proposal_count_pending(int user_id, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT COUNT(*) FROM memory_entity_merge_proposals "
+                          "WHERE user_id = ? AND resolved_at IS NULL",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   int n = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      n = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (count_out)
+      *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Forward declaration — promote_to_user_self_entity is defined further
+ * down (near memory_alias_link_user_self_run).  Both auto-promote helpers
+ * are public-API callers of that static. */
+static int promote_to_user_self_entity(int user_id, int64_t entity_id);
+
+int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id) {
+   int64_t self_id = 0;
+   int rc = find_user_self_id(user_id, &self_id);
+   if (out_id)
+      *out_id = (rc == MEMORY_DB_SUCCESS) ? self_id : 0;
+   /* find_user_self_id returns MEMORY_DB_NOT_FOUND when no row exists;
+    * the public API normalizes that to SUCCESS with out_id=0 since "no
+    * anchor yet" is a valid no-op state, not an error. */
+   if (rc == MEMORY_DB_NOT_FOUND)
+      return MEMORY_DB_SUCCESS;
+   return rc;
+}
+
+int memory_db_entity_maybe_auto_promote_user_self(int user_id,
+                                                  int64_t entity_id,
+                                                  const char *canonical_name,
+                                                  bool *out_promoted) {
+   if (out_promoted)
+      *out_promoted = false;
+   if (user_id <= 0 || entity_id <= 0 || !canonical_name || !*canonical_name)
+      return MEMORY_DB_FAILURE;
+
+   /* Skip if a user_self already exists.  The partial UNIQUE index would
+    * reject the UPDATE anyway, but checking first avoids the noisy
+    * "promote matched no rows" warning from promote_to_user_self_entity
+    * when the user already has their self anchor set. */
+   int64_t existing_self = 0;
+   if (find_user_self_id(user_id, &existing_self) == MEMORY_DB_SUCCESS && existing_self > 0)
+      return MEMORY_DB_SUCCESS;
+
+   /* Look up users.real_name (and identity_aliases). */
+   auth_user_identity_t identity;
+   memset(&identity, 0, sizeof(identity));
+   if (auth_db_get_user_identity(user_id, &identity) != AUTH_DB_SUCCESS)
+      return MEMORY_DB_SUCCESS; /* no identity row — caller hasn't set real_name yet */
+   if (identity.real_name[0] == '\0')
+      return MEMORY_DB_SUCCESS; /* real_name not configured — operator must set it first */
+
+   /* Canonicalize real_name and each newline-separated alias, compare
+    * against the inbound canonical.  Match on equality (after canon
+    * normalization) — substring would be ambiguous for short names. */
+   char rn_canon[MEMORY_ENTITY_NAME_MAX];
+   memory_make_canonical_name(identity.real_name, rn_canon, sizeof(rn_canon));
+
+   bool matches = (rn_canon[0] != '\0' && strcmp(rn_canon, canonical_name) == 0);
+   if (!matches && identity.identity_aliases[0] != '\0') {
+      /* Walk newline-separated aliases. */
+      const char *p = identity.identity_aliases;
+      while (!matches && *p) {
+         while (*p == '\n' || *p == '\r')
+            p++;
+         if (!*p)
+            break;
+         const char *line_start = p;
+         while (*p && *p != '\n' && *p != '\r')
+            p++;
+         size_t len = (size_t)(p - line_start);
+         if (len == 0 || len >= MEMORY_ENTITY_NAME_MAX)
+            continue;
+         char line[MEMORY_ENTITY_NAME_MAX];
+         memcpy(line, line_start, len);
+         line[len] = '\0';
+         char alias_canon[MEMORY_ENTITY_NAME_MAX];
+         memory_make_canonical_name(line, alias_canon, sizeof(alias_canon));
+         if (alias_canon[0] != '\0' && strcmp(alias_canon, canonical_name) == 0)
+            matches = true;
+      }
+   }
+   if (!matches)
+      return MEMORY_DB_SUCCESS;
+
+   /* Promote.  Reuses the existing helper that enforces canonical_id IS
+    * NULL and the no-existing-user_self UNIQUE constraint.  NOT_FOUND
+    * here means the row no longer qualifies (deleted between check and
+    * UPDATE, already promoted, or has canonical_id set — all benign no-
+    * ops, not failures); SUCCESS_with_out_promoted=false matches the
+    * docstring contract. */
+   int rc = promote_to_user_self_entity(user_id, entity_id);
+   if (rc == MEMORY_DB_NOT_FOUND)
+      return MEMORY_DB_SUCCESS;
+   if (rc != MEMORY_DB_SUCCESS)
+      return rc;
+
+   if (out_promoted)
+      *out_promoted = true;
+   OLOG_INFO("memory_db_alias: auto-promoted entity %lld to is_user_self=1 (canonical='%s' "
+             "matched users.real_name)",
+             (long long)entity_id, canonical_name);
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Lookup helper: find a canonical entity for @p user_id whose
+ * canonical_name equals @p canonical (exact match, canonical_id IS NULL).
+ * Returns the entity id via @p out_id (0 if no match).  Used by the
+ * by-real-name promotion sweep. */
+static int find_canonical_by_name(int user_id, const char *canonical, int64_t *out_id) {
+   if (!out_id)
+      return MEMORY_DB_FAILURE;
+   *out_id = 0;
+   if (user_id <= 0 || !canonical || !*canonical)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id FROM memory_entities "
+                          "WHERE user_id = ? AND canonical_id IS NULL "
+                          "  AND canonical_name = ? LIMIT 1",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_text(stmt, 2, canonical, -1, SQLITE_TRANSIENT);
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      *out_id = sqlite3_column_int64(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_auto_promote_user_self_by_real_name(int user_id, bool *out_promoted) {
+   if (out_promoted)
+      *out_promoted = false;
+   if (user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   int64_t existing_self = 0;
+   if (find_user_self_id(user_id, &existing_self) == MEMORY_DB_SUCCESS && existing_self > 0)
+      return MEMORY_DB_SUCCESS; /* already set */
+
+   auth_user_identity_t identity;
+   memset(&identity, 0, sizeof(identity));
+   if (auth_db_get_user_identity(user_id, &identity) != AUTH_DB_SUCCESS)
+      return MEMORY_DB_SUCCESS;
+   if (identity.real_name[0] == '\0')
+      return MEMORY_DB_SUCCESS;
+
+   /* Try real_name first.  Canonicalize before lookup so the match
+    * survives casing / whitespace differences between Settings input and
+    * extraction-stored canonical_name. */
+   char canon[MEMORY_ENTITY_NAME_MAX];
+   memory_make_canonical_name(identity.real_name, canon, sizeof(canon));
+   int64_t found_id = 0;
+   if (canon[0] != '\0') {
+      find_canonical_by_name(user_id, canon, &found_id);
+   }
+
+   /* Fall through to aliases on miss.  Same newline-separated parsing the
+    * maybe-promote helper uses. */
+   if (found_id == 0 && identity.identity_aliases[0] != '\0') {
+      const char *p = identity.identity_aliases;
+      while (*p && found_id == 0) {
+         while (*p == '\n' || *p == '\r')
+            p++;
+         if (!*p)
+            break;
+         const char *line_start = p;
+         while (*p && *p != '\n' && *p != '\r')
+            p++;
+         size_t len = (size_t)(p - line_start);
+         if (len == 0 || len >= MEMORY_ENTITY_NAME_MAX)
+            continue;
+         char line[MEMORY_ENTITY_NAME_MAX];
+         memcpy(line, line_start, len);
+         line[len] = '\0';
+         memory_make_canonical_name(line, canon, sizeof(canon));
+         if (canon[0] != '\0') {
+            find_canonical_by_name(user_id, canon, &found_id);
+         }
+      }
+   }
+
+   if (found_id == 0)
+      return MEMORY_DB_SUCCESS; /* no matching canonical yet — extraction will catch it later */
+
+   /* NOT_FOUND from promote means the row stopped qualifying between the
+    * find_canonical_by_name lookup and the UPDATE — benign race, treat
+    * as no-op to honour the docstring's "SUCCESS on no-op" contract. */
+   int rc = promote_to_user_self_entity(user_id, found_id);
+   if (rc == MEMORY_DB_NOT_FOUND)
+      return MEMORY_DB_SUCCESS;
+   if (rc != MEMORY_DB_SUCCESS)
+      return rc;
+
+   if (out_promoted)
+      *out_promoted = true;
+   OLOG_INFO("memory_db_alias: auto-promoted entity %lld to is_user_self=1 by real_name lookup "
+             "(user_id=%d)",
+             (long long)found_id, user_id);
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_proposal_list_pending(int user_id,
                                     memory_alias_proposal_row_t *out,
                                     int max,
@@ -2595,7 +3061,12 @@ static int seed_user_self_entity(int user_id,
 /* Set is_user_self=1 on an existing entity (Path B step 1 — promote existing
  * match instead of inserting a fresh seed).  Caller is responsible for
  * ensuring no other entity for this user currently has is_user_self=1
- * (the partial UNIQUE index would otherwise block the UPDATE). */
+ * (the partial UNIQUE index would otherwise block the UPDATE).  The SQL
+ * also predicates `canonical_id IS NULL` so this helper refuses to
+ * promote an alias row to user_self — alias rows are shadowed by their
+ * canonical and would create inconsistent state.  Returns MEMORY_DB_NOT_
+ * FOUND when no row matches all three predicates (already-self, alias,
+ * or wrong user). */
 static int promote_to_user_self_entity(int user_id, int64_t entity_id) {
    if (entity_id <= 0 || user_id <= 0)
       return MEMORY_DB_FAILURE;
@@ -2604,7 +3075,8 @@ static int promote_to_user_self_entity(int user_id, int64_t entity_id) {
 
    sqlite3_stmt *stmt = NULL;
    const char *sql = "UPDATE memory_entities SET is_user_self = 1 "
-                     "WHERE id = ? AND user_id = ? AND is_user_self = 0";
+                     "WHERE id = ? AND user_id = ? AND is_user_self = 0 "
+                     "  AND canonical_id IS NULL";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
@@ -3038,11 +3510,11 @@ int memory_alias_link_user_self_run(int user_id,
             row->composite_score = ev.composite_score;
             row->user_self_bonus_applied = ev.user_self_bonus_applied;
          }
-         if (ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
+         if (ev.composite_score >= (float)g_config.memory.entity_merge_auto_threshold) {
             if (row)
                row->outcome = MEMORY_ALIAS_OUTCOME_AUTO_MERGED;
             result->auto_merged++;
-         } else if (ev.composite_score >= MEMORY_ALIAS_REVIEW_THRESHOLD) {
+         } else if (ev.composite_score >= (float)g_config.memory.entity_merge_review_threshold) {
             if (row)
                row->outcome = MEMORY_ALIAS_OUTCOME_PROPOSED;
             result->proposed++;
@@ -3076,7 +3548,7 @@ int memory_alias_link_user_self_run(int user_id,
 
          int outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
          int64_t link_id = 0, proposal_id = 0;
-         if (ev.composite_score >= MEMORY_ALIAS_AUTO_THRESHOLD) {
+         if (ev.composite_score >= (float)g_config.memory.entity_merge_auto_threshold) {
             /* Soft-link: alias source (cand) to target (self).  Reason
              * tag identifies the operator workflow that fired this. */
             int link_rc = memory_db_entity_alias_link(user_id, eid, self_id, "soft",
@@ -3089,7 +3561,7 @@ int memory_alias_link_user_self_run(int user_id,
                outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
                result->rejected++;
             }
-         } else if (ev.composite_score >= MEMORY_ALIAS_REVIEW_THRESHOLD) {
+         } else if (ev.composite_score >= (float)g_config.memory.entity_merge_review_threshold) {
             /* Queue for operator review via the WebUI Suggested-Merges panel. */
             int prop_rc = insert_merge_proposal(user_id, eid, self_id, ev.composite_score,
                                                 /* evidence_json */ NULL, &proposal_id);

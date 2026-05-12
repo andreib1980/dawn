@@ -550,6 +550,34 @@
 # score_uplift_factor = 1.5           # Range: 1.0 - 5.0
 
 # =============================================================================
+# Entity-merge auto-merge gate (Phase 2)
+# =============================================================================
+# After each extraction, freshly-created entities are scored against existing
+# canonicals via the resolver cascade (name jaccard + embedding cosine +
+# exclusive relation overlap + contact overlap + type match + substring
+# bonus + user-self bonus).  Outcome routing:
+#
+#   composite >= auto_threshold    → soft-link written silently (no
+#                                    operator approval, so keep this high)
+#   composite >= review_threshold  → proposal queued for operator approval
+#                                    via the WebUI Memory → Graph tab's
+#                                    "Suggested merges" panel
+#   else                           → entity stays as its own canonical
+#
+# Lower review_threshold = catches more duplicates but more clicks to
+# triage.  Operator approval is the gate, so false positives are cheap.
+# Calibrate against your corpus by watching the WebUI proposal queue's
+# precision (approve rate).
+#
+# `enabled` is a kill-switch for the auto-fire-on-extraction path only.
+# Operator-driven merges (link-user-self, WebUI merge button) work
+# regardless.
+[memory.entity_merge]
+# enabled = true                      # Auto-evaluate freshly-extracted entities
+# auto_threshold = 0.90               # Range: 0.30 - 1.00 (keep conservative)
+# review_threshold = 0.50             # Range: 0.10 - 1.00 (lower = more proposals)
+
+# =============================================================================
 # Scheduler (timers, alarms, reminders)
 # =============================================================================
 

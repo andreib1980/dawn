@@ -49,6 +49,12 @@
    let focusTrapCleanup = null;
    let triggerElement = null;
 
+   /* Phase 2 entity-merge: one-shot flag so auto-route-to-Graph fires
+    * on the FIRST open per page-load when proposals are pending, then
+    * leaves subsequent opens alone.  Reset on full page reload (module
+    * IIFE re-initialises). */
+   let autoRoutedThisLoad = false;
+
    /* =============================================================================
     * Elements
     * ============================================================================= */
@@ -1072,6 +1078,36 @@
 
       memoryElements.popover.classList.remove('hidden');
       memoryElements.btn.classList.add('active');
+
+      /* Phase 2 entity-merge auto-route: on the FIRST open per page-load
+       * with pending proposals, jump straight to the Graph tab so the
+       * user lands on the Suggested-Merges panel.  Subsequent opens
+       * respect whichever tab they last selected — sticky auto-route
+       * was reportedly hijacking Facts-tab visits after a user dismissed
+       * the panel without resolving proposals.  `autoRoutedThisLoad`
+       * is module-private to memory.js so a page reload re-enables it. */
+      if (
+         !autoRoutedThisLoad &&
+         window.DawnMemoryAliases &&
+         typeof DawnMemoryAliases.shouldAutoRouteToGraph === 'function' &&
+         DawnMemoryAliases.shouldAutoRouteToGraph() &&
+         memoryState.activeTab !== 'entities'
+      ) {
+         switchTab('entities');
+         autoRoutedThisLoad = true;
+         /* Visual cue: flash the Graph tab so the user's eye is drawn
+          * to why the panel opened where it did.  CSS class removed
+          * after the 600ms animation completes; if the user closed the
+          * panel before then, the next open won't re-flash because
+          * autoRoutedThisLoad is sticky. */
+         setTimeout(() => {
+            const tabBtn = document.querySelector('.memory-tab[data-tab="entities"]');
+            if (tabBtn) {
+               tabBtn.classList.add('just-routed');
+               setTimeout(() => tabBtn.classList.remove('just-routed'), 600);
+            }
+         }, 0);
+      }
 
       // Request fresh data
       requestStats();

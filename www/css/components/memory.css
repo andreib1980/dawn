@@ -32,6 +32,41 @@
    height: 20px;
 }
 
+/* Proposal-pending indicator — mirrors the music-playing dot pattern so the
+ * two attention cues feel coherent.  Hidden by default; revealed when
+ * memory_entity_merge_proposals has unresolved rows for the current user.
+ * DawnMemoryAliases.setProposalPendingCount() toggles .has-proposals on the
+ * button in response to the memory_proposals_changed WebSocket event.
+ * Animation-delay is offset 0.5s so when this dot fires alongside the
+ * music-playing dot, the two pulse in opposing phases instead of synced
+ * (synced reads as "system alarm"; opposing reads as "alive indicator
+ * pair"). */
+#memory-btn .memory-proposal-indicator {
+   position: absolute;
+   top: -2px;
+   right: -2px;
+   width: 8px;
+   height: 8px;
+   background: var(--accent);
+   border-radius: 50%;
+   animation: led-pulse 1s ease-in-out infinite;
+   animation-delay: 0.5s;
+   display: none;
+}
+
+#memory-btn.has-proposals .memory-proposal-indicator {
+   display: block;
+}
+
+/* Suppress the pulse for users with prefers-reduced-motion set.  Static
+ * dot still conveys "something is here"; only the animation is dropped.
+ * Mirrored to music.css so both header attention cues behave the same. */
+@media (prefers-reduced-motion: reduce) {
+   #memory-btn .memory-proposal-indicator {
+      animation: none;
+   }
+}
+
 /* =============================================================================
  * Memory Popover Container
  * ============================================================================= */
@@ -180,6 +215,30 @@
 .memory-tab.active {
    color: var(--accent);
    border-bottom-color: var(--accent);
+}
+
+/* Phase 2 auto-route-to-Graph flash.  When opening the memory panel
+ * with pending proposals, memory.js auto-switches to the Graph tab and
+ * adds .just-routed so the user's eye lands on why they're not where
+ * they expected.  Short 600ms accent-glow fade; no animation under
+ * prefers-reduced-motion. */
+.memory-tab.just-routed {
+   animation: memory-tab-flash 0.6s ease-out;
+}
+
+@keyframes memory-tab-flash {
+   0% {
+      box-shadow: 0 0 0 2px var(--accent);
+   }
+   100% {
+      box-shadow: 0 0 0 0 transparent;
+   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+   .memory-tab.just-routed {
+      animation: none;
+   }
 }
 
 /* =============================================================================

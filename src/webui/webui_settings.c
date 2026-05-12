@@ -32,6 +32,7 @@
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "logging.h"
+#include "memory/memory_db_aliases.h"
 #include "webui/webui_internal.h"
 
 /**
@@ -198,6 +199,24 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
       }
    }
    auth_db_set_user_identity(conn->auth_user_id, &identity);
+
+   /* Phase 2 entity-merge: if real_name is now set and no user-self
+    * anchor exists yet for this user, sweep existing canonicals and
+    * auto-promote a match.  Makes the CLI `dawn-admin memory entity
+    * link-user-self` unnecessary for the common "operator sets their
+    * name in Settings" flow.  No-op when already promoted or when no
+    * canonical matches yet (extraction-time hook catches it later).
+    *
+    * TODO(architecture): this is the first known "user-identity-changed"
+    * cross-subsystem reactor (WebUI handler → memory subsystem).  If a
+    * second consumer arrives (e.g. speaker-ID re-cluster, conversation-
+    * anchor re-stamp, per-user prompt cache invalidation), extract a
+    * Layer-1 notifier hook so `auth_db_set_user_identity` becomes the
+    * publisher and each subsystem registers as a listener.  Don't add
+    * a third direct call site here without doing that refactor first. */
+   if (identity.real_name[0] != '\0') {
+      memory_db_entity_auto_promote_user_self_by_real_name(conn->auth_user_id, NULL);
+   }
 
    /* Save settings */
    int result = auth_db_set_user_settings(conn->auth_user_id, &settings);

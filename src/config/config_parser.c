@@ -1022,6 +1022,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "embeddings",
                                              "recovery",
                                              "focus_injection", /* Phase 1b sub-table */
+                                             "entity_merge",    /* Phase 2 sub-table */
                                              NULL };
    warn_unknown_keys(table, "memory", known_keys);
 
@@ -1300,6 +1301,26 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
 
          PARSE_INT(dedup, "recent_window_turns", fi->dedup.recent_window_turns);
          PARSE_DOUBLE(dedup, "score_uplift_factor", fi->dedup.score_uplift_factor);
+      }
+   }
+
+   /* Parse [memory.entity_merge] sub-table — Phase 2 auto-merge gate. */
+   toml_table_t *emerge = toml_table_in(table, "entity_merge");
+   if (emerge) {
+      static const char *const emerge_keys[] = { "enabled", "auto_threshold", "review_threshold",
+                                                 NULL };
+      warn_unknown_keys(emerge, "memory.entity_merge", emerge_keys);
+
+      PARSE_BOOL(emerge, "enabled", config->entity_merge_enabled);
+      PARSE_DOUBLE(emerge, "auto_threshold", config->entity_merge_auto_threshold);
+      PARSE_DOUBLE(emerge, "review_threshold", config->entity_merge_review_threshold);
+      /* Clamp to sane bounds.  auto >= review enforced after clamping so
+       * operators can't accidentally make the auto band wider than review
+       * (which would auto-merge proposals that should require approval). */
+      CONFIG_CLAMP(config->entity_merge_auto_threshold, 0.30f, 1.0f);
+      CONFIG_CLAMP(config->entity_merge_review_threshold, 0.10f, 1.0f);
+      if (config->entity_merge_review_threshold > config->entity_merge_auto_threshold) {
+         config->entity_merge_review_threshold = config->entity_merge_auto_threshold;
       }
    }
 }

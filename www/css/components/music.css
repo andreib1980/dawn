@@ -54,6 +54,15 @@
    display: block;
 }
 
+/* Suppress the pulse for users with prefers-reduced-motion set.  Static
+ * dot still conveys "playing"; only the animation is dropped.  Mirrored
+ * to memory.css for the proposal-pending dot. */
+@media (prefers-reduced-motion: reduce) {
+   #music-btn .music-playing-indicator {
+      animation: none;
+   }
+}
+
 /* =============================================================================
  * Music Panel Container (Popover style like Memory)
  * ============================================================================= */

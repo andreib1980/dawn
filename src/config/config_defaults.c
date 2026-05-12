@@ -366,6 +366,19 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.dedup.recent_window_turns = 8;
    config->memory.focus_injection.dedup.score_uplift_factor = 1.5f;
 
+   /* Phase 2 entity-merge auto-merge gate.  auto_threshold=0.90 stays
+    * conservative because auto-merges land with no human approval.
+    * review_threshold=0.50 is permissive — proposals go through the
+    * Suggested-Merges WebUI panel where the operator gates the actual
+    * write.  Lower bound on legitimate matches: substring (+0.10) +
+    * type_match (+0.05) + cosine(0.7) (+0.21) + jaccard(0.5) (+0.15)
+    * = 0.51, just above the floor.  Random pairs without substring/
+    * jaccard stay below.  Calibrate against the dev corpus by watching
+    * the WebUI proposal queue for false-positive rate. */
+   config->memory.entity_merge_enabled = true;
+   config->memory.entity_merge_auto_threshold = 0.90f;
+   config->memory.entity_merge_review_threshold = 0.50f;
+
    /* Shutdown - disabled by default for security */
    config->shutdown.enabled = false;
    config->shutdown.passphrase[0] = '\0';

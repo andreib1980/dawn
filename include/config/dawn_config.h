@@ -38,13 +38,20 @@ extern "C" {
 /* =============================================================================
  * Utility Macros
  * ============================================================================= */
+/* CONFIG_CLAMP: forces a numeric config value into [lo, hi].  The
+ * negated-range guard `!(val >= lo && val <= hi)` catches NaN, +inf,
+ * and -inf — IEEE 754 NaN compares false to everything so a naïve
+ * `if (val < lo) ... if (val > hi) ...` would leave NaN unchanged and
+ * silently propagate into runtime checks (where `score >= NaN` is also
+ * false, disabling features without an error log).  Out-of-range
+ * non-NaN values fall back to whichever bound they violated; NaN/inf
+ * fall back to `lo` (deterministic safe default). */
 #ifndef CONFIG_CLAMP
-#define CONFIG_CLAMP(val, lo, hi) \
-   do {                           \
-      if ((val) < (lo))           \
-         (val) = (lo);            \
-      if ((val) > (hi))           \
-         (val) = (hi);            \
+#define CONFIG_CLAMP(val, lo, hi)                               \
+   do {                                                         \
+      if (!((val) >= (lo) && (val) <= (hi))) {                  \
+         (val) = ((val) > (hi)) ? (hi) : (lo); /* NaN → lo */ \
+      }                                                         \
    } while (0)
 #endif
 
@@ -553,6 +560,23 @@ typedef struct {
     * and the prompt-builder integration ships in 1e.  See
     * `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md` §"Phase 1 — Per-Turn Focus". */
    focus_injection_config_t focus_injection;
+
+   /* Phase 2 entity-merge auto-merge gate.  Fires after each extraction
+    * completes, evaluates was_created entities against existing canonicals
+    * via the resolver cascade, and routes by composite score:
+    *   - composite >= auto_threshold      → soft-link written (silent)
+    *   - composite >= review_threshold    → proposal queued for operator
+    *                                        approval via WebUI Suggested-
+    *                                        Merges panel
+    *   - else                             → stays its own canonical
+    * Operator approval gates the review band so lower review_threshold
+    * trades precision for recall — false positives are cheap (one click
+    * to reject) and false misses are expensive (duplicate persists).  The
+    * auto_threshold should stay high (≥ 0.85) because auto-merges land
+    * with no human in the loop. */
+   bool entity_merge_enabled;
+   float entity_merge_auto_threshold;
+   float entity_merge_review_threshold;
 } memory_config_t;
 
 /* =============================================================================

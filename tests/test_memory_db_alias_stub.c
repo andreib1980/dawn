@@ -40,9 +40,10 @@
 #include "dawn_error.h"
 #include "memory/memory_embeddings.h"
 
-/* Globals expected by linked auth_db modules. */
-dawn_config_t g_config;
-secrets_config_t g_secrets;
+/* g_config and g_secrets are now defined by config_defaults.c (linked
+ * into this test binary so config_set_defaults() works in setUp).  The
+ * stub previously declared them; that became a multiple-definition error
+ * once the real source was linked. */
 
 /* The auth_db_state_t storage is owned by auth_db_core.c; we don't redeclare
  * it here.  But test code reads s_db directly, which is fine via the

@@ -854,6 +854,26 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          CONFIG_CLAMP(fi->dedup.recent_window_turns, 0, 100);
          CONFIG_CLAMP(fi->dedup.score_uplift_factor, 1.0f, 5.0f);
       }
+
+      /* [memory.entity_merge] — Phase 2 auto-merge gate. */
+      json_object *emerge_obj = NULL;
+      if (json_object_object_get_ex(section, "entity_merge", &emerge_obj)) {
+         JSON_TO_CONFIG_BOOL(emerge_obj, "enabled", config->memory.entity_merge_enabled);
+         JSON_TO_CONFIG_DOUBLE(emerge_obj, "auto_threshold",
+                               config->memory.entity_merge_auto_threshold);
+         JSON_TO_CONFIG_DOUBLE(emerge_obj, "review_threshold",
+                               config->memory.entity_merge_review_threshold);
+         CONFIG_CLAMP(config->memory.entity_merge_auto_threshold, 0.30f, 1.0f);
+         CONFIG_CLAMP(config->memory.entity_merge_review_threshold, 0.10f, 1.0f);
+         /* Enforce review <= auto so the auto band can't accidentally
+          * subsume the review band (would auto-merge proposals that
+          * should require approval). */
+         if (config->memory.entity_merge_review_threshold >
+             config->memory.entity_merge_auto_threshold) {
+            config->memory.entity_merge_review_threshold =
+                config->memory.entity_merge_auto_threshold;
+         }
+      }
    }
 
    /* [shutdown] */

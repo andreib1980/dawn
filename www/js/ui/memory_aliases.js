@@ -134,9 +134,49 @@
          return;
       }
       proposals = payload.proposals || [];
+      /* The full-list response also implicitly carries the pending count;
+       * keep the icon dot in sync without waiting for a separate push. */
+      setProposalPendingCount(proposals.length);
       if (ctx && ctx.isEntitiesTabActive && ctx.isEntitiesTabActive()) {
          renderProposalsPanel();
       }
+   }
+
+   /* Server-pushed pending-proposal count.  Lights up the memory-icon dot
+    * when count > 0 and clears it when zero.  Called from dawn.js's
+    * `memory_proposals_changed` dispatch and from handleProposalListResponse
+    * (which carries an implicit count via proposals.length).  The auto-
+    * route-to-Graph-tab affordance reads from the same state — see
+    * shouldAutoRouteToGraph() below. */
+   let pendingProposalCount = 0;
+   function setProposalPendingCount(count) {
+      /* Number.isFinite rejects NaN AND Infinity (raw >= 0 lets +Inf
+       * through, which would render "(Infinity suggested merges
+       * pending)" if a buggy server push slipped in).  Negative or
+       * non-numeric inputs also coerce to 0. */
+      const n = Number.isFinite(count) && count >= 0 ? count : 0;
+      pendingProposalCount = n;
+      const btn = document.getElementById('memory-btn');
+      if (btn) {
+         btn.classList.toggle('has-proposals', n > 0);
+         if (n > 0) {
+            const noun = n === 1 ? 'merge' : 'merges';
+            const tooltip = `Your Memory (${n} suggested ${noun} pending)`;
+            const aria = `Your Memory — ${n} suggested ${noun} pending`;
+            btn.setAttribute('title', tooltip);
+            /* aria-label takes precedence over title for screen readers,
+             * so static "View your memories" would leave SR users with
+             * no signal that there's pending work.  Update both. */
+            btn.setAttribute('aria-label', aria);
+         } else {
+            btn.setAttribute('title', 'Your Memory');
+            btn.setAttribute('aria-label', 'View your memories');
+         }
+      }
+   }
+
+   function shouldAutoRouteToGraph() {
+      return pendingProposalCount > 0;
    }
 
    function handleLinkResponse(payload) {
@@ -566,5 +606,11 @@
       renderProposalsPanel,
       requestProposalList,
       cancelMergeMode,
+      /* Phase 2 proposal-pending indicator (memory-icon dot + auto-route
+       * to Graph tab on open).  setProposalPendingCount is called from
+       * dawn.js's memory_proposals_changed dispatch; shouldAutoRouteToGraph
+       * is read by memory.js's open() to decide whether to switch tabs. */
+      setProposalPendingCount,
+      shouldAutoRouteToGraph,
    };
 })();

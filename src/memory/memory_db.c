@@ -2596,7 +2596,16 @@ int memory_db_relation_supersede(int user_id,
    rc = sqlite3_step(create_stmt);
    sqlite3_reset(create_stmt);
    if (rc != SQLITE_DONE) {
-      OLOG_ERROR("memory_db: relation_supersede insert failed: %s", sqlite3_errmsg(s_db.db));
+      int xrc = sqlite3_extended_errcode(s_db.db);
+      OLOG_ERROR("memory_db: relation_supersede insert failed: %s "
+                 "(rc=%d xrc=%d user=%d subj=%lld rel='%s' obj_id=%lld obj_val='%s' "
+                 "fact_id=%lld conv=%lld msg_range=[%lld..%lld] valid=[%lld..%lld])",
+                 sqlite3_errmsg(s_db.db), rc, xrc, user_id, (long long)subject_entity_id, relation,
+                 (long long)object_entity_id, object_value ? object_value : "(null)",
+                 (long long)fact_id, prov ? (long long)prov->conv_id : 0LL,
+                 prov ? (long long)prov->msg_id_start : 0LL,
+                 prov ? (long long)prov->msg_id_end : 0LL, (long long)valid_from,
+                 (long long)valid_to);
       sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;

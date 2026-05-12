@@ -586,6 +586,23 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
  */
 void webui_broadcast_memory_notice(int user_id, const char *level, const char *message);
 
+/**
+ * @brief Broadcast pending merge-proposal count to a user's WebUI sessions.
+ *
+ * Phase 2 entity-merge: WebUI consumers raise the proposal-pending dot on
+ * the memory icon when count > 0 and clear it when count == 0.  Triggered
+ * after proposal insert (Phase 2 auto-fire or link-user-self), after
+ * proposal resolve (operator approve/reject), and on initial WebSocket
+ * auth so reconnecting clients hydrate their state.  The handler queries
+ * memory_entity_merge_proposals directly for the count rather than
+ * trusting a passed value — keeps the broadcast race-free against
+ * concurrent inserts.
+ *
+ * @param user_id   Target user.  Broadcasts to every active session whose
+ *                  auth_user_id matches.
+ */
+void webui_broadcast_memory_proposals_changed(int user_id);
+
 /* Forward declare the focus result type so this header doesn't pull in
  * memory/focus_source.h.  The broadcast helper takes a `const` pointer
  * — caller still owns the struct and its heap. */
