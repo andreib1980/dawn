@@ -415,6 +415,9 @@ dawn_add_unit_test(test_memory_summarize_missing
 dawn_add_unit_test(test_memory_db_admin
    SOURCES test_memory_db_admin.c test_memory_db_admin_stub.c
            ${SRC_ROOT}/src/memory/memory_db_admin.c
+           # memory_db.c linked so memory_db_undo_extraction_attempt is
+           # exercised directly (transient-failure rollback path).
+           ${SRC_ROOT}/src/memory/memory_db.c
    LIBS    dawn_common unity sqlite3 pthread m
    LABEL   ci)
 

@@ -40,6 +40,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
+#include "memory/memory_db.h"
 #include "memory/memory_db_admin.h"
 #include "unity.h"
 
@@ -505,6 +506,79 @@ void test_payload_minimum_username_only(void) {
 }
 
 /* ============================================================================
+ * memory_db_undo_extraction_attempt — transient-failure rollback
+ * ============================================================================ */
+
+/* Helper: read (extraction_attempts, extraction_last_attempt_at) for a conv. */
+static void read_attempt_state(int64_t conv_id, int *attempts, int64_t *last_at) {
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "SELECT extraction_attempts, extraction_last_attempt_at "
+                     "FROM conversations WHERE id = ?";
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL));
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(stmt));
+   if (attempts)
+      *attempts = sqlite3_column_int(stmt, 0);
+   if (last_at)
+      *last_at = sqlite3_column_int64(stmt, 1);
+   sqlite3_finalize(stmt);
+}
+
+/* Standard rollback path: conv was stamped with attempts=2, last_attempt_at=200
+ * (matches the DDL seed for conv 11).  Undo drops attempts to 1 and clears
+ * last_attempt_at to 0 so the recovery scan's re-eligibility predicate
+ * (`extraction_last_attempt_at < updated_at`) admits the conv again. */
+static void test_undo_extraction_attempt_decrements_counter(void) {
+   int attempts_before = -1;
+   int64_t last_at_before = -1;
+   read_attempt_state(11, &attempts_before, &last_at_before);
+   TEST_ASSERT_EQUAL_INT(2, attempts_before);
+   TEST_ASSERT_EQUAL_INT64(200, last_at_before);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_undo_extraction_attempt(11));
+
+   int attempts_after = -1;
+   int64_t last_at_after = -1;
+   read_attempt_state(11, &attempts_after, &last_at_after);
+   TEST_ASSERT_EQUAL_INT(1, attempts_after);
+   TEST_ASSERT_EQUAL_INT64(0, last_at_after);
+}
+
+/* Floor at zero: a transient failure on the very first attempt (attempts=0
+ * before record_attempt stamps it to 1) followed by undo MUST land at 0,
+ * not wrap to a negative.  Seed conv 12 starts at attempts=0; calling undo
+ * directly on it (without a preceding stamp) verifies the MAX(0, ...). */
+static void test_undo_extraction_attempt_clamps_at_zero(void) {
+   int attempts_before = -1;
+   read_attempt_state(12, &attempts_before, NULL);
+   TEST_ASSERT_EQUAL_INT(0, attempts_before);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_undo_extraction_attempt(12));
+
+   int attempts_after = -1;
+   int64_t last_at_after = -1;
+   read_attempt_state(12, &attempts_after, &last_at_after);
+   TEST_ASSERT_EQUAL_INT(0, attempts_after);
+   TEST_ASSERT_EQUAL_INT64(0, last_at_after);
+}
+
+/* Idempotency: calling undo twice in a row leaves the conv in the same
+ * state as one call (counter floored, last_at zeroed). */
+static void test_undo_extraction_attempt_is_idempotent(void) {
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_undo_extraction_attempt(10));
+   int attempts_after_one = -1;
+   read_attempt_state(10, &attempts_after_one, NULL);
+   TEST_ASSERT_EQUAL_INT(0, attempts_after_one); /* seeded at 1, decremented to 0 */
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_undo_extraction_attempt(10));
+   int attempts_after_two = -1;
+   int64_t last_at_after_two = -1;
+   read_attempt_state(10, &attempts_after_two, &last_at_after_two);
+   TEST_ASSERT_EQUAL_INT(0, attempts_after_two); /* clamp held */
+   TEST_ASSERT_EQUAL_INT64(0, last_at_after_two);
+}
+
+/* ============================================================================
  * Test runner
  * ============================================================================ */
 
@@ -522,5 +596,8 @@ int main(void) {
    RUN_TEST(test_worker_is_running_starts_false);
    RUN_TEST(test_payload_fits_under_admin_max);
    RUN_TEST(test_payload_minimum_username_only);
+   RUN_TEST(test_undo_extraction_attempt_decrements_counter);
+   RUN_TEST(test_undo_extraction_attempt_clamps_at_zero);
+   RUN_TEST(test_undo_extraction_attempt_is_idempotent);
    return UNITY_END();
 }

@@ -1756,6 +1756,37 @@ int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+int memory_db_undo_extraction_attempt(int64_t conversation_id) {
+   if (conversation_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   /* Roll back the attempt stamp written by record_attempt in
+    * memory_recovery.c.  Decrement to MAX(0, attempts - 1) so a transient
+    * failure on the very first attempt drops the counter back to 0; reset
+    * last_attempt_at to 0 so the recovery scan's
+    * `extraction_last_attempt_at < updated_at` re-eligibility rule treats
+    * the conv as never-attempted (it isn't dependent on `updated_at`
+    * advancing). */
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations "
+                          "SET extraction_attempts = MAX(0, extraction_attempts - 1), "
+                          "    extraction_last_attempt_at = 0 "
+                          "WHERE id = ?",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conversation_id);
+   int rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+
+   AUTH_DB_UNLOCK();
+   return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
 /* memory_db_facts_get_sources moved to memory_db_provenance.c (Phase B). */
 
 int memory_db_get_last_extracted_msg_id(int64_t conversation_id, int64_t *msg_id_out) {

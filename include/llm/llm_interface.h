@@ -387,6 +387,39 @@ const char *llm_get_default_gemini_model(void);
  */
 int llm_check_connection(const char *url, int timeout_seconds);
 
+/* Thread-local last-error codes — set by the LLM provider layer, read by
+ * callers to distinguish failure modes when a chat-completion returns NULL.
+ * Every public llm_chat_completion* entry point resets the code to
+ * LLM_ERR_NONE on entry so each call's outcome stands on its own. */
+#define LLM_ERR_NONE 0
+#define LLM_ERR_TRANSIENT_NETWORK 1 /* pre-flight check failed, host unreachable */
+
+/**
+ * @brief Get the last LLM error code for the calling thread.
+ *
+ * Useful for distinguishing "LLM endpoint unreachable" (transient, worth
+ * retrying after a back-off) from "LLM returned empty / invalid response"
+ * (likely a real extraction failure).  The memory recovery / reextract
+ * orchestrator reads this after every llm_chat_completion_with_config call
+ * to decide whether to roll back the extraction_attempts counter.
+ *
+ * @return LLM_ERR_NONE if the last call had no signalled error, or one of
+ *         the LLM_ERR_* codes above.
+ */
+int llm_last_error(void);
+
+/**
+ * @brief Set the thread-local last-error code.
+ *
+ * Provider-layer use only — declared here because providers live in
+ * separate translation units (llm_claude.c / llm_openai_chat_completions.c)
+ * and need to set this from their pre-flight check failure paths.  Not
+ * intended for callers above the LLM layer; use llm_last_error() instead.
+ *
+ * @param code One of the LLM_ERR_* codes
+ */
+void llm_set_last_error(int code);
+
 /**
  * @brief Request interruption of current LLM transfer
  *
@@ -497,6 +530,8 @@ void llm_get_default_config(session_llm_config_t *config);
  * @brief Chat completion with explicit configuration (non-streaming)
  *
  * Same as llm_chat_completion() but uses provided config instead of global.
+ * Resets llm_last_error() to LLM_ERR_NONE on entry so callers reading the
+ * code after a NULL return see only this call's outcome.
  *
  * @param conversation_history JSON array of conversation messages (OpenAI format)
  * @param input_text User's input text

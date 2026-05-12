@@ -283,19 +283,28 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
       OLOG_INFO("memory_recovery: extracted conv %lld (%d -> %d msgs)", (long long)row->conv_id,
                 last_extracted_before, last_extracted_after);
    } else {
-      /* Extraction ran but didn't produce a counter advance.  If this was the
-       * last permitted attempt, mark the conversation as extracted so it
-       * doesn't keep showing up as stuck. */
-      bool last_attempt = (max_attempts > 0 && row->extraction_attempts + 1 >= max_attempts);
-      if (last_attempt) {
-         OLOG_INFO("memory_recovery: conv %lld hit attempt cap (%d) without success; "
-                   "marking as extracted (give-up)",
-                   (long long)row->conv_id, max_attempts);
-         memory_db_set_last_extracted(row->conv_id, row->message_count, 0);
+      /* Extraction ran but didn't produce a counter advance.  Two
+       * sub-cases: (a) transient network failure — roll back the attempt
+       * stamp so the next pass picks the conv up again; (b) genuine
+       * non-advance — apply the standard give-up-at-cap heuristic. */
+      if (memory_extraction_consume_last_transient(row->user_id)) {
+         OLOG_WARNING("memory_recovery: conv %lld extraction hit transient network "
+                      "failure (cloud unreachable); rolling back attempt counter so the "
+                      "next pass can retry",
+                      (long long)row->conv_id);
+         memory_db_undo_extraction_attempt(row->conv_id);
       } else {
-         OLOG_INFO("memory_recovery: conv %lld extraction completed without advancing counter "
-                   "(attempt %d/%d)",
-                   (long long)row->conv_id, row->extraction_attempts + 1, max_attempts);
+         bool last_attempt = (max_attempts > 0 && row->extraction_attempts + 1 >= max_attempts);
+         if (last_attempt) {
+            OLOG_INFO("memory_recovery: conv %lld hit attempt cap (%d) without success; "
+                      "marking as extracted (give-up)",
+                      (long long)row->conv_id, max_attempts);
+            memory_db_set_last_extracted(row->conv_id, row->message_count, 0);
+         } else {
+            OLOG_INFO("memory_recovery: conv %lld extraction completed without advancing "
+                      "counter (attempt %d/%d)",
+                      (long long)row->conv_id, row->extraction_attempts + 1, max_attempts);
+         }
       }
    }
    return true;

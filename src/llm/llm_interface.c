@@ -72,6 +72,20 @@ int llm_get_effective_timeout_ms(void) {
    return g_config.network.llm_timeout_ms;
 }
 
+/* Thread-local last-error code (see llm_interface.h LLM_ERR_*).  Provider
+ * layers (claude/openai/etc.) set this when a known failure mode like
+ * pre-flight unreachable is detected; callers read via llm_last_error()
+ * after a NULL return to distinguish transient from genuine failures. */
+static __thread int s_tl_last_error = LLM_ERR_NONE;
+
+void llm_set_last_error(int code) {
+   s_tl_last_error = code;
+}
+
+int llm_last_error(void) {
+   return s_tl_last_error;
+}
+
 void llm_set_timeout_override(int timeout_ms) {
    s_tl_timeout_ms = timeout_ms;
 }
@@ -783,6 +797,7 @@ char *llm_chat_completion(struct json_object *conversation_history,
                           const size_t *vision_image_sizes,
                           int vision_image_count,
                           bool allow_fallback) {
+   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    char *response = NULL;
    llm_type_t type = current_type;
    cloud_provider_t provider = current_cloud_provider;
@@ -885,6 +900,7 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
                                     llm_text_chunk_callback chunk_callback,
                                     void *callback_userdata,
                                     bool allow_fallback) {
+   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    // Clear any previous interrupt flag from cancelled requests
    llm_clear_interrupt();
 
@@ -1070,6 +1086,7 @@ char *llm_chat_completion_streaming_tts(struct json_object *conversation_history
                                         llm_sentence_callback sentence_callback,
                                         void *callback_userdata,
                                         bool allow_fallback) {
+   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    char *response = NULL;
    tts_streaming_context_t ctx;
 
@@ -1282,6 +1299,13 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
                                       const size_t *vision_image_sizes,
                                       int vision_image_count,
                                       const llm_resolved_config_t *config) {
+   /* Reset per-call so callers reading llm_last_error() after a NULL return
+    * see only THIS call's outcome, not a stale signal from an earlier call
+    * on the same thread.  Mirrored at every public chat-completion entry
+    * point so the contract holds regardless of which variant the caller
+    * uses. */
+   llm_set_last_error(LLM_ERR_NONE);
+
    if (!config) {
       // No config provided, use global (with fallback enabled)
       return llm_chat_completion(conversation_history, input_text, vision_images,
@@ -1370,6 +1394,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
                                                 llm_text_chunk_callback chunk_callback,
                                                 void *callback_userdata,
                                                 const llm_resolved_config_t *config) {
+   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    // Clear any previous interrupt flag from cancelled requests
    llm_clear_interrupt();
 
@@ -1460,6 +1485,7 @@ char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversa
                                                     llm_sentence_callback sentence_callback,
                                                     void *callback_userdata,
                                                     const llm_resolved_config_t *config) {
+   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    if (!config) {
       // No config provided, use global (with fallback enabled)
       return llm_chat_completion_streaming_tts(conversation_history, input_text, vision_images,

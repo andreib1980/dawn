@@ -27,6 +27,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
@@ -60,4 +62,42 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
 /* memory_embeddings_invalidate_all is called after a successful reset
  * transaction — the test doesn't exercise the embedding cache. */
 void memory_embeddings_invalidate_all(void) {
+}
+
+/* Stubs for memory_db.c symbols pulled in by linking the full TU.  None
+ * should be reached by the admin tests (which only exercise reset-derived
+ * and undo-extraction-attempt paths).  Per the project's Unity stub
+ * pattern (April 2026 migration), never-called stubs abort with a
+ * diagnostic so signature drift becomes a compile error and accidental
+ * calls are visible at test runtime instead of silently passing. */
+
+uint32_t memory_normalize_and_hash(const char *text, char *out, size_t out_size) {
+   (void)text;
+   (void)out;
+   (void)out_size;
+   fprintf(stderr, "FATAL: memory_normalize_and_hash stub called — admin tests "
+                   "shouldn't hit fact paths\n");
+   abort();
+}
+
+void memory_embeddings_invalidate_cache(int user_id) {
+   (void)user_id;
+   fprintf(stderr, "FATAL: memory_embeddings_invalidate_cache stub called — admin tests "
+                   "shouldn't touch the embedding cache\n");
+   abort();
+}
+
+void memory_embeddings_invalidate_entity_cache(int user_id) {
+   (void)user_id;
+   fprintf(stderr, "FATAL: memory_embeddings_invalidate_entity_cache stub called — admin "
+                   "tests shouldn't touch the entity embedding cache\n");
+   abort();
+}
+
+float memory_embeddings_l2_norm(const float *vec, int dim) {
+   (void)vec;
+   (void)dim;
+   fprintf(stderr, "FATAL: memory_embeddings_l2_norm stub called — admin tests shouldn't "
+                   "exercise vector ops\n");
+   abort();
 }

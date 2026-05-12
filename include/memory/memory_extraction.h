@@ -98,6 +98,23 @@ int memory_trigger_extraction(int user_id,
 bool memory_extraction_in_progress(int user_id);
 
 /**
+ * @brief Read and consume the last-extraction-was-transient flag for a user.
+ *
+ * Returns true exactly once after an extraction completed with a transient
+ * failure signal (cloud unreachable / pre-flight check failed).  The
+ * recovery / reextract orchestrator reads this after waiting for an
+ * extraction to decide whether to roll back the attempt counter instead
+ * of treating the failure as a normal "extraction returned no facts"
+ * outcome.  Returns false if the last extraction for this user succeeded
+ * or failed for a non-transient reason.
+ *
+ * @param user_id User ID to query
+ * @return true if the last extraction for this user signalled transient
+ *         failure; false otherwise.  The flag is cleared by this call.
+ */
+bool memory_extraction_consume_last_transient(int user_id);
+
+/**
  * @brief Parse a JSON response from an LLM, handling common formatting variants.
  *
  * Tries direct parse, markdown code block extraction, and brace/bracket fallback.

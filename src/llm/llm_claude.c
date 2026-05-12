@@ -105,6 +105,7 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
 
    // Check connection
    if (!llm_check_connection(base_url, 4)) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       json_object_put(request);
       return NULL;
@@ -426,6 +427,7 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
 
    // Check connection
    if (!llm_check_connection(base_url, 4)) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       return NULL;
    }
@@ -882,6 +884,7 @@ int llm_claude_streaming_single_shot(struct json_object *conversation_history,
    }
 
    if (!llm_check_connection(base_url, 4)) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       return 1;
    }

@@ -182,6 +182,28 @@ static struct {
 } s_extraction_state = { { 0 }, 0 };
 static pthread_mutex_t s_extraction_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Last-extraction-outcome flag for the recovery/reextract orchestrator.
+ * Set by the extraction thread when an LLM call signals transient failure
+ * (LLM_ERR_TRANSIENT_NETWORK), read+cleared by memory_recovery's
+ * post-wait branch via memory_extraction_consume_last_transient().  Lives
+ * outside the slot table because the slot is released BEFORE the recovery
+ * worker observes "not in progress" — the flag must survive that
+ * transition.  Single-pair design: recovery serializes within a pass and
+ * only waits on one user at a time, so race with a concurrent webui
+ * session-end extraction is rare and best-effort.  Guarded by the
+ * existing s_extraction_mutex to avoid adding another lock. */
+static struct {
+   int last_user_id;
+   bool was_transient;
+} s_last_outcome = { 0, false };
+
+/* Stamp the most-recent outcome under the extraction mutex.  Called only
+ * from the extraction thread before it releases the slot. */
+static void set_last_outcome_locked(int user_id, bool was_transient) {
+   s_last_outcome.last_user_id = user_id;
+   s_last_outcome.was_transient = was_transient;
+}
+
 /* Helper: Get runtime concurrency limit */
 static int get_max_concurrent_extractions(void) {
    int limit = g_config.webui.max_clients;
@@ -1234,6 +1256,14 @@ static void *extraction_thread(void *arg) {
    response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
                                               &extraction_config);
 
+   /* Capture primary's transient status BEFORE any fallback runs.  The
+    * fallback call resets llm_last_error() at entry, so if the primary
+    * failed transient (cloud unreachable) and the fallback then fails
+    * for a non-transient reason (local model returned empty), the final
+    * llm_last_error() reading would lose the primary's transient signal
+    * and recovery would incorrectly take the give-up branch. */
+   bool primary_was_transient = (response == NULL && llm_last_error() == LLM_ERR_TRANSIENT_NETWORK);
+
    /* If primary model failed and we have a fallback, retry with the session's active model */
    bool used_fallback = false;
    if (!response && ctx->has_fallback && ctx->fallback.model[0] != '\0') {
@@ -1346,13 +1376,46 @@ static void *extraction_thread(void *arg) {
                    g_config.memory.extraction_model[0] ? g_config.memory.extraction_model
                                                        : "(default)",
                    (long)ctx->conversation_id);
+
+      /* Distinguish transient (cloud unreachable, pre-flight failure) from
+       * genuine LLM failures.  The recovery/reextract orchestrator reads
+       * this signal via memory_extraction_consume_last_transient() to
+       * decide whether to roll back the attempt counter -- without it,
+       * network blips during a long reextract loop would shelve
+       * conversations after max_attempts hits even though the LLM never
+       * actually rejected them.  Outcome stamp happens unconditionally
+       * just before cleanup so the success path also clears any stale
+       * transient flag from a prior extraction on the same user.  Use
+       * primary_was_transient OR current llm_last_error() so the signal
+       * survives a non-transient fallback failure overwriting it. */
+      bool final_was_transient = (primary_was_transient ||
+                                  llm_last_error() == LLM_ERR_TRANSIENT_NETWORK);
+      if (final_was_transient) {
+         OLOG_INFO("memory_extraction: failure was transient (cloud unreachable) for "
+                   "conv %ld -- caller should roll back attempt counter",
+                   (long)ctx->conversation_id);
+      }
 #ifdef ENABLE_WEBUI
       if (!is_recovery_run) {
          webui_broadcast_memory_notice(ctx->user_id, "error",
-                                       "Memory extraction failed for this session — see daemon "
+                                       "Memory extraction failed for this session - see daemon "
                                        "logs for details.");
       }
 #endif
+   }
+
+   /* Stamp this extraction's outcome for the recovery worker to consume.
+    * Done unconditionally so a successful run clears any stale transient
+    * flag from a prior failed extraction on the same user.  The TLS read
+    * (llm_last_error / primary_was_transient capture) happens from the
+    * same thread that produced the value, so no synchronization needed
+    * for the read; the store into s_last_outcome takes the mutex. */
+   {
+      bool was_transient = (response == NULL && (primary_was_transient ||
+                                                 llm_last_error() == LLM_ERR_TRANSIENT_NETWORK));
+      pthread_mutex_lock(&s_extraction_mutex);
+      set_last_outcome_locked(ctx->user_id, was_transient);
+      pthread_mutex_unlock(&s_extraction_mutex);
    }
 
    free(prompt);
@@ -1551,6 +1614,21 @@ bool memory_extraction_in_progress(int user_id) {
    pthread_mutex_unlock(&s_extraction_mutex);
 
    return in_progress;
+}
+
+bool memory_extraction_consume_last_transient(int user_id) {
+   if (user_id <= 0) {
+      return false;
+   }
+   pthread_mutex_lock(&s_extraction_mutex);
+   bool result = (s_last_outcome.last_user_id == user_id && s_last_outcome.was_transient);
+   if (result) {
+      /* Clear so a subsequent consume returns false — the recovery
+       * worker reads once per extraction it triggered. */
+      s_last_outcome.was_transient = false;
+   }
+   pthread_mutex_unlock(&s_extraction_mutex);
+   return result;
 }
 
 size_t memory_extraction_get_template_size_chars(void) {

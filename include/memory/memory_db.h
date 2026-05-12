@@ -797,6 +797,22 @@ int memory_db_get_last_extracted(int64_t conversation_id, int *count_out);
 int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int64_t last_msg_id);
 
 /**
+ * @brief Roll back an extraction_attempts stamp for a conversation.
+ *
+ * Decrements `conversations.extraction_attempts` to `MAX(0, ... - 1)` and
+ * resets `extraction_last_attempt_at` to 0.  Called by the recovery /
+ * reextract orchestrator when an extraction failed for a transient reason
+ * (cloud unreachable, etc.) — without rollback, the attempt counter would
+ * keep climbing on transient errors and shelve the conversation after
+ * `max_attempts` hits even though the LLM never actually rejected the
+ * request.
+ *
+ * @param conversation_id Conversation ID to roll back
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_undo_extraction_attempt(int64_t conversation_id);
+
+/**
  * @brief Get the last-extracted message ID cursor for a conversation (v40).
  *
  * Returns the highest message.id that was included in the most recent successful

@@ -292,6 +292,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    curl_buffer_init(&chunk);
 
    if (!llm_check_connection(base_url, 4)) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       json_object_put(root);
       return NULL;
@@ -677,6 +678,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
    }
 
    if (!llm_check_connection(base_url, 4)) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       json_object_put(root);
       return NULL;
@@ -1227,6 +1229,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
              (model_name && model_name[0]) ? model_name : "(server default)");
 
    if (!llm_check_connection(base_url, 4)) {
+      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       json_object_put(root);
       return 1;
