@@ -157,11 +157,19 @@ typedef struct {
 #define MEMORY_ALIAS_OUTCOME_AUTO_MERGED 3 /* >= auto threshold → soft link */
 
 typedef struct {
-   int outcome;              /* MEMORY_ALIAS_OUTCOME_* */
-   int64_t source_entity_id; /* the entity scored */
-   int64_t target_entity_id; /* canonical chosen, or 0 if no candidate */
-   int64_t link_id;          /* memory_entity_aliases.id, or 0 */
-   int64_t proposal_id;      /* memory_entity_merge_proposals.id, or 0 */
+   int outcome; /* MEMORY_ALIAS_OUTCOME_* */
+   /* Alias side of the resulting link.  Equals the entity_id passed to
+    * consider_auto_merge() in the common case; differs ONLY when the AUTO
+    * branch's longer-canonical preference fires and swaps direction (the
+    * inbound becomes canonical, the previous-winner becomes the alias).
+    * Caller can detect a swap by comparing this to the entity_id it passed
+    * in. */
+   int64_t source_entity_id;
+   /* Canonical side of the resulting link, or 0 if no candidate.  Subject
+    * to the same swap semantics as source_entity_id. */
+   int64_t target_entity_id;
+   int64_t link_id;     /* memory_entity_aliases.id, or 0 */
+   int64_t proposal_id; /* memory_entity_merge_proposals.id, or 0 */
    memory_alias_evidence_t evidence;
 } memory_alias_evaluate_t;
 

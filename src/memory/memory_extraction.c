@@ -482,11 +482,21 @@ static void apply_phase2_merge_gate(int user_id, const int64_t *fresh_ids, int f
       int merge_rc = memory_db_entity_consider_auto_merge(user_id, fid, &eval);
       if (merge_rc == MEMORY_DB_SUCCESS) {
          if (eval.outcome == MEMORY_ALIAS_OUTCOME_AUTO_MERGED) {
-            OLOG_INFO("memory_extraction: alias auto-merged %ld → %ld (composite=%.2f)", (long)fid,
-                      (long)eval.target_entity_id, (double)eval.evidence.composite_score);
+            /* Print eval.source → eval.target so the log reflects the
+             * actual alias direction.  The longer-canonical swap in
+             * consider_auto_merge may have flipped fid and winner; in
+             * the non-swap case eval.source_entity_id == fid. */
+            OLOG_INFO("memory_extraction: alias auto-merged %ld → %ld (composite=%.2f)",
+                      (long)eval.source_entity_id, (long)eval.target_entity_id,
+                      (double)eval.evidence.composite_score);
          } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_PROPOSED) {
-            OLOG_INFO("memory_extraction: alias proposed %ld → %ld (composite=%.2f)", (long)fid,
-                      (long)eval.target_entity_id, (double)eval.evidence.composite_score);
+            /* Print eval.source → eval.target so the log reflects the
+             * stored proposal direction.  Like AUTO_MERGED, the longer-
+             * canonical preference may have flipped fid and winner at
+             * propose time. */
+            OLOG_INFO("memory_extraction: alias proposed %ld → %ld (composite=%.2f)",
+                      (long)eval.source_entity_id, (long)eval.target_entity_id,
+                      (double)eval.evidence.composite_score);
             any_proposed = true;
          } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_REJECTED && eval.target_entity_id > 0) {
             /* Cascade found a candidate but composite was below the

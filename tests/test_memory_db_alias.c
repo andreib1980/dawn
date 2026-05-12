@@ -872,6 +872,169 @@ static void test_consider_auto_merge_auto_short_circuits_proposals(void) {
    TEST_ASSERT_EQUAL_INT64(self, get_entity_canonical_id(inbound));
 }
 
+/* Longer-canonical-name swap: when AUTO fires and the inbound is the fuller
+ * form of a person/pet/place name, redirect the alias-link so the long form
+ * stays canonical and the existing short form becomes the alias.  Without
+ * this preference, direction is determined incidentally by extraction order
+ * — whoever arrived first wins canonical regardless of name "fullness". */
+static void test_consider_auto_merge_longer_canonical_swap_fires(void) {
+   /* Composite without user_self / exclusive relations / cosine:
+    *   0.30*0  (jaccard "jon" vs "jonathan smith" — empty intersection)
+    *   0.30*0  (cosine stubbed)
+    *   0.25*0  (no exclusive overlap — none on either side)
+    *   0.10*1  (contact email match)
+    *   0.05*1  (both person)
+    *   +0.10   (substring: "jon" ⊂ "jonathan smith")
+    *           = 0.25
+    *
+    * Lower auto_threshold so 0.25 crosses AUTO — setUp() restores the
+    * default for the next test via config_set_defaults(&g_config). */
+   g_config.memory.entity_merge_auto_threshold = 0.20;
+
+   int64_t short_form = insert_entity_typed(g_test_user_id, "Jon", "person");
+   insert_contact(g_test_user_id, short_form, "email", "smithfab@example.com");
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_AUTO_MERGED, eval.outcome);
+
+   /* Swap fired: long-form (inbound) is the new canonical, short-form
+    * (cascade winner) is now the alias.  eval.source/target reflect the
+    * actual link direction taken. */
+   TEST_ASSERT_EQUAL_INT64(short_form, eval.source_entity_id);
+   TEST_ASSERT_EQUAL_INT64(inbound, eval.target_entity_id);
+   TEST_ASSERT_EQUAL_INT64(inbound, get_entity_canonical_id(short_form));
+   /* Inbound itself stays canonical (canonical_id IS NULL). */
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(inbound));
+}
+
+/* Propose-time swap: same direction-preference applies in REVIEW band.
+ * Without this, the proposal row would be stored as (source=inbound,
+ * target=cascade-winner) and the WebUI Suggested-Merges panel would show
+ * "merge Jonathan Smith → Jon" — operator either approves a backwards
+ * merge or has to mentally invert before clicking.  Mirror the AUTO swap
+ * so the stored direction is operator-actionable as-is. */
+static void test_consider_auto_merge_longer_canonical_propose_time_swap_fires(void) {
+   /* Compose composite ~0.25 (substring + contact + type — no exclusive
+    * relations so the no-dependents guard passes) and lower review to
+    * 0.20 with auto well above so we land in REVIEW band. */
+   g_config.memory.entity_merge_review_threshold = 0.20;
+   g_config.memory.entity_merge_auto_threshold = 0.95; /* keep AUTO out of reach */
+
+   int64_t short_form = insert_entity_typed(g_test_user_id, "Jon", "person");
+   insert_contact(g_test_user_id, short_form, "email", "smithfab@example.com");
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_PROPOSED, eval.outcome);
+
+   /* Proposal stored with swapped direction — eval.source/target reflect
+    * what the operator will see in the Suggested-Merges UI. */
+   TEST_ASSERT_EQUAL_INT64(short_form, eval.source_entity_id);
+   TEST_ASSERT_EQUAL_INT64(inbound, eval.target_entity_id);
+   TEST_ASSERT_GREATER_THAN(0, eval.proposal_id);
+
+   /* No alias write (operator still has to approve) — both canonical_id
+    * fields should remain NULL. */
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(short_form));
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(inbound));
+}
+
+/* Same-token-count tiebreaker: "Jon Smith" (existing) vs "Jonathan Smith"
+ * (inbound) — both 2 tokens, so the strictly-more-tokens rule doesn't
+ * apply.  The token-prefix tiebreaker recognises "jon" as a positional
+ * prefix of "jonathan" with matching second token, and the swap fires.
+ * Without the tiebreaker, the longer form would silently land as alias
+ * of the shorter form. */
+static void test_consider_auto_merge_same_token_count_swap_via_token_prefix(void) {
+   g_config.memory.entity_merge_auto_threshold = 0.20;
+
+   int64_t short_form = insert_entity_typed(g_test_user_id, "Jon Smith", "person");
+   insert_contact(g_test_user_id, short_form, "email", "smithfab@example.com");
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_AUTO_MERGED, eval.outcome);
+
+   /* Swap fired even though token counts match — the longer per-token
+    * form is now canonical, the shorter form is alias. */
+   TEST_ASSERT_EQUAL_INT64(short_form, eval.source_entity_id);
+   TEST_ASSERT_EQUAL_INT64(inbound, eval.target_entity_id);
+   TEST_ASSERT_EQUAL_INT64(inbound, get_entity_canonical_id(short_form));
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(inbound));
+}
+
+/* Negative case for the same-token-count tiebreaker: "Bob Smith" vs
+ * "Robert Smith" — same token count but "bob" is NOT a prefix of "robert"
+ * (b ≠ r at position 0), so the prefix tiebreaker correctly skips the
+ * swap.  These are variants, not fuller-vs-shorter forms — auto-swapping
+ * either direction would be an operator-correction event.  Cascade
+ * direction (Bob Smith stays canonical because it was inserted first)
+ * is preserved. */
+static void test_consider_auto_merge_same_token_count_no_swap_on_variants(void) {
+   g_config.memory.entity_merge_auto_threshold = 0.20;
+
+   int64_t existing = insert_entity_typed(g_test_user_id, "Bob Smith", "person");
+   insert_contact(g_test_user_id, existing, "email", "bob@example.com");
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Robert Smith", "person");
+   insert_contact(g_test_user_id, inbound, "email", "bob@example.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_AUTO_MERGED, eval.outcome);
+
+   /* Swap blocked — direction stays as cascade decided (inbound alias of
+    * existing).  Operator can manually re-link if they prefer Robert. */
+   TEST_ASSERT_EQUAL_INT64(inbound, eval.source_entity_id);
+   TEST_ASSERT_EQUAL_INT64(existing, eval.target_entity_id);
+   TEST_ASSERT_EQUAL_INT64(existing, get_entity_canonical_id(inbound));
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(existing));
+}
+
+/* Swap-skipped: target has an open exclusive relation as subject, so the
+ * "no dependents" guard blocks the redirect — alias direction stays as the
+ * cascade picked (inbound → short_form).  Avoids orphaning a relation
+ * subtree by making the head-of-equivalence-class into an alias.  Phase 3
+ * hard-merge / consolidate is the right tool when that's wanted. */
+static void test_consider_auto_merge_longer_canonical_swap_skipped_dependents(void) {
+   g_config.memory.entity_merge_auto_threshold = 0.20;
+
+   int64_t short_form = insert_entity_typed(g_test_user_id, "Jon", "person");
+   insert_contact(g_test_user_id, short_form, "email", "smithfab@example.com");
+   /* born_in is in EXCLUSIVE_RELATIONS[] — its presence on short_form
+    * blocks the swap regardless of whether inbound also has it. */
+   int64_t city = insert_entity_typed(g_test_user_id, "Atlanta", "place");
+   insert_open_relation(g_test_user_id, short_form, "born_in", city, NULL);
+
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   insert_contact(g_test_user_id, inbound, "email", "smithfab@example.com");
+
+   memory_alias_evaluate_t eval;
+   int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_AUTO_MERGED, eval.outcome);
+
+   /* Swap blocked — inbound (long-form) became the alias of short_form. */
+   TEST_ASSERT_EQUAL_INT64(inbound, eval.source_entity_id);
+   TEST_ASSERT_EQUAL_INT64(short_form, eval.target_entity_id);
+   TEST_ASSERT_EQUAL_INT64(short_form, get_entity_canonical_id(inbound));
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(short_form));
+}
+
 /* ============================================================================
  * Phase 2 auto-promote user_self at extraction time / by real_name sweep
  *
@@ -2565,6 +2728,11 @@ int main(void) {
    RUN_TEST(test_consider_auto_merge_substring_rescue_into_review);
    RUN_TEST(test_consider_auto_merge_proposes_multiple_in_band);
    RUN_TEST(test_consider_auto_merge_auto_short_circuits_proposals);
+   RUN_TEST(test_consider_auto_merge_longer_canonical_swap_fires);
+   RUN_TEST(test_consider_auto_merge_longer_canonical_propose_time_swap_fires);
+   RUN_TEST(test_consider_auto_merge_same_token_count_swap_via_token_prefix);
+   RUN_TEST(test_consider_auto_merge_same_token_count_no_swap_on_variants);
+   RUN_TEST(test_consider_auto_merge_longer_canonical_swap_skipped_dependents);
    RUN_TEST(test_auto_promote_user_self_at_extraction_time);
    RUN_TEST(test_auto_promote_user_self_by_real_name_sweep);
    RUN_TEST(test_auto_promote_no_op_when_user_self_exists);

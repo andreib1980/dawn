@@ -1695,6 +1695,184 @@ static int insert_merge_proposal(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+/* Whole-word token count — splits on whitespace, ignores empty runs.  Used by
+ * the longer-canonical-name preference below to compare inbound vs winner. */
+static int entity_count_whole_word_tokens(const char *name) {
+   if (!name)
+      return 0;
+   int count = 0;
+   bool in_token = false;
+   for (const char *p = name; *p; p++) {
+      bool is_ws = isspace((unsigned char)*p);
+      if (!is_ws && !in_token) {
+         count++;
+         in_token = true;
+      } else if (is_ws) {
+         in_token = false;
+      }
+   }
+   return count;
+}
+
+/* Same-token-count tiebreaker: returns true iff every positional token of
+ * `a` is a string prefix of (or equal to) the corresponding token of `b`.
+ * Catches cases like "Jon Smith" (a) → "Jonathan Smith" (b) where token
+ * counts match but b is clearly the fuller form per-token, without
+ * misfiring on variants like "Bob" vs "Robert" (bob is NOT a prefix of
+ * robert).  Known limitation: nickname pairs like "Liz"/"Elizabeth" or
+ * "Bill"/"William" where the short form isn't a prefix of the long — no
+ * string-based heuristic catches those without a nickname dictionary. */
+static bool entity_tokens_are_prefix_of(const char *a, const char *b) {
+   if (!a || !b)
+      return false;
+   const char *pa = a;
+   const char *pb = b;
+   for (;;) {
+      while (*pa && isspace((unsigned char)*pa))
+         pa++;
+      while (*pb && isspace((unsigned char)*pb))
+         pb++;
+      if (!*pa && !*pb)
+         return true; /* both fully consumed pairwise */
+      if (!*pa || !*pb)
+         return false; /* token count mismatch */
+      /* Compare a's token characters one-by-one against b's at this slot. */
+      while (*pa && !isspace((unsigned char)*pa)) {
+         if (!*pb || isspace((unsigned char)*pb))
+            return false; /* b's token shorter than a's at this position */
+         if (*pa != *pb)
+            return false; /* character mismatch — a is not a prefix of b */
+         pa++;
+         pb++;
+      }
+      /* a's token ended; consume the rest of b's token (b may be longer). */
+      while (*pb && !isspace((unsigned char)*pb))
+         pb++;
+   }
+}
+
+/* Types where the "fuller" name form is the natural canonical ("Jonathan
+ * Smith" is the canonical form of "Jon"; "Lassie the Collie" is the
+ * canonical form of "Lassie").  `org` is excluded because acronyms (IBM,
+ * NASA) are typically the canonical form in common usage; `thing` is
+ * excluded because the heuristic doesn't generalize. */
+static bool entity_type_prefers_longer_canonical(const char *entity_type) {
+   if (!entity_type)
+      return false;
+   return strcmp(entity_type, "person") == 0 || strcmp(entity_type, "pet") == 0 ||
+          strcmp(entity_type, "place") == 0;
+}
+
+/* Returns true if the entity has any aliases pointing at it OR any open
+ * exclusive relations as subject.  Used to gate the longer-canonical swap:
+ * we only redirect the alias-link when the existing canonical is a "leaf"
+ * (no equivalence-class subtree, no exclusive subject-side state that would
+ * be surprising to orphan-by-soft-merge).  Fail-safe: returns true on lock
+ * acquisition failure or any SQL error — the caller will skip the swap. */
+static bool entity_has_canonical_dependents(int user_id, int64_t entity_id) {
+   if (entity_id <= 0)
+      return false;
+
+   AUTH_DB_LOCK_OR_RETURN(true);
+
+   sqlite3_stmt *q_alias = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT 1 FROM memory_entities "
+                          "WHERE user_id = ? AND canonical_id = ? LIMIT 1",
+                          -1, &q_alias, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return true;
+   }
+   sqlite3_bind_int(q_alias, 1, user_id);
+   sqlite3_bind_int64(q_alias, 2, entity_id);
+   bool has_alias = (sqlite3_step(q_alias) == SQLITE_ROW);
+   sqlite3_finalize(q_alias);
+   if (has_alias) {
+      AUTH_DB_UNLOCK();
+      return true;
+   }
+
+   sqlite3_stmt *q_rel = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT relation FROM memory_relations "
+                          "WHERE user_id = ? AND subject_entity_id = ? "
+                          "AND valid_to IS NULL",
+                          -1, &q_rel, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return true;
+   }
+   sqlite3_bind_int(q_rel, 1, user_id);
+   sqlite3_bind_int64(q_rel, 2, entity_id);
+   bool has_excl_open = false;
+   while (sqlite3_step(q_rel) == SQLITE_ROW) {
+      const char *rel = (const char *)sqlite3_column_text(q_rel, 0);
+      if (rel && memory_db_relation_is_exclusive(rel)) {
+         has_excl_open = true;
+         break;
+      }
+   }
+   sqlite3_finalize(q_rel);
+   AUTH_DB_UNLOCK();
+   return has_excl_open;
+}
+
+/* Longer-canonical-name preference for person / pet / place entities.  When
+ * the cascade picks the existing canonical as merge target but the inbound
+ * is the "fuller" form, redirect the alias-link so the long form stays
+ * canonical and the existing short form becomes the alias.  Direction is
+ * otherwise determined incidentally by extraction order — "Jon" arriving
+ * first locks itself in as canonical, and a later "Jonathan Smith"
+ * collapses *into* it.  See dawn/docs/TODO.md "Entity merge: prefer longer
+ * canonical name for person/pet/place" for rationale.
+ *
+ * Guard against orphaning a subtree: only swap when the target has no
+ * aliases pointing at it AND no open exclusive relations as subject.  Hard-
+ * merge / Phase 3 consolidate is the right tool when the target is the head
+ * of an equivalence class.
+ *
+ * Lock pattern: TWO SEQUENTIAL lock cycles (one inside load_entity_full,
+ * one inside entity_has_canonical_dependents), NOT one held across both.
+ * Same shape as memory_db_entity_alias_link's pair of load_entity_full
+ * calls.  Don't "optimize" them into a single critical section — minimizing
+ * the cascade lock window matters more than saving two acquire/release
+ * pairs at a path that only fires on AUTO. */
+static bool should_swap_for_longer_canonical(int user_id,
+                                             const memory_entity_t *inbound,
+                                             int64_t winner_id) {
+   if (!inbound || winner_id <= 0)
+      return false;
+   if (!entity_type_prefers_longer_canonical(inbound->entity_type))
+      return false;
+
+   memory_entity_t winner;
+   bool winner_is_self = false;
+   int64_t winner_canon = 0;
+   if (load_entity_full(user_id, winner_id, &winner, &winner_canon, &winner_is_self) !=
+       MEMORY_DB_SUCCESS) {
+      return false;
+   }
+   if (!entity_type_prefers_longer_canonical(winner.entity_type))
+      return false;
+
+   int inbound_tokens = entity_count_whole_word_tokens(inbound->canonical_name);
+   int winner_tokens = entity_count_whole_word_tokens(winner.canonical_name);
+   if (inbound_tokens < winner_tokens)
+      return false;
+   if (inbound_tokens == winner_tokens) {
+      /* Same-token-count tiebreaker: only swap when winner's tokens are
+       * positionally a prefix of inbound's tokens.  Catches "Jon Smith"
+       * (existing) → "Jonathan Smith" (inbound) but skips variants like
+       * "Bob Smith" vs "Robert Smith" where neither is a prefix. */
+      if (!entity_tokens_are_prefix_of(winner.canonical_name, inbound->canonical_name))
+         return false;
+   }
+
+   if (entity_has_canonical_dependents(user_id, winner_id))
+      return false;
+
+   return true;
+}
+
 int memory_db_entity_consider_auto_merge(int user_id,
                                          int64_t entity_id,
                                          memory_alias_evaluate_t *out_eval) {
@@ -1764,17 +1942,37 @@ int memory_db_entity_consider_auto_merge(int user_id,
 
    /* Auto-merge: winner crosses auto threshold.  Sole outcome — the
     * source becomes an alias of the winner, so other "would-be" proposals
-    * are moot.  Soft-link writes happen here. */
+    * are moot.  Soft-link writes happen here.
+    *
+    * Direction swap: for person/pet/place where the inbound is the fuller
+    * form and the existing canonical is a "leaf" (no aliases, no open
+    * exclusive relations as subject), flip the alias-link so the long form
+    * stays canonical.  Updates out_eval->source/target to reflect the
+    * actual link direction taken — caller can detect a swap by comparing
+    * out_eval->target_entity_id against the entity_id passed in. */
    if (ev.composite_score >= auto_thresh) {
+      int64_t link_src = entity_id;
+      int64_t link_tgt = winner_id;
+      if (should_swap_for_longer_canonical(user_id, &inbound, winner_id)) {
+         link_src = winner_id;
+         link_tgt = entity_id;
+         OLOG_INFO("memory_db_alias: auto-merge direction swapped "
+                   "(longer canonical preferred): src %lld→%lld, tgt %lld→%lld",
+                   (long long)entity_id, (long long)link_src, (long long)winner_id,
+                   (long long)link_tgt);
+      }
+
       int64_t link_id = 0;
-      int link_rc = memory_db_entity_alias_link(user_id, entity_id, winner_id, "soft", "auto-merge",
+      int link_rc = memory_db_entity_alias_link(user_id, link_src, link_tgt, "soft", "auto-merge",
                                                 ev.composite_score, NULL, &link_id);
       if (link_rc != MEMORY_DB_SUCCESS) {
          OLOG_WARNING("memory_db_alias: auto-merge soft-link failed for src=%lld tgt=%lld",
-                      (long long)entity_id, (long long)winner_id);
+                      (long long)link_src, (long long)link_tgt);
          out_eval->outcome = MEMORY_ALIAS_OUTCOME_REJECTED;
          return MEMORY_DB_SUCCESS;
       }
+      out_eval->source_entity_id = link_src;
+      out_eval->target_entity_id = link_tgt;
       out_eval->outcome = MEMORY_ALIAS_OUTCOME_AUTO_MERGED;
       out_eval->link_id = link_id;
       return MEMORY_DB_SUCCESS;
@@ -1791,6 +1989,8 @@ int memory_db_entity_consider_auto_merge(int user_id,
     * through the AUTO branch and never reaches this code path. */
    int proposed_count = 0;
    int64_t first_proposal_id = 0;
+   int64_t first_proposal_src = 0;
+   int64_t first_proposal_tgt = 0;
    for (int i = 0; i < scored_count; i++) {
       if (scored[i].evidence.composite_score < review_thresh)
          break; /* sorted DESC, nothing more above threshold */
@@ -1799,19 +1999,36 @@ int memory_db_entity_consider_auto_merge(int user_id,
       if (scored[i].evidence.type_veto_fired)
          continue; /* type mismatch — don't propose */
 
+      /* Direction preference mirrors the AUTO branch — if the inbound is
+       * the fuller person/pet/place form and the candidate is a leaf
+       * (no aliases pointing at it, no open exclusive relations as
+       * subject), store the proposal pre-swapped so the operator sees
+       * the right direction in the Suggested-Merges UI.  Without this
+       * the operator would have to mentally invert "merge Jonathan
+       * Smith → Jon" before clicking approve. */
+      int64_t prop_src = entity_id;
+      int64_t prop_tgt = scored[i].entity_id;
+      if (should_swap_for_longer_canonical(user_id, &inbound, scored[i].entity_id)) {
+         prop_src = scored[i].entity_id;
+         prop_tgt = entity_id;
+      }
+
       int64_t prop_id = 0;
-      if (insert_merge_proposal(user_id, entity_id, scored[i].entity_id,
-                                scored[i].evidence.composite_score, NULL,
-                                &prop_id) == MEMORY_DB_SUCCESS) {
+      if (insert_merge_proposal(user_id, prop_src, prop_tgt, scored[i].evidence.composite_score,
+                                NULL, &prop_id) == MEMORY_DB_SUCCESS) {
          proposed_count++;
-         if (first_proposal_id == 0)
+         if (first_proposal_id == 0) {
             first_proposal_id = prop_id;
+            first_proposal_src = prop_src;
+            first_proposal_tgt = prop_tgt;
+         }
          if (scored[i].entity_id != winner_id) {
             /* Log secondary proposals so operators can see the multi-
              * proposal behavior in extraction logs.  The winner gets
-             * logged by the caller (memory_extraction.c) via out_eval. */
+             * logged by the caller (memory_extraction.c) via out_eval.
+             * Use the post-swap direction for honest log output. */
             OLOG_INFO("memory_db_alias: also proposed %lld → %lld (composite=%.2f)",
-                      (long long)entity_id, (long long)scored[i].entity_id,
+                      (long long)prop_src, (long long)prop_tgt,
                       (double)scored[i].evidence.composite_score);
          }
       }
@@ -1820,6 +2037,12 @@ int memory_db_entity_consider_auto_merge(int user_id,
    if (proposed_count > 0) {
       out_eval->outcome = MEMORY_ALIAS_OUTCOME_PROPOSED;
       out_eval->proposal_id = first_proposal_id;
+      /* Reflect the first (= winner-band) proposal's stored direction so
+       * the caller's log line shows what the operator will see in the
+       * Suggested-Merges panel.  Matches the AUTO branch's contract:
+       * source/target track the resulting row, not the cascade input. */
+      out_eval->source_entity_id = first_proposal_src;
+      out_eval->target_entity_id = first_proposal_tgt;
       return MEMORY_DB_SUCCESS;
    }
 
