@@ -79,6 +79,30 @@ int memory_db_entity_upsert(int user_id,
                             int64_t *id_out);
 
 /**
+ * @brief Upsert an entity with explicit `first_seen` / `last_seen` overrides
+ *
+ * Same contract as memory_db_entity_upsert, plus two timestamp overrides.
+ * Used by reextract paths where the conversation's original creation time
+ * should be preserved on the entity row instead of "now" — otherwise a
+ * full reextract stamps every entity's first_seen into the reextract
+ * window, breaking entity-merge `last_seen` priority comparisons and the
+ * recompute worker's staleness logic.
+ *
+ * @param first_seen_override Epoch seconds, or 0 to use time(NULL)
+ * @param last_seen_override Epoch seconds, or 0 to use time(NULL).  On
+ *        conflict update, this value replaces last_seen (preserves
+ *        chronological progress when reextract processes convs in order).
+ */
+int memory_db_entity_upsert_at(int user_id,
+                               const char *name,
+                               const char *entity_type,
+                               const char *canonical_name,
+                               int64_t first_seen_override,
+                               int64_t last_seen_override,
+                               bool *out_created,
+                               int64_t *id_out);
+
+/**
  * @brief Get an entity by exact canonical name
  *
  * @param user_id User ID

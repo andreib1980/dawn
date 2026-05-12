@@ -3300,14 +3300,15 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Entity graph statements */
+   /* Entity graph statements.  Three timestamp slots (?5 ?6 ?7) bound by
+    * the caller; see memory_db_entity_upsert_at for the resolution rule. */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO memory_entities (user_id, name, entity_type, canonical_name, "
        "first_seen, last_seen, mention_count) "
-       "VALUES (?, ?, ?, ?, strftime('%s','now'), strftime('%s','now'), 1) "
+       "VALUES (?, ?, ?, ?, ?, ?, 1) "
        "ON CONFLICT(user_id, canonical_name) DO UPDATE SET "
-       "last_seen = strftime('%s','now'), mention_count = mention_count + 1, "
+       "last_seen = ?, mention_count = mention_count + 1, "
        "name = CASE WHEN length(excluded.name) > length(name) THEN excluded.name ELSE name END "
        "RETURNING id, mention_count",
        -1, &s_db.stmt_memory_entity_upsert, NULL);

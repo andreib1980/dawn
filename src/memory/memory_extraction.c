@@ -884,8 +884,13 @@ static void process_extraction_response(int user_id,
 
          bool was_created = false;
          int64_t eid = 0;
-         if (memory_db_entity_upsert(user_id, ent_name, ent_type, canonical, &was_created, &eid) !=
-             MEMORY_DB_SUCCESS)
+         /* Pass conv_created_at for both first_seen + last_seen so a
+          * reextract preserves the original conversation time on the
+          * entity row instead of stamping it into the reextract window.
+          * Live extraction passes a near-now timestamp anyway, so the
+          * "_at" variant is equivalent there. */
+         if (memory_db_entity_upsert_at(user_id, ent_name, ent_type, canonical, conv_created_at,
+                                        conv_created_at, &was_created, &eid) != MEMORY_DB_SUCCESS)
             continue;
          if (eid == 0)
             continue;
@@ -978,8 +983,12 @@ static void process_extraction_response(int user_id,
          }
          if (subj_id == 0) {
             bool created = false;
-            if (memory_db_entity_upsert(user_id, subj_name, "thing", subj_canonical, &created,
-                                        &subj_id) != MEMORY_DB_SUCCESS)
+            /* Same conv_created_at override as the primary entity loop —
+             * keeps relation-subject upserts from stamping reextract-time
+             * into first_seen. */
+            if (memory_db_entity_upsert_at(user_id, subj_name, "thing", subj_canonical,
+                                           conv_created_at, conv_created_at, &created,
+                                           &subj_id) != MEMORY_DB_SUCCESS)
                continue;
          }
 

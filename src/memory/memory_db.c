@@ -2168,16 +2168,43 @@ void memory_make_canonical_name(const char *name, char *out, size_t size) {
    out[j] = '\0';
 }
 
+/* Interactive callers (live extraction, contacts UI, memory tool) use this
+ * wrapper — timestamps default to time(NULL) which is correct for "now."
+ * Reextract and historical-replay paths must call memory_db_entity_upsert_at
+ * directly with conv_created_at so first_seen/last_seen are pinned to the
+ * original conversation time, not the reextract window. */
 int memory_db_entity_upsert(int user_id,
                             const char *name,
                             const char *entity_type,
                             const char *canonical_name,
                             bool *out_created,
                             int64_t *id_out) {
+   return memory_db_entity_upsert_at(user_id, name, entity_type, canonical_name, 0, 0, out_created,
+                                     id_out);
+}
+
+int memory_db_entity_upsert_at(int user_id,
+                               const char *name,
+                               const char *entity_type,
+                               const char *canonical_name,
+                               int64_t first_seen_override,
+                               int64_t last_seen_override,
+                               bool *out_created,
+                               int64_t *id_out) {
    if (id_out)
       *id_out = 0;
    if (!name || !entity_type || !canonical_name)
       return MEMORY_DB_FAILURE;
+
+   /* Resolve effective timestamps once.  The `> 0` check treats any non-
+    * positive override (0, negatives) as "use now" — 0 is the documented
+    * sentinel, negatives are caller-bug defense.  Live-extraction callers
+    * pass 0/0 via the wrapper and get the historical behavior unchanged;
+    * the reextract path passes conv_created_at to preserve original
+    * conversation times. */
+   int64_t now_ts = (int64_t)time(NULL);
+   int64_t fs_ts = first_seen_override > 0 ? first_seen_override : now_ts;
+   int64_t ls_ts = last_seen_override > 0 ? last_seen_override : now_ts;
 
    AUTH_DB_LOCK_OR_FAIL();
 
@@ -2186,6 +2213,9 @@ int memory_db_entity_upsert(int user_id,
    sqlite3_bind_text(s_db.stmt_memory_entity_upsert, 2, name, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(s_db.stmt_memory_entity_upsert, 3, entity_type, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(s_db.stmt_memory_entity_upsert, 4, canonical_name, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(s_db.stmt_memory_entity_upsert, 5, fs_ts); /* INSERT first_seen */
+   sqlite3_bind_int64(s_db.stmt_memory_entity_upsert, 6, ls_ts); /* INSERT last_seen */
+   sqlite3_bind_int64(s_db.stmt_memory_entity_upsert, 7, ls_ts); /* UPDATE last_seen */
 
    int64_t entity_id = 0;
    int rc = sqlite3_step(s_db.stmt_memory_entity_upsert);

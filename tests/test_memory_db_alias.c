@@ -179,6 +179,29 @@ static int64_t get_entity_canonical_id(int64_t entity_id) {
    return result;
 }
 
+/* Read first_seen + last_seen on a row.  Returns SUCCESS if the row exists
+ * and stamps both out-params; returns FAILURE otherwise.  Test helper for
+ * the entity_upsert_at timestamp assertions. */
+static int get_entity_timestamps(int64_t entity_id, int64_t *fs, int64_t *ls) {
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT first_seen, last_seen FROM memory_entities WHERE id = ?",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, entity_id);
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      if (fs)
+         *fs = sqlite3_column_int64(stmt, 0);
+      if (ls)
+         *ls = sqlite3_column_int64(stmt, 1);
+      sqlite3_finalize(stmt);
+      return MEMORY_DB_SUCCESS;
+   }
+   sqlite3_finalize(stmt);
+   return MEMORY_DB_FAILURE;
+}
+
 static int count_active_aliases_for_target(int64_t target_id) {
    sqlite3_stmt *stmt = NULL;
    sqlite3_prepare_v2(s_db.db,
@@ -2689,6 +2712,87 @@ static void test_link_user_self_name_collision_returns_distinct_error(void) {
 }
 
 /* ============================================================================
+ * memory_db_entity_upsert_at — first_seen/last_seen overrides for reextract
+ * ============================================================================ */
+
+/* INSERT path: explicit overrides take effect on the new row.  Conflict
+ * path: subsequent upsert with a different timestamp updates last_seen but
+ * leaves first_seen unchanged (the table only writes first_seen on
+ * INSERT).  Sentinel 0 falls back to time(NULL) — verified via a third
+ * upsert whose timestamps must land in a [before, after] live window. */
+static void test_entity_upsert_at_overrides_take_effect(void) {
+   const int64_t past_ts = 1700000000; /* 2023-11-14, fixed past time */
+   int64_t eid = 0;
+   bool was_created = false;
+   int rc = memory_db_entity_upsert_at(g_test_user_id, "Jonathan Smith", "person", "jonathan smith",
+                                       past_ts, past_ts, &was_created, &eid);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(was_created);
+   TEST_ASSERT_GREATER_THAN(0, eid);
+
+   int64_t fs = 0, ls = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, get_entity_timestamps(eid, &fs, &ls));
+   TEST_ASSERT_EQUAL_INT64(past_ts, fs);
+   TEST_ASSERT_EQUAL_INT64(past_ts, ls);
+
+   /* Conflict path: same canonical_name, different override.  first_seen
+    * must stay pinned at the original insert time; last_seen must advance
+    * to the new override (preserves chronological progression when a
+    * reextract processes convs in id order). */
+   const int64_t later_ts = 1730000000; /* 2024-10-27 */
+   int64_t eid2 = 0;
+   bool was_created2 = true;
+   rc = memory_db_entity_upsert_at(g_test_user_id, "Jonathan Smith", "person", "jonathan smith",
+                                   later_ts, later_ts, &was_created2, &eid2);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(was_created2);
+   TEST_ASSERT_EQUAL_INT64(eid, eid2);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, get_entity_timestamps(eid, &fs, &ls));
+   TEST_ASSERT_EQUAL_INT64(past_ts, fs); /* unchanged */
+   TEST_ASSERT_EQUAL_INT64(later_ts, ls);
+
+   /* Sentinel 0 → time(NULL) fallback.  Bracket the upsert with two
+    * time() reads and assert the stamped value lands within. */
+   int64_t before = (int64_t)time(NULL);
+   int64_t eid3 = 0;
+   bool was_created3 = false;
+   rc = memory_db_entity_upsert_at(g_test_user_id, "Dawn Smith", "person", "dawn smith", 0, 0,
+                                   &was_created3, &eid3);
+   int64_t after = (int64_t)time(NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(was_created3);
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, get_entity_timestamps(eid3, &fs, &ls));
+   TEST_ASSERT_GREATER_OR_EQUAL_INT64(before, fs);
+   TEST_ASSERT_LESS_OR_EQUAL_INT64(after, fs);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT64(before, ls);
+   TEST_ASSERT_LESS_OR_EQUAL_INT64(after, ls);
+}
+
+/* The non-_at wrapper delegates to _at with both overrides = 0, so its
+ * timestamps must always be ~now even though the call shape is the same
+ * as it was before the _at split.  Keeps live-extraction callers
+ * behaviorally unchanged. */
+static void test_entity_upsert_wrapper_uses_now(void) {
+   int64_t before = (int64_t)time(NULL);
+   int64_t eid = 0;
+   bool was_created = false;
+   int rc = memory_db_entity_upsert(g_test_user_id, "Bob Smith", "person", "bob smith",
+                                    &was_created, &eid);
+   int64_t after = (int64_t)time(NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(was_created);
+
+   int64_t fs = 0, ls = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, get_entity_timestamps(eid, &fs, &ls));
+   TEST_ASSERT_GREATER_OR_EQUAL_INT64(before, fs);
+   TEST_ASSERT_LESS_OR_EQUAL_INT64(after, fs);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT64(before, ls);
+   TEST_ASSERT_LESS_OR_EQUAL_INT64(after, ls);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -2799,6 +2903,10 @@ int main(void) {
    RUN_TEST(test_link_user_self_promotes_existing_match);
    RUN_TEST(test_link_user_self_seeds_when_no_match);
    RUN_TEST(test_link_user_self_name_collision_returns_distinct_error);
+
+   /* Entity upsert timestamp overrides for reextract */
+   RUN_TEST(test_entity_upsert_at_overrides_take_effect);
+   RUN_TEST(test_entity_upsert_wrapper_uses_now);
 
    return UNITY_END();
 }
