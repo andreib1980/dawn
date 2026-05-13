@@ -285,7 +285,19 @@ dawn_add_unit_test(test_memory_filter
 dawn_add_unit_test(test_focus_source
    SOURCES test_focus_source.c
            ${SRC_ROOT}/src/memory/focus_source.c
+           ${SRC_ROOT}/src/memory/focus_dominant_token.c
            ${SRC_ROOT}/src/memory/memory_filter.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+# Phase B-ii: dominant-token over-inclusion heuristic.  Standalone unit
+# tests for the penalty module — no DB, no embedding engine, no LLM.
+# Covers no-op contracts, dominance detection, penalty math, clamps,
+# FOCUS_SCORE_NA sentinel protection, and a Phase-A severe-pathology
+# integration smoke.
+dawn_add_unit_test(test_focus_dominant_token
+   SOURCES test_focus_dominant_token.c
+           ${SRC_ROOT}/src/memory/focus_dominant_token.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -310,6 +322,7 @@ dawn_add_unit_test(test_memory_focus_adapters
            ${SRC_ROOT}/src/memory/focus_source.c
            ${SRC_ROOT}/src/memory/focus_recency.c
            ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/memory/focus_dominant_token.c
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
@@ -340,6 +353,7 @@ dawn_add_unit_test(test_focus_probe
            ${SRC_ROOT}/src/memory/focus_source.c
            ${SRC_ROOT}/src/memory/focus_recency.c
            ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/memory/focus_dominant_token.c
            ${SRC_ROOT}/src/memory/memory_filter.c
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
@@ -362,6 +376,7 @@ dawn_add_unit_test(test_external_focus_adapters
            ${SRC_ROOT}/src/memory/focus_source.c
            ${SRC_ROOT}/src/memory/focus_recency.c
            ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/memory/focus_dominant_token.c
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
@@ -689,6 +704,7 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/memory/focus_source.c
            ${SRC_ROOT}/src/memory/focus_recency.c
            ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/memory/focus_dominant_token.c
            ${SRC_ROOT}/src/memory/memory_filter.c
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c

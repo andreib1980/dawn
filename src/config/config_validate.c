@@ -43,9 +43,15 @@
       }                                                                                         \
    } while (0)
 
+/* NaN-safe range check: the negated-range form catches NaN/+inf/-inf
+ * because every comparison with NaN evaluates to false.  The old
+ * `value < min || value > max` form let NaN slip through silently.
+ * Same shape as include/config/dawn_config.h's CONFIG_CLAMP.
+ * Hardened 2026-05-13 (security review LOW-1) — closes ~30 validator
+ * sites at once, defense-in-depth against malformed admin-side TOML. */
 #define VALIDATE_RANGE_FLOAT(field, value, min, max)                                 \
    do {                                                                              \
-      if ((value) < (min) || (value) > (max)) {                                      \
+      if (!((value) >= (min) && (value) <= (max))) {                                 \
          ADD_ERROR(field, "must be between %.2f and %.2f (got %.4f)", (double)(min), \
                    (double)(max), (double)(value));                                  \
       }                                                                              \
@@ -199,6 +205,16 @@ int config_validate(const dawn_config_t *config,
                       config->memory.focus_injection.dedup.recent_window_turns, 0, 100);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.dedup.score_uplift_factor",
                         config->memory.focus_injection.dedup.score_uplift_factor, 1.0f, 5.0f);
+   /* Lower bound at 0.01 (not 0.0) — the runtime self-guard in
+    * focus_apply_dominant_token_penalty silently no-ops at value ≤ 0.0,
+    * so accepting 0.0 here would let an operator's slider lie about
+    * effect.  Disable the heuristic via the `enabled` flag instead. */
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.dominant_token_heuristic.threshold",
+                        config->memory.focus_injection.dominant_token_heuristic.threshold, 0.01f,
+                        1.0f);
+   VALIDATE_RANGE_FLOAT("memory.focus_injection.dominant_token_heuristic.base_penalty",
+                        config->memory.focus_injection.dominant_token_heuristic.base_penalty, 0.01f,
+                        1.0f);
 
    /* ===== Port Numbers (1 - 65535) ===== */
    VALIDATE_RANGE_INT("mqtt.port", config->mqtt.port, 1, 65535);

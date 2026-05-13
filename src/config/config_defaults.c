@@ -381,6 +381,18 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.dedup.recent_window_turns = 8;
    config->memory.focus_injection.dedup.score_uplift_factor = 1.5f;
 
+   /* Dominant-token over-inclusion heuristic (Phase B reranker workstream,
+    * 2026-05-13).  Bench-validated at canonical params on focus_probe_cases.json
+    * cases 16-18: 18/18 quorum across all three providers, parameter-robust
+    * across threshold ∈ {0.50, 0.60, 0.70} × base_penalty ∈ {0.30, 0.40,
+    * 0.50}.  See docs/RERANKER_PHASE_A_DESIGN.md for the full bench
+    * methodology and decision rationale.  Default-on because the bench
+    * shows zero regression on existing 15 cases and clean rescue of the
+    * three severe-pathology probes. */
+   config->memory.focus_injection.dominant_token_heuristic.enabled = true;
+   config->memory.focus_injection.dominant_token_heuristic.threshold = 0.60f;
+   config->memory.focus_injection.dominant_token_heuristic.base_penalty = 0.40f;
+
    /* Phase 2 entity-merge auto-merge gate.  auto_threshold=0.90 stays
     * conservative because auto-merges land with no human approval.
     * review_threshold=0.50 is permissive — proposals go through the

@@ -853,6 +853,14 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
             JSON_TO_CONFIG_DOUBLE(dedup_obj, "score_uplift_factor", fi->dedup.score_uplift_factor);
          }
 
+         json_object *dth_obj = NULL;
+         if (json_object_object_get_ex(focus_obj, "dominant_token_heuristic", &dth_obj)) {
+            JSON_TO_CONFIG_BOOL(dth_obj, "enabled", fi->dominant_token_heuristic.enabled);
+            JSON_TO_CONFIG_DOUBLE(dth_obj, "threshold", fi->dominant_token_heuristic.threshold);
+            JSON_TO_CONFIG_DOUBLE(dth_obj, "base_penalty",
+                                  fi->dominant_token_heuristic.base_penalty);
+         }
+
          CONFIG_CLAMP(fi->focus_budget_tokens, 256, 4096);
          CONFIG_CLAMP(fi->top_k, 1, 64);
          CONFIG_CLAMP(fi->min_score, 0.0f, 1.0f);
@@ -870,6 +878,11 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          CONFIG_CLAMP(fi->source_weights.dawn_background, 0.0f, 5.0f);
          CONFIG_CLAMP(fi->dedup.recent_window_turns, 0, 100);
          CONFIG_CLAMP(fi->dedup.score_uplift_factor, 1.0f, 5.0f);
+         /* Lower bound at 0.01 mirrors config_validate.c — runtime
+          * self-guard silently no-ops at ≤ 0.0; disable via the
+          * `enabled` flag instead so the slider can't lie. */
+         CONFIG_CLAMP(fi->dominant_token_heuristic.threshold, 0.01f, 1.0f);
+         CONFIG_CLAMP(fi->dominant_token_heuristic.base_penalty, 0.01f, 1.0f);
       }
 
       /* [memory.entity_merge] — Phase 2 auto-merge gate. */

@@ -1288,6 +1288,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                                 "weight_source",
                                                 "source_weights",
                                                 "dedup",
+                                                "dominant_token_heuristic",
                                                 NULL };
       warn_unknown_keys(focus, "memory.focus_injection", focus_keys);
 
@@ -1330,6 +1331,16 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
 
          PARSE_INT(dedup, "recent_window_turns", fi->dedup.recent_window_turns);
          PARSE_DOUBLE(dedup, "score_uplift_factor", fi->dedup.score_uplift_factor);
+      }
+
+      toml_table_t *dth = toml_table_in(focus, "dominant_token_heuristic");
+      if (dth) {
+         static const char *const dth_keys[] = { "enabled", "threshold", "base_penalty", NULL };
+         warn_unknown_keys(dth, "memory.focus_injection.dominant_token_heuristic", dth_keys);
+
+         PARSE_BOOL(dth, "enabled", fi->dominant_token_heuristic.enabled);
+         PARSE_DOUBLE(dth, "threshold", fi->dominant_token_heuristic.threshold);
+         PARSE_DOUBLE(dth, "base_penalty", fi->dominant_token_heuristic.base_penalty);
       }
    }
 

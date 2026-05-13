@@ -658,7 +658,7 @@
       "comment": "FAIL @ both w_rec=0.15 AND w_rec=0.30 — third severe dominant-token case in a work-context shape.  Right answer is a recent memory_summary with specific recent status (shard 3 of 5, rebalanced cluster) phrased without 'database migration' or 'project' query tokens (sem=0.50).  9 decoys all paraphrase 'database migration project' generically (sem=0.93-0.95).  Three cases at three different topic domains validates that the pathology is structural to embedding-based scoring, not query-specific.",
       "user_query": "What's the status on the database migration project?",
       "memory_seed": [
-        {"source_id": "memory_summary", "text": "Recent migration work: completed shard 3 of 5 over the weekend maintenance window, observed 2-hour downtime per shard during failover. Validation passes on the rebalanced cluster. Next shard scheduled for Friday after the release freeze lifts.",
+        {"source_id": "memory_summary", "text": "Recent rollout work: completed shard 3 of 5 over the weekend maintenance window, observed 2-hour downtime per shard during failover. Validation passes on the rebalanced cluster. Next shard scheduled for Friday after the release freeze lifts.",
          "item_id": "summary:shard3", "importance": 0.55,
          "semantic_override": 0.50, "recency_override": 0.95},
         {"source_id": "memory_fact", "text": "User leads the database migration project across the platform engineering team.",

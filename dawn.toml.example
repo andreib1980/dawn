@@ -589,6 +589,31 @@
 # score_uplift_factor = 1.5           # Range: 1.0 - 5.0
 
 # =============================================================================
+# [memory.focus_injection.dominant_token_heuristic]
+#
+# Phase B-ii structural fix for low-IDF dominant-token cosine over-
+# inclusion (the pathology probed by focus_probe_cases.json cases
+# 16-18).  When a user query has a low-IDF dominant token like
+# "favorite restaurant" or "doctor blood test" AND > threshold of
+# the candidate pool shares that token AND the right-answer summary
+# uses specific vocabulary instead, pure cosine + weight tuning
+# cannot rescue the right answer — the semantic gap exceeds any
+# recency lift safe parameters allow.  This heuristic detects the
+# shape per-turn and applies a composite-score penalty to candidates
+# whose query-overlap is ONLY via the dominant tokens.
+#
+# Bench-validated 18/18 quorum across all three providers
+# (anthropic/openai/local) on the 18-case fixture suite — see
+# docs/RERANKER_PHASE_A_DESIGN.md for the full bench history.
+# =============================================================================
+# [memory.focus_injection.dominant_token_heuristic]
+# enabled = true                      # Default on after Phase B-ii ship
+# threshold = 0.60                    # Pool fraction to call a token
+#                                     # dominant.  Range: 0.0 - 1.0.
+# base_penalty = 0.40                 # Max composite-score penalty per
+#                                     # candidate.  Range: 0.0 - 1.0.
+
+# =============================================================================
 # Entity-merge auto-merge gate (Phase 2)
 # =============================================================================
 # After each extraction, freshly-created entities are scored against existing

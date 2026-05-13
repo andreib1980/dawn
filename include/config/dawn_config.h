@@ -493,6 +493,18 @@ typedef struct {
                             grows past that and the cliff causes drops. */
    focus_source_weights_t source_weights;
    focus_dedup_config_t dedup;
+   /* Dominant-token over-inclusion heuristic (Phase 1j re-bench + Phase B
+    * reranker workstream).  Mitigates the failure mode where a query has
+    * a low-IDF dominant token (e.g. "favorite restaurant", "doctor blood
+    * test"), > threshold of the candidate pool shares that token, and
+    * the right-answer summary uses specific vocabulary.  Bench-validated
+    * at canonical params via benchmarks/focus_probe_cases.json cases
+    * 16-18 (severe_dominant_token_*) — see docs/RERANKER_PHASE_A_DESIGN.md. */
+   struct {
+      bool enabled;
+      float threshold;    /* Pool-fraction share to call a token "dominant" */
+      float base_penalty; /* Max composite-score penalty per candidate */
+   } dominant_token_heuristic;
 } focus_injection_config_t;
 
 typedef struct {

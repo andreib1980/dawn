@@ -1459,6 +1459,15 @@ json_object *config_to_json(const dawn_config_t *config) {
                              json_object_new_double(fi->dedup.score_uplift_factor));
       json_object_object_add(focus, "dedup", dedup);
 
+      json_object *dth = json_object_new_object();
+      json_object_object_add(dth, "enabled",
+                             json_object_new_boolean(fi->dominant_token_heuristic.enabled));
+      json_object_object_add(dth, "threshold",
+                             json_object_new_double(fi->dominant_token_heuristic.threshold));
+      json_object_object_add(dth, "base_penalty",
+                             json_object_new_double(fi->dominant_token_heuristic.base_penalty));
+      json_object_object_add(focus, "dominant_token_heuristic", dth);
+
       json_object_object_add(memory, "focus_injection", focus);
    }
 
@@ -2108,6 +2117,11 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "\n[memory.focus_injection.dedup]\n");
       fprintf(fp, "recent_window_turns = %d\n", fi->dedup.recent_window_turns);
       fprintf(fp, "score_uplift_factor = %.2f\n", fi->dedup.score_uplift_factor);
+
+      fprintf(fp, "\n[memory.focus_injection.dominant_token_heuristic]\n");
+      fprintf(fp, "enabled = %s\n", fi->dominant_token_heuristic.enabled ? "true" : "false");
+      fprintf(fp, "threshold = %.2f\n", fi->dominant_token_heuristic.threshold);
+      fprintf(fp, "base_penalty = %.2f\n", fi->dominant_token_heuristic.base_penalty);
    }
 
    fprintf(fp, "\n[memory.entity_merge]\n");

@@ -491,6 +491,20 @@ static void captured_release(void) {
    memset(&s_captured, 0, sizeof(s_captured));
 }
 
+/* Latent stub: build_focus_block.c calls webui_get_active_conversation_id()
+ * to refresh the broadcast conv_id from a live dispatch pointer.  In the
+ * bench, session_get_dispatch_session() returns NULL (no dispatch
+ * published), so this stub never actually fires — but the symbol must
+ * resolve at link time.  Signature mirrors the canonical declaration
+ * in include/webui/webui_server.h:566 so a future LTO/static-analysis
+ * pass can't trip on the prior ABI-mismatched stub.  Mirrors the
+ * same shape used in tests/test_prompt_builder_stub.c. */
+struct session;
+int64_t webui_get_active_conversation_id(struct session *session) {
+   (void)session;
+   return 0;
+}
+
 void webui_broadcast_context_injection(int user_id,
                                        int64_t conv_id,
                                        int64_t turn_id,
@@ -826,6 +840,30 @@ static int parse_config(struct json_object *cfg) {
       return FAILURE;
    if (validate_float_range("dedup.score_uplift_factor", fi->dedup.score_uplift_factor,
                             BENCH_DEDUP_UPLIFT_MIN, BENCH_DEDUP_UPLIFT_MAX) != SUCCESS)
+      return FAILURE;
+
+   /* Dominant-token over-inclusion heuristic — Phase B-ii.  Mirrors
+    * production defaults (config_defaults.c): enabled=true,
+    * threshold=0.60, base_penalty=0.40.  Bench callers override via the
+    * "dominant_token_heuristic" sub-object in the focus config JSON. */
+   struct json_object *dth = NULL;
+   fi->dominant_token_heuristic.enabled = true;
+   fi->dominant_token_heuristic.threshold = 0.60f;
+   fi->dominant_token_heuristic.base_penalty = 0.40f;
+   if (json_object_object_get_ex(cfg, "dominant_token_heuristic", &dth)) {
+      struct json_object *enabled_obj = NULL;
+      if (json_object_object_get_ex(dth, "enabled", &enabled_obj) &&
+          json_object_is_type(enabled_obj, json_type_boolean)) {
+         fi->dominant_token_heuristic.enabled = json_object_get_boolean(enabled_obj);
+      }
+      fi->dominant_token_heuristic.threshold = (float)json_get_double(dth, "threshold", 0.60);
+      fi->dominant_token_heuristic.base_penalty = (float)json_get_double(dth, "base_penalty", 0.40);
+   }
+   if (validate_float_range("dominant_token_heuristic.threshold",
+                            fi->dominant_token_heuristic.threshold, 0.0f, 1.0f) != SUCCESS)
+      return FAILURE;
+   if (validate_float_range("dominant_token_heuristic.base_penalty",
+                            fi->dominant_token_heuristic.base_penalty, 0.0f, 1.0f) != SUCCESS)
       return FAILURE;
    return SUCCESS;
 }

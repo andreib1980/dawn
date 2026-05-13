@@ -94,6 +94,13 @@ void webui_broadcast_memory_notice(int user_id, const char *level, const char *m
    (void)level;
    (void)message;
 }
+/* Added 2026-05-13 to unblock bench_retrieval after Phase 2 entity-merge
+ * (commit 9bfda37) added these symbols to memory_extraction.c without
+ * updating the bench stub list.  Pre-existing link breakage flagged by
+ * the coding-review pass following the reranker workstream ship. */
+void webui_broadcast_memory_proposals_changed(int user_id) {
+   (void)user_id;
+}
 
 /* Metrics — recorded by daemon for observability; bench discards */
 void metrics_record_llm_query(int duration_ms, bool is_cloud, bool success) {
@@ -164,8 +171,12 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
    (void)conv_id;
    (void)title;
 }
-int64_t webui_get_active_conversation_id(int user_id) {
-   (void)user_id;
+/* Signature corrected 2026-05-13 to match canonical declaration in
+ * include/webui/webui_server.h:566 — the prior `int user_id` form was
+ * an ABI mismatch (UB per C11 §6.5.2.2; worked only by aarch64 ABI
+ * coincidence).  Mirrors tests/test_prompt_builder_stub.c. */
+int64_t webui_get_active_conversation_id(session_t *s) {
+   (void)s;
    return 0;
 }
 void webui_send_compaction_complete(session_t *s) {
@@ -252,4 +263,73 @@ const struct device_type_def *device_type_get_def(const char *name) {
 bool llm_silent_observe_provider_is_valid(const char *provider) {
    (void)provider;
    return true;
+}
+
+/* =============================================================================
+ * Phase 2 entity-merge stubs — added 2026-05-13 to unblock bench_retrieval
+ * after the entity-merge ship (commit 9bfda37, 2026-05-12) wired
+ * memory_db_entity_consider_auto_merge / _get_user_self_id /
+ * _maybe_auto_promote_user_self into memory_extraction.c without
+ * updating the bench stub list.  The bench never drives entity merging,
+ * so these no-ops return MEMORY_DB_NOT_FOUND / sane defaults that keep
+ * memory_extraction.c's branches falling through to the non-merge path.
+ *
+ * Signatures mirror include/memory/memory_db_aliases.h:304/595/597.
+ * ============================================================================= */
+#include "memory/memory_db_aliases.h"
+#include "memory/memory_types.h"
+
+int memory_db_entity_consider_auto_merge(int user_id,
+                                         int64_t entity_id,
+                                         memory_alias_evaluate_t *out_eval) {
+   (void)user_id;
+   (void)entity_id;
+   if (out_eval != NULL) {
+      memset(out_eval, 0, sizeof(*out_eval));
+   }
+   return MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id) {
+   (void)user_id;
+   if (out_id != NULL) {
+      *out_id = 0;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_maybe_auto_promote_user_self(int user_id,
+                                                  int64_t entity_id,
+                                                  const char *canonical_name,
+                                                  bool *out_promoted) {
+   (void)user_id;
+   (void)entity_id;
+   (void)canonical_name;
+   if (out_promoted != NULL) {
+      *out_promoted = false;
+   }
+   return MEMORY_DB_NOT_FOUND;
+}
+
+/* memory_callback.c's `merge_entities` tool action calls this; the bench
+ * never reaches that path but the symbol must resolve. */
+int memory_db_entity_alias_link(int user_id,
+                                int64_t source_id,
+                                int64_t target_id,
+                                const char *link_kind,
+                                const char *reason,
+                                float composite_score,
+                                const char *evidence_json,
+                                int64_t *out_link_id) {
+   (void)user_id;
+   (void)source_id;
+   (void)target_id;
+   (void)link_kind;
+   (void)reason;
+   (void)composite_score;
+   (void)evidence_json;
+   if (out_link_id != NULL) {
+      *out_link_id = 0;
+   }
+   return MEMORY_DB_NOT_FOUND;
 }

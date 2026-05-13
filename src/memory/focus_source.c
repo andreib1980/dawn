@@ -32,6 +32,7 @@
 #include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/focus_dominant_token.h"
 #include "memory/focus_source_internal.h"
 #include "memory/memory_filter.h"
 
@@ -400,6 +401,29 @@ int focus_compose(int user_id,
       free(pool);
       free(pool_weights);
       return SUCCESS;
+   }
+
+   /* =====================================================================
+    * Dominant-token over-inclusion heuristic
+    *
+    * Applied between filter/cap and ranking: mutates each candidate's
+    * semantic_score in the working pool when the query has a low-IDF
+    * dominant token shared by > threshold of the pool AND the
+    * candidate matches the query ONLY via that token.  The existing
+    * composite formula propagates the penalty naturally because the
+    * mutation lands before compute_score_breakdown reads semantic_score.
+    *
+    * Bench-validated at default params via cases 16-18 in
+    * focus_probe_cases.json — see docs/RERANKER_PHASE_A_DESIGN.md.
+    * Function self-no-ops when disabled / query is empty / pool < 2,
+    * so this is safe to call unconditionally.
+    * ===================================================================== */
+   {
+      const focus_injection_config_t *fi_hcfg = &g_config.memory.focus_injection;
+      focus_apply_dominant_token_penalty(fi_hcfg->dominant_token_heuristic.enabled,
+                                         fi_hcfg->dominant_token_heuristic.threshold,
+                                         fi_hcfg->dominant_token_heuristic.base_penalty, query_text,
+                                         pool, pool_count);
    }
 
    /* =====================================================================

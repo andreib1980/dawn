@@ -68,24 +68,28 @@ DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
 DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 
 # Per-provider HEAD baselines for component 6 fix-rate.
-# Recalibrated 2026-05-13 (Phase 1j re-bench) after promoting
-# w_rec 0.15 → 0.30 against the augmented 15-case fixture set.  Four
-# new cases (12-15) probe the summary-vs-paraphrase-ladder pathology
-# the original 11 fixtures didn't exercise.  Run B at w_rec=0.30
-# produced 15/15 across all three providers (anthropic / openai /
-# local) with no regression on the regression-guard (case 14) or any
-# existing case.  Run A at w_rec=0.15 produced 13/15 (cases 12, 13
-# FAIL as designed).  Original Phase 1j.B tuning (w_imp 0.2 → 1.0,
-# w_rec 0.3 → 0.15, 11/11 baseline shipped 2026-05-08) is preserved
-# in the atlas tuning log; this baseline supersedes.
+# Recalibrated 2026-05-13 (Phase B-ii reranker workstream) after
+# landing the dominant-token over-inclusion heuristic in
+# memory/focus_dominant_token.c.  18/18 across all three providers
+# on the augmented 18-case fixture set — cases 16-18 lift from
+# unanimous FAIL × 3 (Phase A baseline) to unanimous PASS × 3 with
+# zero regression on the existing 15.
+#
+# Prior bumps preserved in atlas tuning log:
+#   - Phase 1j.B (2026-05-08): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15,
+#     11/11 fix-rate against the original 11-case fixture set
+#   - Phase 1j re-bench (2026-05-13): w_rec 0.15 → 0.30, 15/15
+#     fix-rate against the augmented 15-case set
+#   - Phase B-ii (2026-05-13): dominant-token heuristic, 18/18
+#     against the 18-case set
 #
 # Regression detection: (candidate_fix_count < baseline_fix_count)
 # is a FAIL on that provider.  See atlas/dawn/memory/PHASE_1J_TUNING_LOG.md
-# for the full pathology → fix mapping across both tuning passes.
+# and docs/RERANKER_PHASE_A_DESIGN.md for the full bench history.
 HEAD_BASELINE_FIX_COUNT = {
-    "anthropic": 15,
-    "openai": 15,
-    "local": 15,
+    "anthropic": 18,
+    "openai": 18,
+    "local": 18,
 }
 
 # Production-shape config block — passed verbatim to bench_focus_pipeline
@@ -128,6 +132,15 @@ DEFAULT_FOCUS_CONFIG = {
     "dedup": {
         "recent_window_turns": 8,
         "score_uplift_factor": 1.5,
+    },
+    # Phase B-ii: dominant-token over-inclusion heuristic.  Mirrors the
+    # shipped production defaults in config_defaults.c.  Cases 16-18
+    # (severe_dominant_token_*) require enabled=true to pass; cases 1-15
+    # are invariant to the heuristic (none trigger dominant-token shape).
+    "dominant_token_heuristic": {
+        "enabled": True,
+        "threshold": 0.60,
+        "base_penalty": 0.40,
     },
 }
 

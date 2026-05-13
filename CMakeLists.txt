@@ -652,6 +652,7 @@ list(APPEND DAWN_SOURCES
     src/memory/focus_source.c
     src/memory/focus_recency.c
     src/memory/focus_candidate_helpers.c
+    src/memory/focus_dominant_token.c
     src/memory/memory_fact_search.c
     src/memory/memory_focus_adapters.c
     src/memory/memory_source_dedup.c
