@@ -541,6 +541,39 @@ int memory_db_fact_update_confidence(int64_t fact_id, float confidence) {
    return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+/* Phase 0 v47: write the subject_entity_id FK onto an existing fact row.
+ * Ad-hoc prepared statement (not cached in s_db.stmt_*) because this runs
+ * once per fact insert during extraction — bounded by extraction cadence,
+ * not on a hot retrieval path.  Move to cached statement if profiling
+ * shows it's significant. */
+int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t entity_id) {
+   if (fact_id <= 0 || entity_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "UPDATE memory_facts SET subject_entity_id = ? "
+                               "WHERE id = ? AND user_id = ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare fact_set_subject_entity failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, entity_id);
+   sqlite3_bind_int64(stmt, 2, fact_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+   int step_rc = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (step_rc != SQLITE_DONE)
+      return MEMORY_DB_FAILURE;
+   return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
 int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id) {
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
@@ -2893,6 +2926,92 @@ int memory_db_relation_list_by_object(int user_id,
    }
 
    sqlite3_reset(s_db.stmt_memory_relation_list_by_object);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+/* Graph-retrieval Phase 1A helper: return DISTINCT fact_ids for fact-linked
+ * relations touching @entity_id (as either subject or object).  Skips
+ * relations with NULL fact_id — those are structured-only graph edges
+ * that Phase 1B will synthesize separately.  Sorted by relation confidence
+ * DESC then created_at DESC so the highest-quality graph anchors come
+ * first when the fan-out cap (@max) trips.  Caller is responsible for
+ * deduplicating across multiple seed entities. */
+int memory_db_relation_fact_ids_for_entity(int user_id,
+                                           int64_t entity_id,
+                                           int64_t *out_fact_ids,
+                                           int max,
+                                           int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_fact_ids || max <= 0 || entity_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_relation_fact_ids_for_entity;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, entity_id);
+   sqlite3_bind_int64(stmt, 3, entity_id);
+   sqlite3_bind_int(stmt, 4, max);
+
+   int count = 0;
+   while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+      out_fact_ids[count++] = sqlite3_column_int64(stmt, 0);
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+/* List this user's distinct relation predicates, ordered by frequency.
+ * Used by the Phase 0 extraction-prompt builder.  Ad-hoc prepared
+ * statement (not cached in s_db.stmt_*) because this runs once per
+ * extraction — bounded by call cadence, not by per-relation hot path. */
+int memory_db_relation_distinct_predicates(int user_id,
+                                           char out[][MEMORY_RELATION_MAX],
+                                           int max,
+                                           int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out || max <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT relation, COUNT(*) AS n "
+                               "  FROM memory_relations "
+                               " WHERE user_id = ? "
+                               " GROUP BY relation "
+                               " ORDER BY n DESC "
+                               " LIMIT ?",
+                               -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare relation_distinct_predicates failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int(stmt, 2, max);
+
+   int count = 0;
+   while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+      const char *rel = (const char *)sqlite3_column_text(stmt, 0);
+      if (!rel || !*rel)
+         continue;
+      strncpy(out[count], rel, MEMORY_RELATION_MAX - 1);
+      out[count][MEMORY_RELATION_MAX - 1] = '\0';
+      count++;
+   }
+   sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;

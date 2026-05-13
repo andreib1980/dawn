@@ -48,7 +48,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 46
+#define AUTH_DB_SCHEMA_VERSION 47
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -233,6 +233,7 @@ typedef struct {
    sqlite3_stmt *stmt_memory_relation_list_by_subject;
    sqlite3_stmt *stmt_memory_relation_list_by_subject_at; /* v33 — as-of variant */
    sqlite3_stmt *stmt_memory_relation_list_by_object;
+   sqlite3_stmt *stmt_memory_relation_fact_ids_for_entity; /* graph-retrieval 1A */
    sqlite3_stmt *stmt_memory_entity_search;
    sqlite3_stmt *stmt_memory_entity_delete;
    sqlite3_stmt *stmt_memory_entity_set_photo;

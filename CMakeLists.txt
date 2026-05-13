@@ -657,6 +657,8 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_focus_adapters.c
     src/memory/memory_source_dedup.c
     src/memory/memory_score_floor.c
+    src/memory/memory_graph_retrieval.c
+    src/memory/memory_predicate_dedup.c
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c

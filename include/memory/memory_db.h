@@ -219,6 +219,22 @@ int memory_db_fact_update_access(int64_t fact_id, int user_id);
 int memory_db_fact_update_confidence(int64_t fact_id, float confidence);
 
 /**
+ * @brief Set the subject_entity_id FK on an existing fact (v47).
+ *
+ * Phase 0 — the extraction prompt now requires a `subject` field on every
+ * fact, and the extractor resolves that text to an entity_id (creating
+ * the entity if needed).  This helper writes the resulting FK back onto
+ * the fact row so graph traversal can go fact → entity directly.
+ *
+ * @param fact_id Fact ID
+ * @param user_id User ID (ownership check)
+ * @param entity_id Subject entity ID (must already exist in memory_entities)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (no such fact for user),
+ *         or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t entity_id);
+
+/**
  * @brief Mark a fact as superseded by another
  *
  * Used when a fact is corrected or updated.

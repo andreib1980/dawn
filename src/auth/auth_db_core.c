@@ -301,14 +301,23 @@ static const char *SCHEMA_SQL =
     "   source_conversation_id INTEGER DEFAULT NULL,"
     "   source_msg_id_start    INTEGER DEFAULT NULL,"
     "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    /* v47: subject_entity_id — hard FK from fact to its subject entity.
+     * NULLABLE during the migration window (existing rows backfill from
+     * linked relations; re-extraction under the new prompt populates the
+     * rest).  Tightens to NOT NULL in a follow-up migration once backfill
+     * completes.  See PHASE_0_EXTRACTION_PROMPT_DRAFT.md. */
+    "   subject_entity_id      INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
-    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
+    "   FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_user ON memory_facts(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_confidence ON "
     "memory_facts(user_id, confidence DESC);"
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(user_id, normalized_hash);"
+    /* idx_memory_facts_subject: created by the v47 post-migration index block
+     * on existing DBs (column doesn't exist until ALTER TABLE runs). */
     /* idx_memory_facts_user_category is created by the v34 migration block (runs
      * after ALTER TABLE adds the column).  Keeping it here would fail on an
      * existing pre-v34 DB because CREATE TABLE IF NOT EXISTS is a no-op for
@@ -2199,6 +2208,65 @@ static int create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v47 migration: add memory_facts.subject_entity_id as a hard FK from each
+    * fact to the entity it's about.  Backfill from existing memory_relations
+    * rows where fact_id is set — that captures the ~17% of facts that already
+    * have a linked relation.  The remaining ~83% stay NULL until a re-extract
+    * under the new Phase 0 prompt populates them at insert time.  A follow-up
+    * migration tightens NOT NULL once backfill + re-extract complete.
+    *
+    * Phase 0 design: facts MUST carry an entity FK so graph traversal can
+    * go fact → entity directly without the relations table hop, AND so the
+    * Phase 2 entity-merge resolver's cascading effects automatically apply
+    * to facts the same way they apply to relations.  See
+    * docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md §"C-side changes required" #3.
+    *
+    * NULLABLE during the migration window — re-extract uses the new prompt
+    * which fills subject_entity_id at insert time via the existing entity
+    * resolver, so the column populates organically as users use the system.
+    *
+    * Literal-NULL default → SQLite O(1) ALTER fast path. */
+   if (current_version >= 1 && current_version < 47) {
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE memory_facts ADD COLUMN subject_entity_id INTEGER DEFAULT NULL",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v47 migration (memory_facts.subject_entity_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added subject_entity_id column to memory_facts (v47)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      /* Backfill from memory_relations.  For each fact that has at least one
+       * linked relation, copy the subject_entity_id of that relation onto the
+       * fact.  When a fact has multiple linked relations (typical), MIN() is
+       * a stable deterministic pick — the subject of the lowest-id linked
+       * relation, which is usually the primary relation emitted first by the
+       * extraction LLM.  Facts with no linked relations stay NULL and rely
+       * on re-extraction to populate. */
+      rc = sqlite3_exec(s_db.db,
+                        "UPDATE memory_facts "
+                        "   SET subject_entity_id = ("
+                        "     SELECT MIN(r.subject_entity_id) "
+                        "       FROM memory_relations r "
+                        "      WHERE r.fact_id = memory_facts.id "
+                        "        AND r.subject_entity_id IS NOT NULL"
+                        "   ) "
+                        " WHERE subject_entity_id IS NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v47 migration (backfill subject_entity_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO(
+             "auth_db: backfilled memory_facts.subject_entity_id from linked relations (v47)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2217,6 +2285,23 @@ static int create_schema(const char *db_path) {
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: could not create summary_nodes index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v47 post-migration index: idx_memory_facts_subject supports the
+    * fact-to-entity reverse lookup that graph traversal will use ("give me
+    * every fact whose subject is entity X").  Created here because on an
+    * existing pre-v47 DB the column doesn't exist until the ALTER TABLE
+    * above runs — same pattern as v34's category index. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_subject "
+                     "ON memory_facts(user_id, subject_entity_id) "
+                     "WHERE subject_entity_id IS NOT NULL",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory_facts subject index: %s",
+                   errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
@@ -3503,6 +3588,26 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Graph-retrieval Phase 1A: return DISTINCT fact_ids for relations linking
+    * @entity_id (as subject OR object).  Only returns relations with non-NULL
+    * fact_id — the structured-only relations (NULL fact_id, ~60% of rows) are
+    * Phase 1B's territory.  Sorted by confidence DESC so the highest-quality
+    * graph-anchored facts surface first when the caller's fan-out cap trips. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT DISTINCT r.fact_id "
+                           "FROM memory_relations r "
+                           "WHERE r.user_id = ? "
+                           "  AND (r.subject_entity_id = ? OR r.object_entity_id = ?) "
+                           "  AND r.fact_id IS NOT NULL "
+                           "ORDER BY r.confidence DESC, r.created_at DESC "
+                           "LIMIT ?",
+                           -1, &s_db.stmt_memory_relation_fact_ids_for_entity, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare relation_fact_ids_for_entity failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* Equivalence-class aggregation: see entity_get_by_name above for
     * rationale.  ORDER BY uses the row's own mention_count (not the
     * aggregated class total) — keeps the ORDER BY trivially indexable
@@ -4466,6 +4571,8 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_relation_list_by_subject_at);
    if (s_db.stmt_memory_relation_list_by_object)
       sqlite3_finalize(s_db.stmt_memory_relation_list_by_object);
+   if (s_db.stmt_memory_relation_fact_ids_for_entity)
+      sqlite3_finalize(s_db.stmt_memory_relation_fact_ids_for_entity);
    if (s_db.stmt_memory_entity_search)
       sqlite3_finalize(s_db.stmt_memory_entity_search);
    if (s_db.stmt_memory_entity_delete)

@@ -262,6 +262,61 @@ int memory_db_relation_list_by_object(int user_id,
                                       int *count_out);
 
 /**
+ * @brief Graph-retrieval Phase 1A: return DISTINCT fact_ids of fact-linked
+ * relations touching @p entity_id as either subject or object.
+ *
+ * Walks `memory_relations` for rows where (subject_entity_id = @p entity_id
+ * OR object_entity_id = @p entity_id) AND fact_id IS NOT NULL.  Returns the
+ * linked fact IDs, sorted by relation confidence DESC then created_at DESC
+ * so the highest-quality graph anchors come first when the fan-out cap
+ * trips.
+ *
+ * Skips relations with NULL fact_id — those are structured-only graph
+ * edges (Phase 1B territory).  ~40% of relations are fact-linked at the
+ * dev's current LoCoMo scale (May 2026 profile).
+ *
+ * Caller is responsible for deduplicating fact_ids across multiple seed
+ * entities (e.g., a fact about both "John" and "Tim" will surface once
+ * per seed entity that touches it).
+ *
+ * @param user_id User ID (defense-in-depth scoping)
+ * @param entity_id Seed entity ID
+ * @param out_fact_ids Caller-allocated array of size @p max
+ * @param max Fan-out cap; bound this from the caller side per query
+ * @param count_out Receives actual returned count
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_fact_ids_for_entity(int user_id,
+                                           int64_t entity_id,
+                                           int64_t *out_fact_ids,
+                                           int max,
+                                           int *count_out);
+
+/**
+ * @brief List this user's distinct relation predicates, ordered by frequency.
+ *
+ * Used by the Phase 0 extraction-prompt builder to surface the user's
+ * accumulated predicate vocabulary back to the LLM ("previously used
+ * relation types"), bounding the LLM's tendency to invent parallel
+ * duplicates (has_child / has_children, is_friend_of / is_friend_with).
+ *
+ * Frequency-ordered DESC so when @p max truncates, the most-used
+ * predicates survive.  Each row is a snake_case predicate string
+ * (canonicalized at insert time via memory_predicate_canonicalize).
+ *
+ * @param user_id User ID
+ * @param out 2D array of [max][MEMORY_RELATION_MAX] for predicate strings
+ * @param max Capacity of @p out (typically 30 — enough headroom over
+ *            observed per-user distinct counts of 15-23)
+ * @param count_out Receives actual returned count
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_distinct_predicates(int user_id,
+                                           char out[][MEMORY_RELATION_MAX],
+                                           int max,
+                                           int *count_out);
+
+/**
  * @brief Bulk-load all relations for a user in a single query
  *
  * Returns outgoing relations sorted by subject_entity_id. Used by WebUI

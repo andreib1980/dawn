@@ -568,6 +568,30 @@ typedef struct {
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */
    float category_threshold;
+   /* Graph-retrieval (Phase 2.b of cat-3 work) — parallel candidate
+    * source for memory.search alongside hybrid keyword + cosine search.
+    * Extracts proper-noun entities from the query, resolves to canonical
+    * memory_entities, fans out one hop via fact-linked memory_relations,
+    * and surfaces the resulting fact_ids as additional candidates with
+    * a flat entity-grounding score.  Targets cat-3 entity-specific
+    * lookup queries like "What country did Jolene buy snake Seraphim?"
+    * where cosine over-broadens on the noun and the gold answer sits
+    * at rank 50+.  See memory_graph_retrieval.h for the pipeline. */
+   struct {
+      bool enabled; /* default true; disable to A/B against pure hybrid */
+      /* Per-fact score assigned to graph-anchored candidates.  Default 0.4
+       * sits above the 0.30 search_score_floor (graph candidates survive
+       * the floor by construction) and below typical strong hybrid hits
+       * (~0.5-0.7 cosine + keyword), so the merge keeps graph candidates
+       * present without dominating the ranking.  Bench-tune. */
+      float entity_grounding_bonus;
+      /* Total fan-out cap across all seed entities per query.  Top-degree
+       * LoCoMo entities have 50-80 incoming + outgoing relations; 30 is
+       * comfortable headroom for the typical 1-3 seeds while bounded
+       * against pathological multi-entity queries. */
+      int max_facts_per_query;
+   } graph_retrieval;
+
    /* Memory-tool search score floor.  Drops facts whose hybrid score
     * (kw_weight * kw_score + vec_weight * cosine + temporal boost) falls
     * below this value before they reach the LLM.  Closes the "I don't
