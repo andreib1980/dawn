@@ -353,8 +353,10 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
             OLOG_ERROR("OpenAI API: Access forbidden (HTTP 403) - check API key permissions");
          } else if (http_code == 429) {
             OLOG_ERROR("OpenAI API: Rate limit exceeded (HTTP 429)");
-         } else if (http_code >= 500) {
+            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+         } else if (http_code >= 500 && http_code < 600) {
             OLOG_ERROR("OpenAI API: Server error (HTTP %ld)", http_code);
+            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
          } else if (http_code != 0) {
             OLOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
          }
@@ -790,9 +792,11 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          } else if (http_code == 429) {
             OLOG_ERROR("OpenAI API: Rate limit exceeded (HTTP 429)");
             error_code = "LLM_RATE_LIMIT";
-         } else if (http_code >= 500) {
+            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+         } else if (http_code >= 500 && http_code < 600) {
             OLOG_ERROR("OpenAI API: Server error (HTTP %ld)", http_code);
             error_code = "LLM_SERVER_ERROR";
+            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
          } else {
             OLOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
             error_code = "LLM_ERROR";
@@ -1363,6 +1367,9 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    if (http_code != 200) {
       OLOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
+      if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      }
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
       if (session && session->type == SESSION_TYPE_WEBUI) {

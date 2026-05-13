@@ -2027,6 +2027,17 @@ static void llm_call_cleanup(llm_call_ctx_t *ctx) {
  * @return Response string on success, NULL on failure (takes ownership of response)
  */
 static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_t *ctx) {
+   /* Capture the provider's error code before any cleanup path can mutate it.
+    * Used both to set a distinguishable WebUI stream-end reason and to refine
+    * the failure log so transient retries-exhausted aren't conflated with
+    * hard errors (auth, parse, bad request).
+    *
+    * INVARIANT: this function must execute on the same thread that drove the
+    * LLM call.  llm_last_error() reads thread-local storage; a future
+    * refactor to dispatch finalize onto a different thread would silently
+    * read LLM_ERR_NONE here.  All current callers (session_llm_call,
+    * session_llm_call_no_add) satisfy this. */
+   int post_call_error = llm_last_error();
 #ifdef ENABLE_WEBUI
    // End WebSocket streaming
    if (session->type == SESSION_TYPE_WEBUI) {
@@ -2039,7 +2050,15 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
       }
 
       if (session->llm_streaming_active) {
-         webui_send_stream_end(session, response ? "complete" : "error");
+         const char *reason;
+         if (response) {
+            reason = "complete";
+         } else if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
+            reason = "transient_error";
+         } else {
+            reason = "error";
+         }
+         webui_send_stream_end(session, reason);
       }
       // Fallback for non-streaming LLMs
       if (response && !session->stream_had_content && session->cmd_tag_filter.nesting_depth == 0) {
@@ -2060,7 +2079,12 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    }
 
    if (!response) {
-      OLOG_ERROR("Session %u: LLM call failed", session->session_id);
+      if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
+         OLOG_ERROR("Session %u: LLM call failed (transient network error, retries exhausted)",
+                    session->session_id);
+      } else {
+         OLOG_ERROR("Session %u: LLM call failed", session->session_id);
+      }
       return NULL;
    }
 

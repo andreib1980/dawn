@@ -32,6 +32,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "core/session_manager.h"
 #include "llm/llm_claude.h"
@@ -43,8 +44,35 @@
 #include "logging.h"
 #include "webui/webui_server.h"
 
+/* Transient-network retry policy.  Triggered when the provider returns rc != 0
+ * AND llm_last_error() == LLM_ERR_TRANSIENT_NETWORK (pre-flight unreachable,
+ * HTTP 429, or HTTP 5xx).  Backoff is exponential from BASE: 1s, 2s, 4s. */
+#define LLM_TRANSIENT_RETRY_MAX 3
+#define LLM_TRANSIENT_BACKOFF_BASE_MS 1000
+
 /* Thread-local flag: set when the tool loop skips follow-up */
 static _Thread_local bool s_did_skip_followup = false;
+
+/* Sleep in 250ms chunks honoring llm_is_interrupt_requested().  Returns 1 if
+ * the wait was interrupted (caller should bail), 0 if the full duration
+ * elapsed normally.  Not SUCCESS/FAILURE — the 1/0 is a normal/interrupted
+ * sentinel.  Mirrors the pattern in llm_rate_limit.c (a future refactor could
+ * promote both copies to a shared helper — see docs/TODO.md).
+ *
+ * 250ms is below the ~400ms wake-word-feels-laggy threshold and gives 2.5×
+ * fewer scheduler wakeups than 100ms on the 7s worst-case backoff path. */
+static int sleep_with_interrupt_check(int total_ms) {
+   struct timespec chunk = { .tv_sec = 0, .tv_nsec = 250000000L }; /* 250ms */
+   int elapsed_ms = 0;
+   while (elapsed_ms < total_ms) {
+      if (llm_is_interrupt_requested()) {
+         return 1;
+      }
+      nanosleep(&chunk, NULL);
+      elapsed_ms += 250;
+   }
+   return 0;
+}
 
 bool llm_tool_loop_did_skip_followup(void) {
    return s_did_skip_followup;
@@ -345,14 +373,84 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
                                    params->model, params->chunk_callback, params->callback_userdata,
                                    iteration, &result);
 
+      /* Retry transient network failures (pre-flight unreachable, HTTP 429,
+       * HTTP 5xx) with exponential backoff before bubbling up.  Each retry is
+       * a fresh provider call within the same iteration — failed attempts
+       * don't burn an iteration slot.  Hard errors (auth, bad request,
+       * parse failure) bypass this loop.
+       *
+       * Retries re-enter llm_rate_limit_wait() on cloud paths: a server-driven
+       * 429 means we're locally overcounted, so we must consult the local
+       * budget again rather than racing past it.  Log noise stays bounded:
+       * intermediate retries log at INFO, final give-up logs at ERROR. */
+      for (int retry = 0; rc != 0 && llm_last_error() == LLM_ERR_TRANSIENT_NETWORK &&
+                          retry < LLM_TRANSIENT_RETRY_MAX;
+           retry++) {
+         int backoff_ms = LLM_TRANSIENT_BACKOFF_BASE_MS << retry; /* 1s, 2s, 4s */
+         OLOG_INFO("Tool loop: transient network error at iteration %d, "
+                   "retry %d/%d in %dms",
+                   iteration, retry + 1, LLM_TRANSIENT_RETRY_MAX, backoff_ms);
+         if (sleep_with_interrupt_check(backoff_ms)) {
+            OLOG_INFO("Tool loop: retry backoff interrupted at iteration %d", iteration);
+            llm_tool_response_free(&result);
+            return NULL;
+         }
+         /* Re-enter the rate-limit gate on cloud retries (mirrors the
+          * top-of-iteration gate at the start of this loop).  Local LLM
+          * is exempt — no shared per-minute budget there. */
+         if (params->llm_type != LLM_LOCAL) {
+            if (llm_rate_limit_wait()) {
+               OLOG_WARNING("Tool loop: rate limit wait interrupted during retry at "
+                            "iteration %d",
+                            iteration);
+               llm_tool_response_free(&result);
+               return NULL;
+            }
+         }
+         llm_tool_response_free(&result);
+         memset(&result, 0, sizeof(result));
+         rc = params->provider_fn(params->conversation_history, params->input_text,
+                                  params->vision_images, params->vision_image_sizes,
+                                  params->vision_image_count, params->base_url, params->api_key,
+                                  params->model, params->chunk_callback, params->callback_userdata,
+                                  iteration, &result);
+      }
+
       if (rc != 0) {
-         OLOG_ERROR("Tool loop: Provider call failed at iteration %d", iteration);
+         if (llm_last_error() == LLM_ERR_TRANSIENT_NETWORK) {
+            OLOG_ERROR("Tool loop: transient network error at iteration %d after %d retries, "
+                       "giving up",
+                       iteration, LLM_TRANSIENT_RETRY_MAX);
+         } else {
+            OLOG_ERROR("Tool loop: Provider call failed at iteration %d", iteration);
+         }
          llm_tool_response_free(&result);
          return NULL;
       }
 
-      /* Step 4: If no tool calls, return text response */
+      /* Step 4: If no tool calls, return text response.
+       *
+       * A clean provider call (rc == 0) with no tool_calls and NULL text is a
+       * benign "end_turn with empty content" outcome — the LLM signalled the
+       * preceding tool result was sufficient and no further response is
+       * warranted.  Return an empty malloc'd string rather than NULL so
+       * callers (session_manager.c) do not classify it as an LLM call
+       * failure.  malloc(1) so the caller owns a heap pointer it can free()
+       * identically to the populated path. */
       if (!result.has_tool_calls) {
+         if (result.text == NULL) {
+            OLOG_INFO("Tool loop: provider returned empty content at iteration %d "
+                      "(clean end_turn, no response needed)",
+                      iteration);
+            llm_tool_response_free(&result);
+            char *empty = malloc(1);
+            if (!empty) {
+               OLOG_ERROR("Tool loop: malloc(1) failed on empty-content path");
+               return NULL;
+            }
+            empty[0] = '\0';
+            return empty;
+         }
          final_response = result.text;
          result.text = NULL; /* Transfer ownership to caller */
          llm_tool_response_free(&result);

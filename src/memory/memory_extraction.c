@@ -1061,6 +1061,20 @@ static void process_extraction_response(int user_id,
             OLOG_DEBUG("memory_extraction: no fact match for relation (%s, %s, %s)", subj_name,
                        rel_type, obj_name);
          }
+         /* Defensive: fact_map entries are valid at build time, but the FK
+          * violation observed during Step 4 suggests a row can vanish before
+          * relation_supersede fires (root cause not yet pinpointed — see the
+          * FK probe in memory_db.c).  Remove once the probe surfaces the
+          * racing delete and the root cause is closed. */
+         if (rel_fact_id > 0) {
+            memory_fact_t fact_check;
+            if (memory_db_fact_get(rel_fact_id, &fact_check) != MEMORY_DB_SUCCESS) {
+               OLOG_WARNING("memory_extraction: rel_fact_id=%lld no longer in memory_facts "
+                            "(subj=%s rel=%s obj=%s) — storing relation with NULL fact link",
+                            (long long)rel_fact_id, subj_name, rel_type, obj_name);
+               rel_fact_id = 0;
+            }
+         }
          int64_t old_fact_id = 0;
          int rel_rc = memory_db_relation_supersede(user_id, subj_id, rel_type, obj_entity_id,
                                                    (obj_entity_id == 0) ? obj_name : NULL,

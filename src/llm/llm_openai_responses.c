@@ -1154,6 +1154,9 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    if (http_code != 200) {
       const char *err_msg = llm_openai_parse_error_message(rctx.raw_buffer, http_code);
       OLOG_ERROR("Responses: HTTP %ld: %s", http_code, err_msg);
+      if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      }
 #ifdef ENABLE_WEBUI
       session_t *s = session_get_command_context();
       if (s && s->type == SESSION_TYPE_WEBUI) {

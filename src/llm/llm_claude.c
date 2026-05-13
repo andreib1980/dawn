@@ -177,8 +177,10 @@ char *llm_claude_chat_completion(struct json_object *conversation_history,
          OLOG_ERROR("Claude API: Access forbidden (HTTP 403) - check API key permissions");
       } else if (http_code == 429) {
          OLOG_ERROR("Claude API: Rate limit exceeded (HTTP 429)");
-      } else if (http_code >= 500) {
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      } else if (http_code >= 500 && http_code < 600) {
          OLOG_ERROR("Claude API: Server error (HTTP %ld)", http_code);
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       } else if (http_code != 0) {
          OLOG_ERROR("Claude API: Request failed (HTTP %ld)", http_code);
       }
@@ -558,9 +560,11 @@ static char *llm_claude_streaming_internal(struct json_object *conversation_hist
       } else if (http_code == 429) {
          OLOG_ERROR("Claude API: Rate limit exceeded (HTTP 429)");
          error_code = "LLM_RATE_LIMIT";
-      } else if (http_code >= 500) {
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      } else if (http_code >= 500 && http_code < 600) {
          OLOG_ERROR("Claude API: Server error (HTTP %ld)", http_code);
          error_code = "LLM_SERVER_ERROR";
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
       } else if (http_code == 400) {
          OLOG_ERROR("Claude API: Bad request (HTTP 400) - check tool format and message structure");
          error_code = "LLM_BAD_REQUEST";
@@ -1023,6 +1027,9 @@ int llm_claude_streaming_single_shot(struct json_object *conversation_history,
 
    if (http_code != 200) {
       OLOG_ERROR("Claude API: Request failed (HTTP %ld)", http_code);
+      if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
+         llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      }
       if (http_code == 400 && streaming_ctx.raw_response.data) {
          OLOG_ERROR("Claude error response: %s", streaming_ctx.raw_response.data);
       }

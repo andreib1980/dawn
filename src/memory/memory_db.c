@@ -39,6 +39,33 @@
 /* Forward declarations for helpers used across sections */
 static void populate_entity_from_row(sqlite3_stmt *stmt, memory_entity_t *entity);
 
+/* Lightweight FK existence check.  Returns 1 if a row with the given id exists
+ * in the specified table, 0 otherwise, or -1 if the prepare itself failed.
+ * The -1 is intentionally not SUCCESS/FAILURE — this is a diagnostic-only
+ * helper whose only consumer is the relation_supersede FK probe block, which
+ * passes the result straight into a log format string for operator inspection.
+ * Used by error-path diagnostics (relation_supersede) to pinpoint which FK
+ * actually fired on xrc=787 SQLITE_CONSTRAINT_FOREIGNKEY — the bare error
+ * message names no column.
+ *
+ * Ad-hoc prepare/finalize because this is invoked only on the error path; the
+ * extra parser/planner cost is irrelevant compared to surfacing the cause. */
+static int fk_row_exists(const char *table, int64_t id) {
+   if (!table || id <= 0) {
+      return 0;
+   }
+   char sql[96];
+   snprintf(sql, sizeof(sql), "SELECT 1 FROM %s WHERE id = ?", table);
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      return -1; /* prepare failed — caller logs "-1=check_failed" */
+   }
+   sqlite3_bind_int64(stmt, 1, id);
+   int rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+   return (rc == SQLITE_ROW) ? 1 : 0;
+}
+
 /* Bind provenance columns to sequential params at positions (base), (base+1), (base+2).
  * Emits SQLITE_NULL for all three when prov is NULL or prov->conv_id <= 0. */
 static void bind_provenance(sqlite3_stmt *stmt, int base, const memory_provenance_t *prov) {
@@ -2667,6 +2694,26 @@ int memory_db_relation_supersede(int user_id,
                  prov ? (long long)prov->msg_id_start : 0LL,
                  prov ? (long long)prov->msg_id_end : 0LL, (long long)valid_from,
                  (long long)valid_to);
+
+      /* xrc=787 = SQLITE_CONSTRAINT_FOREIGNKEY — SQLite's bare error message
+       * names no column.  Probe each FK to pinpoint the violator.  Static
+       * analysis can't reach it (paraphrase-merged fact_ids appear valid at
+       * fact_map build time; no in-extraction delete path touches facts).
+       * Live probing is the only way to see which row vanished by the time
+       * the INSERT actually fired. */
+      if (xrc == SQLITE_CONSTRAINT_FOREIGNKEY) {
+         int user_ok = fk_row_exists("users", (int64_t)user_id);
+         int subj_ok = fk_row_exists("memory_entities", subject_entity_id);
+         int obj_ok = (object_entity_id > 0) ? fk_row_exists("memory_entities", object_entity_id)
+                                             : 1;
+         int fact_ok = (fact_id > 0) ? fk_row_exists("memory_facts", fact_id) : 1;
+         int conv_ok = (prov && prov->conv_id > 0) ? fk_row_exists("conversations", prov->conv_id)
+                                                   : 1;
+         OLOG_ERROR("memory_db: relation_supersede FK probe: user=%d subj=%d obj=%d "
+                    "fact=%d conv=%d (1=exists, 0=missing, -1=check_failed)",
+                    user_ok, subj_ok, obj_ok, fact_ok, conv_ok);
+      }
+
       sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
