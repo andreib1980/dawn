@@ -801,11 +801,25 @@ static void parse_flaresolverr(toml_table_t *table, flaresolverr_config_t *confi
    PARSE_SIZE_T(table, "max_response_bytes", config->max_response_bytes);
 }
 
+static void parse_url_fetcher_tavily(toml_table_t *table, tavily_fetch_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "timeout_sec", "max_response_bytes", "extract_depth",
+                                             NULL };
+   warn_unknown_keys(table, "url_fetcher.tavily", known_keys);
+
+   PARSE_INT(table, "timeout_sec", config->timeout_sec);
+   PARSE_SIZE_T(table, "max_response_bytes", config->max_response_bytes);
+   PARSE_STRING(table, "extract_depth", config->extract_depth);
+}
+
 static void parse_url_fetcher(toml_table_t *table, url_fetcher_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "whitelist", "flaresolverr", NULL };
+   static const char *const known_keys[] = { "whitelist", "fallback", "flaresolverr", "tavily",
+                                             NULL };
    warn_unknown_keys(table, "url_fetcher", known_keys);
 
    /* Parse whitelist array into static 2D array */
@@ -826,9 +840,16 @@ static void parse_url_fetcher(toml_table_t *table, url_fetcher_config_t *config)
       }
    }
 
+   /* Fallback engine selection: "flaresolverr" | "tavily" | "none" */
+   PARSE_STRING(table, "fallback", config->fallback);
+
    /* Parse [url_fetcher.flaresolverr] sub-table */
    toml_table_t *flaresolverr = toml_table_in(table, "flaresolverr");
    parse_flaresolverr(flaresolverr, &config->flaresolverr);
+
+   /* Parse [url_fetcher.tavily] sub-table (tunables; API key in secrets.toml) */
+   toml_table_t *tavily = toml_table_in(table, "tavily");
+   parse_url_fetcher_tavily(tavily, &config->tavily);
 }
 
 static void parse_mqtt(toml_table_t *table, mqtt_config_t *config) {
@@ -1631,6 +1652,9 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          OLOG_WARNING("config: service_token is too short (min 32 chars) — ignoring");
          secrets->service_token[0] = '\0';
       }
+
+      /* Tavily API key (used by Tavily search + URL extract adapters) */
+      PARSE_STRING(secrets_section, "tavily_api_key", secrets->tavily_api_key);
    }
 
    /* Legacy: Parse [api_keys] section (old format) */

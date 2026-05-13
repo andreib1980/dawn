@@ -618,13 +618,14 @@
             engine: {
                type: 'select',
                label: 'Engine',
-               options: ['searxng', 'disabled'],
-               hint: 'Search engine for web queries (SearXNG is privacy-focused)',
+               options: ['searxng', 'tavily', 'disabled'],
+               hint: 'SearXNG (local/free, privacy-focused) or Tavily (commercial API, more reliable; requires tavily_api_key in secrets.toml)',
             },
             endpoint: {
                type: 'text',
-               label: 'Endpoint',
+               label: 'SearXNG Endpoint',
                hint: 'SearXNG instance URL (e.g., http://localhost:8888)',
+               showWhen: { key: 'search.engine', value: 'searxng' },
             },
             summarizer: {
                type: 'group',
@@ -682,14 +683,21 @@
                placeholder: 'api.example.com\ninternal.corp.com',
                hint: 'Only allow fetching from these domains (one per line, empty = allow all)',
             },
+            fallback: {
+               type: 'select',
+               label: 'Bypass engine (when blocked)',
+               options: ['flaresolverr', 'tavily', 'none'],
+               hint: 'Direct fetch is always tried first (free, fast). This engine kicks in when the site returns 403 / 401 / bot challenge / JS-only content. FlareSolverr is local + free (needs the Docker service running). Tavily is a commercial API (requires tavily_api_key in secrets.toml) but works without a separate service.',
+            },
             flaresolverr: {
                type: 'group',
                label: 'FlareSolverr',
+               showWhen: { key: 'url_fetcher.fallback', value: 'flaresolverr' },
                fields: {
                   enabled: {
                      type: 'checkbox',
                      label: 'Enable FlareSolverr',
-                     hint: 'Auto-fallback for sites with Cloudflare protection (requires FlareSolverr service)',
+                     hint: 'Required when bypass engine = flaresolverr. Service must be running at the endpoint below.',
                   },
                   endpoint: {
                      type: 'text',
@@ -709,6 +717,33 @@
                      min: 1024,
                      step: 1024,
                      hint: 'Maximum response size to accept',
+                  },
+               },
+            },
+            tavily: {
+               type: 'group',
+               label: 'Tavily',
+               showWhen: { key: 'url_fetcher.fallback', value: 'tavily' },
+               fields: {
+                  extract_depth: {
+                     type: 'select',
+                     label: 'Extract Depth',
+                     options: ['advanced', 'basic'],
+                     hint: '"advanced" (2 credits/call) runs smart article-body extraction and strips nav/sidebar chrome — recommended. "basic" (1 credit/call) returns faithful page text including all navigation menus.',
+                  },
+                  timeout_sec: {
+                     type: 'number',
+                     label: 'Timeout (sec)',
+                     min: 1,
+                     max: 120,
+                     hint: 'Request timeout for Tavily /extract',
+                  },
+                  max_response_bytes: {
+                     type: 'number',
+                     label: 'Max Response (bytes)',
+                     min: 1024,
+                     step: 1024,
+                     hint: 'Maximum raw_content size to keep from Tavily',
                   },
                },
             },

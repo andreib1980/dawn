@@ -240,6 +240,7 @@ openai_api_key = "sk-your-openai-key"
 # gemini_api_key = "your-gemini-key"
 # plex_token = "your-plex-token"          # Optional: adds Plex library to unified music DB
 # home_assistant_token = "your-ha-token"  # Optional: for Home Assistant smart home control
+# tavily_api_key = "tvly-your-tavily-key" # Optional: commercial search + URL extract (see Tavily section)
 ```
 
 > **Plex users**: To get your Plex token, see the [Plex Music Source](#plex-music-source) section below. When configured, Plex tracks are automatically synced into the unified music database alongside local files, with priority-based deduplication.
@@ -647,6 +648,50 @@ Enable in `dawn.toml`:
 enabled = true
 endpoint = "http://localhost:8191"
 ```
+
+### Tavily (Commercial Search + URL Extract)
+
+[Tavily](https://tavily.com) is an LLM-optimized search and content-extraction API. It is an **opt-in, paid alternative** to the default SearXNG (search) + FlareSolverr (URL fetch) stack. Free tier covers 1000 calls/month — enough for most personal-use cases. No new build dependencies (uses existing libcurl + json-c).
+
+When and why you'd want it:
+
+- **More reliable search results** — SearXNG depends on scraping public engines that intermittently rate-limit or block; Tavily provides a stable LLM-tuned ranking.
+- **JavaScript-rendered content without running a headless browser** — Tavily's `/extract` returns clean article text from sites that would otherwise need FlareSolverr.
+- **No local containers to run** — replaces both Docker services if you don't want the operational overhead.
+
+**1. Get a Tavily API key:** sign up at [tavily.com](https://tavily.com) and copy your API key (starts with `tvly-`).
+
+**2. Add the key to `secrets.toml`:**
+
+```toml
+[secrets]
+tavily_api_key = "tvly-your-tavily-key"
+```
+
+Or enter it in WebUI Settings → Secrets → Tavily API Key.
+
+**3. Enable Tavily as the search engine and/or URL-fetch fallback in `dawn.toml`:**
+
+```toml
+[search]
+engine = "tavily"           # "searxng" (default) | "tavily" | "disabled"
+
+[url_fetcher]
+# Direct libcurl fetch is always tried first; fallback engages on 403/redirect-loop/
+# parse-failure/very-small-body. "tavily" or "flaresolverr".
+fallback = "tavily"         # "flaresolverr" (default) | "tavily" | "none"
+
+[url_fetcher.tavily]
+timeout_sec = 30
+max_response_bytes = 1048576
+extract_depth = "advanced"  # "basic" | "advanced" (2× credit cost; better on heavy-chrome sites)
+```
+
+The two toggles are independent — you can use Tavily for search while keeping FlareSolverr for URL fetch, or vice versa.
+
+**Resilience:** if Tavily returns an error or you exhaust the per-user rate limit (10/min, 100/hr), DAWN falls back to SearXNG/FlareSolverr automatically when those are also configured. The Tavily handoff is gated by DAWN's local SSRF allowlist (`url_is_blocked()`) — internal IPs are never forwarded upstream.
+
+**Test it:** Ask DAWN to *"search for the latest news on Mars exploration"* or *"fetch the article at https://example.com/long-page"*. Watch the daemon log for `tavily_search` / `tavily_extract` lines to confirm the path.
 
 ### MQTT Security (Authentication + TLS)
 

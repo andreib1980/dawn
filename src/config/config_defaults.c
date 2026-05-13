@@ -201,11 +201,20 @@ void config_set_defaults(dawn_config_t *config) {
    /* URL Fetcher - whitelist is zeroed by memset */
    config->url_fetcher.whitelist_count = 0;
 
+   /* Fallback engine selection — preserves existing FlareSolverr default;
+    * users opt into Tavily by changing this string. */
+   SAFE_COPY(config->url_fetcher.fallback, "flaresolverr");
+
    /* FlareSolverr */
    config->url_fetcher.flaresolverr.enabled = false;
    SAFE_COPY(config->url_fetcher.flaresolverr.endpoint, "http://127.0.0.1:8191/v1");
    config->url_fetcher.flaresolverr.timeout_sec = 10;
    config->url_fetcher.flaresolverr.max_response_bytes = 4 * 1024 * 1024; /* 4MB */
+
+   /* Tavily /extract (no enabled flag — selection is via url_fetcher.fallback) */
+   config->url_fetcher.tavily.timeout_sec = 30;
+   config->url_fetcher.tavily.max_response_bytes = 1 * 1024 * 1024; /* 1MB */
+   SAFE_COPY(config->url_fetcher.tavily.extract_depth, "advanced");
 
    /* MQTT - matching dawn.h */
    config->mqtt.enabled = true;

@@ -527,12 +527,17 @@ set(DAWN_SOURCES
     src/tools/tools_init.c
     src/tools/hud_discovery.c
     src/tools/web_search.c
+    src/tools/web_search_tavily.c
+    src/tools/tavily_rate_limit.c
     src/tools/weather_service.c
     src/tools/calculator.c
     src/tools/tinyexpr.c
     src/tools/search_summarizer.c
     src/tools/tfidf_summarizer.c
     src/tools/url_fetcher.c
+    src/tools/url_fetcher_detect.c
+    src/tools/url_fetcher_fallback.c
+    src/tools/url_fetch_tavily.c
     src/tools/html_parser.c
     src/core/time_query_parser.c
     src/core/iso8601.c

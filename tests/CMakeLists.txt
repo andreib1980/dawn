@@ -456,6 +456,18 @@ dawn_add_unit_test(test_rate_limiter
    LIBS    unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_tavily_rate_limit
+   SOURCES test_tavily_rate_limit.c
+           ${SRC_ROOT}/src/tools/tavily_rate_limit.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+dawn_add_unit_test(test_flaresolverr_error_detection
+   SOURCES test_flaresolverr_error_detection.c
+           ${SRC_ROOT}/src/tools/url_fetcher_detect.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_crypto_store
    SOURCES test_crypto_store.c test_crypto_store_stub.c
            ${SRC_ROOT}/src/core/crypto_store.c

@@ -55,6 +55,9 @@ static void set_valid_defaults(void) {
    s_config.llm.max_tokens = 4096;
    s_config.memory.temporal_weight = 0.2f;
    s_config.memory.category_threshold = 0.25f;
+   /* paraphrase_dedup_threshold validator added in commit 6aa2e32 (May 2026) —
+    * test helper updated to provide a valid default in the same range [0.5,1.0]. */
+   s_config.memory.paraphrase_dedup_threshold = 0.92f;
    s_config.memory.extraction_timeout_ms = 30000;
    s_config.memory.recompute_batch_size = 50;
    s_config.memory.recompute_batch_sleep_ms = 100;
@@ -66,6 +69,7 @@ static void set_valid_defaults(void) {
     * reaching the field the individual test is exercising. */
    s_config.memory.focus_injection.focus_budget_tokens = 1024;
    s_config.memory.focus_injection.top_k = 8;
+   s_config.memory.focus_injection.summary_max_scan = 4096;
    s_config.memory.focus_injection.min_score = 0.4f;
    s_config.memory.focus_injection.weight_semantic = 1.0f;
    s_config.memory.focus_injection.weight_recency = 0.3f;

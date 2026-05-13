@@ -29,6 +29,13 @@
          maxlength: 256,
       },
       {
+         id: 'secret-tavily',
+         key: 'tavily_api_key',
+         label: 'Tavily API Key',
+         placeholder: 'tvly-...',
+         maxlength: 256,
+      },
+      {
          id: 'secret-mqtt-user',
          key: 'mqtt_username',
          label: 'MQTT Username',

@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,6 +122,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_SECRET("OPENAI_API_KEY", secrets->openai_api_key);
    ENV_SECRET("ANTHROPIC_API_KEY", secrets->claude_api_key);
    ENV_SECRET("GEMINI_API_KEY", secrets->gemini_api_key);
+   ENV_SECRET("TAVILY_API_KEY", secrets->tavily_api_key);
 
    /* DAWN_ prefixed environment variables */
 
@@ -210,6 +212,9 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_SIZE_T("DAWN_SEARCH_SUMMARIZER_TARGET_WORDS", config->search.summarizer.target_words);
    ENV_FLOAT("DAWN_SEARCH_SUMMARIZER_TARGET_RATIO", config->search.summarizer.target_ratio);
 
+   /* [url_fetcher] */
+   ENV_STRING("DAWN_URL_FETCHER_FALLBACK", config->url_fetcher.fallback);
+
    /* [url_fetcher.flaresolverr] */
    ENV_BOOL("DAWN_URL_FETCHER_FLARESOLVERR_ENABLED", config->url_fetcher.flaresolverr.enabled);
    ENV_STRING("DAWN_URL_FETCHER_FLARESOLVERR_ENDPOINT", config->url_fetcher.flaresolverr.endpoint);
@@ -217,6 +222,12 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
            config->url_fetcher.flaresolverr.timeout_sec);
    ENV_SIZE_T("DAWN_URL_FETCHER_FLARESOLVERR_MAX_RESPONSE_BYTES",
               config->url_fetcher.flaresolverr.max_response_bytes);
+
+   /* [url_fetcher.tavily] */
+   ENV_INT("DAWN_URL_FETCHER_TAVILY_TIMEOUT_SEC", config->url_fetcher.tavily.timeout_sec);
+   ENV_SIZE_T("DAWN_URL_FETCHER_TAVILY_MAX_RESPONSE_BYTES",
+              config->url_fetcher.tavily.max_response_bytes);
+   ENV_STRING("DAWN_URL_FETCHER_TAVILY_EXTRACT_DEPTH", config->url_fetcher.tavily.extract_depth);
 
    /* [mqtt] */
    ENV_BOOL("DAWN_MQTT_ENABLED", config->mqtt.enabled);
@@ -354,12 +365,18 @@ void config_dump(const dawn_config_t *config) {
 
    printf("\n[url_fetcher]\n");
    printf("  whitelist_count = %d\n", config->url_fetcher.whitelist_count);
+   printf("  fallback = \"%s\"\n", config->url_fetcher.fallback);
 
    printf("\n[url_fetcher.flaresolverr]\n");
    printf("  enabled = %s\n", config->url_fetcher.flaresolverr.enabled ? "true" : "false");
    printf("  endpoint = \"%s\"\n", config->url_fetcher.flaresolverr.endpoint);
    printf("  timeout_sec = %d\n", config->url_fetcher.flaresolverr.timeout_sec);
    printf("  max_response_bytes = %zu\n", config->url_fetcher.flaresolverr.max_response_bytes);
+
+   printf("\n[url_fetcher.tavily]\n");
+   printf("  timeout_sec = %d\n", config->url_fetcher.tavily.timeout_sec);
+   printf("  max_response_bytes = %zu\n", config->url_fetcher.tavily.max_response_bytes);
+   printf("  extract_depth = \"%s\"\n", config->url_fetcher.tavily.extract_depth);
 
    printf("\n[mqtt]\n");
    printf("  enabled = %s\n", config->mqtt.enabled ? "true" : "false");
@@ -1216,6 +1233,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object *url_fetcher = json_object_new_object();
    json_object_object_add(url_fetcher, "whitelist_count",
                           json_object_new_int(config->url_fetcher.whitelist_count));
+   json_object_object_add(url_fetcher, "fallback",
+                          json_object_new_string(config->url_fetcher.fallback));
 
    /* URL whitelist array */
    json_object *whitelist = json_object_new_array();
@@ -1236,6 +1255,18 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int64(
                               (int64_t)config->url_fetcher.flaresolverr.max_response_bytes));
    json_object_object_add(url_fetcher, "flaresolverr", flaresolverr);
+
+   /* [url_fetcher.tavily] */
+   json_object *tavily_fetch = json_object_new_object();
+   json_object_object_add(tavily_fetch, "timeout_sec",
+                          json_object_new_int(config->url_fetcher.tavily.timeout_sec));
+   json_object_object_add(tavily_fetch, "max_response_bytes",
+                          json_object_new_int64(
+                              (int64_t)config->url_fetcher.tavily.max_response_bytes));
+   json_object_object_add(tavily_fetch, "extract_depth",
+                          json_object_new_string(config->url_fetcher.tavily.extract_depth));
+   json_object_object_add(url_fetcher, "tavily", tavily_fetch);
+
    json_object_object_add(root, "url_fetcher", url_fetcher);
 
    /* [mqtt] */
@@ -1591,6 +1622,8 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
                           json_object_new_boolean(secrets && secrets->google_client_secret[0]));
    json_object_object_add(obj, "google_redirect_url",
                           json_object_new_boolean(secrets && secrets->google_redirect_url[0]));
+   json_object_object_add(obj, "tavily_api_key",
+                          json_object_new_boolean(secrets && secrets->tavily_api_key[0]));
 
    return obj;
 }
@@ -1878,8 +1911,19 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "target_words = %zu\n", config->search.summarizer.target_words);
    fprintf(fp, "target_ratio = %.2f\n", config->search.summarizer.target_ratio);
 
-   if (config->url_fetcher.whitelist_count > 0 || config->url_fetcher.flaresolverr.enabled) {
+   /* Always emit the [url_fetcher] header if any sub-section has non-default
+    * content. The `fallback` field is operator-controllable so we always
+    * write it once we've moved off the default — otherwise a WebUI change
+    * to fallback would silently never persist. */
+   bool emit_url_fetcher = config->url_fetcher.whitelist_count > 0 ||
+                           config->url_fetcher.flaresolverr.enabled ||
+                           (config->url_fetcher.fallback[0] != '\0' &&
+                            strcmp(config->url_fetcher.fallback, "flaresolverr") != 0);
+   if (emit_url_fetcher) {
       fprintf(fp, "\n[url_fetcher]\n");
+      if (config->url_fetcher.fallback[0] != '\0') {
+         fprintf(fp, "fallback = \"%s\"\n", config->url_fetcher.fallback);
+      }
       if (config->url_fetcher.whitelist_count > 0) {
          fprintf(fp, "whitelist = [\n");
          for (int i = 0; i < config->url_fetcher.whitelist_count; i++) {
@@ -1897,6 +1941,17 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       fprintf(fp, "timeout_sec = %d\n", config->url_fetcher.flaresolverr.timeout_sec);
       fprintf(fp, "max_response_bytes = %zu\n",
               config->url_fetcher.flaresolverr.max_response_bytes);
+
+      /* Emit [url_fetcher.tavily] only when fallback selected — keeps
+       * default dawn.toml clean for SearXNG-only users. */
+      if (strcmp(config->url_fetcher.fallback, "tavily") == 0) {
+         fprintf(fp, "\n[url_fetcher.tavily]\n");
+         fprintf(fp, "timeout_sec = %d\n", config->url_fetcher.tavily.timeout_sec);
+         fprintf(fp, "max_response_bytes = %zu\n", config->url_fetcher.tavily.max_response_bytes);
+         if (config->url_fetcher.tavily.extract_depth[0]) {
+            fprintf(fp, "extract_depth = \"%s\"\n", config->url_fetcher.tavily.extract_depth);
+         }
+      }
    }
 
    fprintf(fp, "\n[mqtt]\n");
@@ -2153,6 +2208,7 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
    WRITE_SECRET("openai_api_key", secrets->openai_api_key);
    WRITE_SECRET("claude_api_key", secrets->claude_api_key);
    WRITE_SECRET("gemini_api_key", secrets->gemini_api_key);
+   WRITE_SECRET("tavily_api_key", secrets->tavily_api_key);
    WRITE_SECRET("mqtt_username", secrets->mqtt_username);
    WRITE_SECRET("mqtt_password", secrets->mqtt_password);
    WRITE_SECRET("satellite_registration_key", secrets->satellite_registration_key);

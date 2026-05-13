@@ -312,6 +312,62 @@ int config_validate(const dawn_config_t *config,
       }
    }
 
+   /* ===== URL Fetcher Fallback Engine (enum) =====
+    * "flaresolverr" (default) | "tavily" | "none". Cross-field rule:
+    * fallback = "flaresolverr" but flaresolverr.enabled = false → hard error
+    * (the fallback would silently never fire). Missing API key with
+    * fallback = "tavily" is NOT a hard error — runtime cascades to
+    * FlareSolverr / fails gracefully and surfaces a request-time warning. */
+   if (config->url_fetcher.fallback[0] != '\0') {
+      const char *valid_fallbacks[] = { "flaresolverr", "tavily", "none" };
+      if (!string_in_list(config->url_fetcher.fallback, valid_fallbacks, 3)) {
+         ADD_ERROR("url_fetcher.fallback", "must be 'flaresolverr', 'tavily', or 'none' (got '%s')",
+                   config->url_fetcher.fallback);
+      } else if (strcmp(config->url_fetcher.fallback, "flaresolverr") == 0 &&
+                 !config->url_fetcher.flaresolverr.enabled) {
+         ADD_ERROR("url_fetcher.fallback",
+                   "set to 'flaresolverr' but [url_fetcher.flaresolverr] enabled = false");
+      }
+
+      /* Tavily fetch tunables (only validated when selected) */
+      if (strcmp(config->url_fetcher.fallback, "tavily") == 0) {
+         VALIDATE_RANGE_INT("url_fetcher.tavily.timeout_sec",
+                            config->url_fetcher.tavily.timeout_sec, 1, 300);
+         if (config->url_fetcher.tavily.max_response_bytes < 1024) {
+            ADD_ERROR("url_fetcher.tavily.max_response_bytes", "must be at least 1KB");
+         }
+         if (config->url_fetcher.tavily.max_response_bytes > 16 * 1024 * 1024) {
+            ADD_ERROR("url_fetcher.tavily.max_response_bytes", "must be at most 16MB");
+         }
+         if (config->url_fetcher.tavily.extract_depth[0] != '\0') {
+            const char *valid_depths[] = { "basic", "advanced" };
+            if (!string_in_list(config->url_fetcher.tavily.extract_depth, valid_depths, 2)) {
+               ADD_ERROR("url_fetcher.tavily.extract_depth",
+                         "must be 'basic' or 'advanced' (got '%s')",
+                         config->url_fetcher.tavily.extract_depth);
+            }
+         }
+      }
+   }
+
+   /* ===== Search Engine (enum) =====
+    * "searxng" (default) | "tavily" | "disabled". Empty allowed (legacy
+    * behavior — treated as searxng). Missing API key with engine=tavily is
+    * NOT a hard error; the dispatcher in web_search.c gracefully falls back
+    * to SearXNG. */
+   if (config->search.engine[0] != '\0') {
+      const char *valid_engines[] = { "searxng", "tavily", "disabled" };
+      if (!string_in_list(config->search.engine, valid_engines, 3)) {
+         ADD_ERROR("search.engine", "must be 'searxng', 'tavily', or 'disabled' (got '%s')",
+                   config->search.engine);
+      }
+   }
+
+   /* secrets pointer kept in signature for future cross-field checks
+    * (e.g. soft-warning when engine = "tavily" but no API key set). No
+    * current consumer reads it directly here. */
+   (void)secrets;
+
    /* ===== Barge-in Cooldowns (positive) ===== */
    if (config->audio.bargein.enabled) {
       if (config->audio.bargein.cooldown_ms < 0) {

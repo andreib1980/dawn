@@ -39,6 +39,8 @@
 #include "logging.h"
 #include "tools/curl_buffer.h"
 #include "tools/html_parser.h"
+#include "tools/url_fetcher_detect.h"
+#include "tools/url_fetcher_internal.h"
 #include "utils/string_utils.h"
 
 // =============================================================================
@@ -908,21 +910,27 @@ static int flaresolverr_fetch(const char *url, char **out_html, size_t *out_size
 }
 
 /**
- * @brief Try FlareSolverr fallback and extract content
+ * @brief Run the full FlareSolverr fallback path: fetch via FlareSolverr,
+ *        extract markdown, apply Chromium-error-page content-quality check.
  *
- * Common helper for all FlareSolverr fallback paths. Fetches via FlareSolverr,
- * extracts markdown, and returns the result.
+ * Exposed via tools/url_fetcher_internal.h so the dispatcher in
+ * url_fetcher_fallback.c can call it without duplicating the chain.
+ *
+ * Error-page gate (SEC-H2): rejects when ALL of (a) extracted_len < 2048,
+ * (b) >=2 Chromium error signatures present, (c) original HTML lacked
+ * article-structure markers. Substring match alone false-positives on
+ * legitimate articles about DNS errors and is a censorship vector.
  *
  * @param url URL to fetch
- * @param base_url Base URL for relative link resolution (can be NULL, defaults to url)
+ * @param base_url Base URL for relative link resolution (NULL = use url)
  * @param out_content Receives extracted markdown (caller frees on success)
- * @param out_size Receives content size (optional, can be NULL)
+ * @param out_size Receives content size (optional)
  * @return URL_FETCH_SUCCESS on success, error code otherwise
  */
-static int try_flaresolverr_fallback(const char *url,
-                                     const char *base_url,
-                                     char **out_content,
-                                     size_t *out_size) {
+int flaresolverr_fallback_fetch(const char *url,
+                                const char *base_url,
+                                char **out_content,
+                                size_t *out_size) {
    if (!flaresolverr_is_enabled() || !flaresolverr_is_available()) {
       return URL_FETCH_ERROR_NETWORK;
    }
@@ -935,6 +943,10 @@ static int try_flaresolverr_fallback(const char *url,
       free(flare_html);  // safe if NULL
       return URL_FETCH_ERROR_NETWORK;
    }
+
+   /* Capture article-marker check on the ORIGINAL HTML before extraction
+    * frees it — needed for the error-page gate below. */
+   bool has_article_markers = html_has_article_markers(flare_html);
 
    char *extracted = NULL;
    const char *effective_base = base_url ? base_url : url;
@@ -954,6 +966,29 @@ static int try_flaresolverr_fallback(const char *url,
       return URL_FETCH_ERROR_EMPTY;
    }
 
+   /* SEC-H2 / ARCH-M4: combined Chromium-error-page gate. All three arms
+    * must hold to reject — a single substring hit on a legitimate article
+    * would otherwise censor real content. */
+   if (extracted_len < 2048 && !has_article_markers) {
+      int sigs = count_chromium_error_signatures(extracted);
+      if (sigs >= 2) {
+         OLOG_WARNING("url_fetcher: FlareSolverr returned Chromium error page "
+                      "(signatures=%d, len=%zu) for %s — treating as fetch failure",
+                      sigs, extracted_len, url);
+         free(extracted);
+         return URL_FETCH_ERROR_EMPTY;
+      }
+   }
+
+   /* Prompt-injection defense for FlareSolverr-fetched markdown happens
+    * one layer up in url_tool.c, which wraps every url_fetch tool result in
+    * `[BEGIN UNTRUSTED WEB CONTENT]` / `[END UNTRUSTED WEB CONTENT]` markers
+    * regardless of provider. The memory_filter blocklist is intentionally
+    * NOT used on web content — it's authored for short factual text destined
+    * for persistent memory storage and false-positives heavily on
+    * article-length natural language. The filter still gates memory
+    * ingestion at its storage sites (memory_db_fact_insert etc.). */
+
    OLOG_INFO("url_fetcher: FlareSolverr fallback extracted %zu bytes of markdown", extracted_len);
    OLOG_INFO("url_fetcher: Content preview:\n%.2000s%s", extracted,
              extracted_len > 2000 ? "\n... (truncated)" : "");
@@ -963,6 +998,10 @@ static int try_flaresolverr_fallback(const char *url,
       *out_size = extracted_len;
    }
    return URL_FETCH_SUCCESS;
+}
+
+bool flaresolverr_is_enabled_and_available(void) {
+   return flaresolverr_is_enabled() && flaresolverr_is_available();
 }
 
 // =============================================================================
@@ -1375,14 +1414,14 @@ int url_fetch_content_with_base(const char *url,
             curl_slist_free_all(resolve_list);
          curl_easy_cleanup(curl);
 
-         // HTTP/2 errors are often server-side blocking — try FlareSolverr
-         if ((res == CURLE_HTTP2_STREAM || res == CURLE_HTTP2) && flaresolverr_is_enabled()) {
-            OLOG_INFO("url_fetcher: HTTP/2 error, trying FlareSolverr fallback");
-            if (try_flaresolverr_fallback(url, base_url, out_content, out_size) ==
+         // HTTP/2 errors are often server-side blocking — try configured fallback
+         if (res == CURLE_HTTP2_STREAM || res == CURLE_HTTP2) {
+            OLOG_INFO("url_fetcher: HTTP/2 error, trying fallback provider");
+            if (url_fetcher_try_fallback(url, base_url, out_content, out_size) ==
                 URL_FETCH_SUCCESS) {
                return URL_FETCH_SUCCESS;
             }
-            OLOG_WARNING("url_fetcher: FlareSolverr fallback failed for HTTP/2 error");
+            OLOG_WARNING("url_fetcher: Fallback failed for HTTP/2 error");
          }
 
          return URL_FETCH_ERROR_NETWORK;
@@ -1413,13 +1452,13 @@ int url_fetch_content_with_base(const char *url,
          curl_slist_free_all(resolve_list);
       curl_easy_cleanup(curl);
 
-      // For redirect loops (often caused by JS-based paywalls), try FlareSolverr
+      // For redirect loops (often caused by JS-based paywalls), try fallback
       if (res == CURLE_TOO_MANY_REDIRECTS) {
-         OLOG_INFO("url_fetcher: Redirect loop detected, trying FlareSolverr fallback");
-         if (try_flaresolverr_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
+         OLOG_INFO("url_fetcher: Redirect loop detected, trying fallback provider");
+         if (url_fetcher_try_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
             return URL_FETCH_SUCCESS;
          }
-         OLOG_WARNING("url_fetcher: FlareSolverr fallback failed for redirect loop");
+         OLOG_WARNING("url_fetcher: Fallback failed for redirect loop");
       }
 
       return URL_FETCH_ERROR_NETWORK;
@@ -1434,14 +1473,14 @@ int url_fetch_content_with_base(const char *url,
          curl_slist_free_all(resolve_list);
       curl_easy_cleanup(curl);
 
-      // If we got 401/403, try FlareSolverr as fallback (bot protection)
+      // If we got 401/403, try fallback (bot protection)
       // Note: Some sites like Reuters use 401 Unauthorized instead of 403 for bot blocking
       if (http_code == 401 || http_code == 403) {
-         OLOG_INFO("url_fetcher: HTTP %ld, trying FlareSolverr fallback", http_code);
-         if (try_flaresolverr_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
+         OLOG_INFO("url_fetcher: HTTP %ld, trying fallback provider", http_code);
+         if (url_fetcher_try_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
             return URL_FETCH_SUCCESS;
          }
-         OLOG_WARNING("url_fetcher: FlareSolverr fallback failed for %s", url);
+         OLOG_WARNING("url_fetcher: Fallback failed for %s", url);
       }
 
       return URL_FETCH_ERROR_HTTP;
@@ -1520,31 +1559,39 @@ int url_fetch_content_with_base(const char *url,
    curl_buffer_free(&buffer);
 
    if (result != URL_FETCH_SUCCESS) {
-      // If content extraction failed (likely JS-rendered page), try FlareSolverr
-      OLOG_INFO("url_fetcher: Direct fetch failed with %d, trying FlareSolverr fallback", result);
-      if (try_flaresolverr_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
+      // If content extraction failed (likely JS-rendered page), try fallback
+      OLOG_INFO("url_fetcher: Direct fetch failed with %d, trying fallback provider", result);
+      if (url_fetcher_try_fallback(url, base_url, out_content, out_size) == URL_FETCH_SUCCESS) {
          return URL_FETCH_SUCCESS;
       }
-      OLOG_WARNING("url_fetcher: FlareSolverr fallback also failed");
+      OLOG_WARNING("url_fetcher: Fallback also failed");
       return result;
    }
 
    size_t extracted_len = strlen(extracted);
 
-   // If extraction succeeded but returned empty/minimal content, try FlareSolverr
-   // (Many JS-rendered pages return valid HTML with no text content)
-   if (extracted_len < 100) {
-      OLOG_INFO("url_fetcher: Extracted only %zu bytes, trying FlareSolverr fallback",
-                extracted_len);
+   /* If extraction succeeded but returned only a stub (typical of JS-rendered
+    * pages where our static parser sees the structural metadata block but
+    * misses the dynamically-loaded article body — e.g. CNBC article pages
+    * yielding ~660 bytes of just key-points before the article appears via
+    * JS), try the fallback provider for a fuller extraction.
+    *
+    * 500 byte threshold rationale: legitimate news briefs are typically
+    * 200-500 bytes of clean body text, so values below 500 are usually
+    * truncated/stub extractions worth re-fetching. Tested 2026-05-13: CNBC
+    * article pages yielded 662 bytes here (key-points only) without firing
+    * the fallback at the prior < 100 byte threshold. */
+   if (extracted_len < 500) {
+      OLOG_INFO("url_fetcher: Extracted only %zu bytes, trying fallback provider", extracted_len);
       char *flare_content = NULL;
       size_t flare_len = 0;
-      if (try_flaresolverr_fallback(url, base_url, &flare_content, &flare_len) ==
+      if (url_fetcher_try_fallback(url, base_url, &flare_content, &flare_len) ==
           URL_FETCH_SUCCESS) {
          free(extracted);
          extracted = flare_content;
          extracted_len = flare_len;
       } else {
-         OLOG_WARNING("url_fetcher: FlareSolverr fallback failed, using minimal content");
+         OLOG_WARNING("url_fetcher: Fallback failed, using minimal content");
          // Keep original extracted content even if minimal
       }
    }

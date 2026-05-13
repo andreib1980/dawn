@@ -589,6 +589,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
 
    /* [url_fetcher] */
    if (json_object_object_get_ex(payload, "url_fetcher", &section)) {
+      JSON_TO_CONFIG_STR(section, "fallback", config->url_fetcher.fallback);
+
       struct json_object *flaresolverr;
       if (json_object_object_get_ex(section, "flaresolverr", &flaresolverr)) {
          JSON_TO_CONFIG_BOOL(flaresolverr, "enabled", config->url_fetcher.flaresolverr.enabled);
@@ -597,6 +599,15 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                             config->url_fetcher.flaresolverr.timeout_sec);
          JSON_TO_CONFIG_SIZE_T(flaresolverr, "max_response_bytes",
                                config->url_fetcher.flaresolverr.max_response_bytes);
+      }
+
+      struct json_object *tavily_fetch;
+      if (json_object_object_get_ex(section, "tavily", &tavily_fetch)) {
+         JSON_TO_CONFIG_INT(tavily_fetch, "timeout_sec", config->url_fetcher.tavily.timeout_sec);
+         JSON_TO_CONFIG_SIZE_T(tavily_fetch, "max_response_bytes",
+                               config->url_fetcher.tavily.max_response_bytes);
+         JSON_TO_CONFIG_STR(tavily_fetch, "extract_depth",
+                            config->url_fetcher.tavily.extract_depth);
       }
 
       /* Parse whitelist string array */
@@ -1227,6 +1238,13 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
       if (str) {
          strncpy(mutable_secrets->gemini_api_key, str, sizeof(mutable_secrets->gemini_api_key) - 1);
          mutable_secrets->gemini_api_key[sizeof(mutable_secrets->gemini_api_key) - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "tavily_api_key", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->tavily_api_key, str, sizeof(mutable_secrets->tavily_api_key) - 1);
+         mutable_secrets->tavily_api_key[sizeof(mutable_secrets->tavily_api_key) - 1] = '\0';
       }
    }
    if (json_object_object_get_ex(payload, "mqtt_username", &val)) {

@@ -87,6 +87,19 @@ This document tracks all third-party dependencies used by the DAWN project.
 | GCC/G++ | 11+ | C/C++ compiler |
 | pkg-config | - | Library discovery |
 
+## Optional Commercial APIs
+
+| Service | Purpose | Selection | Notes |
+|---------|---------|-----------|-------|
+| OpenAI | Cloud LLM | `[llm.cloud] provider = "openai"` | Sign up at openai.com |
+| Anthropic Claude | Cloud LLM | `[llm.cloud] provider = "claude"` | Sign up at anthropic.com |
+| Google Gemini | Cloud LLM | `[llm.cloud] provider = "gemini"` | Sign up at ai.google.dev |
+| **Tavily** | LLM-optimized web search + URL extract (opt-in alternative to local SearXNG + FlareSolverr) | `[search] engine = "tavily"` and/or `[url_fetcher] fallback = "tavily"` | Sign up at tavily.com — free tier 1000 calls/month. Key in `secrets.toml` under `tavily_api_key` (or `TAVILY_API_KEY` env). No new build deps (uses existing libcurl + json-c). |
+
+### Security note on API keys via environment variables
+
+All API key environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY`, etc.) are subject to standard process-environment risks: they appear in `/proc/$PID/environ` (owner-readable on Linux), can be captured by core dumps, and may leak through diagnostic tooling. For production deployments, prefer `secrets.toml` with `chmod 600` over env-var configuration. DAWN's log redaction (`ENV_SECRET` macro) prevents the key value from appearing in INFO logs but cannot prevent leakage through the kernel or third-party tooling.
+
 ## Model Files (Not Libraries)
 
 These are model files required at runtime, not source dependencies:

@@ -41,8 +41,11 @@
 
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
+#include "core/session_manager.h"
 #include "logging.h"
 #include "tools/curl_buffer.h"
+#include "tools/tavily_rate_limit.h"
+#include "tools/web_search_tavily.h"
 #include "utils/string_utils.h"
 
 // =============================================================================
@@ -620,6 +623,49 @@ search_response_t *web_search_query_typed(const char *query,
 
    if (max_results <= 0) {
       max_results = SEARXNG_MAX_RESULTS;
+   }
+
+   /* TOCTOU-safe read of the engine string into a local; WebUI settings POST
+    * can mutate g_config mid-call. */
+   char engine[32];
+   snprintf(engine, sizeof(engine), "%s", g_config.search.engine);
+
+   /* Honor [search] engine = "disabled" — short-circuit with an empty
+    * response (no error string; tool dispatcher treats empty results as
+    * "no results found"). Image search remains on the SearXNG path
+    * regardless because Tavily has no image search and "disabled" image
+    * search is meaningless. */
+   if (type != SEARCH_TYPE_IMAGES && strcmp(engine, "disabled") == 0) {
+      OLOG_INFO("web_search: search.engine = 'disabled', returning empty response");
+      search_response_t *empty = calloc(1, sizeof(search_response_t));
+      return empty; /* may be NULL on OOM; caller handles */
+   }
+
+   /* Tavily dispatch — opt-in alternative to SearXNG. Image search is
+    * Tavily-incompatible and stays on the SearXNG path. Resolve the active
+    * user_id via session_get_command_context()/session_get_local() so the
+    * per-user rate limit isolates abuse to one user's bucket. */
+   if (type != SEARCH_TYPE_IMAGES && strcmp(engine, "tavily") == 0 &&
+       web_search_tavily_is_configured()) {
+      session_t *sess = session_get_command_context();
+      if (!sess) {
+         sess = session_get_local();
+      }
+      int uid = sess ? sess->metrics.user_id : 0;
+      if (tavily_rate_limit_check(uid)) {
+         search_response_t *tav = web_search_tavily_query_typed(query, max_results, type,
+                                                                time_range);
+         if (tav && !tav->error) {
+            return tav;
+         }
+         OLOG_INFO("tavily_search: %s, falling back to SearXNG",
+                   tav && tav->error ? tav->error : "null response");
+         if (tav) {
+            web_search_free_response(tav);
+         }
+      } else {
+         OLOG_WARNING("tavily_search: rate-limited, falling back to SearXNG");
+      }
    }
 
    // Allocate response structure

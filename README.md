@@ -69,9 +69,9 @@ DAWN runs on platforms from a Jetson Orin to a Raspberry Pi 5 and supports multi
 
 DAWN's LLM automatically invokes tools and incorporates results into responses. Multiple tool calls execute concurrently for faster answers.
 
-- **Web Search** — Voice-activated search via SearXNG (self-hosted, privacy-focused). Categories: web, news, social, science, IT, Q&A, dictionary, academic papers. Time filtering for recent results (today, this week, this month).
+- **Web Search** — Voice-activated search via SearXNG (self-hosted, privacy-focused) or optional [Tavily](https://tavily.com) (commercial, LLM-optimized; free tier 1000 calls/month). Categories: web, news, social, science, IT, Q&A, dictionary, academic papers. Time filtering for recent results (today, this week, this month).
 - **Image Search** — Search and display images from the web. Images are fetched server-side (SSRF-protected with DNS pinning), cached locally, and served via zero-copy file serving. Click-to-enlarge lightbox in WebUI. Results displayed as inline markdown images.
-- **URL Fetcher** — Fetch and read web pages. Large pages auto-summarized. Optional FlareSolverr for JavaScript-heavy sites.
+- **URL Fetcher** — Fetch and read web pages. Optional FlareSolverr (headless browser) or Tavily `/extract` (commercial, LLM-optimized) fallback for JavaScript-heavy sites. SSRF-protected. Untrusted-content framing on tool results.
 - **Weather** — Real-time weather and forecasts via Open-Meteo API (free, no API key required).
 - **Calculator** — Mathematical expression evaluation.
 - **CalDAV Calendar** — CalDAV calendar integration (Google Calendar via OAuth 2.0, iCloud, Nextcloud, Radicale). Query today's events, search by keyword, add/update/delete events across multiple accounts. Filter queries by calendar name.
@@ -183,6 +183,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **SearXNG Web Search** | Privacy-focused voice-activated web search | [GETTING_STARTED.md — SearXNG](GETTING_STARTED.md#searxng-setup-for-web-search) |
 | **Plex Music Source** | Unified music library with local + Plex tracks | [GETTING_STARTED.md — Plex](GETTING_STARTED.md#plex-music-source) |
 | **FlareSolverr** | Fetch JavaScript-heavy web pages | [GETTING_STARTED.md — FlareSolverr](GETTING_STARTED.md#javascript-heavy-sites-flaresolverr) |
+| **Tavily** | Opt-in commercial search + URL extract (alternative to SearXNG / FlareSolverr) | [GETTING_STARTED.md — Tavily](GETTING_STARTED.md#tavily-commercial-search--url-extract) |
 | **Local LLM** | Fully offline operation with llama.cpp or Ollama | [GETTING_STARTED.md — Local LLM](GETTING_STARTED.md#local-llm-free-no-api-key) |
 
 ---

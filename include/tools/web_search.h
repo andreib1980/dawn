@@ -55,14 +55,22 @@ typedef enum {
 
 /**
  * @brief Search result structure
+ *
+ * Shared across all search providers (SearXNG, Tavily, future). Field name
+ * `searxng_score` is retained for source compatibility but the value
+ * semantics are provider-specific:
+ *   - SearXNG: cross-engine confidence, typically 0.0–3.0+
+ *   - Tavily:  per-result relevance, 0.0–1.0
+ * The reranker in score_result() clamps this to [0, 100] so both ranges
+ * feed the same scoring pipeline without overflow.
  */
 typedef struct {
    char *title;
    char *url;
    char *snippet;
    char *engine;
-   char *published_date; /* ISO 8601 from SearXNG, or NULL */
-   float searxng_score;  /* SearXNG cross-engine confidence (0.0-3.0+) */
+   char *published_date; /* ISO 8601 from provider, or NULL */
+   float searxng_score;  /* Provider-specific relevance — see struct docstring */
 } search_result_t;
 
 /**

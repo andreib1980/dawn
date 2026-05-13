@@ -329,10 +329,28 @@ typedef struct {
    size_t max_response_bytes;      /* Max response size */
 } flaresolverr_config_t;
 
+/* Tavily /extract config (HTTPS endpoint hard-coded inside adapter).
+ * Used when url_fetcher.fallback = "tavily". API key in secrets.toml. */
+typedef struct {
+   int timeout_sec;           /* Request timeout (default 30) */
+   size_t max_response_bytes; /* Max raw_content size (default 1 MB) */
+   /* "basic" (1 credit, faithful page text) or "advanced" (2 credits, smart
+    * article-body extraction with nav/sidebar/footer stripped). Default
+    * "advanced" — heavily-chromed sites (TipRanks, Yahoo, etc.) dominate
+    * the first 8 KB with menu links under basic, leaving article body
+    * behind the hard truncate. */
+   char extract_depth[16];
+} tavily_fetch_config_t;
+
 typedef struct {
    char whitelist[URL_FETCHER_MAX_WHITELIST][URL_FETCHER_ENTRY_MAX]; /* Static whitelist */
    int whitelist_count; /* Number of whitelist entries */
+   /* Fallback engine selection when direct libcurl fetch fails.
+    * "flaresolverr" (default) | "tavily" | "none". When "tavily" is selected
+    * and the API key is missing, runtime falls back to flaresolverr-or-none. */
+   char fallback[16];
    flaresolverr_config_t flaresolverr;
+   tavily_fetch_config_t tavily;
 } url_fetcher_config_t;
 
 /* =============================================================================
@@ -690,6 +708,10 @@ typedef struct {
 
    /* Service token for machine-to-machine image API access (MIRAGE, etc.) */
    char service_token[CONFIG_API_KEY_MAX];
+
+   /* Tavily API key (LLM-optimized search + URL extract; opt-in alternative
+    * to SearXNG + FlareSolverr). https://tavily.com — free tier 1000/mo. */
+   char tavily_api_key[CONFIG_API_KEY_MAX];
 } secrets_config_t;
 
 /* =============================================================================
