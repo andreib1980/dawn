@@ -314,6 +314,14 @@ void config_set_defaults(dawn_config_t *config) {
     * expressions (parser returns "not found", no boost applied).  Safe default. */
    config->memory.temporal_weight = 0.20f;
    config->memory.category_threshold = 0.25f;
+   /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
+    * entity_grounding_bonus 0.4 sits between the 0.30 search floor and
+    * typical strong hybrid hits; max_facts_per_query 30 bounds fan-out for
+    * high-degree entities. */
+   config->memory.graph_retrieval.enabled = true;
+   config->memory.graph_retrieval.entity_grounding_bonus = 0.40f;
+   config->memory.graph_retrieval.max_facts_per_query = 30;
+
    /* Memory-tool search score floor: drops marginal-cosine hits before they
     * reach the LLM.  0.30 sits at the natural kw_weight boundary — pure
     * single-token keyword matches score exactly `kw_weight * 1.0 = 0.30`,

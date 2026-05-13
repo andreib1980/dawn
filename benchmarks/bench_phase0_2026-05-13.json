@@ -1,0 +1,23 @@
+{
+  "mode": "memory-pipeline",
+  "granularity": "per_locomo_session",
+  "scoring": "recall_reach (retrieval reach via provenance overlap; NOT answer support)",
+  "extraction_provider": "claude",
+  "extraction_model": "claude-haiku-4-5",
+  "avg_recall_reach": 0.8733397776297419,
+  "total_qa": 1982,
+  "conversations": 10,
+  "total_facts_extracted": 2736,
+  "total_extractions": 272,
+  "extraction_total_seconds": 3647.0,
+  "cache_hits": 0,
+  "cache_misses": 10,
+  "elapsed_seconds": 3700.8910484313965,
+  "per_category": {
+    "1": 0.7875924161898403,
+    "2": 0.8878504672897196,
+    "3": 0.8064316438037665,
+    "4": 0.9306381292112564,
+    "5": 0.8228699551569507
+  }
+}

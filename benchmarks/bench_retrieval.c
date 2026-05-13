@@ -965,8 +965,7 @@ int main(int argc, char *argv[]) {
          case 'F':
             search_score_floor_override = (float)atof(optarg);
             if (search_score_floor_override < 0.0f || search_score_floor_override > 1.0f) {
-               fprintf(stderr,
-                       "bench: --search-score-floor must be in [0.0, 1.0] (got %.4f)\n",
+               fprintf(stderr, "bench: --search-score-floor must be in [0.0, 1.0] (got %.4f)\n",
                        (double)search_score_floor_override);
                return 1;
             }
@@ -986,6 +985,15 @@ int main(int argc, char *argv[]) {
    if (memory_pipeline) {
       memset(&g_config, 0, sizeof(g_config));
       memset(&g_secrets, 0, sizeof(g_secrets));
+      /* Apply hard-coded defaults BEFORE parsing TOML — mirrors the
+       * production startup order in src/dawn.c so any config field not
+       * mentioned in the user's dawn.toml takes its compile-time
+       * default value.  Without this, fields like
+       * `memory.graph_retrieval.enabled` (true by default) silently
+       * stay false because the parser only patches keys it sees in
+       * the TOML, and most operator dawn.tomls don't list every
+       * sub-table. */
+      config_set_defaults(&g_config);
       if (config_load_from_search(config_path, &g_config) != 0) {
          fprintf(stderr, "bench: failed to load config %s\n", config_path);
          return 1;

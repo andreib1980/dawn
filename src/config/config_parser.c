@@ -1260,6 +1260,19 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    CONFIG_CLAMP(config->category_threshold, 0.05f, 0.95f);
    CONFIG_CLAMP(config->search_score_floor, 0.0f, 1.0f);
 
+   /* Parse [memory.graph_retrieval] sub-table */
+   toml_table_t *graph = toml_table_in(table, "graph_retrieval");
+   if (graph) {
+      static const char *const graph_keys[] = { "enabled", "entity_grounding_bonus",
+                                                "max_facts_per_query", NULL };
+      warn_unknown_keys(graph, "memory.graph_retrieval", graph_keys);
+      PARSE_BOOL(graph, "enabled", config->graph_retrieval.enabled);
+      PARSE_DOUBLE(graph, "entity_grounding_bonus", config->graph_retrieval.entity_grounding_bonus);
+      PARSE_INT(graph, "max_facts_per_query", config->graph_retrieval.max_facts_per_query);
+   }
+   CONFIG_CLAMP(config->graph_retrieval.entity_grounding_bonus, 0.0f, 1.0f);
+   CONFIG_CLAMP(config->graph_retrieval.max_facts_per_query, 1, 200);
+
    /* Parse [memory.recovery] sub-table */
    toml_table_t *recovery = toml_table_in(table, "recovery");
    if (recovery) {

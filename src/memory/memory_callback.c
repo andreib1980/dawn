@@ -48,6 +48,7 @@
 /* SOURCE_DEDUP_CAP / source_dedup_set_t / source_dedup_{seen,add} live in
  * memory_callback_internal.h so the unit tests can exercise them directly. */
 #include "memory/memory_filter.h"
+#include "memory/memory_graph_retrieval.h"
 #include "memory/memory_similarity.h"
 #include "memory/memory_types.h"
 #include "mosquitto_comms.h"
@@ -502,6 +503,67 @@ char *memory_action_search(int user_id,
       float scores[10];
       memory_fact_search_hybrid(user_id, keywords, gate_ptr, 0, since_ts, facts, scores, 10,
                                 &fact_count);
+
+      /* Graph-retrieval Phase 1A — entity-graph parallel candidate source.
+       * Extracts proper-noun entities from the query, resolves to canonical
+       * memory_entities, fans out one hop via fact-linked relations, and
+       * merges deduped graph candidates into the hybrid pool.  Targets
+       * cat-3 entity-specific queries where cosine over-broadens on the
+       * noun ("country", "meat") and the gold answer sits at rank 50+
+       * in pure hybrid retrieval.  See memory_graph_retrieval.h. */
+      if (g_config.memory.graph_retrieval.enabled) {
+         int64_t seeds[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
+         int seed_count = 0;
+         memory_graph_extract_seed_entities(user_id, keywords, seeds,
+                                            MEMORY_GRAPH_MAX_SEED_CANDIDATES, &seed_count);
+         if (seed_count > 0) {
+            /* Cap graph fan-out at 10 (matches the facts[10] working array
+             * size — the merge below dedupes against hybrid hits and the
+             * combined set re-sorts then truncates to 10 facts total).
+             * The per-query budget from config bounds the upstream query;
+             * 10 is the post-dedup ceiling that fits the existing array. */
+            memory_fact_t graph_facts[10];
+            float graph_scores[10];
+            int graph_count = 0;
+            int per_query_cap = g_config.memory.graph_retrieval.max_facts_per_query;
+            if (per_query_cap > 10)
+               per_query_cap = 10;
+            memory_graph_expand_fact_linked(user_id, seeds, seed_count, graph_facts, graph_scores,
+                                            per_query_cap, &graph_count);
+            /* Merge graph candidates into facts[] with dedup-by-fact-id.
+             * Hybrid scores already sit in facts/scores; we append novel
+             * graph entries until facts[] is full, then re-sort by score
+             * descending so the merged ranking surfaces graph candidates
+             * that out-score weak hybrid tail. */
+            for (int i = 0; i < graph_count && fact_count < 10; i++) {
+               bool dup = false;
+               for (int j = 0; j < fact_count; j++) {
+                  if (facts[j].id == graph_facts[i].id) {
+                     dup = true;
+                     break;
+                  }
+               }
+               if (!dup) {
+                  facts[fact_count] = graph_facts[i];
+                  scores[fact_count] = graph_scores[i];
+                  fact_count++;
+               }
+            }
+            /* Insertion sort merged list by score descending (small N). */
+            for (int i = 1; i < fact_count; i++) {
+               memory_fact_t tmp_fact = facts[i];
+               float tmp_score = scores[i];
+               int j = i - 1;
+               while (j >= 0 && scores[j] < tmp_score) {
+                  facts[j + 1] = facts[j];
+                  scores[j + 1] = scores[j];
+                  j--;
+               }
+               facts[j + 1] = tmp_fact;
+               scores[j + 1] = tmp_score;
+            }
+         }
+      }
 
       /* "I don't remember" gate — drop marginal-cosine hits before they reach
        * the LLM.  Closes the floor against fabrication from weak similarity.
