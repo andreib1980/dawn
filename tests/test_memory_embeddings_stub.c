@@ -136,3 +136,14 @@ int memory_db_entity_update_embedding(int64_t entity_id,
    (void)norm;
    return 0;
 }
+
+int memory_db_summary_update_embedding(int user_id,
+                                       int64_t summary_id,
+                                       const float *embedding,
+                                       int dims) {
+   (void)user_id;
+   (void)summary_id;
+   (void)embedding;
+   (void)dims;
+   return 0;
+}

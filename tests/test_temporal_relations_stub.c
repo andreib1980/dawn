@@ -33,8 +33,21 @@ auth_db_state_t s_db = {
 
 dawn_config_t g_config;
 
-/* Embedding-cache invalidator called from memory_db_delete_user_memories;
- * the embeddings module isn't linked into this standalone test, so the stub
- * is a no-op. */
+/* Embedding-cache invalidators and math helpers called from memory_db.c
+ * mutation paths and semantic search; the embeddings module isn't linked
+ * into this standalone test, so the stubs are no-ops (l2_norm returns 0
+ * since the test never exercises semantic summary search). */
 void memory_embeddings_invalidate_all(void) {
+}
+
+void memory_embeddings_invalidate_cache(void) {
+}
+
+void memory_embeddings_invalidate_entity_cache(void) {
+}
+
+float memory_embeddings_l2_norm(const float *vec, int dims) {
+   (void)vec;
+   (void)dims;
+   return 0.0f;
 }
