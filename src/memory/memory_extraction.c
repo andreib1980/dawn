@@ -453,7 +453,16 @@ static const char *validate_fact_category(const char *raw) {
  * Fact map — tracks newly created facts for relation linkage
  * ============================================================================= */
 
-#define FACT_MAP_MAX 32
+/* Bumped from 32 → 128 after Step 4 reextract surfaced overflow on long
+ * conversations.  Each entry is sizeof(extraction_fact_entry_t) ≈ 520 B
+ * (512 B text + int64), so 128 entries ≈ 67 KB stack — comfortable on
+ * glibc's 8 MB default pthread stack used by Linux/Jetson (DAWN's primary
+ * target).  Note: musl/uclibc defaults can be as low as 80-128 KB; if
+ * those become targets the array must move to the heap.  Excess facts
+ * beyond this cap are still STORED but their relation linkage to this
+ * conversation's relations is lost (the per-fact WARNING below names
+ * which facts).  Make this dynamic if 128 still overflows in practice. */
+#define FACT_MAP_MAX 128
 
 typedef struct {
    char text[MEMORY_FACT_TEXT_MAX];

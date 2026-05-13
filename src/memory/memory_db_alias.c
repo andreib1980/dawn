@@ -2659,11 +2659,27 @@ int memory_db_entity_list_for_admin(int user_id,
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
-   /* Pass 1 — canonicals (canonical_id IS NULL), mention_count DESC. */
-   const char *sql_canonical = "SELECT id, name, entity_type, mention_count, is_user_self "
-                               "FROM memory_entities "
-                               "WHERE user_id = ? AND canonical_id IS NULL "
-                               "ORDER BY mention_count DESC, id ASC LIMIT ?";
+   /* Pass 1 — canonicals (canonical_id IS NULL), equivalence-class
+    * mention_count DESC.  Before this aggregation a soft-merged operator
+    * who linked "Kris Kersey (50)" → "Kristopher Kersey (3)" saw the
+    * canonical display "3 mentions" while the class total was 53; the
+    * canonical-only display masked the actual merge state.  Subquery
+    * sums mention_count across {self + aliases pointing at self}, and
+    * ORDER BY uses the aggregated value so high-traffic equivalence
+    * classes still surface to the top of the admin list.
+    *
+    * Sort-key asymmetry vs entity_search (own mc): admin list is the
+    * operator's source of truth; entity_search needs an indexable sort
+    * key for hot-path queries — see auth_db_core.c entity_search prep. */
+   const char *sql_canonical =
+       "SELECT e.id, e.name, e.entity_type, "
+       "  (SELECT COALESCE(SUM(mention_count), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)) "
+       "    AS class_mention_count, "
+       "  e.is_user_self "
+       "FROM memory_entities e "
+       "WHERE e.user_id = ? AND e.canonical_id IS NULL "
+       "ORDER BY class_mention_count DESC, e.id ASC LIMIT ?";
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql_canonical, -1, &stmt, NULL) != SQLITE_OK) {
       AUTH_DB_UNLOCK();

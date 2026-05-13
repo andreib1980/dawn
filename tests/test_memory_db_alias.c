@@ -1682,6 +1682,148 @@ static void test_entity_list_for_admin_alias_tail_carries_canonical_id(void) {
 }
 
 /* ============================================================================
+ * Equivalence-class stats aggregation (Bundle 2, 2026-05-13)
+ *
+ * mention_count / first_seen / last_seen are aggregated over
+ * {self + soft-aliases pointing at self} via correlated subqueries
+ * inside three SELECTs: entity_get_by_name, entity_search, and the admin
+ * canonical-list query in memory_db_alias.c.  These tests pin the SQL
+ * behavior so the next maintainer can't regress to per-row values.
+ * ============================================================================ */
+
+static void set_entity_stats(int64_t entity_id,
+                             int mention_count,
+                             int64_t first_seen,
+                             int64_t last_seen) {
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE memory_entities SET mention_count = ?, first_seen = ?, last_seen = ? WHERE id = ?",
+       -1, &stmt, NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, rc);
+   sqlite3_bind_int(stmt, 1, mention_count);
+   sqlite3_bind_int64(stmt, 2, first_seen);
+   sqlite3_bind_int64(stmt, 3, last_seen);
+   sqlite3_bind_int64(stmt, 4, entity_id);
+   rc = sqlite3_step(stmt);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, rc);
+   sqlite3_finalize(stmt);
+}
+
+static void test_entity_get_by_name_aggregates_class_stats(void) {
+   /* Canonical with one alias.  Class total: mc=15, fs=500, ls=2500. */
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Canon", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Aliased", "person");
+   set_entity_stats(canonical, 10, 1000, 2000);
+   set_entity_stats(alias, 5, 500, 2500);
+   int64_t link_id = 0;
+   memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft", "operator", 0.95f, NULL,
+                               &link_id);
+
+   memory_entity_t out = { 0 };
+   int rc = memory_db_entity_get_by_name(g_test_user_id, "canon", &out);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(canonical, out.id);
+   TEST_ASSERT_EQUAL_INT(15, out.mention_count);          /* SUM */
+   TEST_ASSERT_EQUAL_INT64(500, (int64_t)out.first_seen); /* MIN */
+   TEST_ASSERT_EQUAL_INT64(2500, (int64_t)out.last_seen); /* MAX */
+}
+
+static void test_entity_get_by_name_alias_returns_self_stats(void) {
+   /* Querying an alias row directly should return its own stats (no
+    * class aggregation), since aliases have no dependents under the
+    * single-level rule. */
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Canon", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Aliased", "person");
+   set_entity_stats(canonical, 10, 1000, 2000);
+   set_entity_stats(alias, 5, 500, 2500);
+   int64_t link_id = 0;
+   memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft", "operator", 0.95f, NULL,
+                               &link_id);
+
+   memory_entity_t out = { 0 };
+   int rc = memory_db_entity_get_by_name(g_test_user_id, "aliased", &out);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(alias, out.id);
+   /* Alias's own values, not the canonical's. */
+   TEST_ASSERT_EQUAL_INT(5, out.mention_count);
+   TEST_ASSERT_EQUAL_INT64(500, (int64_t)out.first_seen);
+   TEST_ASSERT_EQUAL_INT64(2500, (int64_t)out.last_seen);
+}
+
+static void test_entity_search_aggregates_class_stats(void) {
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Searchable", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "SearchAlias", "person");
+   set_entity_stats(canonical, 7, 100, 200);
+   set_entity_stats(alias, 3, 50, 250);
+   int64_t link_id = 0;
+   memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft", "operator", 0.95f, NULL,
+                               &link_id);
+
+   memory_entity_t out[8];
+   int count = 0;
+   int rc = memory_db_entity_search(g_test_user_id, "search", out, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT(1, count);
+   /* Find the canonical row in the result. */
+   bool saw_canonical = false;
+   for (int i = 0; i < count; i++) {
+      if (out[i].id == canonical) {
+         saw_canonical = true;
+         TEST_ASSERT_EQUAL_INT(10, out[i].mention_count);         /* 7 + 3 */
+         TEST_ASSERT_EQUAL_INT64(50, (int64_t)out[i].first_seen); /* MIN */
+         TEST_ASSERT_EQUAL_INT64(250, (int64_t)out[i].last_seen); /* MAX */
+      }
+   }
+   TEST_ASSERT_TRUE(saw_canonical);
+}
+
+static void test_entity_get_by_name_solo_canonical_no_aliases(void) {
+   /* Degenerate equivalence class of 1 — canonical with no aliases.
+    * Subquery's OR clause still matches the row itself via id=e.id, so the
+    * aggregates return self values (not NULL).  Pins the COALESCE wrap as
+    * defense-in-depth rather than load-bearing. */
+   int64_t solo = insert_entity_typed(g_test_user_id, "Solo", "person");
+   set_entity_stats(solo, 7, 100, 200);
+
+   memory_entity_t out = { 0 };
+   int rc = memory_db_entity_get_by_name(g_test_user_id, "solo", &out);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT64(solo, out.id);
+   TEST_ASSERT_EQUAL_INT(7, out.mention_count);
+   TEST_ASSERT_EQUAL_INT64(100, (int64_t)out.first_seen);
+   TEST_ASSERT_EQUAL_INT64(200, (int64_t)out.last_seen);
+}
+
+static void test_entity_list_for_admin_aggregates_class_mention_count(void) {
+   /* Admin canonical-list should display the SUMMED mention_count.
+    * Reproduces the Step 4 motivator: "Kris Kersey (mention_count=50)"
+    * soft-aliased into "Kristopher Kersey (mention_count=3)" should
+    * read as 53 in the admin output, not 3. */
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Kris Kersey", "person");
+   set_entity_stats(canonical, 3, 1000, 1000);
+   set_entity_stats(alias, 50, 500, 2000);
+   int64_t link_id = 0;
+   memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft", "operator", 0.95f, NULL,
+                               &link_id);
+
+   memory_alias_entity_row_t rows[8];
+   int count = 0;
+   int rc = memory_db_entity_list_for_admin(g_test_user_id, /* include_aliases */ false, rows, 8,
+                                            &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   bool saw = false;
+   for (int i = 0; i < count; i++) {
+      if (rows[i].entity_id == canonical) {
+         saw = true;
+         TEST_ASSERT_EQUAL_INT(53, rows[i].mention_count); /* 3 + 50, not 3 */
+      }
+   }
+   TEST_ASSERT_TRUE(saw);
+}
+
+/* ============================================================================
  * Ckpt 5: alias_summary helper + LLM-tool integration smoke
  *
  * The smoke scenarios exercise the same code path the LLM tool uses
@@ -2864,6 +3006,13 @@ int main(void) {
    RUN_TEST(test_alias_history_helper_includes_unlinked);
    RUN_TEST(test_entity_list_for_admin_canonical_only_default);
    RUN_TEST(test_entity_list_for_admin_alias_tail_carries_canonical_id);
+
+   /* Equivalence-class stats aggregation (Bundle 2, 2026-05-13) */
+   RUN_TEST(test_entity_get_by_name_aggregates_class_stats);
+   RUN_TEST(test_entity_get_by_name_alias_returns_self_stats);
+   RUN_TEST(test_entity_get_by_name_solo_canonical_no_aliases);
+   RUN_TEST(test_entity_search_aggregates_class_stats);
+   RUN_TEST(test_entity_list_for_admin_aggregates_class_mention_count);
    RUN_TEST(test_proposal_list_returns_pending_only);
    RUN_TEST(test_proposal_resolve_approved_creates_alias);
 

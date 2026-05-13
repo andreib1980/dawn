@@ -3317,11 +3317,26 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, user_id, name, entity_type, canonical_name, mention_count, "
-                           "first_seen, last_seen FROM memory_entities "
-                           "WHERE user_id = ? AND canonical_name = ?",
-                           -1, &s_db.stmt_memory_entity_get_by_name, NULL);
+   /* Equivalence-class aggregation (v43+): mention_count / first_seen /
+    * last_seen are aggregated over {self + soft-aliases pointing at self}
+    * via correlated subqueries.  For canonical rows this returns the
+    * class total; for alias rows (canonical_id IS NOT NULL) it returns
+    * self values, since aliases never have dependents (single-level rule
+    * enforced by memory_db_alias_link's no-dependents check).  Idx
+    * idx_memory_entities_canonical (partial) + PK back the subqueries
+    * at O(log N). */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT e.id, e.user_id, e.name, e.entity_type, e.canonical_name, "
+       "  (SELECT COALESCE(SUM(mention_count), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)), "
+       "  (SELECT COALESCE(MIN(first_seen), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)), "
+       "  (SELECT COALESCE(MAX(last_seen), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)) "
+       "FROM memory_entities e "
+       "WHERE e.user_id = ? AND e.canonical_name = ?",
+       -1, &s_db.stmt_memory_entity_get_by_name, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare entity_get_by_name failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
@@ -3433,13 +3448,31 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, user_id, name, entity_type, canonical_name, "
-                           "mention_count, first_seen, last_seen "
-                           "FROM memory_entities "
-                           "WHERE user_id = ? AND canonical_name LIKE ? ESCAPE '\\' "
-                           "ORDER BY mention_count DESC LIMIT ? OFFSET ?",
-                           -1, &s_db.stmt_memory_entity_search, NULL);
+   /* Equivalence-class aggregation: see entity_get_by_name above for
+    * rationale.  ORDER BY uses the row's own mention_count (not the
+    * aggregated class total) — keeps the ORDER BY trivially indexable
+    * and matches the historical behavior for canonical-row sort order;
+    * aggregated counts surface in the row payload, not the sort key.
+    *
+    * Deliberate asymmetry: the admin canonical-list query in
+    * memory_db_alias.c sorts by CLASS total because it's the source-of-
+    * truth display for operators making merge decisions, and ~270
+    * canonicals is small enough that the per-row subquery sort is
+    * sub-millisecond.  Search is on a hotter path and serves both LLM
+    * and user queries — index-friendly sort matters more there. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT e.id, e.user_id, e.name, e.entity_type, e.canonical_name, "
+       "  (SELECT COALESCE(SUM(mention_count), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)), "
+       "  (SELECT COALESCE(MIN(first_seen), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)), "
+       "  (SELECT COALESCE(MAX(last_seen), 0) FROM memory_entities "
+       "     WHERE user_id = e.user_id AND (id = e.id OR canonical_id = e.id)) "
+       "FROM memory_entities e "
+       "WHERE e.user_id = ? AND e.canonical_name LIKE ? ESCAPE '\\' "
+       "ORDER BY e.mention_count DESC LIMIT ? OFFSET ?",
+       -1, &s_db.stmt_memory_entity_search, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare entity_search failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
