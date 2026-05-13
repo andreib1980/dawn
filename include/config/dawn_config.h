@@ -568,6 +568,32 @@ typedef struct {
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */
    float category_threshold;
+   /* Memory-tool search score floor.  Drops facts whose hybrid score
+    * (kw_weight * kw_score + vec_weight * cosine + temporal boost) falls
+    * below this value before they reach the LLM.  Closes the "I don't
+    * remember" gate against marginal-cosine fabrication: at 0 the LLM
+    * sees every cosine hit above the embeddings layer's 0.01 near-zero
+    * cut; at 0.30 (default) hybrid-vector-only marginal hits below the
+    * natural kw_weight=0.30 boundary are dropped silently.  Only applies
+    * to the non-category branch of memory_action_search() and the per-
+    * turn focus-injection fact adapter — category-filtered searches are
+    * SQL-LIKE grounded and need no floor.  0.30 = `kw_weight * 1.0` is
+    * the cleanest cutoff (preserves every legitimate single-token
+    * keyword match); drop to 0.10-0.20 if your corpus shows over-
+    * filtering, or push higher if weak fabrications persist.
+    *
+    * SINGLE-KNOB DESIGN: this value gates BOTH the memory.search tool
+    * (memory_callback.c:memory_action_search) AND the per-turn focus-
+    * injection fact adapter (memory_focus_adapters.c:fact_adapter_query).
+    * Both code paths feed the LLM verbatim (tool response vs. system-prompt
+    * focus block) and share the same marginal-cosine fabrication surface,
+    * so a single tunable keeps tool-time and injection-time semantics
+    * aligned.  If a future use case justifies divergent thresholds (e.g.,
+    * bench sweeps, A/B), split into `memory.search_score_floor` and
+    * `focus_injection.fact_score_floor` rather than reaching past the helper
+    * — the helper itself (memory_search_apply_score_floor) stays pure (no
+    * config dep) precisely to preserve that seam. */
+   float search_score_floor;
    /* Paraphrase-dedup gate at extraction time.  Replaces the old LIKE-based
     * fact-similar prefilter with an embedding-cosine check: if a newly
     * extracted fact's embedding scores >= paraphrase_dedup_threshold

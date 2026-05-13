@@ -442,6 +442,12 @@ dawn_add_unit_test(test_memory_source_dedup
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_memory_score_floor
+   SOURCES test_memory_score_floor.c
+           ${SRC_ROOT}/src/memory/memory_score_floor.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_similarity
    SOURCES test_memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -645,6 +651,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            ${SRC_ROOT}/src/memory/memory_source_dedup.c
+           ${SRC_ROOT}/src/memory/memory_score_floor.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c

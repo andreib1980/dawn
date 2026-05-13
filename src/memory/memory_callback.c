@@ -502,6 +502,18 @@ char *memory_action_search(int user_id,
       float scores[10];
       memory_fact_search_hybrid(user_id, keywords, gate_ptr, 0, since_ts, facts, scores, 10,
                                 &fact_count);
+
+      /* "I don't remember" gate — drop marginal-cosine hits before they reach
+       * the LLM.  Closes the floor against fabrication from weak similarity.
+       * Category-filtered branch above is SQL-LIKE grounded and is
+       * intentionally not gated.  See dawn_config.h §search_score_floor. */
+      const float score_floor = g_config.memory.search_score_floor;
+      const int before = fact_count;
+      fact_count = memory_search_apply_score_floor(facts, scores, fact_count, score_floor);
+      if (fact_count < before) {
+         OLOG_DEBUG("memory_action_search: floor=%.2f dropped %d/%d facts for query '%s'",
+                    score_floor, before - fact_count, before, keywords);
+      }
    }
 
    /* source_budget==0 from caller means "use default"; else honor caller's value

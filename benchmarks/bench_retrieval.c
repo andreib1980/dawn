@@ -857,6 +857,11 @@ static void print_usage(const char *prog) {
            "  --extraction-model <name>        Override extraction model (e.g.,\n"
            "                                   claude-haiku-4-5, claude-sonnet-4-6).\n"
            "                                   Used by the four-model sweep.\n"
+           "  --search-score-floor <float>     Override g_config.memory.search_score_floor\n"
+           "                                   for memory-pipeline mode. 0.0 disables the\n"
+           "                                   floor (baseline = pre-2026-05-13 behavior);\n"
+           "                                   0.30 is the natural kw_weight boundary.\n"
+           "                                   Use to sweep the floor without rebuilding.\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -889,6 +894,7 @@ int main(int argc, char *argv[]) {
       { "config", required_argument, 0, 'C' },
       { "extraction-provider", required_argument, 0, 'X' },
       { "extraction-model", required_argument, 0, 'Y' },
+      { "search-score-floor", required_argument, 0, 'F' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
@@ -898,9 +904,14 @@ int main(int argc, char *argv[]) {
    const char *config_path = "./dawn.toml";
    const char *extraction_provider_override = NULL;
    const char *extraction_model_override = NULL;
+   /* search_score_floor override: sentinel < 0 means "leave g_config alone";
+    * any >= 0 value (including 0.0) means "override g_config after load".
+    * The 0.0 override is meaningful — it represents the pre-2026-05-13
+    * baseline (no floor) for ablation against the new default. */
+   float search_score_floor_override = -1.0f;
 
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:MSrh", long_options, NULL)) !=
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:F:MSrh", long_options, NULL)) !=
           -1) {
       switch (opt) {
          case 'p':
@@ -951,6 +962,15 @@ int main(int argc, char *argv[]) {
          case 'Y':
             extraction_model_override = optarg;
             break;
+         case 'F':
+            search_score_floor_override = (float)atof(optarg);
+            if (search_score_floor_override < 0.0f || search_score_floor_override > 1.0f) {
+               fprintf(stderr,
+                       "bench: --search-score-floor must be in [0.0, 1.0] (got %.4f)\n",
+                       (double)search_score_floor_override);
+               return 1;
+            }
+            break;
          case 'h':
             print_usage(argv[0]);
             return 0;
@@ -983,6 +1003,14 @@ int main(int argc, char *argv[]) {
       if (extraction_model_override && extraction_model_override[0]) {
          snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
                   extraction_model_override);
+      }
+      /* Post-load floor override: 0.0 represents the pre-2026-05-13 baseline
+       * (floor disabled), 0.30 is the new default — wire so sweeps can
+       * traverse the full range without rebuilding. */
+      if (search_score_floor_override >= 0.0f) {
+         g_config.memory.search_score_floor = search_score_floor_override;
+         fprintf(stderr, "bench: search_score_floor override -> %.4f\n",
+                 (double)search_score_floor_override);
       }
       if (smoke) {
          if (optind + 2 != argc) {

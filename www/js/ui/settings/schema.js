@@ -1047,6 +1047,17 @@
                      displayValue: (v) => Math.round(v * 100) + '%',
                      advanced: true,
                   },
+                  search_score_floor: {
+                     type: 'range',
+                     label: 'Memory Search Score Floor',
+                     hint: 'Drops marginal-cosine hits from memory-tool search results before they reach the LLM. 0 disables. Default 0.30 (the natural keyword-weight boundary — preserves single-token keyword matches, filters hybrid-vector-only marginal hits). Drop to 0.10-0.20 if over-filtering, push higher if weak fabrications persist.',
+                     configPath: 'memory.search_score_floor',
+                     min: 0,
+                     max: 1,
+                     step: 0.05,
+                     displayValue: (v) => Math.round(v * 100) + '%',
+                     advanced: true,
+                  },
                   category_threshold: {
                      type: 'range',
                      label: 'Category Classification Threshold',

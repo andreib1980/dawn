@@ -112,6 +112,38 @@ int memory_fact_search_hybrid(int user_id,
                               int max,
                               int *out_count);
 
+/**
+ * @brief "I don't remember" gate — compact a fact/score parallel array by
+ *        dropping entries whose score falls below @p score_floor.
+ *
+ * Designed to be applied to the output of `memory_fact_search_hybrid()` at
+ * any call site where the resulting facts will be surfaced to the LLM —
+ * the memory tool's `search` action and the per-turn focus-injection fact
+ * adapter both qualify.  Closes the floor against fabrication from
+ * marginal-cosine hits.
+ *
+ * - `score_floor <= 0.0f` → no-op (legacy behavior — every above-near-zero
+ *   hit reaches the LLM).
+ * - Keyword-only fallback scores from `memory_fact_search_hybrid()` are
+ *   integer match counts cast to float (always >= 1.0), so any sub-1.0
+ *   floor passes them untouched — only hybrid-path marginal-cosine hits
+ *   are filtered.
+ *
+ * In-place compaction preserves the descending-score order from the
+ * upstream ranker.  Pure function — no allocations, no logging.
+ *
+ * @param facts In/out parallel array; entries with score >= floor stay,
+ *              others are compacted out.
+ * @param scores In/out parallel array (must be same length as @p facts).
+ * @param count Current valid entry count.
+ * @param score_floor Score threshold (inclusive lower bound).
+ * @return New entry count after filtering, in [0, @p count].
+ */
+int memory_search_apply_score_floor(memory_fact_t *facts,
+                                    float *scores,
+                                    int count,
+                                    float score_floor);
+
 #ifdef __cplusplus
 }
 #endif

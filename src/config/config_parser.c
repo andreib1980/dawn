@@ -1229,6 +1229,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                               "vector_weight",
                                               "temporal_weight",
                                               "category_threshold",
+                                              "search_score_floor",
                                               "backfill_on_startup",
                                               "model_id",
                                               "recompute_on_model_change",
@@ -1244,6 +1245,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "vector_weight", config->embedding_vector_weight);
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
+      PARSE_DOUBLE(embeddings, "search_score_floor", config->search_score_floor);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
       PARSE_STRING(embeddings, "model_id", config->model_id);
       PARSE_BOOL(embeddings, "recompute_on_model_change", config->recompute_on_model_change);
@@ -1256,6 +1258,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    CONFIG_CLAMP(config->embedding_vector_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->temporal_weight, 0.0f, 1.0f);
    CONFIG_CLAMP(config->category_threshold, 0.05f, 0.95f);
+   CONFIG_CLAMP(config->search_score_floor, 0.0f, 1.0f);
 
    /* Parse [memory.recovery] sub-table */
    toml_table_t *recovery = toml_table_in(table, "recovery");

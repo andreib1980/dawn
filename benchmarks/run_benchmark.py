@@ -78,6 +78,7 @@ class BenchRetrieval:
       config_path=None,
       extraction_provider="",
       extraction_model="",
+      search_score_floor=None,
    ):
       cmd = [binary_path, "--provider", provider]
       if model:
@@ -105,6 +106,10 @@ class BenchRetrieval:
             cmd += ["--extraction-model", extraction_model]
          if config_path:
             cmd += ["--config", config_path]
+         # Floor override: 0.0 is a meaningful value (baseline = no floor),
+         # so test against None not truthiness.
+         if search_score_floor is not None:
+            cmd += ["--search-score-floor", str(search_score_floor)]
 
       # text=False / no bufsize: _read_json_line reads raw bytes via os.read
       # off the stdout fd directly, doing line splitting in Python. Mixing
@@ -1699,6 +1704,16 @@ def main():
       "LoCoMo cat-3 lift. Requires datasets that pass timestamps (LoCoMo).",
    )
    parser.add_argument(
+      "--search-score-floor",
+      type=float,
+      default=None,
+      dest="search_score_floor",
+      help="Override g_config.memory.search_score_floor for memory-pipeline mode. "
+      "0.0 disables the floor (baseline = pre-2026-05-13 behavior); 0.30 is the "
+      "natural kw_weight boundary (shipped default). Use to ablate the 'I don't "
+      "remember' gate against legitimate-retrieval recall.",
+   )
+   parser.add_argument(
       "--now",
       type=int,
       default=None,
@@ -1944,6 +1959,7 @@ def _run_one(args, extraction_provider, extraction_model):
       config_path=args.config_path if args.memory_pipeline else None,
       extraction_provider=extraction_provider,
       extraction_model=extraction_model,
+      search_score_floor=args.search_score_floor,
    )
    print(f"  Ready: {engine.dims} dims, provider={engine.provider}, "
          f"mode={engine.mode}, extraction="

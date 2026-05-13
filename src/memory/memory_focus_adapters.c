@@ -235,6 +235,13 @@ static int fact_adapter_query(int user_id,
       }
       kept++;
    }
+
+   /* "I don't remember" gate — same configurable score floor that gates the
+    * memory tool's `search` action.  Focus-block facts are prepended to the
+    * system prompt verbatim, so the marginal-cosine fabrication surface is
+    * identical to the tool path.  Single knob (g_config.memory.search_score_floor)
+    * keeps tool-time and injection-time semantics aligned. */
+   kept = memory_search_apply_score_floor(facts, scores, kept, g_config.memory.search_score_floor);
    if (kept <= 0)
       return SUCCESS;
 

@@ -314,6 +314,17 @@ void config_set_defaults(dawn_config_t *config) {
     * expressions (parser returns "not found", no boost applied).  Safe default. */
    config->memory.temporal_weight = 0.20f;
    config->memory.category_threshold = 0.25f;
+   /* Memory-tool search score floor: drops marginal-cosine hits before they
+    * reach the LLM.  0.30 sits at the natural kw_weight boundary — pure
+    * single-token keyword matches score exactly `kw_weight * 1.0 = 0.30`,
+    * so 0.30 is the cleanest cutoff that filters hybrid-vector-only
+    * marginal hits without dropping any legitimate keyword match.  Live-
+    * validated 2026-05-13 across three settings (0.10 / 0.20 / 0.30) on
+    * a no-memory query: 0.30 was the only setting that produced visible
+    * filtering AND surfaced focus-block candidates the LLM could use for
+    * intelligent clarifying questions.  See dawn_config.h
+    * §search_score_floor. */
+   config->memory.search_score_floor = 0.30f;
    /* Paraphrase-dedup gate: 0.92 is conservative — calibrated for bge-small-
     * en-v1.5-int8 to favor precision over recall (false merges cost more
     * than false misses).  Tune via benchmarks/bench_paraphrase_calibration.py

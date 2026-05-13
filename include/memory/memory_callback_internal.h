@@ -132,4 +132,9 @@ typedef struct {
 bool source_dedup_seen(const source_dedup_set_t *set, int64_t conv, int64_t s, int64_t e);
 void source_dedup_add(source_dedup_set_t *set, int64_t conv, int64_t s, int64_t e);
 
+/* `memory_search_apply_score_floor` lives in include/memory/memory_fact_search.h
+ * — promoted from the internal header so the per-turn focus-injection fact
+ * adapter (memory_focus_adapters.c) can apply the same "I don't remember"
+ * gate without breaching the internal-only contract of this header. */
+
 #endif /* MEMORY_CALLBACK_INTERNAL_H */

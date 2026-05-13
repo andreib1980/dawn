@@ -783,6 +783,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                             config->memory.embedding_vector_weight);
       JSON_TO_CONFIG_DOUBLE(section, "temporal_weight", config->memory.temporal_weight);
       JSON_TO_CONFIG_DOUBLE(section, "category_threshold", config->memory.category_threshold);
+      JSON_TO_CONFIG_DOUBLE(section, "search_score_floor", config->memory.search_score_floor);
       JSON_TO_CONFIG_BOOL(section, "embedding_backfill_on_startup",
                           config->memory.embedding_backfill_on_startup);
       JSON_TO_CONFIG_STR(section, "model_id", config->memory.model_id);
@@ -797,6 +798,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       CONFIG_CLAMP(config->memory.embedding_vector_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.temporal_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->memory.category_threshold, 0.05f, 0.95f);
+      CONFIG_CLAMP(config->memory.search_score_floor, 0.0f, 1.0f);
 
       /* Paraphrase dedup gate (TOML-tunable, not surfaced in main settings
        * panel — calibration knob, not a casual user toggle). */
