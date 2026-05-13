@@ -191,6 +191,144 @@ static void test_gate_keeps_normal_short_page(void) {
    TEST_ASSERT_FALSE(gate_rejects(2, html, md));
 }
 
+/* ── markdown_is_chrome_dominated ────────────────────────────────────────── */
+
+#include <stdlib.h>
+#include <string.h>
+
+static void test_chrome_null_returns_false(void) {
+   TEST_ASSERT_FALSE(markdown_is_chrome_dominated(NULL, 0, NULL));
+   TEST_ASSERT_FALSE(markdown_is_chrome_dominated(NULL, 1000, NULL));
+}
+
+static void test_chrome_below_sample_floor_returns_false(void) {
+   /* Even a chrome-shaped input is not classified below the 4 KB floor —
+    * too little signal to be confident. */
+   char small[1024];
+   memset(small, 0, sizeof(small));
+   for (size_t i = 0; i + 32 < sizeof(small); i += 32) {
+      memcpy(small + i, "* [Nav](http://example.com/x)\n", 30);
+   }
+   TEST_ASSERT_FALSE(markdown_is_chrome_dominated(small, strlen(small), NULL));
+}
+
+static void test_chrome_dominated_nav_menu(void) {
+   /* Build a >4KB markdown blob that's pure nav-menu link tails — the shape
+    * of PitchBook / Investors.com / TipRanks observed live 2026-05-12. */
+   const char *line = "* [Some Section Name Here](https://example.com/path/to/page)\n";
+   size_t line_len = strlen(line);
+   size_t buf_size = 8192;
+   char *buf = malloc(buf_size + 1);
+   TEST_ASSERT_NOT_NULL(buf);
+   size_t off = 0;
+   while (off + line_len < buf_size) {
+      memcpy(buf + off, line, line_len);
+      off += line_len;
+   }
+   buf[off] = '\0';
+   chrome_metrics_t m;
+   TEST_ASSERT_TRUE(markdown_is_chrome_dominated(buf, off, &m));
+   TEST_ASSERT_TRUE(m.link_density > 0.4);
+   TEST_ASSERT_EQUAL_INT(0, m.paragraph_count);
+   free(buf);
+}
+
+static void test_chrome_legitimate_article_not_flagged(void) {
+   /* Synthesize a 5+ KB article body: paragraphs of ~300 chars each with
+    * occasional inline links. Should NOT trip chrome detection. */
+   const char *para = "This is a sample article paragraph of considerable length, the kind of "
+                      "prose you would actually find in a real news article or blog post on a "
+                      "topic of substance, written in complete sentences that span multiple "
+                      "lines and include occasional links like https://example.com but are "
+                      "dominated by readable English prose rather than navigational link "
+                      "menus or sidebar boilerplate that would mark this as site chrome.\n\n";
+   size_t para_len = strlen(para);
+   size_t buf_size = 8192;
+   char *buf = malloc(buf_size + 1);
+   TEST_ASSERT_NOT_NULL(buf);
+   size_t off = 0;
+   while (off + para_len < buf_size) {
+      memcpy(buf + off, para, para_len);
+      off += para_len;
+   }
+   buf[off] = '\0';
+   chrome_metrics_t m;
+   TEST_ASSERT_FALSE(markdown_is_chrome_dominated(buf, off, &m));
+   TEST_ASSERT_TRUE(m.paragraph_density > 0.5);
+   free(buf);
+}
+
+static void test_chrome_mixed_content_below_threshold(void) {
+   /* Article with nav bar at top but body underneath — combined density
+    * should NOT trip detection because prose dominates the total. */
+   char buf[6144];
+   memset(buf, 0, sizeof(buf));
+   strcpy(buf, "* [Home](http://example.com/)\n"
+               "* [About](http://example.com/about)\n"
+               "* [Contact](http://example.com/contact)\n"
+               "\n"
+               "This is the actual article body, a substantial paragraph of prose "
+               "that goes on for several hundred characters explaining the subject "
+               "matter in genuine detail with complete sentences and reasonable "
+               "topic flow throughout the piece.\n\n");
+   /* Repeat the prose paragraph to bulk out the size. */
+   const char *more = "More prose continues here for paragraphs upon paragraphs, "
+                      "discussing the topic in further depth with examples and "
+                      "context that mirror how real articles are written.\n\n";
+   while (strlen(buf) + strlen(more) < sizeof(buf) - 1) {
+      strcat(buf, more);
+   }
+   TEST_ASSERT_FALSE(markdown_is_chrome_dominated(buf, strlen(buf), NULL));
+}
+
+/* ── url_snippet_cache ───────────────────────────────────────────────────── */
+
+#include "tools/url_snippet_cache.h"
+
+static void test_snippet_cache_miss_on_empty(void) {
+   url_snippet_cache_clear();
+   char out[256];
+   out[0] = '\0';
+   TEST_ASSERT_FALSE(url_snippet_cache_get("https://example.com/", out, sizeof(out)));
+}
+
+static void test_snippet_cache_put_get_roundtrip(void) {
+   url_snippet_cache_clear();
+   url_snippet_cache_put("https://pitchbook.com/q1-2026", "Q1 2026 hit $255B in AI VC");
+   char out[256];
+   TEST_ASSERT_TRUE(url_snippet_cache_get("https://pitchbook.com/q1-2026", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("Q1 2026 hit $255B in AI VC", out);
+}
+
+static void test_snippet_cache_update_overwrites(void) {
+   url_snippet_cache_clear();
+   url_snippet_cache_put("https://example.com/", "first");
+   url_snippet_cache_put("https://example.com/", "second");
+   char out[64];
+   TEST_ASSERT_TRUE(url_snippet_cache_get("https://example.com/", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("second", out);
+}
+
+static void test_snippet_cache_ignores_empty_inputs(void) {
+   url_snippet_cache_clear();
+   url_snippet_cache_put(NULL, "snippet");
+   url_snippet_cache_put("https://example.com/", NULL);
+   url_snippet_cache_put("https://example.com/", "");
+   url_snippet_cache_put("", "snippet");
+   TEST_ASSERT_EQUAL_INT(0, url_snippet_cache_count());
+}
+
+static void test_snippet_cache_eviction(void) {
+   url_snippet_cache_clear();
+   char url_buf[64];
+   for (int i = 0; i < URL_SNIPPET_CACHE_MAX_ENTRIES + 5; i++) {
+      snprintf(url_buf, sizeof(url_buf), "https://example.com/n/%d", i);
+      url_snippet_cache_put(url_buf, "x");
+   }
+   /* Cache should not exceed its bound. */
+   TEST_ASSERT_TRUE(url_snippet_cache_count() <= URL_SNIPPET_CACHE_MAX_ENTRIES);
+}
+
 /* ── Entrypoint ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -217,5 +355,17 @@ int main(void) {
    RUN_TEST(test_gate_keeps_short_article_with_markers);
    RUN_TEST(test_gate_keeps_single_signature_short_no_markers);
    RUN_TEST(test_gate_keeps_normal_short_page);
+
+   RUN_TEST(test_chrome_null_returns_false);
+   RUN_TEST(test_chrome_below_sample_floor_returns_false);
+   RUN_TEST(test_chrome_dominated_nav_menu);
+   RUN_TEST(test_chrome_legitimate_article_not_flagged);
+   RUN_TEST(test_chrome_mixed_content_below_threshold);
+
+   RUN_TEST(test_snippet_cache_miss_on_empty);
+   RUN_TEST(test_snippet_cache_put_get_roundtrip);
+   RUN_TEST(test_snippet_cache_update_overwrites);
+   RUN_TEST(test_snippet_cache_ignores_empty_inputs);
+   RUN_TEST(test_snippet_cache_eviction);
    return UNITY_END();
 }

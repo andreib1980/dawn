@@ -228,6 +228,12 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_SIZE_T("DAWN_URL_FETCHER_TAVILY_MAX_RESPONSE_BYTES",
               config->url_fetcher.tavily.max_response_bytes);
    ENV_STRING("DAWN_URL_FETCHER_TAVILY_EXTRACT_DEPTH", config->url_fetcher.tavily.extract_depth);
+   ENV_INT("DAWN_URL_FETCHER_TAVILY_RATE_LIMIT_PER_MINUTE",
+           config->url_fetcher.tavily.rate_limit_per_minute);
+   ENV_INT("DAWN_URL_FETCHER_TAVILY_RATE_LIMIT_PER_HOUR",
+           config->url_fetcher.tavily.rate_limit_per_hour);
+   ENV_INT("DAWN_URL_FETCHER_TAVILY_RATE_LIMIT_PER_DAY",
+           config->url_fetcher.tavily.rate_limit_per_day);
 
    /* [mqtt] */
    ENV_BOOL("DAWN_MQTT_ENABLED", config->mqtt.enabled);
@@ -377,6 +383,9 @@ void config_dump(const dawn_config_t *config) {
    printf("  timeout_sec = %d\n", config->url_fetcher.tavily.timeout_sec);
    printf("  max_response_bytes = %zu\n", config->url_fetcher.tavily.max_response_bytes);
    printf("  extract_depth = \"%s\"\n", config->url_fetcher.tavily.extract_depth);
+   printf("  rate_limit_per_minute = %d\n", config->url_fetcher.tavily.rate_limit_per_minute);
+   printf("  rate_limit_per_hour = %d\n", config->url_fetcher.tavily.rate_limit_per_hour);
+   printf("  rate_limit_per_day = %d\n", config->url_fetcher.tavily.rate_limit_per_day);
 
    printf("\n[mqtt]\n");
    printf("  enabled = %s\n", config->mqtt.enabled ? "true" : "false");
@@ -1265,6 +1274,12 @@ json_object *config_to_json(const dawn_config_t *config) {
                               (int64_t)config->url_fetcher.tavily.max_response_bytes));
    json_object_object_add(tavily_fetch, "extract_depth",
                           json_object_new_string(config->url_fetcher.tavily.extract_depth));
+   json_object_object_add(tavily_fetch, "rate_limit_per_minute",
+                          json_object_new_int(config->url_fetcher.tavily.rate_limit_per_minute));
+   json_object_object_add(tavily_fetch, "rate_limit_per_hour",
+                          json_object_new_int(config->url_fetcher.tavily.rate_limit_per_hour));
+   json_object_object_add(tavily_fetch, "rate_limit_per_day",
+                          json_object_new_int(config->url_fetcher.tavily.rate_limit_per_day));
    json_object_object_add(url_fetcher, "tavily", tavily_fetch);
 
    json_object_object_add(root, "url_fetcher", url_fetcher);
@@ -1951,6 +1966,10 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
          if (config->url_fetcher.tavily.extract_depth[0]) {
             fprintf(fp, "extract_depth = \"%s\"\n", config->url_fetcher.tavily.extract_depth);
          }
+         fprintf(fp, "rate_limit_per_minute = %d\n",
+                 config->url_fetcher.tavily.rate_limit_per_minute);
+         fprintf(fp, "rate_limit_per_hour = %d\n", config->url_fetcher.tavily.rate_limit_per_hour);
+         fprintf(fp, "rate_limit_per_day = %d\n", config->url_fetcher.tavily.rate_limit_per_day);
       }
    }
 

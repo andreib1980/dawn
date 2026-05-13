@@ -58,28 +58,6 @@ char *memory_filter_normalize(const char *text);
  */
 bool memory_filter_check(const char *text);
 
-/**
- * @brief Length of the DATA-marker overhead used by memory_filter_wrap_if_hit:
- *        sizeof("[DATA]") - 1 + sizeof("[/DATA]") - 1 + NUL.
- */
-#define MEMORY_FILTER_DATA_WRAP_OVERHEAD 14
-
-/**
- * @brief Run memory_filter_check on *inout. On hit, wrap the contents in
- *        [DATA]...[/DATA] markers (caller's original buffer freed and
- *        replaced) so the LLM treats the content as data, not instructions.
- *        On miss / NULL / allocation failure: no-op.
- *
- *        Source label appears in the INFO log line so operators can trace
- *        the wrap to the call site (e.g. "tavily_search" / "tavily_extract"
- *        / "flaresolverr").
- *
- * @param inout  Pointer to a heap-allocated string. On hit, *inout is
- *               freed and replaced with the wrapped allocation.
- * @param source_label  Short identifier for log output. May be NULL.
- */
-void memory_filter_wrap_if_hit(char **inout, const char *source_label);
-
 #ifdef __cplusplus
 }
 #endif

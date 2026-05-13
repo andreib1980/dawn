@@ -417,24 +417,3 @@ bool memory_filter_check(const char *text) {
    free(normalized);
    return blocked;
 }
-
-void memory_filter_wrap_if_hit(char **inout, const char *source_label) {
-   if (!inout || !*inout || !memory_filter_check(*inout)) {
-      return;
-   }
-   const char *orig = *inout;
-   size_t orig_len = strlen(orig);
-   size_t wrapped_size = orig_len + MEMORY_FILTER_DATA_WRAP_OVERHEAD;
-   char *wrapped = malloc(wrapped_size);
-   if (!wrapped) {
-      /* Allocation failure → leave original in place rather than dropping
-       * the content. The filter already flagged it; the LLM still has the
-       * raw text but without DATA markers. Caller's choice not to reject. */
-      return;
-   }
-   snprintf(wrapped, wrapped_size, "[DATA]%s[/DATA]", orig);
-   OLOG_INFO("%s: injection-pattern hit — wrapping content in [DATA] markers",
-             source_label ? source_label : "memory_filter");
-   free(*inout);
-   *inout = wrapped;
-}

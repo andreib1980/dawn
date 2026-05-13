@@ -288,17 +288,31 @@
 
 [url_fetcher.tavily]
 # extract_depth = "advanced"      # Tavily extraction mode:
-                                  #   "advanced" (2 credits/call): smart article-body
-                                  #     extraction, strips nav/sidebar/footer chrome.
-                                  #     Recommended for heavy-chrome sites (TipRanks,
-                                  #     Yahoo, etc.) where basic mode dominates the
-                                  #     first 8 KB with menu links.
-                                  #   "basic" (1 credit/call): faithful full-page text.
+                                  #   "basic"    (1 credit/call): faithful full-page text.
+                                  #   "advanced" (2 credits/call): per Tavily docs, returns
+                                  #              more content with smarter chrome handling.
+                                  #              Live testing on heavy-chrome sites (TipRanks
+                                  #              etc.) shows little difference from "basic" —
+                                  #              tune per your traffic profile. Default
+                                  #              "advanced" preserves headroom; if you're
+                                  #              burning quota faster than expected, drop to
+                                  #              "basic".
                                   # Env: DAWN_URL_FETCHER_TAVILY_EXTRACT_DEPTH
 # timeout_sec = 30                # Request timeout for Tavily /extract calls
                                   # Env: DAWN_URL_FETCHER_TAVILY_TIMEOUT_SEC
 # max_response_bytes = 1048576    # Max raw_content size returned to LLM (1 MB)
                                   # Env: DAWN_URL_FETCHER_TAVILY_MAX_RESPONSE_BYTES
+# rate_limit_per_minute = 10      # Per-user cap — bounds runaway tool loops
+                                  # within one minute. Both /search and /extract
+                                  # count against the same bucket.
+                                  # Env: DAWN_URL_FETCHER_TAVILY_RATE_LIMIT_PER_MINUTE
+# rate_limit_per_hour = 100       # Sustained per-user ceiling.
+                                  # Env: DAWN_URL_FETCHER_TAVILY_RATE_LIMIT_PER_HOUR
+# rate_limit_per_day = 500        # GLOBAL ceiling across all users —
+                                  # monthly-quota backstop. Sized for Tavily's
+                                  # 1000/mo free tier with cushion. Raise if
+                                  # on a paid plan.
+                                  # Env: DAWN_URL_FETCHER_TAVILY_RATE_LIMIT_PER_DAY
 
 # =============================================================================
 # MQTT (Home Automation)

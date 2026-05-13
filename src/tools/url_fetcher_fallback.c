@@ -30,7 +30,6 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
-#include "core/session_manager.h"
 #include "logging.h"
 #include "tools/tavily_rate_limit.h"
 #include "tools/url_fetch_tavily.h"
@@ -42,18 +41,6 @@
  * compile time instead of silently truncating. */
 _Static_assert(sizeof("flaresolverr") <= 16,
                "fallback[16] must fit the longest fallback name plus NUL");
-
-/* Resolve the active user_id for rate-limit isolation. Falls back to local
- * session for command-context-less invocations (e.g. legacy MQTT path) and
- * finally to 0 (anonymous bucket) when no session exists yet. The user_id
- * lives on the per-session metrics tracker (session_set_metrics_user). */
-static int resolve_fallback_user_id(void) {
-   session_t *sess = session_get_command_context();
-   if (!sess) {
-      sess = session_get_local();
-   }
-   return sess ? sess->metrics.user_id : 0;
-}
 
 int url_fetcher_try_fallback(const char *url,
                              const char *base_url,
@@ -89,7 +76,7 @@ int url_fetcher_try_fallback(const char *url,
          return URL_FETCH_ERROR_NETWORK;
       }
 
-      if (!tavily_rate_limit_check(resolve_fallback_user_id())) {
+      if (!tavily_rate_limit_check(tavily_rate_limit_resolve_user_id())) {
          /* Bucket exhausted; transparent cascade to FlareSolverr if available. */
          if (flaresolverr_is_enabled_and_available()) {
             OLOG_INFO("url_fetcher: Tavily rate-limited, cascading to FlareSolverr");

@@ -18,9 +18,15 @@
  *
  * Tavily per-user rate limiter (shared between /search and /extract adapters).
  *
- * Implements a fixed-window counter for two scales: 10 calls/minute and
- * 100 calls/hour per user. A runaway LLM tool loop is bounded at
- * ~2400 calls/day worst case, well inside Tavily's 1000/mo free tier.
+ * Implements a fixed-window counter at three scales:
+ *   - 10 calls/minute and 100 calls/hour per user (runaway-loop bound)
+ *   - 500 calls/day GLOBAL across all users (monthly-quota backstop)
+ *
+ * The per-user limits cap any one caller; the global daily ceiling caps the
+ * deployment as a whole so two simultaneously-runaway users can't double the
+ * quota burn. 500/day = ~15k/month theoretical, but a single-day burst is
+ * capped at half of Tavily's 1000/mo free tier — operator notices before
+ * the month's budget is gone.
  *
  * Thread Safety: All functions thread-safe (internal pthread_mutex).
  */
@@ -34,10 +40,15 @@
 extern "C" {
 #endif
 
-/* Default limits — both /search and /extract count against the same bucket
+/* Compile-time default limits. Live values are read from
+ * `g_config.url_fetcher.tavily.rate_limit_*` at check time so operators
+ * can tune via dawn.toml / WebUI without recompile. A configured value of
+ * 0 falls back to these defaults (matches the rest of the Tavily config
+ * surface). Both /search and /extract count against the same buckets
  * since Tavily quota is unified. */
-#define TAVILY_RL_PER_MINUTE 10
-#define TAVILY_RL_PER_HOUR 100
+#define TAVILY_RL_PER_MINUTE_DEFAULT 10
+#define TAVILY_RL_PER_HOUR_DEFAULT 100
+#define TAVILY_RL_PER_DAY_DEFAULT 500
 
 /* Bucket table capacity. Sized for personal DAWN deployments (1-3 users).
  * Beyond this the limiter fails open (logged), letting calls through rather
@@ -69,6 +80,17 @@ void tavily_rate_limit_reset(void);
  * Convenience helper for diagnostics / logs. Either out pointer can be NULL.
  */
 void tavily_rate_limit_remaining(int user_id, int *minute_remaining, int *hour_remaining);
+
+/**
+ * @brief Resolve the active user_id for rate-limit isolation.
+ *
+ * Reads the per-call command-context session, falls back to the local session
+ * for command-context-less invocations (legacy MQTT path), and finally to 0
+ * (anonymous bucket) when no session exists. Lives here because both
+ * url_fetcher_fallback.c and web_search.c need the same resolution to keep
+ * one user's runaway loop from poisoning another user's quota.
+ */
+int tavily_rate_limit_resolve_user_id(void);
 
 #ifdef __cplusplus
 }

@@ -129,6 +129,15 @@ static char *bounded_dup(const char *src, size_t max_len) {
  * sites. The LLM treats tool-result content as data by virtue of being
  * a tool-call response, not as system instructions. */
 
+/* Placeholder string inserted into the JSON tree in place of the real
+ * api_key — keeps the secret out of json-c-managed memory (which is freed
+ * by json_object_put without zeroing). The real key is substituted into
+ * the final body buffer, which IS sodium_memzero'd before free. SEC-M2.
+ *
+ * The placeholder is plain ASCII so JSON escaping is a no-op; it's also
+ * distinctive enough that strstr() will only match the slot we put it in. */
+#define TAVILY_API_KEY_PLACEHOLDER "__DAWN_TAVILY_API_KEY_PLACEHOLDER__"
+
 /**
  * @brief Build the Tavily /search JSON request body.
  *
@@ -147,12 +156,24 @@ static char *build_request_body(const char *api_key,
    if (!api_key || !query || !out_len) {
       return NULL;
    }
+   /* Defense in depth: reject queries that contain the api_key placeholder.
+    * The strstr() in the substitution path finds the FIRST occurrence in
+    * the serialized JSON; today the placeholder lives in the api_key slot
+    * which comes first, but if json-c ever changed field ordering OR if
+    * the user-controlled query contained the literal placeholder, the real
+    * key would be substituted into the wrong slot and sent to Tavily as
+    * user input. The placeholder is non-natural so legitimate queries
+    * cannot contain it. */
+   if (strstr(query, TAVILY_API_KEY_PLACEHOLDER)) {
+      return NULL;
+   }
    struct json_object *root = json_object_new_object();
    if (!root) {
       return NULL;
    }
 
-   json_object_object_add(root, "api_key", json_object_new_string(api_key));
+   /* SEC-M2: put a placeholder in the JSON tree, not the real key. */
+   json_object_object_add(root, "api_key", json_object_new_string(TAVILY_API_KEY_PLACEHOLDER));
    json_object_object_add(root, "query", json_object_new_string(query));
    json_object_object_add(root, "topic", json_object_new_string(map_topic(type)));
    json_object_object_add(root, "search_depth", json_object_new_string("basic"));
@@ -174,16 +195,31 @@ static char *build_request_body(const char *api_key,
       return NULL;
    }
 
-   char *body = malloc(serialized_len + 1);
+   /* Substitute placeholder with real api_key while copying into our
+    * sodium_memzero-protected body buffer. */
+   const char *placeholder_pos = strstr(serialized, TAVILY_API_KEY_PLACEHOLDER);
+   if (!placeholder_pos) {
+      json_object_put(root);
+      return NULL;
+   }
+   const size_t placeholder_len = sizeof(TAVILY_API_KEY_PLACEHOLDER) - 1;
+   const size_t key_len = strlen(api_key);
+   const size_t prefix_len = (size_t)(placeholder_pos - serialized);
+   const size_t suffix_len = serialized_len - prefix_len - placeholder_len;
+   const size_t body_len = prefix_len + key_len + suffix_len;
+
+   char *body = malloc(body_len + 1);
    if (!body) {
       json_object_put(root);
       return NULL;
    }
-   memcpy(body, serialized, serialized_len);
-   body[serialized_len] = '\0';
-   *out_len = serialized_len;
+   memcpy(body, serialized, prefix_len);
+   memcpy(body + prefix_len, api_key, key_len);
+   memcpy(body + prefix_len + key_len, serialized + prefix_len + placeholder_len, suffix_len);
+   body[body_len] = '\0';
+   *out_len = body_len;
 
-   json_object_put(root); /* releases the json-c-internal buffer holding the key */
+   json_object_put(root); /* safe — only placeholder bytes were in the tree */
    return body;
 }
 

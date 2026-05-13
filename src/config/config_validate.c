@@ -347,6 +347,19 @@ int config_validate(const dawn_config_t *config,
                          config->url_fetcher.tavily.extract_depth);
             }
          }
+         /* Rate-limit sanity ranges. 0 means "use compile-time default". */
+         if (config->url_fetcher.tavily.rate_limit_per_minute != 0) {
+            VALIDATE_RANGE_INT("url_fetcher.tavily.rate_limit_per_minute",
+                               config->url_fetcher.tavily.rate_limit_per_minute, 1, 10000);
+         }
+         if (config->url_fetcher.tavily.rate_limit_per_hour != 0) {
+            VALIDATE_RANGE_INT("url_fetcher.tavily.rate_limit_per_hour",
+                               config->url_fetcher.tavily.rate_limit_per_hour, 1, 100000);
+         }
+         if (config->url_fetcher.tavily.rate_limit_per_day != 0) {
+            VALIDATE_RANGE_INT("url_fetcher.tavily.rate_limit_per_day",
+                               config->url_fetcher.tavily.rate_limit_per_day, 1, 1000000);
+         }
       }
    }
 

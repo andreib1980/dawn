@@ -340,6 +340,14 @@ typedef struct {
     * the first 8 KB with menu links under basic, leaving article body
     * behind the hard truncate. */
    char extract_depth[16];
+   /* Rate-limit caps. Per-user (minute + hour) bounds runaway tool loops;
+    * global (day) bounds total monthly-quota burn across the deployment.
+    * Defaults: 10/min, 100/hr per user, 500/day global — sized for Tavily's
+    * 1000/mo free tier. 0 means "use compile-time default". Both /search
+    * and /extract count against the same buckets (Tavily quota is unified). */
+   int rate_limit_per_minute;
+   int rate_limit_per_hour;
+   int rate_limit_per_day;
 } tavily_fetch_config_t;
 
 typedef struct {

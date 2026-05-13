@@ -62,6 +62,17 @@ static size_t tavily_raw_content_max(void) {
    return m ? m : TAVILY_RAW_CONTENT_DEFAULT_MAX;
 }
 
+/* Placeholder string inserted into the JSON tree in place of the real
+ * api_key — keeps the secret out of json-c-managed memory (which is freed
+ * by json_object_put without zeroing). The real key is substituted into
+ * the final body buffer, which IS sodium_memzero'd before free. SEC-M2.
+ *
+ * The placeholder is plain ASCII so JSON escaping is a no-op; it's also
+ * distinctive enough that strstr() will only match the slot we put it in.
+ *
+ * Defined as a string literal so sizeof gives compile-time length. */
+#define TAVILY_API_KEY_PLACEHOLDER "__DAWN_TAVILY_API_KEY_PLACEHOLDER__"
+
 /**
  * @brief Build the Tavily /extract JSON request body.
  *
@@ -71,6 +82,14 @@ static size_t tavily_raw_content_max(void) {
  */
 static char *build_extract_body(const char *api_key, const char *url, size_t *out_len) {
    if (!api_key || !url || !out_len) {
+      return NULL;
+   }
+   /* Defense in depth: reject URLs containing the api_key placeholder. See
+    * the rationale in web_search_tavily.c's build_request_body. URL is
+    * SSRF-validated upstream, but symmetry matters — the strstr() in the
+    * placeholder substitution path could otherwise land on a user-supplied
+    * occurrence and leak the real key. */
+   if (strstr(url, TAVILY_API_KEY_PLACEHOLDER)) {
       return NULL;
    }
    struct json_object *root = json_object_new_object();
@@ -92,7 +111,8 @@ static char *build_extract_body(const char *api_key, const char *url, size_t *ou
       depth = "advanced";
    }
 
-   json_object_object_add(root, "api_key", json_object_new_string(api_key));
+   /* SEC-M2: put a placeholder in the JSON tree, not the real key. */
+   json_object_object_add(root, "api_key", json_object_new_string(TAVILY_API_KEY_PLACEHOLDER));
    json_object_object_add(root, "urls", urls_arr);
    json_object_object_add(root, "extract_depth", json_object_new_string(depth));
 
@@ -103,16 +123,31 @@ static char *build_extract_body(const char *api_key, const char *url, size_t *ou
       json_object_put(root);
       return NULL;
    }
-   char *body = malloc(serialized_len + 1);
+   /* Substitute placeholder with real api_key while copying into our
+    * sodium_memzero-protected body buffer. */
+   const char *placeholder_pos = strstr(serialized, TAVILY_API_KEY_PLACEHOLDER);
+   if (!placeholder_pos) {
+      json_object_put(root);
+      return NULL;
+   }
+   const size_t placeholder_len = sizeof(TAVILY_API_KEY_PLACEHOLDER) - 1;
+   const size_t key_len = strlen(api_key);
+   const size_t prefix_len = (size_t)(placeholder_pos - serialized);
+   const size_t suffix_len = serialized_len - prefix_len - placeholder_len;
+   const size_t body_len = prefix_len + key_len + suffix_len;
+
+   char *body = malloc(body_len + 1);
    if (!body) {
       json_object_put(root);
       return NULL;
    }
-   memcpy(body, serialized, serialized_len);
-   body[serialized_len] = '\0';
-   *out_len = serialized_len;
+   memcpy(body, serialized, prefix_len);
+   memcpy(body + prefix_len, api_key, key_len);
+   memcpy(body + prefix_len + key_len, serialized + prefix_len + placeholder_len, suffix_len);
+   body[body_len] = '\0';
+   *out_len = body_len;
 
-   json_object_put(root);
+   json_object_put(root); /* safe — only placeholder bytes were in the tree */
    return body;
 }
 

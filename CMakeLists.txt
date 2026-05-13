@@ -538,6 +538,7 @@ set(DAWN_SOURCES
     src/tools/url_fetcher_detect.c
     src/tools/url_fetcher_fallback.c
     src/tools/url_fetch_tavily.c
+    src/tools/url_snippet_cache.c
     src/tools/html_parser.c
     src/core/time_query_parser.c
     src/core/iso8601.c

@@ -608,6 +608,12 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                                config->url_fetcher.tavily.max_response_bytes);
          JSON_TO_CONFIG_STR(tavily_fetch, "extract_depth",
                             config->url_fetcher.tavily.extract_depth);
+         JSON_TO_CONFIG_INT(tavily_fetch, "rate_limit_per_minute",
+                            config->url_fetcher.tavily.rate_limit_per_minute);
+         JSON_TO_CONFIG_INT(tavily_fetch, "rate_limit_per_hour",
+                            config->url_fetcher.tavily.rate_limit_per_hour);
+         JSON_TO_CONFIG_INT(tavily_fetch, "rate_limit_per_day",
+                            config->url_fetcher.tavily.rate_limit_per_day);
       }
 
       /* Parse whitelist string array */

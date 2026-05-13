@@ -805,13 +805,21 @@ static void parse_url_fetcher_tavily(toml_table_t *table, tavily_fetch_config_t 
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "timeout_sec", "max_response_bytes", "extract_depth",
+   static const char *const known_keys[] = { "timeout_sec",
+                                             "max_response_bytes",
+                                             "extract_depth",
+                                             "rate_limit_per_minute",
+                                             "rate_limit_per_hour",
+                                             "rate_limit_per_day",
                                              NULL };
    warn_unknown_keys(table, "url_fetcher.tavily", known_keys);
 
    PARSE_INT(table, "timeout_sec", config->timeout_sec);
    PARSE_SIZE_T(table, "max_response_bytes", config->max_response_bytes);
    PARSE_STRING(table, "extract_depth", config->extract_depth);
+   PARSE_INT(table, "rate_limit_per_minute", config->rate_limit_per_minute);
+   PARSE_INT(table, "rate_limit_per_hour", config->rate_limit_per_hour);
+   PARSE_INT(table, "rate_limit_per_day", config->rate_limit_per_day);
 }
 
 static void parse_url_fetcher(toml_table_t *table, url_fetcher_config_t *config) {

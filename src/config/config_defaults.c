@@ -215,6 +215,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->url_fetcher.tavily.timeout_sec = 30;
    config->url_fetcher.tavily.max_response_bytes = 1 * 1024 * 1024; /* 1MB */
    SAFE_COPY(config->url_fetcher.tavily.extract_depth, "advanced");
+   config->url_fetcher.tavily.rate_limit_per_minute = 10;
+   config->url_fetcher.tavily.rate_limit_per_hour = 100;
+   config->url_fetcher.tavily.rate_limit_per_day = 500;
 
    /* MQTT - matching dawn.h */
    config->mqtt.enabled = true;
