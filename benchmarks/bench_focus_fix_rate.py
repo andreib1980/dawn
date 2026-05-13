@@ -68,39 +68,58 @@ DEFAULT_SECRETS_PATH = DAWN_ROOT / "secrets.toml"
 DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 
 # Per-provider HEAD baselines for component 6 fix-rate.
-# Recalibrated 2026-05-08 (Phase 1j.B) after the weight-tuning win —
-# w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.  All three providers (anthropic /
-# openai / local) lifted from 7/11 → 11/11 against the v2 fixtures
-# (focus_probe_cases.json schema_version=2): the four designed-FAIL
-# cases (semantic-noise pair, recency-collision, source-weight-bury)
-# all promote into top_k=8 under the new weights, while the six
-# designed-PASS cases stay in top_k and the negative-empty case
-# continues to surface appropriately-weak content.  Going forward,
-# regression detection: (candidate_fix_count < baseline_fix_count) is
-# a FAIL on that provider.  See docs/PHASE_1J_TUNING_LOG.md for the
-# pathology→fix mapping.
+# Recalibrated 2026-05-13 (Phase 1j re-bench) after promoting
+# w_rec 0.15 → 0.30 against the augmented 15-case fixture set.  Four
+# new cases (12-15) probe the summary-vs-paraphrase-ladder pathology
+# the original 11 fixtures didn't exercise.  Run B at w_rec=0.30
+# produced 15/15 across all three providers (anthropic / openai /
+# local) with no regression on the regression-guard (case 14) or any
+# existing case.  Run A at w_rec=0.15 produced 13/15 (cases 12, 13
+# FAIL as designed).  Original Phase 1j.B tuning (w_imp 0.2 → 1.0,
+# w_rec 0.3 → 0.15, 11/11 baseline shipped 2026-05-08) is preserved
+# in the atlas tuning log; this baseline supersedes.
+#
+# Regression detection: (candidate_fix_count < baseline_fix_count)
+# is a FAIL on that provider.  See atlas/dawn/memory/PHASE_1J_TUNING_LOG.md
+# for the full pathology → fix mapping across both tuning passes.
 HEAD_BASELINE_FIX_COUNT = {
-    "anthropic": 11,
-    "openai": 11,
-    "local": 11,
+    "anthropic": 15,
+    "openai": 15,
+    "local": 15,
 }
 
 # Production-shape config block — passed verbatim to bench_focus_pipeline
 # unless a case overrides via per-case "config" field.  Mirrors the
-# shipped dawn.toml.example focus_injection defaults.
+# shipped dawn.toml.example focus_injection defaults with one
+# deliberate exception:
+#
+#   top_k=8 here vs production's top_k=12 (config_defaults.c:342).
+#
+# The fixture-design contract (v2 schema_version) pins rank 9-12 for
+# FAIL cases and rank 5-8 for PASS cases under top_k=8 as a stress-test
+# parameter.  Bumping the harness to 12 would let every existing FAIL
+# case pass by default and erase the probe's pathology coverage.
+# Production runs with the extra 4 slots of slack precisely because
+# top_k=8 was too tight after Step-3 added summaries to the per-turn
+# budget; the bench keeps 8 to surface pathologies the production
+# default has room to absorb.
+#
+# memory_summary source weight raised 0.7 → 1.0 in May 2026 (Step-3
+# default change at config_defaults.c:373); harness updated to match
+# 2026-05-13.
 DEFAULT_FOCUS_CONFIG = {
     "top_k": 8,
     "min_score": 0.40,
     "focus_budget_tokens": 1024,
     "weight_semantic": 1.0,
-    "weight_recency": 0.15,
+    "weight_recency": 0.30,
     "weight_importance": 1.00,
     "weight_source": 1.0,
     "source_weights": {
         "memory_fact": 1.0,
         "memory_entity": 0.9,
         "memory_relation": 0.85,
-        "memory_summary": 0.7,
+        "memory_summary": 1.0,
         "document_chunk": 0.7,
         "calendar_event": 0.6,
         "recent_email": 0.5,

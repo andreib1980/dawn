@@ -536,20 +536,19 @@
 # classifier_enabled = false          # RAGRoute-style source classifier
                                       # (default off — opt-in only after probe).
 # weight_semantic = 1.0               # Generative-Agents three-factor ranker
-# weight_recency = 0.15               # weights.  Range each: 0.0 - 5.0.  Phase
+# weight_recency = 0.30               # weights.  Range each: 0.0 - 5.0.  Phase
 # weight_importance = 1.0             # 1j tuning (May 2026) lifted w_imp 0.2 →
                                       # 1.0 and dropped w_rec 0.3 → 0.15 — Probe
                                       # Component 6 fix-rate 7/11 → 11/11 across
                                       # anthropic / openai / local providers.
-                                      #
-                                      # Open tension (post-Step-3): live testing
-                                      # on a corpus with historical summaries
-                                      # suggests w_rec = 0.3 ranks recent
-                                      # semantic-matched summaries above legacy
-                                      # paraphrase-ladder facts.  Try 0.3 in
-                                      # summary-heavy deployments until Phase 1j
-                                      # gains a summary-relevant probe and
-                                      # formally re-tunes.
+                                      # Phase 1j re-bench (2026-05-13) promoted
+                                      # w_rec 0.15 → 0.30 after adding summary-
+                                      # relevant probes (cases 12-15): Run B at
+                                      # 0.30 produced 15/15 across all three
+                                      # providers with no regression on the
+                                      # regression-guard or existing cases.
+                                      # See atlas/dawn/memory/PHASE_1J_TUNING_LOG.md
+                                      # for the full bench history.
 # weight_source = 1.0                 # Multiplier on per-source weights below.
 
 [memory.focus_injection.source_weights]

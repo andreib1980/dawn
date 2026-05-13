@@ -346,18 +346,21 @@ void config_set_defaults(dawn_config_t *config) {
    /* Phase 1j tuning (May 2026): w_imp 0.2 → 1.0, w_rec 0.3 → 0.15.
     * Probe Component 6 fix-rate lifted 7/11 → 11/11 across all three
     * providers (anthropic / openai / local) on the v2 fixtures.  See
-    * docs/PHASE_1J_TUNING_LOG.md for rationale and the bench-validated
-    * pathologies these weights resolve.
+    * atlas/dawn/memory/PHASE_1J_TUNING_LOG.md for rationale and the
+    * bench-validated pathologies these weights resolve.
     *
-    * Open tension (May 2026, post-Step-3): live testing on a corpus with
-    * historical summaries suggests w_rec=0.3 ranks recent semantic summary
-    * matches better than 0.15 (the right summary leads the pool instead of
-    * sitting second).  Phase 1j bench evidence still trumps anecdote, so
-    * the default stays 0.15; operators who care about freshly-extracted
-    * summary surfacing can override in dawn.toml until Phase 1j gains a
-    * summary-relevant probe and re-tunes. */
+    * Phase 1j re-bench (2026-05-13): w_rec 0.15 → 0.30 after the
+    * post-Step-4 corpus exposed a paraphrase-ladder pathology the
+    * original 11 fixtures didn't probe.  4 new cases (12-15 in
+    * benchmarks/focus_probe_cases.json) probe summary-vs-ladder
+    * recency competition + regression-guard against over-correction;
+    * Run B at w_rec=0.30 produced 15/15 across all three providers
+    * with no regression on existing cases or the regression guard.
+    * The candidate weight is now the production default.  Run A at
+    * w_rec=0.15 produced 13/15 (cases 12, 13 failed FAIL → FAIL as
+    * designed). */
    config->memory.focus_injection.weight_semantic = 1.0f;
-   config->memory.focus_injection.weight_recency = 0.15f;
+   config->memory.focus_injection.weight_recency = 0.30f;
    config->memory.focus_injection.weight_importance = 1.0f;
    config->memory.focus_injection.weight_source = 1.0f;
    config->memory.focus_injection.source_weights.memory_fact = 1.0f;
