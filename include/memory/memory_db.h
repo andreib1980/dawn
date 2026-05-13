@@ -466,6 +466,50 @@ int memory_db_summary_list_since(int user_id,
                                  int max_summaries,
                                  int *count_out);
 
+/**
+ * @brief List facts within a time window with explicit sort order
+ *
+ * Generalization of memory_db_fact_list_since() that adds an upper bound
+ * and a configurable sort direction.  Used by the LLM 'recent' tool action
+ * to support queries like "find my oldest stored memory" (sort_asc=true)
+ * or "show me memories from a slice in the past" (until_ts < now).
+ *
+ * @param user_id   User ID
+ * @param since_ts  Lower bound on created_at (inclusive).  Pass 0 for "from
+ *                  the beginning of time" (no lower bound).
+ * @param until_ts  Upper bound on created_at (inclusive).  Pass 0 for "until
+ *                  now" — caller-supplied sentinel resolved internally to
+ *                  INT64_MAX so the SAME prepared statement serves both
+ *                  windowed and open-ended queries.
+ * @param sort_asc  True = ORDER BY created_at ASC (oldest first); false =
+ *                  DESC (newest first, the historical default).
+ * @param out_facts Output array
+ * @param max_facts Max rows to return (caller-supplied; tool layer clamps
+ *                  to a defense-in-depth max via the 'limit' param).
+ * @param count_out Output: rows returned
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_list_window(int user_id,
+                               time_t since_ts,
+                               time_t until_ts,
+                               bool sort_asc,
+                               memory_fact_t *out_facts,
+                               int max_facts,
+                               int *count_out);
+
+/**
+ * @brief List summaries within a time window with explicit sort order
+ *
+ * Mirrors memory_db_fact_list_window — see that function for the rationale.
+ */
+int memory_db_summary_list_window(int user_id,
+                                  time_t since_ts,
+                                  time_t until_ts,
+                                  bool sort_asc,
+                                  memory_summary_t *out_summaries,
+                                  int max_summaries,
+                                  int *count_out);
+
 /* =============================================================================
  * Preference Operations
  * ============================================================================= */

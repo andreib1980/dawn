@@ -2935,6 +2935,96 @@ static void test_entity_upsert_wrapper_uses_now(void) {
 }
 
 /* ============================================================================
+ * memory_db_{fact,summary}_list_window (Bundle 3, 2026-05-13)
+ *
+ * The windowed/sorted variants drive the LLM 'recent' tool action's new
+ * limit/sort/before parameters.  Tests pin three properties:
+ *   - DESC sort returns newest first (the legacy _list_since behavior).
+ *   - ASC sort returns oldest first — enables "find earliest memory" queries.
+ *   - until_ts=0 sentinel resolves to "until now" (subsumes _list_since).
+ * ============================================================================ */
+
+static int64_t insert_fact_at(int user_id, const char *text, int64_t created_at) {
+   int64_t fact_id = 0;
+   int rc = memory_db_fact_create_at(user_id, text, 1.0f, "explicit", "general", NULL, created_at,
+                                     &fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_GREATER_THAN_INT64(0, fact_id);
+   return fact_id;
+}
+
+static void test_fact_list_window_desc_returns_newest_first(void) {
+   int64_t now = (int64_t)time(NULL);
+   int64_t old_id = insert_fact_at(g_test_user_id, "Older fact", now - 86400); /* 1 day ago */
+   int64_t new_id = insert_fact_at(g_test_user_id, "Newer fact", now - 60);    /* 1 min ago */
+
+   memory_fact_t out[8];
+   int count = 0;
+   int rc = memory_db_fact_list_window(g_test_user_id, /* since */ 0, /* until */ 0,
+                                       /* sort_asc */ false, out, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT64(new_id, out[0].id); /* newest first */
+   TEST_ASSERT_EQUAL_INT64(old_id, out[1].id);
+}
+
+static void test_fact_list_window_asc_returns_oldest_first(void) {
+   int64_t now = (int64_t)time(NULL);
+   int64_t old_id = insert_fact_at(g_test_user_id, "Older fact", now - 86400);
+   int64_t new_id = insert_fact_at(g_test_user_id, "Newer fact", now - 60);
+
+   memory_fact_t out[8];
+   int count = 0;
+   int rc = memory_db_fact_list_window(g_test_user_id, /* since */ 0, /* until */ 0,
+                                       /* sort_asc */ true, out, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT64(old_id, out[0].id); /* oldest first */
+   TEST_ASSERT_EQUAL_INT64(new_id, out[1].id);
+}
+
+static void test_fact_list_window_respects_until_ts_bound(void) {
+   int64_t now = (int64_t)time(NULL);
+   /* Three facts: 30 days ago, 10 days ago, 1 hour ago. */
+   int64_t old_id = insert_fact_at(g_test_user_id, "30 days old", now - 30 * 86400);
+   int64_t mid_id = insert_fact_at(g_test_user_id, "10 days old", now - 10 * 86400);
+   insert_fact_at(g_test_user_id, "1 hour old", now - 3600); /* deliberately outside window */
+
+   /* Window: 60 days ago → 5 days ago.  Should return old + mid, NOT new. */
+   memory_fact_t out[8];
+   int count = 0;
+   int rc = memory_db_fact_list_window(g_test_user_id, /* since */ now - 60 * 86400,
+                                       /* until */ now - 5 * 86400, /* sort_asc */ true, out, 8,
+                                       &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT64(old_id, out[0].id);
+   TEST_ASSERT_EQUAL_INT64(mid_id, out[1].id);
+}
+
+static void test_summary_list_window_asc_returns_oldest_first(void) {
+   int64_t now = (int64_t)time(NULL);
+   int64_t old_id = 0, new_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_summary_create_at(g_test_user_id, "session-old", "Older summary",
+                                                     "topic", "neutral", 5, 60, NULL, now - 86400,
+                                                     &old_id));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_summary_create_at(g_test_user_id, "session-new", "Newer summary",
+                                                     "topic", "neutral", 5, 60, NULL, now - 60,
+                                                     &new_id));
+
+   memory_summary_t out[8];
+   int count = 0;
+   int rc = memory_db_summary_list_window(g_test_user_id, /* since */ 0, /* until */ 0,
+                                          /* sort_asc */ true, out, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT64(old_id, out[0].id); /* oldest first */
+   TEST_ASSERT_EQUAL_INT64(new_id, out[1].id);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -3013,6 +3103,12 @@ int main(void) {
    RUN_TEST(test_entity_get_by_name_solo_canonical_no_aliases);
    RUN_TEST(test_entity_search_aggregates_class_stats);
    RUN_TEST(test_entity_list_for_admin_aggregates_class_mention_count);
+
+   /* memory_db_{fact,summary}_list_window (Bundle 3, 2026-05-13) */
+   RUN_TEST(test_fact_list_window_desc_returns_newest_first);
+   RUN_TEST(test_fact_list_window_asc_returns_oldest_first);
+   RUN_TEST(test_fact_list_window_respects_until_ts_bound);
+   RUN_TEST(test_summary_list_window_asc_returns_oldest_first);
    RUN_TEST(test_proposal_list_returns_pending_only);
    RUN_TEST(test_proposal_resolve_approved_creates_alias);
 

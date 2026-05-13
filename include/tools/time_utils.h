@@ -58,7 +58,7 @@ static inline uint64_t get_time_ms(void) {
  *
  * Thread Safety: This function is thread-safe (pure function).
  *
- * @param period Time period string (e.g., "24h", "7d", "1w")
+ * @param period Time period string (e.g., "24h", "7d", "1w", "1y")
  * @return Number of seconds, or 0 if invalid/empty input
  *
  * Examples:
@@ -67,6 +67,8 @@ static inline uint64_t get_time_ms(void) {
  *   "7d"  -> 604800
  *   "2w"  -> 1209600
  *   "30m" -> 1800
+ *   "1y"  -> 31536000
+ *   "10y" -> 315360000
  *   "12"  -> 43200 (defaults to hours)
  *   ""    -> 0
  *   "-5d" -> 0 (negative rejected)
@@ -125,6 +127,11 @@ static inline time_t parse_time_period(const char *period) {
       case 'w':
       case 'W':
          multiplier = 604800; /* weeks */
+         break;
+      case 'y':
+      case 'Y':
+         multiplier = 31536000; /* years (365 days; not leap-year-aware — fine for
+                                 * approximate windowing) */
          break;
       default:
          return 0; /* unknown unit */

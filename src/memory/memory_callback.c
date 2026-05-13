@@ -826,28 +826,70 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
  * Returns facts and summaries created within a specified time period.
  * ============================================================================= */
 
-char *memory_action_recent(int user_id, const char *period, bool with_source, int source_budget) {
-   if (!period || strlen(period) == 0) {
-      return strdup("Please specify a time period (e.g., '24h', '7d', '1w').");
-   }
+/* MEMORY_RECENT_LIMIT_MAX + defaults moved to memory_callback_internal.h so
+ * the tool schema description and the action layer share one source of
+ * truth — see header for rationale. */
+_Static_assert(MEMORY_RECENT_LIMIT_MAX >= MEMORY_RECENT_DEFAULT_FACT_LIMIT &&
+                   MEMORY_RECENT_LIMIT_MAX >= MEMORY_RECENT_DEFAULT_SUMMARY_LIMIT,
+               "MEMORY_RECENT_LIMIT_MAX must be >= the defaults used to size stack arrays");
 
-   time_t seconds = parse_time_period(period);
+char *memory_action_recent(int user_id,
+                           const char *period,
+                           const char *before,
+                           bool sort_asc,
+                           int limit,
+                           bool with_source,
+                           int source_budget) {
+   /* Resolve lower bound — empty/NULL period defaults to "7d" so the LLM
+    * can omit the time window for the common "show me recent stuff" case
+    * (pre-Bundle-3 required a non-empty period and rejected with an
+    * error message). */
+   const char *period_resolved = (period && period[0]) ? period : "7d";
+   time_t seconds = parse_time_period(period_resolved);
    if (seconds <= 0) {
       return strdup("Invalid time period. Use format like '24h', '7d', '1w', or '30m'.");
    }
-
-   time_t since = time(NULL) - seconds;
+   time_t now_ts = time(NULL);
+   time_t since = now_ts - seconds;
    if (since < 0)
       since = 0;
+
+   /* Resolve upper bound — empty/NULL `before` means "until now"; pass 0
+    * to memory_db_*_list_window which resolves to INT64_MAX internally. */
+   time_t until = 0;
+   if (before && before[0]) {
+      time_t before_seconds = parse_time_period(before);
+      if (before_seconds <= 0) {
+         return strdup("Invalid 'before' time period. Use format like '3d', '30d', '1w'.");
+      }
+      until = now_ts - before_seconds;
+      if (until < 0)
+         until = 0;
+   }
+
+   /* Clamp limit; 0 = "use defaults". */
+   int fact_limit = MEMORY_RECENT_DEFAULT_FACT_LIMIT;
+   int summary_limit = MEMORY_RECENT_DEFAULT_SUMMARY_LIMIT;
+   if (limit > 0) {
+      if (limit > MEMORY_RECENT_LIMIT_MAX)
+         limit = MEMORY_RECENT_LIMIT_MAX;
+      fact_limit = limit;
+      summary_limit = limit;
+   }
 
    /* Growable response buffer — see memory_action_search() for rationale. */
    strbuf_t sb;
    strbuf_init(&sb, 4096);
 
-   /* Get recent facts — SQL-filtered by created_at, ordered by recency */
-   memory_fact_t facts[20];
+   /* Get facts within the window, sorted per sort_asc.
+    * Stack footprint: sizeof(memory_fact_t) ≈ 612 B × MEMORY_RECENT_LIMIT_MAX
+    * (50) ≈ 30 KB.  Plus three int64_t[50] provenance arrays below = ~1.2 KB.
+    * Total fact-side stack ≈ 31 KB.  Safe on glibc's 8 MB default pthread
+    * stack; if MEMORY_RECENT_LIMIT_MAX ever bumps past ~256 (≈150 KB), move
+    * these to the heap. */
+   memory_fact_t facts[MEMORY_RECENT_LIMIT_MAX];
    int fact_count = 0;
-   memory_db_fact_list_since(user_id, since, facts, 20, &fact_count);
+   memory_db_fact_list_window(user_id, since, until, sort_asc, facts, fact_limit, &fact_count);
 
    /* See memory_action_search for source_budget clamp rationale. */
    if (source_budget <= 0)
@@ -860,13 +902,17 @@ char *memory_action_recent(int user_id, const char *period, bool with_source, in
    source_dedup_set_t seen = { 0 };
 
    if (fact_count > 0) {
-      strbuf_append(&sb, "RECENT FACTS:\n");
+      strbuf_append(&sb, sort_asc ? "OLDEST FACTS:\n" : "RECENT FACTS:\n");
 
-      /* Batch-fetch fact provenance — caps batch at MAX_PROVENANCE_BATCH (32),
-       * which is above this loop's hard cap (20).  fact_count is always ≤20. */
-      int64_t fact_conv[20] = { 0 }, fact_start[20] = { 0 }, fact_end[20] = { 0 };
+      /* Batch-fetch fact provenance — memory_db_facts_get_sources chunks
+       * internally in MAX_PROVENANCE_BATCH-sized (32) groups, so N > 32 is
+       * fine.  fact_count is always ≤ fact_limit ≤ MEMORY_RECENT_LIMIT_MAX
+       * (50), worst case 2 chunks. */
+      int64_t fact_conv[MEMORY_RECENT_LIMIT_MAX] = { 0 };
+      int64_t fact_start[MEMORY_RECENT_LIMIT_MAX] = { 0 };
+      int64_t fact_end[MEMORY_RECENT_LIMIT_MAX] = { 0 };
       if (with_source) {
-         int64_t fact_ids[20];
+         int64_t fact_ids[MEMORY_RECENT_LIMIT_MAX];
          for (int i = 0; i < fact_count; i++)
             fact_ids[i] = facts[i].id;
          memory_db_facts_get_sources(user_id, fact_ids, fact_count, fact_conv, fact_start,
@@ -894,19 +940,28 @@ char *memory_action_recent(int user_id, const char *period, bool with_source, in
       }
    }
 
-   /* Get recent summaries — SQL-filtered by created_at */
-   memory_summary_t summaries[10];
+   /* Get summaries within the window, sorted per sort_asc.
+    * Stack footprint: sizeof(memory_summary_t) ≈ 2420 B (dominated by the
+    * 2048-byte `summary` field) × MEMORY_RECENT_LIMIT_MAX (50) ≈ 121 KB.
+    * This is the bulk of the function's stack budget — combined with the
+    * fact arrays above the total reaches ~154 KB.  Safe on glibc's 8 MB
+    * default pthread stack but bumping MEMORY_RECENT_LIMIT_MAX past ~256
+    * would push past 600 KB — move these to the heap if that bump lands. */
+   memory_summary_t summaries[MEMORY_RECENT_LIMIT_MAX];
    int summary_count = 0;
-   memory_db_summary_list_since(user_id, since, summaries, 10, &summary_count);
+   memory_db_summary_list_window(user_id, since, until, sort_asc, summaries, summary_limit,
+                                 &summary_count);
 
    if (summary_count > 0) {
       if (strbuf_len(&sb) > 0)
          strbuf_append(&sb, "\n");
-      strbuf_append(&sb, "RECENT CONVERSATIONS:\n");
+      strbuf_append(&sb, sort_asc ? "OLDEST CONVERSATIONS:\n" : "RECENT CONVERSATIONS:\n");
 
-      int64_t sum_conv[10] = { 0 }, sum_start[10] = { 0 }, sum_end[10] = { 0 };
+      int64_t sum_conv[MEMORY_RECENT_LIMIT_MAX] = { 0 };
+      int64_t sum_start[MEMORY_RECENT_LIMIT_MAX] = { 0 };
+      int64_t sum_end[MEMORY_RECENT_LIMIT_MAX] = { 0 };
       if (with_source) {
-         int64_t sum_ids[10];
+         int64_t sum_ids[MEMORY_RECENT_LIMIT_MAX];
          for (int i = 0; i < summary_count; i++)
             sum_ids[i] = summaries[i].id;
          memory_db_summaries_get_sources(user_id, sum_ids, summary_count, sum_conv, sum_start,
@@ -930,7 +985,7 @@ char *memory_action_recent(int user_id, const char *period, bool with_source, in
    }
 
    if (fact_count == 0 && summary_count == 0) {
-      strbuf_appendf(&sb, "No memories found in the past %s.", period);
+      strbuf_appendf(&sb, "No memories found in the past %s.", period_resolved);
    } else {
       strbuf_appendf(&sb, "\nTotal: %d facts, %d conversations", fact_count, summary_count);
    }
@@ -1054,6 +1109,44 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
    } else if (strcmp(actionName, "forget") == 0) {
       return memory_action_forget(user_id, value);
    } else if (strcmp(actionName, "recent") == 0) {
+      /* Bundle 3 (2026-05-13): extract the time-period window from the base
+       * value, plus the new 'before' / 'sort' / 'limit' modifiers from
+       * custom fields.  Pre-Bundle-3 the whole value string was passed
+       * directly to memory_action_recent which then parsed it as a time
+       * period — that's still the behavior when no modifiers are present. */
+      char period[32] = "";
+      tool_param_extract_base(value, period, sizeof(period));
+
+      char before[32] = "";
+      if (value) {
+         tool_param_extract_custom(value, "before", before, sizeof(before));
+      }
+
+      bool sort_asc = false;
+      char sort_str[16] = "";
+      if (value && tool_param_extract_custom(value, "sort", sort_str, sizeof(sort_str))) {
+         sort_asc = (strcmp(sort_str, "oldest") == 0);
+      }
+
+      int limit = 0;
+      char limit_str[16] = "";
+      if (value && tool_param_extract_custom(value, "limit", limit_str, sizeof(limit_str)) &&
+          limit_str[0]) {
+         /* strtol over atoi: atoi has implementation-defined behavior on
+          * overflow (GCC saturates to INT_MAX but the standard doesn't
+          * require it).  strtol with ERANGE check + explicit range bounds
+          * matches the bounded-numeric pattern in parse_time_period. */
+         char *endptr = NULL;
+         errno = 0;
+         long parsed = strtol(limit_str, &endptr, 10);
+         if (errno == 0 && endptr != limit_str && parsed > 0 && parsed <= MEMORY_RECENT_LIMIT_MAX) {
+            limit = (int)parsed;
+         }
+         /* Out-of-range / malformed → limit stays 0 → action layer uses
+          * defaults.  memory_action_recent clamps in-range values
+          * internally as a second gate. */
+      }
+
       bool with_source = false;
       if (value) {
          char wsrc[8] = "";
@@ -1061,7 +1154,9 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
             with_source = (strcmp(wsrc, "true") == 0);
          }
       }
-      return memory_action_recent(user_id, value, with_source, g_config.memory.source_budget_chars);
+      return memory_action_recent(user_id, period[0] ? period : NULL, before[0] ? before : NULL,
+                                  sort_asc, limit, with_source,
+                                  g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "save_contact") == 0) {
       /* value format: "entity_name::field_type::type::value::val::label::lbl" */
       if (!value || !value[0])

@@ -3169,6 +3169,61 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Bundle 3 (2026-05-13) — windowed/sorted variants.  Shared WHERE clause
+    * (user_id + created_at range) so the DESC variant collapses cleanly to
+    * the legacy _list_since semantics when callers pass until=INT64_MAX. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, user_id, fact_text, confidence, source, created_at, "
+                           "last_accessed, access_count, superseded_by, category FROM memory_facts "
+                           "WHERE user_id = ? AND superseded_by IS NULL "
+                           "  AND created_at >= ? AND created_at <= ? "
+                           "ORDER BY created_at ASC LIMIT ?",
+                           -1, &s_db.stmt_memory_fact_list_window_asc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_list_window_asc failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, user_id, fact_text, confidence, source, created_at, "
+                           "last_accessed, access_count, superseded_by, category FROM memory_facts "
+                           "WHERE user_id = ? AND superseded_by IS NULL "
+                           "  AND created_at >= ? AND created_at <= ? "
+                           "ORDER BY created_at DESC LIMIT ?",
+                           -1, &s_db.stmt_memory_fact_list_window_desc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_list_window_desc failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
+       "message_count, duration_seconds, consolidated FROM memory_summaries "
+       "WHERE user_id = ? AND created_at >= ? AND created_at <= ? "
+       "ORDER BY created_at ASC LIMIT ?",
+       -1, &s_db.stmt_memory_summary_list_window_asc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_summary_list_window_asc failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
+       "message_count, duration_seconds, consolidated FROM memory_summaries "
+       "WHERE user_id = ? AND created_at >= ? AND created_at <= ? "
+       "ORDER BY created_at DESC LIMIT ?",
+       -1, &s_db.stmt_memory_summary_list_window_desc, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_summary_list_window_desc failed: %s",
+                 sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* Conversation extraction tracking statements */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT last_extracted_msg_count FROM conversations WHERE id = ?", -1,
@@ -4335,6 +4390,14 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_list_since);
    if (s_db.stmt_memory_summary_list_since)
       sqlite3_finalize(s_db.stmt_memory_summary_list_since);
+   if (s_db.stmt_memory_fact_list_window_asc)
+      sqlite3_finalize(s_db.stmt_memory_fact_list_window_asc);
+   if (s_db.stmt_memory_fact_list_window_desc)
+      sqlite3_finalize(s_db.stmt_memory_fact_list_window_desc);
+   if (s_db.stmt_memory_summary_list_window_asc)
+      sqlite3_finalize(s_db.stmt_memory_summary_list_window_asc);
+   if (s_db.stmt_memory_summary_list_window_desc)
+      sqlite3_finalize(s_db.stmt_memory_summary_list_window_desc);
 
    /* Category-filtered fact statements (v34) */
    if (s_db.stmt_memory_fact_search_by_category)

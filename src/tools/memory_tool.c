@@ -64,7 +64,12 @@ static const treg_param_t memory_params[] = {
        .description = "For 'remember': the fact to store (e.g., 'User prefers dark mode'). "
                       "For 'search': keywords to find relevant memories. "
                       "For 'forget': numeric fact ID to delete (from search/recent results). "
-                      "For 'recent': optional limit number (default 10). "
+                      "For 'recent': how far back the time window reaches "
+                      "(default '7d', upper bound '10y'). Examples: '24h', '7d', '2w', "
+                      "'90d', '1y', '10y'. 'recent' returns entries created within "
+                      "[now − query, now]; widen 'query' to reach older content. "
+                      "'sort' and 'before' modify ordering and upper-bound within this "
+                      "window. "
                       "For 'save_contact': the person's name. "
                       "For 'find_contact': name to search for. "
                       "For 'list_contacts': optional field_type filter (email/phone). "
@@ -78,11 +83,57 @@ static const treg_param_t memory_params[] = {
    {
        .name = "time_range",
        .description = "Optional time filter for 'search'. Limit results to memories from this "
-                      "period. Examples: '24h', '7d', '2w', '30d'. Only used with 'search'.",
+                      "period back to now. Examples: '24h', '7d', '2w', '30d'. Only used "
+                      "with 'search'.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "time_range",
+   },
+   /* Bundle 3 (2026-05-13) — windowed / sorted / count-controlled retrieval
+    * for 'recent'.  The pre-Bundle-3 tool surface offered no way for the
+    * LLM to ask "what's my earliest memory" (every SELECT was DESC-only),
+    * no result-count control (hardcoded 20-fact / 10-summary caps), and
+    * no time-window with both bounds.  These three additions close those
+    * gaps.  'search' has its own hybrid-scoring + top-N pattern and is
+    * not affected by these params. */
+   {
+       .name = "limit",
+       .description = "Optional result count for 'recent' (max per category — facts and "
+                      "summaries each capped to this). Range 1-50; default 20 facts / "
+                      "10 summaries. Not used by 'search' (which returns its hybrid top "
+                      "hits).",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "limit",
+   },
+   {
+       .name = "sort",
+       .description = "Optional sort order for 'recent'. 'newest' (default) returns the most "
+                      "recent entries first; 'oldest' returns the earliest entries first. "
+                      "Sort applies ONLY WITHIN the time window set by 'query' — it does "
+                      "not change how far back 'recent' reaches. To find the earliest "
+                      "entries in the entire store, widen 'query' (its upper bound is "
+                      "'10y'). Not used by 'search' (its hybrid scoring drives ordering).",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "sort",
+       .enum_values = { "newest", "oldest" },
+       .enum_count = 2,
+   },
+   {
+       .name = "before",
+       .description = "Optional time-period upper bound for 'recent' (e.g., '3d', '30d'). "
+                      "Restricts results to entries older than 'before' ago. Combine with "
+                      "'query' (the lower bound) to query a slice in the past — query and "
+                      "before together bracket a window [now − query, now − before]. Not "
+                      "used by 'search'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "before",
    },
    {
        .name = "target_name",
@@ -178,7 +229,7 @@ static const tool_metadata_t memory_metadata = {
                   "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 8,
+   .param_count = 11,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,

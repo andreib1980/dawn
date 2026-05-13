@@ -975,6 +975,85 @@ int memory_db_summary_list_since(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+int memory_db_fact_list_window(int user_id,
+                               time_t since_ts,
+                               time_t until_ts,
+                               bool sort_asc,
+                               memory_fact_t *out_facts,
+                               int max_facts,
+                               int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_facts || max_facts <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+
+   /* until_ts == 0 means "until now"; resolve to INT64_MAX so the prepared
+    * statement's `created_at <= ?` bound is permissive without needing a
+    * separate "no upper bound" code path. */
+   int64_t until_resolved = (until_ts > 0) ? (int64_t)until_ts : INT64_MAX;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = sort_asc ? s_db.stmt_memory_fact_list_window_asc
+                                 : s_db.stmt_memory_fact_list_window_desc;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)since_ts);
+   sqlite3_bind_int64(stmt, 3, until_resolved);
+   sqlite3_bind_int(stmt, 4, max_facts);
+
+   int count = 0;
+   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
+      populate_fact_from_row(stmt, &out_facts[count]);
+      count++;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_summary_list_window(int user_id,
+                                  time_t since_ts,
+                                  time_t until_ts,
+                                  bool sort_asc,
+                                  memory_summary_t *out_summaries,
+                                  int max_summaries,
+                                  int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!out_summaries || max_summaries <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+
+   int64_t until_resolved = (until_ts > 0) ? (int64_t)until_ts : INT64_MAX;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_stmt *stmt = sort_asc ? s_db.stmt_memory_summary_list_window_asc
+                                 : s_db.stmt_memory_summary_list_window_desc;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)since_ts);
+   sqlite3_bind_int64(stmt, 3, until_resolved);
+   sqlite3_bind_int(stmt, 4, max_summaries);
+
+   int count = 0;
+   while (count < max_summaries && sqlite3_step(stmt) == SQLITE_ROW) {
+      populate_summary_from_row(stmt, &out_summaries[count]);
+      count++;
+   }
+
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
 /* =============================================================================
  * Preference Operations
  * ============================================================================= */

@@ -174,6 +174,15 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_list_since;
    sqlite3_stmt *stmt_memory_summary_list_since;
 
+   /* Bundle 3 (2026-05-13) — windowed/sorted variants for the LLM 'recent'
+    * and 'search' tool actions.  Cover (since, until, sort) parameter space
+    * with one prepared statement per sort direction.  The DESC variant
+    * subsumes the legacy _list_since shape when called with until=INT64_MAX. */
+   sqlite3_stmt *stmt_memory_fact_list_window_asc;
+   sqlite3_stmt *stmt_memory_fact_list_window_desc;
+   sqlite3_stmt *stmt_memory_summary_list_window_asc;
+   sqlite3_stmt *stmt_memory_summary_list_window_desc;
+
    /* Category-filtered fact queries (v34) */
    sqlite3_stmt *stmt_memory_fact_search_by_category;
    sqlite3_stmt *stmt_memory_fact_update_category;
