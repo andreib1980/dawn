@@ -149,6 +149,15 @@ Trigger phrases: "code review", "review my changes", "run the agents", "run the 
 3. Synthesize into a consolidated table with severity and action (fix / skip / ask). **Fix pre-existing issues when found** — triage on merit (severity + fix effort), not on when introduced.
 4. Apply approved fixes; re-verify format and tests.
 
+## Benchmark Methodology — `recall_reach` ≠ leader entailment
+
+LoCoMo/LongMemEval/ConvoMem measure different things depending on flags. The bench prints a `LEADER-COMPARABLE: YES|NO` banner and tags `leader_comparable` in the results JSON. Honor it.
+
+- **`recall_reach`** — top-K provenance overlap. Internal diagnostic. **NEVER** quote alongside ByteRover/MemMachine/Hindsight/Mem0 — they publish LLM-judge generation, not retrieval reach.
+- **`recall_generation`** — generate-and-judge. **Leader-comparable IF the Mem0 protocol is matched.** Required flags: `--memory-pipeline --generator-provider openai --generator-model gpt-4o-mini --judge-provider openai --judge-model gpt-4o-mini --prompt-style mem0 --with-source --exclude-categories 5`.
+
+When writing a number for an external audience (atlas, X post, paper, README), confirm `leader_comparable: true` in the run's results JSON or DON'T compare to leaders. See `benchmarks/README.md` for full methodology. Historical benchmark numbers live in [`atlas/dawn/memory/STATE.md`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory) — reference that file rather than re-listing numbers in TODO.md.
+
 ## Design Docs
 
 - **Active planning**: @docs/TODO.md (master), plus per-feature docs in `docs/` (e.g., `PHONE_SMS_DESIGN.md`, `SPEAKER_IDENTIFICATION_PLAN.md`).

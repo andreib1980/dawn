@@ -310,6 +310,17 @@ def _read_anthropic_key_from_secrets(secrets_path):
    return m.group(1) if m else None
 
 
+def _read_openai_key_from_secrets(secrets_path):
+   """Cheap regex parse of secrets.toml for the openai_api_key field."""
+   try:
+      with open(secrets_path) as f:
+         body = f.read()
+   except (FileNotFoundError, PermissionError):
+      return None
+   m = re.search(r'^\s*openai_api_key\s*=\s*"([^"]+)"', body, re.MULTILINE)
+   return m.group(1) if m else None
+
+
 class JudgeCache:
    """Disk-persistent cache for entailment judgments.  Single JSON file keyed
    by SHA-256 of (judge_model, prompt_version, question, gold_answer,
@@ -390,12 +401,99 @@ or are missing a key detail required by the answer, respond NO. Respond with \
 exactly one word: YES or NO."""
 
 
+# ---- LLM call retry + failure semantics --------------------------------------
+#
+# Policy (per user direction): an LLM call that fails after MAX_ATTEMPTS
+# retries INVALIDATES the test result for that QA pair.  We never cache a
+# fabricated 0.0; the caller drops the QA from numerator AND denominator and
+# the failure is surfaced in the final report.  This prevents transient API
+# blips from silently dragging the headline number down.
+
+RETRY_MAX_ATTEMPTS = 5
+RETRY_BASE_DELAY = 1.0  # exponential: 1, 2, 4, 8, 16 (capped at RETRY_MAX_DELAY)
+RETRY_MAX_DELAY = 60.0
+RETRYABLE_HTTP = {429, 500, 502, 503, 504}
+
+
+class LLMCallFailed(Exception):
+   """Raised after MAX_ATTEMPTS retries.  Caller MUST exclude the QA pair from
+   the metric (do not cache, do not score) and surface the failure in the
+   final report."""
+
+   def __init__(self, attempts, last_error):
+      self.attempts = attempts
+      self.last_error = last_error
+      super().__init__(f"LLM call failed after {attempts} attempts: {last_error}")
+
+
+def _call_with_retry(call_fn, *, max_attempts=RETRY_MAX_ATTEMPTS, label=""):
+   """Run @p call_fn() with retry-with-exponential-backoff on transient errors
+   (HTTP 429/5xx + socket errors).  Honors the `retry-after` header on 429.
+   On final exhaustion raises LLMCallFailed — caller treats this as a failed
+   measurement, NOT a wrong-answer verdict."""
+   import urllib.error
+   import socket
+   last_exc = None
+   for attempt in range(max_attempts):
+      try:
+         return call_fn()
+      except urllib.error.HTTPError as exc:
+         last_exc = exc
+         if exc.code not in RETRYABLE_HTTP:
+            # Non-retryable (e.g., 401 auth, 400 bad request) — propagate
+            # as LLMCallFailed so the caller treats it uniformly.
+            raise LLMCallFailed(attempt + 1, exc)
+         wait = None
+         if exc.code == 429:
+            # Anthropic and OpenAI both honor `retry-after` on 429 responses.
+            try:
+               wait = float(exc.headers.get("retry-after", 0))
+            except (TypeError, ValueError, AttributeError):
+               wait = None
+         if wait is None or wait <= 0:
+            wait = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+         print(f"  {label or 'llm'}: HTTP {exc.code} on attempt "
+               f"{attempt + 1}/{max_attempts}; sleeping {wait:.1f}s",
+               file=sys.stderr)
+         time.sleep(wait)
+      except (urllib.error.URLError, socket.timeout, ConnectionError, TimeoutError) as exc:
+         last_exc = exc
+         wait = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+         print(f"  {label or 'llm'}: transient ({type(exc).__name__}: {exc}) on attempt "
+               f"{attempt + 1}/{max_attempts}; sleeping {wait:.1f}s",
+               file=sys.stderr)
+         time.sleep(wait)
+   raise LLMCallFailed(max_attempts, last_exc)
+
+
+# Refusal-style gold answers (cat-5 adversarial) where an empty / "I don't
+# know" generation IS the correct answer.  Without this guard, the empty-
+# generation short-circuit in CorrectnessJudge.judge would score these 0.0
+# and we'd silently underweight cat-5.
+_REFUSAL_GOLD_RE = re.compile(
+   r"^\s*("
+   r"not\s+mentioned|no\s+information|no\s+specific\s+information|"
+   r"unknown|n/?a|none|"
+   r"not\s+specified|not\s+stated|not\s+available|nothing|"
+   r"cannot\s+determine|no\s+answer|i\s+don'?t\s+know"
+   r")\s*\.?\s*$", re.IGNORECASE)
+
+
+def _is_refusal_gold(gold_answer):
+   """True when the gold answer is a refusal/non-information phrase — used by
+   CorrectnessJudge to score empty generations 1.0 (correct) instead of 0.0
+   when the gold itself is a refusal."""
+   if not gold_answer:
+      return False
+   return bool(_REFUSAL_GOLD_RE.match(gold_answer))
+
+
 def _anthropic_call(model, system, user_prompt, api_key, temperature=0.0,
                     max_tokens=64, timeout=60.0):
    """Direct HTTPS POST to the Anthropic Messages API.  Returns the first text
-   block from the response.  No SDK dependency — we only need this one shape
-   of call.  Caller is responsible for catching exceptions (timeouts, 4xx,
-   5xx) and deciding how to score."""
+   block from the response.  Caller wraps in `_call_with_retry()` to handle
+   transient failures.  Non-transient errors propagate as raw exceptions and
+   get classified by the retry wrapper."""
    import urllib.request
    payload = json.dumps({
       "model": model,
@@ -423,6 +521,40 @@ def _anthropic_call(model, system, user_prompt, api_key, temperature=0.0,
    return ""
 
 
+def _openai_call(model, system, user_prompt, api_key, temperature=0.0,
+                 max_tokens=64, timeout=60.0):
+   """Direct HTTPS POST to the OpenAI Chat Completions API.  Returns the
+   message content from the first choice.  Caller wraps in
+   `_call_with_retry()`.  Used when --judge-provider or --generator-provider
+   is set to 'openai' — Mem0's default protocol uses gpt-4o-mini for both
+   sides, so we need this to produce leader-comparable numbers."""
+   import urllib.request
+   payload = json.dumps({
+      "model": model,
+      "max_tokens": max_tokens,
+      "temperature": temperature,
+      "messages": [
+         {"role": "system", "content": system},
+         {"role": "user", "content": user_prompt},
+      ],
+   }).encode("utf-8")
+   req = urllib.request.Request(
+      "https://api.openai.com/v1/chat/completions",
+      data=payload,
+      headers={
+         "Authorization": f"Bearer {api_key}",
+         "content-type": "application/json",
+      },
+      method="POST")
+   with urllib.request.urlopen(req, timeout=timeout) as resp:
+      body = resp.read().decode("utf-8")
+   data = json.loads(body)
+   choices = data.get("choices", [])
+   if not choices:
+      return ""
+   return choices[0].get("message", {}).get("content", "") or ""
+
+
 def _parse_yes_no(raw):
    """Strict YES/NO parser shared by entailment and correctness judges."""
    if not raw:
@@ -437,20 +569,22 @@ def _parse_yes_no(raw):
 
 
 class EntailmentJudge:
-   """Anthropic-API-backed entailment scorer.  Caches every call; flush() at
-   the end persists the cache so the next run is free.  Failures are logged
-   and treated as score=0.0 (does not entail) — judge errors should not look
-   like passes."""
+   """API-backed entailment scorer.  Caches every successful verdict.  On
+   final-retry-exhausted failure, returns (None, False) — the caller drops
+   the QA from numerator AND denominator and the failure is surfaced in the
+   final report.  Provider selectable per `provider` ('anthropic'|'openai')."""
 
-   def __init__(self, model, api_key, cache, temperature=0.0, max_facts=20):
+   def __init__(self, model, api_key, cache, temperature=0.0, max_facts=20,
+                provider="anthropic"):
       self.model = model
       self.api_key = api_key
       self.cache = cache
       self.temperature = temperature
       self.max_facts = max_facts  # cap to keep prompt bounded; LoCoMo top-K=10 typically
+      self.provider = provider
       self.calls_made = 0
       self.cache_hits = 0
-      self.errors = 0
+      self.failures = 0  # final-retry-exhausted (test-invalidating)
 
    def _build_prompt(self, question, gold_answer, fact_texts):
       texts = list(fact_texts)[:self.max_facts]
@@ -468,7 +602,9 @@ class EntailmentJudge:
       return _parse_yes_no(raw)
 
    def judge(self, question, gold_answer, fact_texts):
-      """Returns (score, was_cached).  score in {0.0, 1.0}."""
+      """Returns (score|None, was_cached).  score in {0.0, 1.0} on success;
+      None indicates the LLM call exhausted retries and the QA must be
+      excluded from the metric (numerator + denominator)."""
       key = JudgeCache.make_key(
          self.model, ENTAILMENT_PROMPT_VERSION, question, gold_answer, fact_texts)
       cached = self.cache.get(key)
@@ -477,15 +613,18 @@ class EntailmentJudge:
          return cached.get("score", 0.0), True
 
       user_prompt = self._build_prompt(question, gold_answer, fact_texts)
+      call = (_openai_call if self.provider == "openai" else _anthropic_call)
       try:
-         raw = _anthropic_call(
-            self.model, ENTAILMENT_SYSTEM, user_prompt, self.api_key,
-            temperature=self.temperature, max_tokens=8)
-      except Exception as exc:
-         self.errors += 1
-         print(f"  judge: API error ({exc}); scoring 0.0", file=sys.stderr)
-         self.cache.put(key, 0.0, f"ERROR: {exc}")
-         return 0.0, False
+         raw = _call_with_retry(
+            lambda: call(self.model, ENTAILMENT_SYSTEM, user_prompt, self.api_key,
+                         temperature=self.temperature, max_tokens=8),
+            label="entailment")
+      except LLMCallFailed as exc:
+         self.failures += 1
+         print(f"  entailment: FAILED after {exc.attempts} attempts ({exc.last_error}); "
+               f"QA excluded from metric", file=sys.stderr)
+         # Do NOT cache — next run retries.
+         return None, False
 
       score = self._parse_score(raw)
       self.calls_made += 1
@@ -494,10 +633,26 @@ class EntailmentJudge:
 
 
 def _resolve_anthropic_key(args):
-   """Shared API-key resolution chain for judge + generator."""
+   """Shared Anthropic API-key resolution chain for judge + generator."""
    return (args.judge_api_key
            or os.environ.get("ANTHROPIC_API_KEY")
            or _read_anthropic_key_from_secrets("./secrets.toml"))
+
+
+def _resolve_openai_key(args):
+   """Shared OpenAI API-key resolution chain.  Mirrors anthropic resolution:
+   CLI flag > env var > secrets.toml."""
+   return (getattr(args, "openai_api_key", "")
+           or os.environ.get("OPENAI_API_KEY")
+           or _read_openai_key_from_secrets("./secrets.toml"))
+
+
+def _resolve_api_key(args, provider):
+   """Provider-routed key resolution.  Returns None if no key is reachable
+   so the caller can disable that judge/generator cleanly."""
+   if provider == "openai":
+      return _resolve_openai_key(args)
+   return _resolve_anthropic_key(args)
 
 
 def make_entailment_judge(args):
@@ -505,14 +660,14 @@ def make_entailment_judge(args):
    None if --judge-model is not set (entailment scoring opts in)."""
    if not args.judge_model:
       return None
-   if args.judge_provider != "anthropic":
-      print(f"  judge: only --judge-provider=anthropic is supported (got "
-            f"'{args.judge_provider}'); disabling entailment", file=sys.stderr)
+   provider = args.judge_provider or "anthropic"
+   if provider not in ("anthropic", "openai"):
+      print(f"  judge: unsupported --judge-provider '{provider}' "
+            f"(expected anthropic|openai); disabling entailment", file=sys.stderr)
       return None
-   api_key = _resolve_anthropic_key(args)
+   api_key = _resolve_api_key(args, provider)
    if not api_key:
-      print("  judge: no API key — pass --judge-api-key, set ANTHROPIC_API_KEY, "
-            "or fill claude_api_key in ./secrets.toml. Entailment disabled.",
+      print(f"  judge: no {provider} API key — entailment disabled.",
             file=sys.stderr)
       return None
    cache_path = None
@@ -525,6 +680,7 @@ def make_entailment_judge(args):
       cache=cache,
       temperature=args.judge_temperature,
       max_facts=args.judge_max_facts,
+      provider=provider,
    )
 
 
@@ -542,38 +698,29 @@ def make_entailment_judge(args):
 # whether DAWN's actual answer pipeline can produce the right answer from
 # what retrieval surfaced — what users actually experience.
 
-GENERATOR_PROMPT_VERSION = 1
-CORRECTNESS_PROMPT_VERSION = 1
+# Bump these whenever the prompt or response format changes in a way that
+# would make old cached judgments invalid under the new rubric.  Cache keys
+# include the version so a bump invalidates only the affected entries.
+GENERATOR_PROMPT_VERSION = 2  # bumped from 1 when --prompt-style was added
+CORRECTNESS_PROMPT_VERSION = 2
 
-GENERATOR_SYSTEM = (
+# DAWN's original "strict" rubric — conservative judge, factually-equivalent
+# requirement, answers "Be concise — one short sentence when possible."
+# Produces honest but not directly leader-comparable numbers.
+GENERATOR_SYSTEM_STRICT = (
    "You answer the user's question using only the provided memory facts. "
    "Be concise — one short sentence when possible. If the facts do not "
    "contain a clear answer, respond exactly: I don't know."
 )
 
-GENERATOR_USER_TEMPLATE = """\
-Memory facts:
-{numbered_facts}
-
-Question: {question}"""
-
-# Production-faithful template: the bench passes the formatted memory_callback
-# output (facts + verbatim source excerpts + entity graph block) verbatim,
-# matching what voice DAWN users see when the LLM tool fires.
-GENERATOR_USER_TEMPLATE_FROM_MEMORY = """\
-Memory tool output:
-{memory_text}
-
-Question: {question}"""
-
-CORRECTNESS_SYSTEM = (
+CORRECTNESS_SYSTEM_STRICT = (
    "You judge whether a generated answer is factually equivalent to a "
    "correct answer. Focus on the substantive content — date, name, number, "
    "or fact — not on phrasing or formatting. Respond with exactly one word: "
    "YES or NO."
 )
 
-CORRECTNESS_USER_TEMPLATE = """\
+CORRECTNESS_USER_TEMPLATE_STRICT = """\
 Question: {question}
 
 Correct answer: {gold_answer}
@@ -591,23 +738,114 @@ generated specific claim counts as NO.
 
 Respond with exactly one word: YES or NO."""
 
+# Mem0-aligned rubric (--prompt-style mem0).  Mirrors the LoCoMo evaluation
+# protocol used by Mem0, ByteRover, MemMachine, and Memobase: short factual
+# generations (≤5-6 words) and a "be generous — topic match counts" judge.
+# These instructions reproduce the LETTER of the published Mem0 evaluation
+# (https://github.com/mem0ai/mem0/tree/main/evaluation) so our numbers can
+# be compared head-to-head with leader publications.  The exact prompt text
+# is derived from the methodology described in Mem0 §4 + Appendix A and the
+# Penfield Labs audit reproduction; not a byte-identical fork but
+# preserves the rubric direction (concise gen + generous judge).
+GENERATOR_SYSTEM_MEM0 = (
+   "You answer questions about a multi-session conversation using the "
+   "provided memory facts. Provide a concise factual answer in fewer than "
+   "5 to 6 words. If no answer can be derived from the facts, respond: "
+   "\"No information available.\""
+)
+
+CORRECTNESS_SYSTEM_MEM0 = (
+   "You evaluate whether a predicted answer is correct given a question and "
+   "a gold answer. Be generous with your grading — as long as the predicted "
+   "answer touches on the same topic or core fact as the gold answer, count "
+   "it as CORRECT. Output exactly one word: YES or NO."
+)
+
+CORRECTNESS_USER_TEMPLATE_MEM0 = """\
+Question: {question}
+
+Gold answer: {gold_answer}
+
+Predicted answer: {generated_answer}
+
+Is the predicted answer correct? Be generous: minor phrasing differences, \
+paraphrases, extra context, or partial matches all count as CORRECT as long \
+as the predicted answer touches on the same topic or core fact as the gold \
+answer.
+
+Edge case: if the gold answer is "Not mentioned" / "No information" / \
+similar, then a predicted "I don't know" / "No information available" / \
+refusal counts as YES; a confidently-wrong specific claim counts as NO.
+
+Respond with exactly one word: YES or NO."""
+
+# Default to strict; override with --prompt-style mem0 for leader-comparable
+# runs.  Module-level globals because they're referenced by the classes
+# below; they get patched in main() based on the CLI flag.
+GENERATOR_SYSTEM = GENERATOR_SYSTEM_STRICT
+CORRECTNESS_SYSTEM = CORRECTNESS_SYSTEM_STRICT
+CORRECTNESS_USER_TEMPLATE = CORRECTNESS_USER_TEMPLATE_STRICT
+
+GENERATOR_USER_TEMPLATE = """\
+Memory facts:
+{numbered_facts}
+
+Question: {question}"""
+
+# Production-faithful template: the bench passes the formatted memory_callback
+# output (facts + verbatim source excerpts + entity graph block) verbatim,
+# matching what voice DAWN users see when the LLM tool fires.
+GENERATOR_USER_TEMPLATE_FROM_MEMORY = """\
+Memory tool output:
+{memory_text}
+
+Question: {question}"""
+
+
+def apply_prompt_style(style):
+   """Switch the module-level generator/judge prompts based on --prompt-style.
+   Bumps the in-memory prompt-version constants so cached judgments under one
+   style don't leak into the other.  Returns the resolved style string for
+   the results JSON."""
+   global GENERATOR_SYSTEM, CORRECTNESS_SYSTEM, CORRECTNESS_USER_TEMPLATE
+   global GENERATOR_PROMPT_VERSION, CORRECTNESS_PROMPT_VERSION
+   style = (style or "strict").lower()
+   if style == "mem0":
+      GENERATOR_SYSTEM = GENERATOR_SYSTEM_MEM0
+      CORRECTNESS_SYSTEM = CORRECTNESS_SYSTEM_MEM0
+      CORRECTNESS_USER_TEMPLATE = CORRECTNESS_USER_TEMPLATE_MEM0
+      # Distinct version suffix so the cache key encodes the style.
+      GENERATOR_PROMPT_VERSION = 100
+      CORRECTNESS_PROMPT_VERSION = 100
+   else:
+      style = "strict"
+      GENERATOR_SYSTEM = GENERATOR_SYSTEM_STRICT
+      CORRECTNESS_SYSTEM = CORRECTNESS_SYSTEM_STRICT
+      CORRECTNESS_USER_TEMPLATE = CORRECTNESS_USER_TEMPLATE_STRICT
+      GENERATOR_PROMPT_VERSION = 2
+      CORRECTNESS_PROMPT_VERSION = 2
+   return style
+
 
 class AnswerGenerator:
    """Synthesizes a candidate answer from (question, retrieved facts) using a
-   single Anthropic Messages call.  Caches every generation; an identical
-   (model, prompt version, question, retrieved facts) tuple is free on rerun."""
+   single Messages/ChatCompletions call.  Caches every successful generation.
+   On final-retry-exhausted failure, returns (None, False) — caller treats
+   the QA as failed (excluded from metric).  Provider selectable per
+   `provider` ('anthropic'|'openai')."""
 
    def __init__(self, model, api_key, cache, temperature=0.0, max_tokens=200,
-                max_facts=20):
+                max_facts=20, provider="anthropic"):
       self.model = model
       self.api_key = api_key
       self.cache = cache
       self.temperature = temperature
       self.max_tokens = max_tokens
       self.max_facts = max_facts
+      self.provider = provider
       self.calls_made = 0
       self.cache_hits = 0
-      self.errors = 0
+      self.failures = 0  # final-retry-exhausted
 
    def _build_prompt(self, question, fact_texts):
       texts = list(fact_texts)[:self.max_facts]
@@ -619,8 +857,8 @@ class AnswerGenerator:
          question=question, numbered_facts=numbered)
 
    def generate(self, question, fact_texts):
-      """Returns (answer_text, was_cached).  Empty string on hard failure
-      (caller can decide whether to count that as a wrong answer or skip)."""
+      """Returns (answer_text|None, was_cached).  None indicates the LLM call
+      exhausted retries and the QA must be excluded from the metric."""
       # Reuse JudgeCache.make_key shape — gold_answer slot is unused, pass "".
       key = JudgeCache.make_key(
          self.model, GENERATOR_PROMPT_VERSION, question, "", fact_texts)
@@ -630,19 +868,17 @@ class AnswerGenerator:
          return cached.get("raw", ""), True
 
       user_prompt = self._build_prompt(question, fact_texts)
+      call = (_openai_call if self.provider == "openai" else _anthropic_call)
       try:
-         raw = _anthropic_call(
-            self.model, GENERATOR_SYSTEM, user_prompt, self.api_key,
-            temperature=self.temperature, max_tokens=self.max_tokens)
-      except Exception as exc:
-         self.errors += 1
-         print(f"  generator: API error ({exc}); empty answer",
-               file=sys.stderr)
-         # Cache empty raw so reruns short-circuit cleanly through the
-         # correctness judge's empty-generation fast-path; the diagnostic
-         # error message is logged above.
-         self.cache.put(key, 0.0, "")
-         return "", False
+         raw = _call_with_retry(
+            lambda: call(self.model, GENERATOR_SYSTEM, user_prompt, self.api_key,
+                         temperature=self.temperature, max_tokens=self.max_tokens),
+            label="generator")
+      except LLMCallFailed as exc:
+         self.failures += 1
+         print(f"  generator: FAILED after {exc.attempts} attempts "
+               f"({exc.last_error}); QA excluded from metric", file=sys.stderr)
+         return None, False
 
       self.calls_made += 1
       self.cache.put(key, 0.0, raw)
@@ -651,9 +887,8 @@ class AnswerGenerator:
    def generate_from_memory_text(self, question, memory_text):
       """Production-faithful variant: generator consumes the formatted
       memory_callback output (facts + source excerpts + entity graph) instead
-      of the numbered-fact list.  Cache key folds memory_text into the
-      'fact_texts' slot so different source budgets / source toggles produce
-      distinct cache entries naturally."""
+      of the numbered-fact list.  Same retry + failure semantics as
+      generate()."""
       # Cache key: feed memory_text as a single-element fact_texts list so any
       # change to the formatted output (different source budget, with_source
       # toggle, etc.) yields a fresh key.  Bumps GENERATOR_PROMPT_VERSION on
@@ -668,16 +903,17 @@ class AnswerGenerator:
       user_prompt = GENERATOR_USER_TEMPLATE_FROM_MEMORY.format(
          question=question,
          memory_text=memory_text if memory_text else "(no memories returned)")
+      call = (_openai_call if self.provider == "openai" else _anthropic_call)
       try:
-         raw = _anthropic_call(
-            self.model, GENERATOR_SYSTEM, user_prompt, self.api_key,
-            temperature=self.temperature, max_tokens=self.max_tokens)
-      except Exception as exc:
-         self.errors += 1
-         print(f"  generator(from_memory): API error ({exc}); empty answer",
-               file=sys.stderr)
-         self.cache.put(key, 0.0, "")
-         return "", False
+         raw = _call_with_retry(
+            lambda: call(self.model, GENERATOR_SYSTEM, user_prompt, self.api_key,
+                         temperature=self.temperature, max_tokens=self.max_tokens),
+            label="generator")
+      except LLMCallFailed as exc:
+         self.failures += 1
+         print(f"  generator(from_memory): FAILED after {exc.attempts} attempts "
+               f"({exc.last_error}); QA excluded from metric", file=sys.stderr)
+         return None, False
 
       self.calls_made += 1
       self.cache.put(key, 0.0, raw)
@@ -687,16 +923,17 @@ class AnswerGenerator:
 class CorrectnessJudge:
    """Binary correctness scorer for generated answers.  Same JudgeCache shape
    as EntailmentJudge but a separate prompt version + cache file so the two
-   metrics never share a verdict."""
+   metrics never share a verdict.  Final-retry-exhausted → (None, False)."""
 
-   def __init__(self, model, api_key, cache, temperature=0.0):
+   def __init__(self, model, api_key, cache, temperature=0.0, provider="anthropic"):
       self.model = model
       self.api_key = api_key
       self.cache = cache
       self.temperature = temperature
+      self.provider = provider
       self.calls_made = 0
       self.cache_hits = 0
-      self.errors = 0
+      self.failures = 0  # final-retry-exhausted
 
    def _build_prompt(self, question, gold_answer, generated_answer):
       return CORRECTNESS_USER_TEMPLATE.format(
@@ -704,7 +941,8 @@ class CorrectnessJudge:
          generated_answer=generated_answer)
 
    def judge(self, question, gold_answer, generated_answer):
-      """Returns (score, was_cached).  score in {0.0, 1.0}."""
+      """Returns (score|None, was_cached).  None on retry exhaustion → QA
+      excluded from metric.  score in {0.0, 1.0} on success."""
       # Cache key: hash a fact-list of length 1 containing the generated answer
       # so JudgeCache.make_key can be reused without a new shape.  Order is
       # stable since it's a single element.
@@ -716,23 +954,33 @@ class CorrectnessJudge:
          self.cache_hits += 1
          return cached.get("score", 0.0), True
 
-      # Empty generated answer is automatically wrong unless gold is also
-      # empty (which doesn't happen in LoCoMo).  Skip the API round-trip.
+      # Empty generated answer × refusal-style gold = CORRECT (1.0):
+      # "I don't know" / empty is the right answer when the gold says
+      # "Not mentioned" or similar (cat-5 adversarial subset).  Concrete
+      # gold + empty gen = INCORRECT (0.0).  Avoids the API round-trip
+      # without dropping cat-5 verdicts incorrectly.
       if not generated_answer or not generated_answer.strip():
-         self.cache.put(key, 0.0, "(empty generation)")
-         return 0.0, False
+         if _is_refusal_gold(gold_answer):
+            score = 1.0
+            note = "(empty generation; refusal-gold match)"
+         else:
+            score = 0.0
+            note = "(empty generation)"
+         self.cache.put(key, score, note)
+         return score, False
 
       user_prompt = self._build_prompt(question, gold_answer, generated_answer)
+      call = (_openai_call if self.provider == "openai" else _anthropic_call)
       try:
-         raw = _anthropic_call(
-            self.model, CORRECTNESS_SYSTEM, user_prompt, self.api_key,
-            temperature=self.temperature, max_tokens=8)
-      except Exception as exc:
-         self.errors += 1
-         print(f"  correctness: API error ({exc}); scoring 0.0",
-               file=sys.stderr)
-         self.cache.put(key, 0.0, f"ERROR: {exc}")
-         return 0.0, False
+         raw = _call_with_retry(
+            lambda: call(self.model, CORRECTNESS_SYSTEM, user_prompt, self.api_key,
+                         temperature=self.temperature, max_tokens=8),
+            label="correctness")
+      except LLMCallFailed as exc:
+         self.failures += 1
+         print(f"  correctness: FAILED after {exc.attempts} attempts "
+               f"({exc.last_error}); QA excluded from metric", file=sys.stderr)
+         return None, False
 
       score = _parse_yes_no(raw)
       self.calls_made += 1
@@ -741,13 +989,17 @@ class CorrectnessJudge:
 
 
 def make_generator(args):
-   """Build an AnswerGenerator if --generator-model is set, else None.
-   Reuses the judge API key chain so a single ANTHROPIC_API_KEY covers both."""
+   """Build an AnswerGenerator if --generator-model is set, else None."""
    if not args.generator_model:
       return None
-   api_key = _resolve_anthropic_key(args)
+   provider = (getattr(args, "generator_provider", "") or "anthropic")
+   if provider not in ("anthropic", "openai"):
+      print(f"  generator: unsupported --generator-provider '{provider}'",
+            file=sys.stderr)
+      return None
+   api_key = _resolve_api_key(args, provider)
    if not api_key:
-      print("  generator: no API key — disabling generate-and-judge",
+      print(f"  generator: no {provider} API key — disabling generate-and-judge",
             file=sys.stderr)
       return None
    cache_path = None
@@ -761,6 +1013,7 @@ def make_generator(args):
       temperature=args.generator_temperature,
       max_tokens=args.generator_max_tokens,
       max_facts=args.judge_max_facts,
+      provider=provider,
    )
 
 
@@ -769,7 +1022,10 @@ def make_correctness_judge(args):
    is also configured (generate-and-judge requires both)."""
    if not args.judge_model:
       return None
-   api_key = _resolve_anthropic_key(args)
+   provider = args.judge_provider or "anthropic"
+   if provider not in ("anthropic", "openai"):
+      return None
+   api_key = _resolve_api_key(args, provider)
    if not api_key:
       return None
    cache_path = None
@@ -781,6 +1037,7 @@ def make_correctness_judge(args):
       api_key=api_key,
       cache=cache,
       temperature=args.judge_temperature,
+      provider=provider,
    )
 
 
@@ -1191,7 +1448,8 @@ def _snapshot_cache_paths(cache_dir, engine, conv_idx, conv):
 def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                       no_cache=False, judge=None, generator=None,
                       correctness_judge=None,
-                      with_source=False, source_budget=0):
+                      with_source=False, source_budget=0,
+                      exclude_categories=None, prompt_style="strict"):
    """Run LoCoMo through extraction + memory-fact retrieval. Returns metrics.
 
    If cache_dir is set and no_cache is False, per-conversation extraction state
@@ -1227,6 +1485,31 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
    per_category_generation = {}
    total_qa = 0
    gen_and_judge = generator is not None and correctness_judge is not None
+   # Skip-tracking — per user direction, failures must be VISIBLE in the
+   # final report (not silently scored 0.0).  Three flavors:
+   #   * dropped_qa_no_evidence: gold has no evidence dia_ids; we can't score
+   #     recall on these.  4 such in locomo10 (all cat-3).
+   #   * excluded_qa_by_category: --exclude-categories filter.  Mem0 protocol
+   #     excludes cat 5 (adversarial); leader-comparable numbers report on
+   #     cat 1-4 only.
+   #   * judge_failures / generator_failures / correctness_failures: counted
+   #     inside the per-class .failures attribute (final-retry-exhausted).
+   dropped_qa_no_evidence = 0
+   excluded_qa_by_category = 0
+   per_category_dropped = {}
+   per_category_excluded = {}
+   # Per-category failure tallies for the three LLM-backed metrics.  Populated
+   # alongside numerators so the final report can show "cat 3: 0.806 over 96
+   # evaluated (0 failed)" instead of just an aggregate.
+   per_category_judge_fail = {}
+   per_category_gen_fail = {}
+   per_category_corr_fail = {}
+   # Normalize exclude_categories to a set of strings (dataset stores
+   # `category` as int; we stringify everywhere for stable keys).
+   exclude_set = set()
+   if exclude_categories:
+      for c in exclude_categories:
+         exclude_set.add(str(c))
    total_facts_added = 0  # cumulative across all convs (facts_total resets per conv via reset_memory)
    last_conv_facts = 0    # facts in the most-recently-extracted conv
    total_extractions = 0
@@ -1361,7 +1644,20 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                             if qa.get("adversarial_answer") is not None
                             else qa.get("gold_answer", ""))
          gold_answer = str(gold_answer_raw) if gold_answer_raw is not None else ""
-         if not question or not evidence:
+         if not question:
+            continue
+         if not evidence:
+            # No gold provenance → can't score recall_reach.  Tracked for the
+            # results JSON so the denominator is honest.
+            dropped_qa_no_evidence += 1
+            per_category_dropped[category] = per_category_dropped.get(category, 0) + 1
+            continue
+         # --exclude-categories filter (Mem0 protocol excludes cat-5 adversarial).
+         # Excluded QAs are counted separately and reported alongside the
+         # included pool so we can show "cat 1-4 overall: X (cat-5 excluded)".
+         if category in exclude_set:
+            excluded_qa_by_category += 1
+            per_category_excluded[category] = per_category_excluded.get(category, 0) + 1
             continue
 
          # Normalize evidence: split any space-separated multi-IDs (LoCoMo
@@ -1390,16 +1686,24 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
          # Entailment judge — strict YES/NO over (question, gold, fact texts).
          # Always uses raw fact list (not source-augmented) so entailment metric
          # measures retrieval quality, independent of source-budget sweep.
+         # None return = retry exhaustion → exclude QA from metric entirely.
          if judge is not None and gold_answer:
             ent_score, _ = judge.judge(question, gold_answer, fact_texts)
-            all_entailment.append(ent_score)
-            per_category_entailment.setdefault(category, []).append(ent_score)
+            if ent_score is None:
+               per_category_judge_fail[category] = \
+                  per_category_judge_fail.get(category, 0) + 1
+            else:
+               all_entailment.append(ent_score)
+               per_category_entailment.setdefault(category, []).append(ent_score)
 
          # Generate-and-judge — the leader-comparable metric.
          # When with_source=True (production-faithful path), the generator
          # consumes the formatted memory_callback output (facts + source
          # excerpts + entity graph block) instead of just numbered fact texts.
-         # source_budget=0 uses the production default (3072 chars).
+         # source_budget=0 uses the production default (3072 chars).  If
+         # either the generator OR the correctness judge exhausts retries,
+         # the QA is excluded from the generation metric (numerator AND
+         # denominator) so a transient blip can't fabricate a 0 verdict.
          if gen_and_judge and gold_answer:
             if with_source:
                cbresp = engine.query_memory_callback(question,
@@ -1410,10 +1714,18 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                   question, memory_text)
             else:
                generated, _ = generator.generate(question, fact_texts)
-            corr_score, _ = correctness_judge.judge(
-               question, gold_answer, generated)
-            all_generation.append(corr_score)
-            per_category_generation.setdefault(category, []).append(corr_score)
+            if generated is None:
+               per_category_gen_fail[category] = \
+                  per_category_gen_fail.get(category, 0) + 1
+            else:
+               corr_score, _ = correctness_judge.judge(
+                  question, gold_answer, generated)
+               if corr_score is None:
+                  per_category_corr_fail[category] = \
+                     per_category_corr_fail.get(category, 0) + 1
+               else:
+                  all_generation.append(corr_score)
+                  per_category_generation.setdefault(category, []).append(corr_score)
 
       # Persist all caches periodically so a crash mid-run doesn't lose work
       if judge is not None and judge.cache is not None:
@@ -1428,9 +1740,14 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
       if judge is not None and all_entailment:
          avg_ent = sum(all_entailment) / len(all_entailment)
          progress += f" recall_entailment={avg_ent:.3f}"
+         if judge.failures:
+            progress += f" (judge_fail={judge.failures})"
       if gen_and_judge and all_generation:
          avg_gen = sum(all_generation) / len(all_generation)
          progress += f" recall_generation={avg_gen:.3f}"
+         if generator.failures or correctness_judge.failures:
+            progress += (f" (gen_fail={generator.failures} "
+                         f"corr_fail={correctness_judge.failures})")
       print(progress, file=sys.stderr)
 
    # Final flush of all caches before reporting
@@ -1446,6 +1763,7 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
       "mode": "memory-pipeline",
       "granularity": "per_locomo_session",
       "scoring": "recall_reach (retrieval reach via provenance overlap; NOT answer support)",
+      "prompt_style": prompt_style,
       "extraction_provider": engine.ready_info.get("extraction_provider", ""),
       "extraction_model": engine.ready_info.get("extraction_model", ""),
       "avg_recall_reach": sum(all_recall) / len(all_recall) if all_recall else 0,
@@ -1457,40 +1775,56 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
       "cache_hits": total_cache_hits,
       "cache_misses": total_cache_misses,
       "elapsed_seconds": elapsed,
+      "dropped_qa_no_evidence": dropped_qa_no_evidence,
+      "excluded_qa_by_category": excluded_qa_by_category,
+      "excluded_categories": sorted(exclude_set) if exclude_set else [],
+      "per_category_dropped": dict(sorted(per_category_dropped.items())),
+      "per_category_excluded": dict(sorted(per_category_excluded.items())),
       "per_category": {},
    }
    for cat, vals in sorted(per_category.items()):
       results["per_category"][cat] = sum(vals) / len(vals) if vals else 0
    if judge is not None:
       results["judge_model"] = judge.model
-      results["judge_provider"] = "anthropic"
+      results["judge_provider"] = judge.provider
       results["judge_calls_made"] = judge.calls_made
       results["judge_cache_hits"] = judge.cache_hits
-      results["judge_errors"] = judge.errors
+      results["judge_failures"] = judge.failures
       results["recall_entailment"] = (
          sum(all_entailment) / len(all_entailment) if all_entailment else 0)
       results["entailment_evaluated"] = len(all_entailment)
       results["per_category_entailment"] = {}
+      results["per_category_entailment_failures"] = dict(sorted(per_category_judge_fail.items()))
       for cat, vals in sorted(per_category_entailment.items()):
          results["per_category_entailment"][cat] = (
             sum(vals) / len(vals) if vals else 0)
    if gen_and_judge:
       results["generator_model"] = generator.model
+      results["generator_provider"] = generator.provider
       results["with_source"] = bool(with_source)
       results["source_budget"] = int(source_budget)
       results["generator_calls_made"] = generator.calls_made
       results["generator_cache_hits"] = generator.cache_hits
-      results["generator_errors"] = generator.errors
+      results["generator_failures"] = generator.failures
       results["correctness_calls_made"] = correctness_judge.calls_made
       results["correctness_cache_hits"] = correctness_judge.cache_hits
-      results["correctness_errors"] = correctness_judge.errors
+      results["correctness_failures"] = correctness_judge.failures
       results["recall_generation"] = (
          sum(all_generation) / len(all_generation) if all_generation else 0)
       results["generation_evaluated"] = len(all_generation)
       results["per_category_generation"] = {}
+      results["per_category_generator_failures"] = dict(sorted(per_category_gen_fail.items()))
+      results["per_category_correctness_failures"] = dict(sorted(per_category_corr_fail.items()))
       for cat, vals in sorted(per_category_generation.items()):
          results["per_category_generation"][cat] = (
             sum(vals) / len(vals) if vals else 0)
+   # Tag the results with leader-comparability so the JSON itself records
+   # whether this number can be quoted alongside ByteRover/MemMachine/Mem0
+   # published headlines.  See classify_leader_comparable() for the rules.
+   ok, reasons = classify_leader_comparable(results)
+   results["leader_comparable"] = ok
+   results["leader_comparable_failing_reasons"] = reasons
+   results["leader_comparable_metric"] = "recall_generation" if ok else None
    return results
 
 
@@ -1586,6 +1920,100 @@ def run_convomem(engine, dataset_path, limit=100):
 
 
 # =============================================================================
+# Leader-comparability classifier
+# =============================================================================
+#
+# CRITICAL: published memory-system numbers (ByteRover, MemMachine, Hindsight,
+# Mem0) are LLM-judge generation correctness ("J score") under a specific
+# protocol — NOT retrieval recall.  `recall_reach` is an internal diagnostic;
+# it is NOT directly comparable to leader headlines.  This classifier prevents
+# accidental apples-to-oranges reporting by tagging every results dict with a
+# `leader_comparable_metric` + `leader_comparable_config` block so the JSON
+# itself records whether the run matches the Mem0 protocol.
+#
+# Conditions for "leader-comparable" (all required):
+#   - benchmark == "locomo" + memory-pipeline mode
+#   - generator_model + judge_model both set
+#   - generator_provider == "openai" AND judge_provider == "openai"
+#   - generator_model and judge_model are gpt-4o-mini or gpt-4o (Mem0 family)
+#   - prompt_style == "mem0"
+#   - "5" in excluded_categories
+#   - with_source == True
+# If ANY condition fails, the run produces a number but it CANNOT be quoted
+# alongside published leaders.
+
+LEADER_PROTOCOL_REQUIREMENTS = [
+   ("mode", "memory-pipeline",
+    "must be memory-pipeline (raw chunk retrieval ≠ production memory tool)"),
+   ("generator_provider", "openai",
+    "Mem0/MemMachine publish with OpenAI gpt-4o-mini; other providers shift the number"),
+   ("judge_provider", "openai",
+    "Mem0/MemMachine use gpt-4o-mini as both generator AND judge"),
+   ("prompt_style", "mem0",
+    "Mem0 uses 'be generous, topic match counts' judge prompt; strict rubric "
+    "undercuts the number ~10-15pp"),
+   ("with_source", True,
+    "Bare facts-only mode underweights generator context; production / leaders "
+    "feed richer memory output"),
+   ("excluded_categories_contains_5", True,
+    "Mem0 convention excludes cat-5 adversarial; including it changes the "
+    "denominator and is not directly comparable"),
+]
+
+LEADER_MODEL_PREFIXES = ("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini")
+
+
+def classify_leader_comparable(results):
+   """Return (bool, list_of_failing_reasons).  bool=True only when ALL Mem0
+   protocol conditions are met.  The reasons list documents what's missing so
+   the print_results banner can show specifics."""
+   failures = []
+   # mode check
+   if results.get("mode") != "memory-pipeline":
+      failures.append(
+         f"mode={results.get('mode', '?')} — needs 'memory-pipeline'")
+   # provider checks
+   if results.get("generator_provider") != "openai":
+      failures.append(
+         f"generator_provider={results.get('generator_provider', '?')} — "
+         f"needs 'openai' (Mem0/MemMachine convention)")
+   if results.get("judge_provider") != "openai":
+      failures.append(
+         f"judge_provider={results.get('judge_provider', '?')} — needs 'openai'")
+   # model checks (gpt-4o-mini family)
+   gen_model = (results.get("generator_model") or "")
+   if not any(gen_model.startswith(p) for p in LEADER_MODEL_PREFIXES):
+      failures.append(
+         f"generator_model={gen_model or '<unset>'} — needs one of "
+         f"{', '.join(LEADER_MODEL_PREFIXES)}")
+   judge_model = (results.get("judge_model") or "")
+   if not any(judge_model.startswith(p) for p in LEADER_MODEL_PREFIXES):
+      failures.append(
+         f"judge_model={judge_model or '<unset>'} — needs one of "
+         f"{', '.join(LEADER_MODEL_PREFIXES)}")
+   # prompt style
+   if results.get("prompt_style") != "mem0":
+      failures.append(
+         f"prompt_style={results.get('prompt_style', '?')} — needs 'mem0' "
+         f"('be generous' judge rubric)")
+   # with_source
+   if not results.get("with_source"):
+      failures.append(
+         "with_source=False — needs True (production memory_callback output, "
+         "not bare numbered fact list)")
+   # cat-5 exclusion
+   excluded = results.get("excluded_categories", []) or []
+   if "5" not in excluded:
+      failures.append(
+         f"excluded_categories={excluded} — needs to include '5' "
+         f"(Mem0 excludes cat-5 adversarial)")
+   # recall_generation must exist
+   if "recall_generation" not in results:
+      failures.append("recall_generation not measured — no generate-and-judge run")
+   return (len(failures) == 0, failures)
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -1662,6 +2090,28 @@ def print_results(benchmark_name, results):
             if gen is not None:
                row += f"   gen={gen:.3f}"
          print(row)
+
+   # Leader-comparability banner — make it impossible to publish or compare
+   # the wrong number by accident.  Prints in big letters whether THIS run's
+   # config matches the Mem0 protocol that ByteRover / MemMachine / Hindsight
+   # publish under.  If NOT comparable, lists what's missing.
+   if "leader_comparable" in results:
+      print(f"{'─' * 60}")
+      if results["leader_comparable"]:
+         print(f"  LEADER-COMPARABLE: YES")
+         print(f"  → recall_generation = {results.get('recall_generation', 0):.4f} "
+               f"is directly comparable to published LoCoMo headlines from")
+         print(f"    ByteRover, MemMachine, Hindsight, Mem0, Memobase.")
+      else:
+         print(f"  LEADER-COMPARABLE: NO")
+         print(f"  → This run's numbers are INTERNAL DIAGNOSTIC only.")
+         print(f"    DO NOT quote recall_reach / recall_entailment / "
+               f"recall_generation from this")
+         print(f"    run alongside published leader headlines — they "
+               f"measure different things.")
+         print(f"  Missing from Mem0 protocol:")
+         for r in results.get("leader_comparable_failing_reasons", []):
+            print(f"    - {r}")
 
    print(f"{'=' * 60}\n")
 
@@ -1831,8 +2281,10 @@ def main():
    parser.add_argument(
       "--judge-provider",
       default="anthropic",
+      choices=["anthropic", "openai"],
       dest="judge_provider",
-      help="Judge provider (only 'anthropic' supported in v1; default).",
+      help="Judge provider: 'anthropic' (Claude family, default) or 'openai' "
+      "(GPT family, matches Mem0/ByteRover/MemMachine protocol).",
    )
    parser.add_argument(
       "--judge-api-key",
@@ -1840,6 +2292,14 @@ def main():
       dest="judge_api_key",
       help="Anthropic API key for the judge. Falls back to ANTHROPIC_API_KEY "
       "env var, then ./secrets.toml claude_api_key.",
+   )
+   parser.add_argument(
+      "--openai-api-key",
+      default="",
+      dest="openai_api_key",
+      help="OpenAI API key for the judge / generator when their provider is "
+      "set to 'openai'. Falls back to OPENAI_API_KEY env var, then "
+      "./secrets.toml openai_api_key.",
    )
    parser.add_argument(
       "--judge-temperature",
@@ -1868,10 +2328,38 @@ def main():
       "--generator-model",
       default="",
       dest="generator_model",
-      help="Anthropic model for the answer generator (e.g., 'claude-haiku-4-5' "
-      "or 'claude-sonnet-4-6'). Empty disables generate-and-judge — "
-      "recall_generation will not be reported. Requires --judge-model for "
-      "the correctness verdict.",
+      help="Model for the answer generator (e.g., 'claude-haiku-4-5', "
+      "'gpt-4o-mini'). Empty disables generate-and-judge — recall_generation "
+      "will not be reported. Requires --judge-model for the correctness "
+      "verdict.",
+   )
+   parser.add_argument(
+      "--generator-provider",
+      default="anthropic",
+      choices=["anthropic", "openai"],
+      dest="generator_provider",
+      help="Generator provider: 'anthropic' (default) or 'openai' (matches "
+      "Mem0 / ByteRover / MemMachine published protocol).",
+   )
+   parser.add_argument(
+      "--prompt-style",
+      default="strict",
+      choices=["strict", "mem0"],
+      dest="prompt_style",
+      help="Generator/judge prompt rubric. 'strict' (default) = DAWN's "
+      "factually-equivalent rubric; produces honest but conservative "
+      "numbers. 'mem0' = Mem0-aligned 'be generous, topic match counts' "
+      "rubric — required for direct head-to-head comparison with ByteRover "
+      "/ MemMachine / Memobase published headlines.",
+   )
+   parser.add_argument(
+      "--exclude-categories",
+      default="",
+      dest="exclude_categories",
+      help="Comma-separated LoCoMo category integers to exclude from "
+      "scoring (e.g., '5' excludes cat-5 adversarial — Mem0 protocol "
+      "convention).  Excluded QAs are tallied separately in the results "
+      "JSON so the denominator stays honest.",
    )
    parser.add_argument(
       "--generator-temperature",
@@ -2005,6 +2493,16 @@ def _run_one(args, extraction_provider, extraction_model):
             granularity=gran, turn_scoring=args.turn_scoring)
       elif args.benchmark == "locomo":
          if args.memory_pipeline:
+            # Apply --prompt-style BEFORE constructing judges/generators so
+            # the module-level templates + prompt-version constants reflect
+            # the requested rubric.  Cache keys include the version, so
+            # mem0-style runs never collide with strict-style runs.
+            resolved_style = apply_prompt_style(args.prompt_style)
+            if resolved_style != args.prompt_style:
+               print(f"  prompt-style: '{args.prompt_style}' unrecognized; using "
+                     f"'strict'.", file=sys.stderr)
+            else:
+               print(f"  prompt-style: {resolved_style}", file=sys.stderr)
             judge = make_entailment_judge(args)
             generator = make_generator(args)
             correctness_judge = make_correctness_judge(args) if generator else None
@@ -2017,13 +2515,23 @@ def _run_one(args, extraction_provider, extraction_model):
             if args.source_budget != 0 and not args.with_source:
                print("  --source-budget requires --with-source; ignoring",
                      file=sys.stderr)
+            # Parse --exclude-categories into a list[str] for stable keying
+            # against the dataset's stringified category field.
+            exclude_cats = []
+            if args.exclude_categories:
+               for tok in args.exclude_categories.split(","):
+                  tok = tok.strip()
+                  if tok:
+                     exclude_cats.append(tok)
             results = run_locomo_memory(
                engine, args.dataset, limit=args.limit, top_k=args.top_k,
                cache_dir=args.cache_dir, no_cache=args.no_cache,
                judge=judge, generator=generator,
                correctness_judge=correctness_judge,
                with_source=args.with_source,
-               source_budget=args.source_budget)
+               source_budget=args.source_budget,
+               exclude_categories=exclude_cats,
+               prompt_style=args.prompt_style)
          else:
             results = run_locomo(
                engine, args.dataset, limit=args.limit,

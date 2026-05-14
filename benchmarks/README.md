@@ -1,7 +1,82 @@
 # Retrieval Benchmarks
 
-Measures DAWN's memory retrieval quality against three published benchmarks,
-using the same datasets and metrics that other memory systems report on.
+Measures DAWN's memory retrieval quality against three published benchmarks.
+
+## ⚠ Read this before comparing numbers to published systems
+
+This harness produces several metrics. **They measure different things, and
+only one is directly comparable to ByteRover / MemMachine / Hindsight / Mem0
+published headlines.** Confusing them produces apples-to-oranges results.
+
+| Metric | What it measures | Comparable to leaders? |
+|---|---|---|
+| `recall_reach` | Top-K provenance overlap with gold dialog IDs | **NO** — internal diagnostic only |
+| `recall_entailment` | Strict YES/NO: do retrieved facts contain enough info to derive gold? | **NO** — internal diagnostic |
+| `recall_generation` | Generate-and-judge: LLM produces answer from retrieved memory, judge scores vs gold | **YES, if Mem0 protocol is matched** |
+
+**Published systems (ByteRover, MemMachine, Hindsight, Mem0, Memobase) all
+report `recall_generation`-style LLM-judge accuracy.** They do NOT report
+retrieval-reach or entailment. If you quote one of our `recall_reach` numbers
+alongside a published 90%+ headline, you're misrepresenting both.
+
+### How to know the run is leader-comparable
+
+The bench prints a `LEADER-COMPARABLE: YES|NO` banner at the end, and tags
+`leader_comparable: true|false` in the results JSON. Honor it. The classifier
+lives at `classify_leader_comparable()` in `run_benchmark.py`.
+
+**Mem0 protocol** (all required):
+
+| Flag | Value | Why |
+|---|---|---|
+| `--memory-pipeline` | required | Production retrieval (memory_facts + entity graph), not raw chunks |
+| `--generator-provider` | `openai` | Mem0/MemMachine publish using OpenAI |
+| `--generator-model` | `gpt-4o-mini` (or `gpt-4o`) | Mem0 default + MemMachine convention |
+| `--judge-provider` | `openai` | Same family — avoids cross-family bias |
+| `--judge-model` | `gpt-4o-mini` (or `gpt-4o`) | Same as generator (Mem0 protocol) |
+| `--prompt-style` | `mem0` | "Be generous, topic match counts" rubric — strict rubric undercuts ~10-15pp |
+| `--with-source` | required | Production memory_callback context; bare-facts mode underweights generator ~6pp |
+| `--exclude-categories` | `5` | Mem0 convention excludes cat-5 adversarial |
+
+### Canonical leader-comparable run
+
+```bash
+python3 benchmarks/run_benchmark.py \
+    --binary ./build-debug/tests/bench_retrieval \
+    --benchmark locomo \
+    --dataset ~/datasets/locomo/data/locomo10.json \
+    --memory-pipeline \
+    --config ./dawn.toml \
+    --cache-dir ./benchmarks/snapshots_phase2_base \
+    --generator-provider openai --generator-model gpt-4o-mini \
+    --judge-provider openai --judge-model gpt-4o-mini \
+    --prompt-style mem0 \
+    --exclude-categories 5 \
+    --with-source \
+    --output /tmp/bench_leader.json
+```
+
+Expect ~$2 spend, ~50 min wall clock. Cache makes re-runs free.
+
+### Comparable to whom?
+
+| Comparison target | Use |
+|---|---|
+| ByteRover 2.0 (92.2%), MemMachine v0.2 (91.2%) | `recall_generation`, Mem0 protocol above |
+| Hindsight / Backboard (89-90%) | Same Mem0 protocol; their judge is GPT-OSS-120B but published comparison runs use Mem0-equivalent prompts |
+| MemReranker MAP (0.74) | `recall_reach` is the closest analogue but not identical (reach is binary hit-in-top-K, MAP is rank-weighted). Run with `--memory-pipeline` and report alongside MAP, not as MAP. |
+| Mem0 paper "J score" | `recall_generation` under Mem0 protocol = same metric, same dataset, same prompts |
+
+### Internal diagnostic metric (`recall_reach`)
+
+Useful for **regression testing** across DAWN-internal changes — does a code
+change move retrieval quality? But the number IS NOT a leader benchmark.
+When publishing internal progress (atlas STATE.md, X posts, etc.), label it
+"recall_reach (NOT leader-comparable)" explicitly. Historical DAWN benchmark
+numbers in `atlas/dawn/memory/STATE.md` are `recall_reach` unless otherwise
+labeled.
+
+---
 
 ## Architecture
 
@@ -53,21 +128,27 @@ For the full dataset (all 6 categories), use `huggingface-cli`:
 huggingface-cli download Salesforce/ConvoMem --repo-type dataset --local-dir ~/datasets/convomem
 ```
 
-## Current Baselines (May 2026)
+## Current Internal Baselines (May 2026) — `recall_reach`, NOT leader-comparable
 
-These are the numbers to beat. Every implementation commit that touches the
-retrieval pipeline should re-verify against all three benchmarks before merging.
+These are DAWN's internal retrieval-reach numbers — top-K provenance overlap
+with gold dialog IDs. Use them for regression testing across DAWN-internal
+changes ("did this commit move retrieval quality?"). **Do NOT quote these
+alongside ByteRover/MemMachine/Hindsight/Mem0 published headlines** — see
+the warning section above. For leader-comparable numbers, see
+`atlas/dawn/memory/STATE.md`.
+
 Pipeline: `bge-small-en-v1.5-int8` bi-encoder + hybrid scoring (cosine + keyword
 + temporal-query proximity + proper-noun boost).
 
-| Benchmark | Score | Config |
+| Benchmark | `recall_reach` | Config |
 |---|---|---|
 | **LongMemEval R@5** | **97.0%** | turn-level, official scoring, top-K=5 |
 | **LongMemEval NDCG@5** | **92.5%** | turn-level, official scoring |
-| **LoCoMo overall** | **81.6%** | session granularity (argparse default), top-K=10 |
-| LoCoMo cat-1 (profile facts) | 69.3% | — |
-| LoCoMo cat-2 (temporal) | 84.9% | — |
-| LoCoMo cat-3 (inference) | 64.4% | — |
+| **LoCoMo overall** | **91.7%** | session granularity, top-K=10 (after Phase 0+1A+2.1, May 14 2026) |
+| LoCoMo cat-1 (single-hop) | 82.8% | — |
+| LoCoMo cat-2 (temporal) | 92.4% | — |
+| LoCoMo cat-3 (inference) | 79.5% | — |
+| LoCoMo cat-4 (multi-hop) | 95.8% | — |
 | **ConvoMem avg recall** | **99.0%** | 100 items |
 
 **Granularity note for LoCoMo.** The argparse default is `--granularity session`
