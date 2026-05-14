@@ -274,3 +274,5 @@ int memory_graph_expand_fact_linked(int user_id,
       *out_count = produced;
    return SUCCESS;
 }
+
+/* Set-membership helper for the expanded seed table. */

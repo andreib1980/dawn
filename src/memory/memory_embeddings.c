@@ -1150,6 +1150,75 @@ int memory_embeddings_hybrid_search(int user_id,
    return result_count;
 }
 
+int memory_embeddings_rescore_against_query(int user_id,
+                                            const float *query_emb,
+                                            float query_norm,
+                                            float entity_bonus,
+                                            const int64_t *fact_ids,
+                                            int fact_count,
+                                            float *out_scores) {
+   if (out_scores == NULL || fact_count < 0)
+      return FAILURE;
+   if (fact_count == 0)
+      return SUCCESS;
+   if (fact_ids == NULL)
+      return FAILURE;
+
+   /* Initialize every score to the un-scoreable sentinel.  Only facts
+    * found in the per-user embedding cache get a real score below.
+    * Callers MUST treat negative scores as "this fact could not be
+    * query-scored" and skip them — DO NOT merge sentinel-scored facts
+    * into the LLM-facing pool.
+    *
+    * Prior implementations fell back to `entity_bonus` for un-scoreable
+    * facts, which silently dumped low-quality candidates into the merge.
+    * Architecture-review finding (May 14, 2026): that fallback conflated
+    * "I have no evidence" with "I have evidence this is irrelevant" and
+    * was load-bearing on the Step 1 regression. */
+   for (int i = 0; i < fact_count; i++)
+      out_scores[i] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL;
+
+   if (query_emb == NULL || query_norm < 1e-6f || !memory_embeddings_available())
+      return SUCCESS;
+
+   const int dims = embedding_engine_dims();
+   const float vec_weight = g_config.memory.embedding_vector_weight;
+
+   pthread_mutex_lock(&s_cache.mutex);
+   if (cache_load(user_id) != 0) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      OLOG_DEBUG("memory_embeddings_rescore: cache_load failed, all facts left unscored");
+      return SUCCESS;
+   }
+
+   /* For each caller-supplied fact_id, find it in the cache and compute
+    * cosine.  Linear scan of s_cache.ids[] per candidate — O(N * cache_size)
+    * total.  At typical scale (~30 graph candidates × ~2000 cached facts =
+    * ~60k integer comparisons) this is sub-ms.  Facts not in the cache
+    * (no stored embedding) KEEP the sentinel — the caller drops them. */
+   for (int i = 0; i < fact_count; i++) {
+      int64_t fid = fact_ids[i];
+      if (fid <= 0)
+         continue;
+      int found_idx = -1;
+      for (int c = 0; c < s_cache.count; c++) {
+         if (s_cache.ids[c] == fid) {
+            found_idx = c;
+            break;
+         }
+      }
+      if (found_idx < 0)
+         continue; /* keep sentinel — caller drops */
+      const float cosine = memory_embeddings_cosine_with_norms(
+          query_emb, s_cache.embeddings + (size_t)found_idx * (size_t)dims, dims, query_norm,
+          s_cache.norms[found_idx]);
+      out_scores[i] = vec_weight * cosine + entity_bonus;
+   }
+
+   pthread_mutex_unlock(&s_cache.mutex);
+   return SUCCESS;
+}
+
 /* =============================================================================
  * Background Backfill
  * ============================================================================= */

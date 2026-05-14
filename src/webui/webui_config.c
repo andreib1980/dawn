@@ -792,8 +792,13 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                                   config->memory.graph_retrieval.entity_grounding_bonus);
             JSON_TO_CONFIG_INT(graph, "max_facts_per_query",
                                config->memory.graph_retrieval.max_facts_per_query);
+            JSON_TO_CONFIG_BOOL(graph, "use_query_scoring",
+                                config->memory.graph_retrieval.use_query_scoring);
+            JSON_TO_CONFIG_DOUBLE(graph, "entity_bonus",
+                                  config->memory.graph_retrieval.entity_bonus);
             CONFIG_CLAMP(config->memory.graph_retrieval.entity_grounding_bonus, 0.0f, 1.0f);
             CONFIG_CLAMP(config->memory.graph_retrieval.max_facts_per_query, 1, 200);
+            CONFIG_CLAMP(config->memory.graph_retrieval.entity_bonus, 0.0f, 1.0f);
          }
       }
       JSON_TO_CONFIG_BOOL(section, "embedding_backfill_on_startup",

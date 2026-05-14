@@ -1409,6 +1409,11 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(graph, "max_facts_per_query",
                              json_object_new_int(
                                  config->memory.graph_retrieval.max_facts_per_query));
+      json_object_object_add(graph, "use_query_scoring",
+                             json_object_new_boolean(
+                                 config->memory.graph_retrieval.use_query_scoring));
+      json_object_object_add(graph, "entity_bonus",
+                             json_object_new_double(config->memory.graph_retrieval.entity_bonus));
       json_object_object_add(memory, "graph_retrieval", graph);
    }
    json_object_object_add(memory, "embedding_backfill_on_startup",
@@ -2092,6 +2097,9 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "entity_grounding_bonus = %.2f\n",
            config->memory.graph_retrieval.entity_grounding_bonus);
    fprintf(fp, "max_facts_per_query = %d\n", config->memory.graph_retrieval.max_facts_per_query);
+   fprintf(fp, "use_query_scoring = %s\n",
+           config->memory.graph_retrieval.use_query_scoring ? "true" : "false");
+   fprintf(fp, "entity_bonus = %.2f\n", config->memory.graph_retrieval.entity_bonus);
    fprintf(fp, "backfill_on_startup = %s\n",
            config->memory.embedding_backfill_on_startup ? "true" : "false");
    if (config->memory.model_id[0]) {

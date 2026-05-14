@@ -77,6 +77,7 @@
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_fact_search.h"
 #include "memory/memory_graph_retrieval.h"
 #include "memory/memory_types.h"
 
@@ -727,114 +728,33 @@ static int handle_query_memory(struct json_object *cmd) {
       top_k = json_object_get_int(topk_obj);
    if (top_k <= 0)
       top_k = 10;
-   if (top_k > BENCH_MP_FACT_LIST_CAP)
-      top_k = BENCH_MP_FACT_LIST_CAP;
+   if (top_k > MEMORY_SEARCH_HYBRID_MAX)
+      top_k = MEMORY_SEARCH_HYBRID_MAX;
 
-   /* Hybrid search.  Pass NULL keyword inputs since LoCoMo questions are
-    * typically full sentences — pure cosine + temporal works as a clean Phase 1
-    * baseline; pre-keyword scoring can be added later if the orchestrator
-    * benefits from it. */
-   embedding_search_result_t *results = calloc((size_t)top_k, sizeof(*results));
-   if (!results) {
+   /* Delegate to the unified retrieval primitive — same code path
+    * memory_action_search uses in production.  This closes the prior
+    * bench-vs-production drift (different hybrid call shape, different
+    * graph-merge implementation, missing score floor) flagged by the
+    * May 14, 2026 architecture review. */
+   memory_fact_t *facts = calloc((size_t)top_k, sizeof(*facts));
+   float *scores = calloc((size_t)top_k, sizeof(*scores));
+   if (!facts || !scores) {
+      free(facts);
+      free(scores);
       respond_error("alloc failed");
       return 1;
    }
-   int n_results = memory_embeddings_hybrid_search(BENCH_MP_USER_ID, query_text, NULL, NULL, 0, 0,
-                                                   results, top_k);
-   if (n_results < 0)
-      n_results = 0;
+   int n_results = 0;
+   memory_search_execute(BENCH_MP_USER_ID, query_text, 0, facts, scores, top_k, &n_results);
 
-   /* Graph-retrieval Phase 1A — entity-graph parallel candidate source.
-    * Mirrors the production hook in memory_action_search (memory_callback.c)
-    * so cat-3 bench measurement captures the graph-retrieval delta on the
-    * same retrieval shape production sees.  Graph candidates carry the
-    * configured entity_grounding_bonus as their score; we append deduped
-    * novel candidates into a working buffer larger than `top_k`, re-sort,
-    * then truncate back to `top_k` so graph candidates DISPLACE weak
-    * cosine tail (otherwise the merge is a no-op when hybrid filled the
-    * cap — which is the common case at any non-trivial top_k). */
-   if (g_config.memory.graph_retrieval.enabled && top_k > 0) {
-      int64_t seeds[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
-      int seed_count = 0;
-      memory_graph_extract_seed_entities(BENCH_MP_USER_ID, query_text, seeds,
-                                         MEMORY_GRAPH_MAX_SEED_CANDIDATES, &seed_count);
-      if (seed_count > 0) {
-         int graph_cap = g_config.memory.graph_retrieval.max_facts_per_query;
-         if (graph_cap > top_k)
-            graph_cap = top_k;
-         if (graph_cap > 0) {
-            /* Working buffer holds hybrid (up to n_results) + graph (up
-             * to graph_cap) before sort + truncate. */
-            int merge_cap = n_results + graph_cap;
-            embedding_search_result_t *merged = calloc((size_t)merge_cap, sizeof(*merged));
-            memory_fact_t *gfacts = calloc((size_t)graph_cap, sizeof(*gfacts));
-            float *gscores = calloc((size_t)graph_cap, sizeof(*gscores));
-            int gcount = 0;
-            if (merged && gfacts && gscores) {
-               memcpy(merged, results, (size_t)n_results * sizeof(*merged));
-               int merged_n = n_results;
-               memory_graph_expand_fact_linked(BENCH_MP_USER_ID, seeds, seed_count, gfacts, gscores,
-                                               graph_cap, &gcount);
-               for (int i = 0; i < gcount && merged_n < merge_cap; i++) {
-                  /* Max-blend: if the fact is already in hybrid pool,
-                   * keep its higher score (graph bonus floor).  Novel
-                   * graph candidates enter with bonus as their score.
-                   *
-                   * 2026-05-13 bench finding: additive composition
-                   * (bonus += hybrid) regressed top-10 recall by 27pp
-                   * because EVERY John-anchored fact got the boost,
-                   * including weak hits that aren't the answer.
-                   * Additive treats "fact mentions a query entity" as
-                   * strong, independent evidence — but for high-degree
-                   * entities (John deg=82), most facts mention them,
-                   * so the boost just reshuffles the pool.  Max-blend
-                   * is conservative until a more discriminating
-                   * policy emerges (relation-type matching, rank-tail-
-                   * only boost, etc.). */
-                  int dup_at = -1;
-                  for (int j = 0; j < merged_n; j++) {
-                     if (merged[j].fact_id == gfacts[i].id) {
-                        dup_at = j;
-                        break;
-                     }
-                  }
-                  if (dup_at >= 0) {
-                     if (gscores[i] > merged[dup_at].score)
-                        merged[dup_at].score = gscores[i];
-                  } else {
-                     merged[merged_n].fact_id = gfacts[i].id;
-                     merged[merged_n].score = gscores[i];
-                     merged_n++;
-                  }
-               }
-               /* Insertion sort by score DESC. */
-               for (int i = 1; i < merged_n; i++) {
-                  embedding_search_result_t tmp = merged[i];
-                  int j = i - 1;
-                  while (j >= 0 && merged[j].score < tmp.score) {
-                     merged[j + 1] = merged[j];
-                     j--;
-                  }
-                  merged[j + 1] = tmp;
-               }
-               int final_n = (merged_n < top_k) ? merged_n : top_k;
-               memcpy(results, merged, (size_t)final_n * sizeof(*results));
-               n_results = final_n;
-            }
-            free(merged);
-            free(gfacts);
-            free(gscores);
-         }
-      }
-   }
-
-   /* Batch-load provenance + per-fact text */
+   /* Batch-load provenance for the surviving facts. */
    int64_t *fact_ids = calloc((size_t)n_results, sizeof(int64_t));
    int64_t *prov_convs = calloc((size_t)n_results, sizeof(int64_t));
    int64_t *prov_starts = calloc((size_t)n_results, sizeof(int64_t));
    int64_t *prov_ends = calloc((size_t)n_results, sizeof(int64_t));
    if (n_results > 0 && (!fact_ids || !prov_convs || !prov_starts || !prov_ends)) {
-      free(results);
+      free(facts);
+      free(scores);
       free(fact_ids);
       free(prov_convs);
       free(prov_starts);
@@ -843,7 +763,7 @@ static int handle_query_memory(struct json_object *cmd) {
       return 1;
    }
    for (int i = 0; i < n_results; i++)
-      fact_ids[i] = results[i].fact_id;
+      fact_ids[i] = facts[i].id;
    if (n_results > 0)
       memory_db_facts_get_sources(BENCH_MP_USER_ID, fact_ids, n_results, prov_convs, prov_starts,
                                   prov_ends);
@@ -852,13 +772,11 @@ static int handle_query_memory(struct json_object *cmd) {
     * whose msg_id is in [msg_start, msg_end].  Empty list if range is zeroed. */
    fprintf(stdout, "{\"status\":\"ok\",\"results\":[");
    for (int i = 0; i < n_results; i++) {
-      memory_fact_t fact = { 0 };
-      memory_db_fact_get(results[i].fact_id, &fact);
-      struct json_object *text_str = json_object_new_string(fact.fact_text);
+      struct json_object *text_str = json_object_new_string(facts[i].fact_text);
       const char *text_json = json_object_to_json_string(text_str);
 
       fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"score\":%.6f,\"text\":%s,", i ? "," : "",
-              results[i].fact_id, (double)results[i].score, text_json);
+              facts[i].id, (double)scores[i], text_json);
       fprintf(stdout, "\"conv_id\":%" PRId64 ",\"msg_start\":%" PRId64 ",\"msg_end\":%" PRId64 ",",
               prov_convs[i], prov_starts[i], prov_ends[i]);
       fprintf(stdout, "\"covered_dia_ids\":[");
@@ -878,7 +796,8 @@ static int handle_query_memory(struct json_object *cmd) {
    fprintf(stdout, "]}\n");
    fflush(stdout);
 
-   free(results);
+   free(facts);
+   free(scores);
    free(fact_ids);
    free(prov_convs);
    free(prov_starts);
@@ -959,6 +878,168 @@ static int handle_query_graph_only(struct json_object *cmd) {
                                   prov_ends);
 
    fprintf(stdout, "{\"status\":\"ok\",\"seed_count\":%d,\"results\":[", seed_count);
+   for (int i = 0; i < gcount; i++) {
+      struct json_object *text_str = json_object_new_string(gfacts[i].fact_text);
+      const char *text_json = json_object_to_json_string(text_str);
+      fprintf(stdout, "%s{\"fact_id\":%" PRId64 ",\"score\":%.6f,\"text\":%s,", i ? "," : "",
+              gfacts[i].id, (double)gscores[i], text_json);
+      fprintf(stdout, "\"conv_id\":%" PRId64 ",\"msg_start\":%" PRId64 ",\"msg_end\":%" PRId64 ",",
+              prov_convs[i], prov_starts[i], prov_ends[i]);
+      fprintf(stdout, "\"covered_dia_ids\":[");
+      bool first = true;
+      if (prov_starts[i] > 0 && prov_ends[i] >= prov_starts[i]) {
+         for (int64_t mid = prov_starts[i]; mid <= prov_ends[i]; mid++) {
+            const char *did = dia_map_reverse(mid);
+            if (!did)
+               continue;
+            fprintf(stdout, "%s\"%s\"", first ? "" : ",", did);
+            first = false;
+         }
+      }
+      fprintf(stdout, "]}");
+      json_object_put(text_str);
+   }
+   fprintf(stdout, "]}\n");
+   fflush(stdout);
+
+   free(gfacts);
+   free(gscores);
+   free(prov_convs);
+   free(prov_starts);
+   free(prov_ends);
+   free(fact_ids);
+   return 1;
+}
+
+/* query_graph_two_hop {text}
+ *
+ * Diagnostic: 2-hop graph reachability ceiling.  Same response shape as
+ * query_graph_only but expands the seed set to include 1-hop entity
+ * neighbors before running memory_graph_expand_fact_linked.  Used to
+ * measure how many cat-3 misses become reachable when retrieval walks
+ * 2 hops from query-extracted seeds.
+ *
+ * Algorithm:
+ *   1. Extract proper-noun seeds (Phase 1A path).
+ *   2. For each seed, list relations as subject AND object →
+ *      collect neighbor entity IDs (skip object_entity_id=0 literals).
+ *   3. Union seeds + 1-hop neighbors → expanded seed set, deduplicated.
+ *   4. Call memory_graph_expand_fact_linked on the expanded set.
+ *   5. Return facts + covered_dia_ids in the same shape as
+ *      query_graph_only, plus "expanded_seed_count" surfacing
+ *      |seeds ∪ 1-hop neighbors|.
+ */
+#define BENCH_MP_TWO_HOP_MAX_EXPANDED_SEEDS 256
+#define BENCH_MP_TWO_HOP_NEIGHBORS_PER_SEED 64
+
+static bool expanded_set_contains(const int64_t *set, int n, int64_t id) {
+   for (int i = 0; i < n; i++) {
+      if (set[i] == id)
+         return true;
+   }
+   return false;
+}
+
+static int handle_query_graph_two_hop(struct json_object *cmd) {
+   struct json_object *text_obj = NULL;
+   if (!json_object_object_get_ex(cmd, "text", &text_obj)) {
+      respond_error("query_graph_two_hop: missing text");
+      return 1;
+   }
+   const char *query_text = json_object_get_string(text_obj);
+   if (!query_text || !*query_text) {
+      respond_error("query_graph_two_hop: empty text");
+      return 1;
+   }
+
+   int64_t seeds[MEMORY_GRAPH_MAX_SEED_CANDIDATES];
+   int seed_count = 0;
+   memory_graph_extract_seed_entities(BENCH_MP_USER_ID, query_text, seeds,
+                                      MEMORY_GRAPH_MAX_SEED_CANDIDATES, &seed_count);
+
+   /* Expand seeds: union(seeds, 1-hop entity neighbors via subject AND object). */
+   int64_t expanded[BENCH_MP_TWO_HOP_MAX_EXPANDED_SEEDS];
+   int expanded_n = 0;
+   for (int s = 0; s < seed_count && expanded_n < BENCH_MP_TWO_HOP_MAX_EXPANDED_SEEDS; s++) {
+      if (!expanded_set_contains(expanded, expanded_n, seeds[s]))
+         expanded[expanded_n++] = seeds[s];
+   }
+
+   memory_relation_t *neighbors = calloc((size_t)BENCH_MP_TWO_HOP_NEIGHBORS_PER_SEED,
+                                         sizeof(*neighbors));
+   if (!neighbors) {
+      respond_error("alloc failed");
+      return 1;
+   }
+
+   for (int s = 0; s < seed_count && expanded_n < BENCH_MP_TWO_HOP_MAX_EXPANDED_SEEDS; s++) {
+      int got = 0;
+      /* Subject direction: this seed's outgoing edges → object entities */
+      if (memory_db_relation_list_by_subject(BENCH_MP_USER_ID, seeds[s], neighbors,
+                                             BENCH_MP_TWO_HOP_NEIGHBORS_PER_SEED,
+                                             &got) == MEMORY_DB_SUCCESS) {
+         for (int i = 0; i < got && expanded_n < BENCH_MP_TWO_HOP_MAX_EXPANDED_SEEDS; i++) {
+            int64_t oid = neighbors[i].object_entity_id;
+            if (oid <= 0)
+               continue;
+            if (!expanded_set_contains(expanded, expanded_n, oid))
+               expanded[expanded_n++] = oid;
+         }
+      }
+      /* Object direction: this seed's incoming edges → subject entities */
+      got = 0;
+      if (memory_db_relation_list_by_object(BENCH_MP_USER_ID, seeds[s], neighbors,
+                                            BENCH_MP_TWO_HOP_NEIGHBORS_PER_SEED,
+                                            &got) == MEMORY_DB_SUCCESS) {
+         for (int i = 0; i < got && expanded_n < BENCH_MP_TWO_HOP_MAX_EXPANDED_SEEDS; i++) {
+            int64_t sid = neighbors[i].subject_entity_id;
+            if (sid <= 0)
+               continue;
+            if (!expanded_set_contains(expanded, expanded_n, sid))
+               expanded[expanded_n++] = sid;
+         }
+      }
+   }
+   free(neighbors);
+
+   const int cap = BENCH_MP_FACT_LIST_CAP;
+   memory_fact_t *gfacts = calloc((size_t)cap, sizeof(*gfacts));
+   float *gscores = calloc((size_t)cap, sizeof(*gscores));
+   int gcount = 0;
+   if (!gfacts || !gscores) {
+      free(gfacts);
+      free(gscores);
+      respond_error("alloc failed");
+      return 1;
+   }
+   if (expanded_n > 0) {
+      memory_graph_expand_fact_linked(BENCH_MP_USER_ID, expanded, expanded_n, gfacts, gscores, cap,
+                                      &gcount);
+   }
+
+   /* Provenance lookup (same shape as query_graph_only) */
+   int64_t *prov_convs = calloc((size_t)gcount, sizeof(int64_t));
+   int64_t *prov_starts = calloc((size_t)gcount, sizeof(int64_t));
+   int64_t *prov_ends = calloc((size_t)gcount, sizeof(int64_t));
+   int64_t *fact_ids = calloc((size_t)gcount, sizeof(int64_t));
+   if (gcount > 0 && (!prov_convs || !prov_starts || !prov_ends || !fact_ids)) {
+      free(gfacts);
+      free(gscores);
+      free(prov_convs);
+      free(prov_starts);
+      free(prov_ends);
+      free(fact_ids);
+      respond_error("alloc failed");
+      return 1;
+   }
+   for (int i = 0; i < gcount; i++)
+      fact_ids[i] = gfacts[i].id;
+   if (gcount > 0)
+      memory_db_facts_get_sources(BENCH_MP_USER_ID, fact_ids, gcount, prov_convs, prov_starts,
+                                  prov_ends);
+
+   fprintf(stdout, "{\"status\":\"ok\",\"seed_count\":%d,\"expanded_seed_count\":%d,\"results\":[",
+           seed_count, expanded_n);
    for (int i = 0; i < gcount; i++) {
       struct json_object *text_str = json_object_new_string(gfacts[i].fact_text);
       const char *text_json = json_object_to_json_string(text_str);
@@ -1294,6 +1375,8 @@ int bench_mp_dispatch(struct json_object *cmd) {
 
    if (strcmp(cmd_str, "query_graph_only") == 0)
       return handle_query_graph_only(cmd);
+   if (strcmp(cmd_str, "query_graph_two_hop") == 0)
+      return handle_query_graph_two_hop(cmd);
    if (strcmp(cmd_str, "query_memory") == 0)
       return handle_query_memory(cmd);
    if (strcmp(cmd_str, "reset_memory") == 0)

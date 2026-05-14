@@ -26,11 +26,19 @@
  * sits at rank 50+.  Closes the LoCoMo cat-3 retrieval gap that
  * remained after the May 2026 shipped retrieval surface.
  *
- * Phase 1A (this module's initial scope) walks fact-linked relations
- * only — relations with non-NULL `fact_id`.  ~40% of relation rows
- * qualify at the dev's current scale.  Phase 1B will add structured-
- * relation synthesis for the other 60% (relations that exist as graph
- * edges without an associated fact text).
+ * Phase 1A walks fact-linked relations only — relations with non-NULL
+ * `fact_id`.  Phase 0 (May 13, 2026) paired-output schema guarantees
+ * ~100% fact↔relation linkage on new extractions, so the fact-linked
+ * subset is now effectively the full graph for fresh memory.
+ *
+ * Phase 2 (multi-hop traversal) was scoped, scaffolded, and reverted
+ * during the May 14, 2026 session: the 43.8% additional reach measured
+ * at hop-2 in the diagnostic turned out to be a measurement artifact
+ * of extraction linking facts to peripheral entities, not genuine
+ * graph-distance multi-hop questions on LoCoMo.  Production scaffolding
+ * was stripped; the design (and the rationale for the strip) is captured
+ * in docs/PHASE_2_GRAPH_RETRIEVAL_DESIGN.md.  Phase 2 production code
+ * will re-land if a benchmark surfaces genuine multi-hop test cases.
  *
  * Pipeline:
  *   1. Extract proper-noun candidates from the query string.
@@ -70,6 +78,15 @@ extern "C" {
  * scratch).  LoCoMo cat-3 questions average ~1.5 proper nouns; 8 is
  * comfortable headroom. */
 #define MEMORY_GRAPH_MAX_SEED_CANDIDATES 8
+
+/** Intermediate graph-candidate pool size used by `memory_action_search`
+ * and the parallel bench path.  Caller's working buffer must be at least
+ * this large.  The Phase 2 Step 1 query-scoring path widens the
+ * candidate pool past the 10-slot LLM-facing cap so topically-relevant
+ * graph candidates can compete with hybrid hits before the final
+ * truncate.  30 matches `[memory.graph_retrieval] max_facts_per_query`
+ * default; bump together if the per-query cap rises. */
+#define MEMORY_GRAPH_INTERMEDIATE_CAP 30
 
 /**
  * @brief Extract proper-noun candidates from @p query and resolve each

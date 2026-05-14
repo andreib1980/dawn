@@ -198,6 +198,77 @@ int memory_embeddings_hybrid_search(int user_id,
                                     embedding_search_result_t *out_results,
                                     int max_results);
 
+/** Sentinel score returned by `memory_embeddings_rescore_against_query`
+ * for facts that could not be scored (no embedding in the per-user cache,
+ * embedding engine unavailable, query embedding failed).  Callers MUST
+ * treat any score equal to this sentinel as "skip this fact" — do NOT
+ * merge into the LLM-facing pool.  Negative-infinity (per IEEE 754
+ * behavior with insertion sort) is sufficient and distinct from any
+ * legitimate score value, but `-1.0f` is human-readable in logs and
+ * works with `score < 0.0f` checks. */
+#define MEMORY_EMBEDDINGS_RESCORE_SENTINEL (-1.0f)
+
+/**
+ * @brief Phase 2 Step 1: re-score a caller-supplied list of facts against a
+ *        pre-computed query embedding using cosine similarity + an optional
+ *        additive bonus.
+ *
+ * Used by graph retrieval to apply query-relevance scoring to entity-bounded
+ * candidate facts, replacing the legacy flat `entity_grounding_bonus` that
+ * was disconnected from query content.
+ *
+ * Scoring formula (per fact):
+ *
+ *   if fact_id is in the per-user embedding cache:
+ *     score = vec_weight * cosine(query_emb, fact_emb) + entity_bonus
+ *   else:
+ *     score = MEMORY_EMBEDDINGS_RESCORE_SENTINEL  // caller MUST drop
+ *
+ * `vec_weight` is read from `g_config.memory.embedding_vector_weight` so the
+ * scale stays consistent with `memory_embeddings_hybrid_search`.
+ *
+ * Taking a pre-computed embedding (rather than re-embedding the query)
+ * avoids a duplicate ONNX inference per `memory_action_search` call —
+ * `memory_fact_search_hybrid` already embedded the same query string
+ * upstream; passing the embedding through saves 5-30 ms on bge-small
+ * INT8 / Jetson.
+ *
+ * The keyword term from the hybrid formula is deliberately omitted: graph
+ * candidates are entity-grounded by construction, so the kw signal is
+ * largely redundant with the entity-graph membership.  Cosine carries the
+ * topical-relevance signal cleanly.
+ *
+ * **Caller contract**: facts whose returned score equals
+ * `MEMORY_EMBEDDINGS_RESCORE_SENTINEL` MUST be dropped from the merged
+ * pool.  Earlier versions silently substituted `entity_bonus` for such
+ * facts, which produced low-quality LLM-facing candidates and caused a
+ * -9pp Phase 2 Step 1 regression (May 14, 2026 architecture audit).
+ *
+ * If @p query_emb is NULL or the embedding engine is unavailable, EVERY
+ * fact gets the sentinel — the caller should treat this as "graph
+ * retrieval is silently disabled this turn" and rely on hybrid alone.
+ *
+ * Thread-safe: takes the embedding cache lock internally.
+ *
+ * @param user_id Owner user_id (for cache scoping)
+ * @param query_emb Caller-supplied query embedding (size must be
+ *                  `embedding_engine_dims()`).  NULL → all sentinels.
+ * @param query_norm Pre-computed L2 norm of @p query_emb (saves recomputation).
+ * @param entity_bonus Caller-supplied additive bonus (typically 0.0)
+ * @param fact_ids Caller-allocated array of fact IDs to score (in)
+ * @param fact_count Number of facts
+ * @param out_scores Caller-allocated parallel array (out) — overwritten;
+ *                   sentinel means "drop this fact"
+ * @return SUCCESS or FAILURE (FAILURE only on NULL out_scores / NULL fact_ids).
+ */
+int memory_embeddings_rescore_against_query(int user_id,
+                                            const float *query_emb,
+                                            float query_norm,
+                                            float entity_bonus,
+                                            const int64_t *fact_ids,
+                                            int fact_count,
+                                            float *out_scores);
+
 /**
  * @brief Invalidate the fact embedding cache (e.g., after store/delete)
  */

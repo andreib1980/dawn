@@ -144,6 +144,60 @@ int memory_search_apply_score_floor(memory_fact_t *facts,
                                     int count,
                                     float score_floor);
 
+/** Maximum `max` parameter the unified retrieval primitive
+ * `memory_search_execute()` will accept.  Sizes its stack-allocated merge
+ * pool (`max + MEMORY_GRAPH_INTERMEDIATE_CAP` entries).  Callers passing
+ * larger values get clamped silently.  10 matches the LLM-facing slot
+ * count used by `memory_action_search`; bench callers can pass 1..10. */
+#define MEMORY_SEARCH_HYBRID_MAX 10
+
+/**
+ * @brief Unified retrieval primitive: hybrid + entity-graph + score floor.
+ *
+ * Single source of truth for "given a user query, return top-K relevant
+ * facts."  Called by both production (`memory_action_search`, non-category
+ * branch) and the bench harness (`bench_mp_handle_query_memory`) so the
+ * two paths can't drift.
+ *
+ * Pipeline:
+ *   1. `memory_fact_search_hybrid()` → hybrid keyword + cosine retrieval
+ *      against the full corpus, top-`max` by hybrid score.
+ *   2. Entity-graph candidate expansion (Phase 1A) if enabled in config:
+ *      extract proper-noun seeds from @p query, walk fact-linked relations,
+ *      return up to `MEMORY_GRAPH_INTERMEDIATE_CAP` entity-bounded
+ *      candidates.
+ *   3. Phase 2 Step 1 query-aware scoring if enabled: re-score graph
+ *      candidates as `vec_weight * cosine + entity_bonus` so topically-
+ *      irrelevant entity-grounded facts compete fairly with hybrid hits.
+ *      Sentinel-scored facts (no embedding in cache) are dropped.
+ *   4. Score-based merge: union(hybrid, graph) pool → sort by score
+ *      descending → truncate to @p max.  Lets a high-scoring graph
+ *      candidate displace a low-scoring hybrid tail entry.
+ *   5. Apply `search_score_floor` to drop marginal-cosine hits.
+ *
+ * All scoring knobs read from `g_config.memory.*`.  Only the per-call
+ * inputs (user_id, query, since_ts, max) are caller-supplied.
+ *
+ * Thread-safe: each underlying primitive acquires its own mutex as needed
+ * (s_cache.mutex inside hybrid + rescore, auth_db_mutex inside DB calls).
+ *
+ * @param user_id Owner user_id (for defense-in-depth scoping)
+ * @param query Query text
+ * @param since_ts Optional time filter (0 = no filter)
+ * @param out_facts Caller-allocated array of size @p max
+ * @param out_scores Caller-allocated parallel array of size @p max
+ * @param max Output cap (typically 10 for LLM-facing retrieval)
+ * @param out_count Receives actual returned fact count, in [0, @p max]
+ * @return SUCCESS or FAILURE
+ */
+int memory_search_execute(int user_id,
+                          const char *query,
+                          time_t since_ts,
+                          memory_fact_t *out_facts,
+                          float *out_scores,
+                          int max,
+                          int *out_count);
+
 #ifdef __cplusplus
 }
 #endif

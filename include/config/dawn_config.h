@@ -590,6 +590,23 @@ typedef struct {
        * comfortable headroom for the typical 1-3 seeds while bounded
        * against pathological multi-entity queries. */
       int max_facts_per_query;
+      /* Phase 2 Step 1 (May 14, 2026): query-aware scoring of graph
+       * candidates.  When true (default), graph candidates are re-scored
+       * against the query using cosine(query, fact) + entity_bonus.
+       * Replaces the flat entity_grounding_bonus that was disconnected
+       * from query content.  Set false to revert to flat-bonus scoring
+       * for config-toggle ablation.
+       *
+       * See docs/PHASE_2_GRAPH_RETRIEVAL_DESIGN.md §2C Step 1. */
+      bool use_query_scoring;
+      /* Small additive bonus applied to query-scored graph candidates
+       * (when use_query_scoring=true).  Distinguishes graph-rescued
+       * candidates from pure-hybrid candidates at otherwise-tied scores.
+       * Default 0.10 — small enough that hybrid relevance dominates,
+       * large enough that an entity-grounded near-tie wins.  Range
+       * [0.0, 1.0]; 0.0 reproduces pure-hybrid scoring on the graph
+       * candidate pool (no graph preference). */
+      float entity_bonus;
    } graph_retrieval;
 
    /* Memory-tool search score floor.  Drops facts whose hybrid score

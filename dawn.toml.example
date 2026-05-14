@@ -497,6 +497,30 @@
 # recompute_batch_sleep_ms = 100  # Sleep between batches in ms (0-5000).
                                   # Throttles CPU; increase to reduce background load.
 
+[memory.graph_retrieval]
+# Entity-graph candidate retrieval for memory.search.  Phase 1A walks 1 hop
+# from query-extracted proper-noun seeds via fact-linked relations.  Phase 2
+# Step 1 (May 14, 2026) added query-aware scoring of graph candidates
+# (+1.1pp cat-3 on LoCoMo with no regressions).
+# enabled = true                   # Default-on; disable to A/B against pure hybrid
+# entity_grounding_bonus = 0.40    # Legacy flat score for graph candidates when
+                                   # use_query_scoring=false.  Range [0.0, 1.0].
+# max_facts_per_query = 30         # Total fan-out cap across all seeds per query.
+                                   # Range [1, 200].
+# use_query_scoring = true         # Phase 2 Step 1: re-score graph candidates
+                                   # against the query (vec_weight*cosine +
+                                   # entity_bonus) instead of using the flat
+                                   # entity_grounding_bonus.  Default true.
+                                   # Set false to revert to flat-bonus scoring
+                                   # for config-toggle ablation.
+# entity_bonus = 0.0               # Additive bonus applied to query-scored graph
+                                   # candidates on top of vec_weight*cosine.  Default
+                                   # 0.0 — the bonus was found to act as an asymmetric
+                                   # thumb-on-scale (only graph-branch facts received
+                                   # it, displacing equally-relevant hybrid hits).
+                                   # Experimental knob; set >0 to test symmetric-
+                                   # bonus designs only.  Range [0.0, 1.0].
+
 [memory.recovery]
 # Re-runs memory extraction on conversations whose last_extracted_msg_count
 # is behind message_count after the configured idle window.  Catches sessions

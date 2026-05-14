@@ -153,6 +153,8 @@ int config_validate(const dawn_config_t *config,
                         config->memory.graph_retrieval.entity_grounding_bonus, 0.0f, 1.0f);
    VALIDATE_RANGE_INT("memory.graph_retrieval.max_facts_per_query",
                       config->memory.graph_retrieval.max_facts_per_query, 1, 200);
+   VALIDATE_RANGE_FLOAT("memory.graph_retrieval.entity_bonus",
+                        config->memory.graph_retrieval.entity_bonus, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.paraphrase_dedup_threshold",
                         config->memory.paraphrase_dedup_threshold, 0.5f, 1.0f);
 
