@@ -1399,6 +1399,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_boolean(config->memory.temporal_filter_enabled));
    json_object_object_add(memory, "rrf_enabled",
                           json_object_new_boolean(config->memory.rrf_enabled));
+   json_object_object_add(memory, "memory_text_minimal",
+                          json_object_new_boolean(config->memory.memory_text_minimal));
    json_object_object_add(memory, "category_threshold",
                           json_object_new_double(config->memory.category_threshold));
    json_object_object_add(memory, "search_score_floor",
@@ -2096,6 +2098,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "temporal_filter_enabled = %s\n",
            config->memory.temporal_filter_enabled ? "true" : "false");
    fprintf(fp, "rrf_enabled = %s\n", config->memory.rrf_enabled ? "true" : "false");
+   fprintf(fp, "memory_text_minimal = %s\n", config->memory.memory_text_minimal ? "true" : "false");
    fprintf(fp, "category_threshold = %.2f\n", config->memory.category_threshold);
    fprintf(fp, "search_score_floor = %.2f\n", config->memory.search_score_floor);
 

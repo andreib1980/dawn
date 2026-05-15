@@ -319,6 +319,10 @@ void config_set_defaults(dawn_config_t *config) {
    /* RRF retrieval — off-by-default for A/B against the weighted-sum composite.
     * Flip after bench shows lift; promote-or-retire after enough live signal. */
    config->memory.rrf_enabled = false;
+   /* Minimal memory_text format — off-by-default for A/B against the current
+    * verbose format.  Cuts ~30-50% of memory_text bytes by stripping per-fact
+    * metadata + demoting source excerpts to a single global block. */
+   config->memory.memory_text_minimal = false;
    config->memory.category_threshold = 0.25f;
    /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
     * entity_grounding_bonus 0.4 sits between the 0.30 search floor and
