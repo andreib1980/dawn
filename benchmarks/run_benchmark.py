@@ -26,6 +26,9 @@ Usage:
 
 import argparse
 import hashlib
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import os
@@ -136,6 +139,11 @@ class BenchRetrieval:
          bufsize=0,
       )
       self._stdout_buf = b""
+      # The bench_retrieval subprocess owns a single stdin/stdout pair.
+      # Concurrent threads in the per-QA scoring pool MUST serialize
+      # request/response pairs through this lock or commands would
+      # interleave and read each other's responses.
+      self._pipe_lock = threading.Lock()
 
       # Read ready message — skip OLOG preamble lines (logging is on stdout).
       # Time-based so verbose startup logging never exhausts a fixed line cap.
@@ -184,10 +192,15 @@ class BenchRetrieval:
          buf += chunk
 
    def _send(self, obj):
-      """Send a JSON command and read the response, skipping OLOG preamble lines."""
-      self.proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
-      self.proc.stdin.flush()
-      return self._read_json_line(timeout=120.0, what=f"response to {obj.get('cmd')}")
+      """Send a JSON command and read the response, skipping OLOG preamble lines.
+
+      Holds the pipe lock for the entire write+read round-trip so concurrent
+      threads in the QA-scoring pool can call engine methods without
+      interleaving commands."""
+      with self._pipe_lock:
+         self.proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
+         self.proc.stdin.flush()
+         return self._read_json_line(timeout=120.0, what=f"response to {obj.get('cmd')}")
 
    def add(self, doc_id, text, created_at=None):
       """Optional created_at (Unix seconds) feeds the temporal-scoring boost."""
@@ -208,10 +221,12 @@ class BenchRetrieval:
 
    def _send_with_timeout(self, obj, timeout):
       """Like _send but with a configurable timeout for slow operations
-      (extraction can take 5-30s per call on Claude Haiku/Sonnet/Opus)."""
-      self.proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
-      self.proc.stdin.flush()
-      return self._read_json_line(timeout=timeout, what=f"response to {obj.get('cmd')}")
+      (extraction can take 5-30s per call on Claude Haiku/Sonnet/Opus).
+      Pipe lock held for the full round-trip — see _send()."""
+      with self._pipe_lock:
+         self.proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
+         self.proc.stdin.flush()
+         return self._read_json_line(timeout=timeout, what=f"response to {obj.get('cmd')}")
 
    def conv_create(self, title="bench", anchor_date=None):
       """Optional anchor_date (Unix seconds) seeds conversations.anchor_date so
@@ -1445,11 +1460,81 @@ def _snapshot_cache_paths(cache_dir, engine, conv_idx, conv):
    return db_path, map_path, key
 
 
-def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
+def _score_one_qa(qa, conv_idx, engine, judge, generator, correctness_judge,
+                  top_k, with_source, source_budget, gen_and_judge):
+   """Worker — single-QA scoring, called from a ThreadPoolExecutor in the
+   per-conv scoring phase.  Engine I/O is pipe-locked inside BenchRetrieval._send
+   so concurrent threads serialize through the bench_retrieval subprocess
+   without interleaving commands; the LLM judge/generator/correctness calls
+   are network-bound HTTP and fan out in parallel via the GIL-friendly thread
+   pool.  Returns a result dict the main thread aggregates into the per-conv
+   counters + JSONL dump.
+
+   Counters are NOT touched here — that work happens single-threaded in the
+   main loop so we don't need locks around them."""
+   question = qa.get("question", "")
+   evidence = qa.get("evidence", [])
+   category = str(qa.get("category", "unknown"))
+   gold_answer_raw = (qa.get("answer")
+                      if qa.get("answer") is not None
+                      else qa.get("adversarial_answer")
+                      if qa.get("adversarial_answer") is not None
+                      else qa.get("gold_answer", ""))
+   gold_answer = str(gold_answer_raw) if gold_answer_raw is not None else ""
+
+   flat_evidence = []
+   for e in evidence:
+      flat_evidence.extend(e.split())
+   evidence_set = set(flat_evidence)
+
+   qresp = engine.query_memory(question, top_k=top_k)
+   retrieved = qresp.get("results", [])
+   covered = set()
+   for r in retrieved:
+      covered.update(r.get("covered_dia_ids", []))
+   recall = compute_fraction_recall(list(covered), evidence_set)
+   fact_texts = [r.get("text", "") for r in retrieved if r.get("text")]
+
+   ent_score = None
+   if judge is not None and gold_answer:
+      ent_score, _ = judge.judge(question, gold_answer, fact_texts)
+
+   memory_text = None
+   generated = None
+   corr_score = None
+   if gen_and_judge and gold_answer:
+      if with_source:
+         cbresp = engine.query_memory_callback(
+            question, with_source=True, source_budget=source_budget)
+         memory_text = cbresp.get("text", "")
+         generated, _ = generator.generate_from_memory_text(question, memory_text)
+      else:
+         generated, _ = generator.generate(question, fact_texts)
+      if generated is not None:
+         corr_score, _ = correctness_judge.judge(question, gold_answer, generated)
+
+   return {
+      "conv_idx": conv_idx,
+      "category": category,
+      "question": question,
+      "gold_answer": gold_answer,
+      "evidence_set": evidence_set,
+      "covered": covered,
+      "recall": recall,
+      "retrieved": retrieved,
+      "memory_text": memory_text,
+      "ent_score": ent_score,
+      "generated": generated,
+      "corr_score": corr_score,
+   }
+
+
+def run_locomo_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=None,
                       no_cache=False, judge=None, generator=None,
                       correctness_judge=None,
                       with_source=False, source_budget=0,
-                      exclude_categories=None, prompt_style="strict"):
+                      exclude_categories=None, prompt_style="strict",
+                      dump_failures_path="", qa_workers=1):
    """Run LoCoMo through extraction + memory-fact retrieval. Returns metrics.
 
    If cache_dir is set and no_cache is False, per-conversation extraction state
@@ -1516,9 +1601,55 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
    total_extract_seconds = 0.0
    total_cache_hits = 0
    total_cache_misses = 0
+   # Per-QA diagnostic dump: one JSONL line per scored QA pair with everything
+   # needed to localize the reach→entailment→generation gap (where it fails
+   # AND why).  Opened in append mode if user passes a path; closed at end.
+   dump_fp = None
+   if dump_failures_path:
+      dump_fp = open(dump_failures_path, "w")
+      print(f"  dump-failures: writing per-QA records to {dump_failures_path}",
+            file=sys.stderr)
+   # JSONL dump writes are serialized in the main thread (aggregator), so the
+   # per-conv worker stages records in cr["per_qa_records"] and the main thread
+   # writes them as each future completes.  No file-lock needed.
    t0 = time.time()
+   # Conv-result accumulator: each worker fills this with everything the main
+   # thread needs to update global counters + the JSONL dump.  All keys must
+   # be present so the aggregator can blindly merge.
+   _CR_INIT_KEYS = (
+      "per_qa_records", "all_recall", "all_entailment", "all_generation",
+      "per_category", "per_category_entailment", "per_category_generation",
+      "per_category_judge_fail", "per_category_gen_fail", "per_category_corr_fail",
+   )
+   primary_engine = engines[0] if isinstance(engines, list) else engines
 
-   for conv_idx, entry in enumerate(entries):
+   def process_one_conv(engine, conv_idx, entry):
+      """Per-conv worker — handles extraction (cache or fresh) and QA scoring,
+      returns a result dict.  Thread-safe when each thread owns a separate
+      engine (the engine's pipe lock serializes any internal concurrent
+      access from the inner QA thread pool)."""
+      conv = entry.get("conversation", entry)
+      cr = {k: ([] if k != "per_qa_records" else []) for k in _CR_INIT_KEYS}
+      # Rebind the dict-shaped accumulators (the comprehension above made them
+      # all lists; reset the category dicts here so we don't lose them).
+      cr["per_category"] = {}
+      cr["per_category_entailment"] = {}
+      cr["per_category_generation"] = {}
+      cr["per_category_judge_fail"] = {}
+      cr["per_category_gen_fail"] = {}
+      cr["per_category_corr_fail"] = {}
+      cr["per_category_dropped"] = {}
+      cr["per_category_excluded"] = {}
+      cr["dropped_qa_no_evidence"] = 0
+      cr["excluded_qa_by_category"] = 0
+      cr["total_qa"] = 0
+      cr["facts_added"] = 0
+      cr["last_conv_facts"] = 0
+      cr["extractions"] = 0
+      cr["extract_seconds"] = 0.0
+      cr["cache_hit"] = False
+      cr["cache_miss"] = False
+      cr["conv_idx"] = conv_idx
       conv = entry.get("conversation", entry)
 
       # Cache lookup: skip extraction entirely if a snapshot for this exact
@@ -1534,8 +1665,8 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                lresp = engine.snapshot_load(db_path, map_path)
                if lresp.get("status") == "ok":
                   cache_hit = True
-                  last_conv_facts = lresp.get("facts", last_conv_facts)
-                  total_cache_hits += 1
+                  cr["last_conv_facts"] = lresp.get("facts", 0)
+                  cr["cache_hit"] = True
                   print(f"  [conv {conv_idx}] cache HIT key={cache_key} "
                         f"facts={lresp.get('facts', 0)} "
                         f"entities={lresp.get('entities', 0)} "
@@ -1546,7 +1677,7 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                      f"falling back to extraction", file=sys.stderr)
 
       if not cache_hit:
-         total_cache_misses += 1
+         cr["cache_miss"] = True
          # Reset per-conv: fresh facts & dia_id map
          engine.reset_memory()
 
@@ -1573,7 +1704,7 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
          conv_id = cresp.get("conv_id")
          if not conv_id:
             print(f"  conv {conv_idx}: conv_create failed; skipping", file=sys.stderr)
-            continue
+            return cr
 
          # Determine speakers (LoCoMo has two; first introduced -> user)
          first_speaker = None
@@ -1604,14 +1735,15 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
             session_ts = session_dates.get(session_n) or first_session_ts
             eresp = engine.extract(conv_id, session_id=f"locomo_{conv_idx}_s{session_n}",
                                    timeout_ms=600000, anchor_date=session_ts)
-            total_extractions += 1
-            total_extract_seconds += eresp.get("duration_ms", 0) / 1000.0
-            total_facts_added += eresp.get("facts_added", 0)
-            last_conv_facts = eresp.get("facts_total", last_conv_facts)
+            cr["extractions"] += 1
+            cr["extract_seconds"] += eresp.get("duration_ms", 0) / 1000.0
+            cr["facts_added"] += eresp.get("facts_added", 0)
+            cr["last_conv_facts"] = eresp.get("facts_total", cr["last_conv_facts"])
 
-            print(f"  [conv {conv_idx} sess {session_n}] facts={last_conv_facts} "
-                  f"+{eresp.get('facts_added', 0)} dur={eresp.get('duration_ms', 0)}ms",
-                  file=sys.stderr)
+            print(f"  [conv {conv_idx} sess {session_n}] "
+                  f"facts={cr['last_conv_facts']} "
+                  f"+{eresp.get('facts_added', 0)} "
+                  f"dur={eresp.get('duration_ms', 0)}ms", file=sys.stderr)
 
          # Save snapshot at end of this conversation's extraction
          if cache_dir and not no_cache and db_path and map_path:
@@ -1629,126 +1761,171 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
                print(f"  [conv {conv_idx}] snapshot_save error: {exc}",
                      file=sys.stderr)
 
-      # Score each QA pair via memory query + provenance->dia_id mapping
+      # Score each QA pair via memory query + provenance->dia_id mapping.
+      # Pre-filter into the valid set so dropped/excluded counts move
+      # in the main thread before any worker fires (counters don't need locks).
       qa_pairs = entry.get("qa", entry.get("QA", entry.get("qa_pairs", [])))
+      valid_qas = []
       for qa in qa_pairs:
          question = qa.get("question", "")
          evidence = qa.get("evidence", [])
          category = str(qa.get("category", "unknown"))
-         # LoCoMo gold answer: prefer 'answer'; cat-5 (adversarial) often uses
-         # 'adversarial_answer' instead.  Coerce to str — answers are sometimes
-         # ints (dates, counts) and we hash them as text.
-         gold_answer_raw = (qa.get("answer")
-                            if qa.get("answer") is not None
-                            else qa.get("adversarial_answer")
-                            if qa.get("adversarial_answer") is not None
-                            else qa.get("gold_answer", ""))
-         gold_answer = str(gold_answer_raw) if gold_answer_raw is not None else ""
          if not question:
             continue
          if not evidence:
-            # No gold provenance → can't score recall_reach.  Tracked for the
-            # results JSON so the denominator is honest.
-            dropped_qa_no_evidence += 1
-            per_category_dropped[category] = per_category_dropped.get(category, 0) + 1
+            cr["dropped_qa_no_evidence"] += 1
+            cr["per_category_dropped"][category] = \
+               cr["per_category_dropped"].get(category, 0) + 1
             continue
-         # --exclude-categories filter (Mem0 protocol excludes cat-5 adversarial).
-         # Excluded QAs are counted separately and reported alongside the
-         # included pool so we can show "cat 1-4 overall: X (cat-5 excluded)".
          if category in exclude_set:
-            excluded_qa_by_category += 1
-            per_category_excluded[category] = per_category_excluded.get(category, 0) + 1
+            cr["excluded_qa_by_category"] += 1
+            cr["per_category_excluded"][category] = \
+               cr["per_category_excluded"].get(category, 0) + 1
             continue
+         valid_qas.append(qa)
 
-         # Normalize evidence: split any space-separated multi-IDs (LoCoMo
-         # conv 8 has 'D9:1 D4:4 D4:6' as a single string in 3 cat-3 questions)
-         flat_evidence = []
-         for e in evidence:
-            flat_evidence.extend(e.split())
-         evidence_set = set(flat_evidence)
+      # Parallel scoring path.  Engine I/O is pipe-locked; JudgeCache get/put
+      # rely on the GIL (Python dict ops are atomic).
+      qa_results = []
+      if qa_workers > 1 and len(valid_qas) > 1:
+         with ThreadPoolExecutor(max_workers=qa_workers) as pool:
+            futures = [pool.submit(_score_one_qa, qa, conv_idx, engine, judge,
+                                   generator, correctness_judge, top_k,
+                                   with_source, source_budget, gen_and_judge)
+                       for qa in valid_qas]
+            for fut in as_completed(futures):
+               try:
+                  qa_results.append(fut.result())
+               except Exception as exc:
+                  print(f"  [conv {conv_idx}] QA scoring worker failed: "
+                        f"{exc}", file=sys.stderr)
+      else:
+         for qa in valid_qas:
+            qa_results.append(_score_one_qa(
+               qa, conv_idx, engine, judge, generator, correctness_judge,
+               top_k, with_source, source_budget, gen_and_judge))
 
-         qresp = engine.query_memory(question, top_k=top_k)
-         retrieved = qresp.get("results", [])
-
-         # Aggregate covered dia_ids across all retrieved facts
-         covered = set()
-         for r in retrieved:
-            covered.update(r.get("covered_dia_ids", []))
-
-         recall = compute_fraction_recall(list(covered), evidence_set)
-         all_recall.append(recall)
-         per_category.setdefault(category, []).append(recall)
-         total_qa += 1
-
-         # Build fact texts once — both entailment and generator consume them.
-         fact_texts = [r.get("text", "") for r in retrieved if r.get("text")]
-
-         # Entailment judge — strict YES/NO over (question, gold, fact texts).
-         # Always uses raw fact list (not source-augmented) so entailment metric
-         # measures retrieval quality, independent of source-budget sweep.
-         # None return = retry exhaustion → exclude QA from metric entirely.
-         if judge is not None and gold_answer:
-            ent_score, _ = judge.judge(question, gold_answer, fact_texts)
-            if ent_score is None:
-               per_category_judge_fail[category] = \
-                  per_category_judge_fail.get(category, 0) + 1
+      # Build per-conv tallies + per-QA dump records (kept local; main thread
+      # merges into globals + writes JSONL).
+      for r in qa_results:
+         category = r["category"]
+         cr["all_recall"].append(r["recall"])
+         cr["per_category"].setdefault(category, []).append(r["recall"])
+         cr["total_qa"] += 1
+         if judge is not None and r["gold_answer"]:
+            if r["ent_score"] is None:
+               cr["per_category_judge_fail"][category] = \
+                  cr["per_category_judge_fail"].get(category, 0) + 1
             else:
-               all_entailment.append(ent_score)
-               per_category_entailment.setdefault(category, []).append(ent_score)
-
-         # Generate-and-judge — the leader-comparable metric.
-         # When with_source=True (production-faithful path), the generator
-         # consumes the formatted memory_callback output (facts + source
-         # excerpts + entity graph block) instead of just numbered fact texts.
-         # source_budget=0 uses the production default (3072 chars).  If
-         # either the generator OR the correctness judge exhausts retries,
-         # the QA is excluded from the generation metric (numerator AND
-         # denominator) so a transient blip can't fabricate a 0 verdict.
-         if gen_and_judge and gold_answer:
-            if with_source:
-               cbresp = engine.query_memory_callback(question,
-                                                    with_source=True,
-                                                    source_budget=source_budget)
-               memory_text = cbresp.get("text", "")
-               generated, _ = generator.generate_from_memory_text(
-                  question, memory_text)
+               cr["all_entailment"].append(r["ent_score"])
+               cr["per_category_entailment"].setdefault(
+                  category, []).append(r["ent_score"])
+         if gen_and_judge and r["gold_answer"]:
+            if r["generated"] is None:
+               cr["per_category_gen_fail"][category] = \
+                  cr["per_category_gen_fail"].get(category, 0) + 1
+            elif r["corr_score"] is None:
+               cr["per_category_corr_fail"][category] = \
+                  cr["per_category_corr_fail"].get(category, 0) + 1
             else:
-               generated, _ = generator.generate(question, fact_texts)
-            if generated is None:
-               per_category_gen_fail[category] = \
-                  per_category_gen_fail.get(category, 0) + 1
-            else:
-               corr_score, _ = correctness_judge.judge(
-                  question, gold_answer, generated)
-               if corr_score is None:
-                  per_category_corr_fail[category] = \
-                     per_category_corr_fail.get(category, 0) + 1
-               else:
-                  all_generation.append(corr_score)
-                  per_category_generation.setdefault(category, []).append(corr_score)
+               cr["all_generation"].append(r["corr_score"])
+               cr["per_category_generation"].setdefault(
+                  category, []).append(r["corr_score"])
+         cr["per_qa_records"].append({
+            "conv_idx": r["conv_idx"],
+            "category": category,
+            "question": r["question"],
+            "gold_answer": r["gold_answer"],
+            "evidence": sorted(r["evidence_set"]),
+            "retrieved_dia_ids": sorted(r["covered"]),
+            "recall_reach": r["recall"],
+            "retrieved": [
+               {"text": rr.get("text", ""),
+                "covered_dia_ids": rr.get("covered_dia_ids", []),
+                "score": rr.get("score")}
+               for rr in r["retrieved"]
+            ],
+            "memory_text": r["memory_text"],
+            "entailment": r["ent_score"],
+            "generated": r["generated"],
+            "correctness": r["corr_score"],
+         })
 
-      # Persist all caches periodically so a crash mid-run doesn't lose work
-      if judge is not None and judge.cache is not None:
-         judge.cache.flush()
-      if generator is not None and generator.cache is not None:
-         generator.cache.flush()
-      if correctness_judge is not None and correctness_judge.cache is not None:
-         correctness_judge.cache.flush()
+      # Per-conv summary print (this conv's own numbers; aggregator emits no
+      # cumulative line since parallel runs would arrive out of order).
+      avg_r = sum(cr["all_recall"]) / len(cr["all_recall"]) if cr["all_recall"] else 0
+      pmsg = (f"  [conv {conv_idx} done] QA={cr['total_qa']} "
+              f"recall_reach={avg_r:.3f}")
+      if cr["all_entailment"]:
+         pmsg += (f" recall_entailment="
+                  f"{sum(cr['all_entailment'])/len(cr['all_entailment']):.3f}")
+      if cr["all_generation"]:
+         pmsg += (f" recall_generation="
+                  f"{sum(cr['all_generation'])/len(cr['all_generation']):.3f}")
+      print(pmsg, file=sys.stderr)
+      return cr
 
-      avg = sum(all_recall) / len(all_recall) if all_recall else 0
-      progress = f"  [conv {conv_idx + 1}/{len(entries)}] QA={total_qa} avg_recall_reach={avg:.3f}"
-      if judge is not None and all_entailment:
-         avg_ent = sum(all_entailment) / len(all_entailment)
-         progress += f" recall_entailment={avg_ent:.3f}"
-         if judge.failures:
-            progress += f" (judge_fail={judge.failures})"
-      if gen_and_judge and all_generation:
-         avg_gen = sum(all_generation) / len(all_generation)
-         progress += f" recall_generation={avg_gen:.3f}"
-         if generator.failures or correctness_judge.failures:
-            progress += (f" (gen_fail={generator.failures} "
-                         f"corr_fail={correctness_judge.failures})")
-      print(progress, file=sys.stderr)
+   # =========================================================================
+   # Dispatcher + aggregator.  Each conv produces a cr dict; main thread
+   # merges all crs into the global accumulators in sequence.
+   # =========================================================================
+   conv_results = []
+   if isinstance(engines, list) and len(engines) > 1:
+      eq = queue.Queue()
+      for e in engines:
+         eq.put(e)
+
+      def _conv_worker(idx_entry):
+         conv_idx, entry = idx_entry
+         eng = eq.get()
+         try:
+            return process_one_conv(eng, conv_idx, entry)
+         finally:
+            eq.put(eng)
+
+      with ThreadPoolExecutor(max_workers=len(engines)) as pool:
+         for cr in pool.map(_conv_worker, list(enumerate(entries))):
+            conv_results.append(cr)
+   else:
+      eng = engines[0] if isinstance(engines, list) else engines
+      for conv_idx, entry in enumerate(entries):
+         conv_results.append(process_one_conv(eng, conv_idx, entry))
+
+   for cr in conv_results:
+      total_qa += cr["total_qa"]
+      all_recall.extend(cr["all_recall"])
+      all_entailment.extend(cr["all_entailment"])
+      all_generation.extend(cr["all_generation"])
+      for cat, vals in cr["per_category"].items():
+         per_category.setdefault(cat, []).extend(vals)
+      for cat, vals in cr["per_category_entailment"].items():
+         per_category_entailment.setdefault(cat, []).extend(vals)
+      for cat, vals in cr["per_category_generation"].items():
+         per_category_generation.setdefault(cat, []).extend(vals)
+      for cat, n in cr["per_category_judge_fail"].items():
+         per_category_judge_fail[cat] = per_category_judge_fail.get(cat, 0) + n
+      for cat, n in cr["per_category_gen_fail"].items():
+         per_category_gen_fail[cat] = per_category_gen_fail.get(cat, 0) + n
+      for cat, n in cr["per_category_corr_fail"].items():
+         per_category_corr_fail[cat] = per_category_corr_fail.get(cat, 0) + n
+      for cat, n in cr["per_category_dropped"].items():
+         per_category_dropped[cat] = per_category_dropped.get(cat, 0) + n
+      for cat, n in cr["per_category_excluded"].items():
+         per_category_excluded[cat] = per_category_excluded.get(cat, 0) + n
+      dropped_qa_no_evidence += cr["dropped_qa_no_evidence"]
+      excluded_qa_by_category += cr["excluded_qa_by_category"]
+      total_facts_added += cr["facts_added"]
+      if cr["last_conv_facts"]:
+         last_conv_facts = cr["last_conv_facts"]
+      total_extractions += cr["extractions"]
+      total_extract_seconds += cr["extract_seconds"]
+      if cr["cache_hit"]:
+         total_cache_hits += 1
+      if cr["cache_miss"]:
+         total_cache_misses += 1
+      if dump_fp is not None:
+         for rec in cr["per_qa_records"]:
+            dump_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
    # Final flush of all caches before reporting
    if judge is not None and judge.cache is not None:
@@ -1757,6 +1934,10 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
       generator.cache.flush()
    if correctness_judge is not None and correctness_judge.cache is not None:
       correctness_judge.cache.flush()
+   if dump_fp is not None:
+      dump_fp.close()
+      print(f"  dump-failures: wrote {total_qa} per-QA records to "
+            f"{dump_failures_path}", file=sys.stderr)
 
    elapsed = time.time() - t0
    results = {
@@ -1764,8 +1945,8 @@ def run_locomo_memory(engine, dataset_path, limit=0, top_k=10, cache_dir=None,
       "granularity": "per_locomo_session",
       "scoring": "recall_reach (retrieval reach via provenance overlap; NOT answer support)",
       "prompt_style": prompt_style,
-      "extraction_provider": engine.ready_info.get("extraction_provider", ""),
-      "extraction_model": engine.ready_info.get("extraction_model", ""),
+      "extraction_provider": primary_engine.ready_info.get("extraction_provider", ""),
+      "extraction_model": primary_engine.ready_info.get("extraction_model", ""),
       "avg_recall_reach": sum(all_recall) / len(all_recall) if all_recall else 0,
       "total_qa": total_qa,
       "conversations": len(entries),
@@ -2409,6 +2590,39 @@ def main():
       "include the extraction model so models never overwrite each other. "
       "Memory-pipeline LoCoMo only.",
    )
+   parser.add_argument(
+      "--dump-failures",
+      default="",
+      dest="dump_failures",
+      help="Write per-QA diagnostic JSONL to this path. One line per scored "
+      "QA: question, gold, retrieved facts (with covered dia_ids), recall_reach, "
+      "memory_callback text (if --with-source), generated answer, entailment + "
+      "correctness scores. Used to localize the reach→entailment→generation "
+      "gap. Memory-pipeline LoCoMo only.",
+   )
+   parser.add_argument(
+      "--qa-workers",
+      type=int,
+      default=16,
+      dest="qa_workers",
+      help="Number of concurrent threads for the per-QA scoring phase (default "
+      "16). Each thread does ~3 OpenAI calls per QA; engine I/O is pipe-locked. "
+      "gpt-4o-mini's 5000 RPM / 2M TPM limits comfortably support 16-32 workers. "
+      "Set 1 to force sequential (debug). Memory-pipeline LoCoMo only.",
+   )
+   parser.add_argument(
+      "--conv-workers",
+      type=int,
+      default=1,
+      dest="conv_workers",
+      help="Number of concurrent threads processing LoCoMo conversations "
+      "(default 1 = sequential). N spawns N bench_retrieval subprocesses; "
+      "convs are pulled from a queue. Combined with --qa-workers, total "
+      "concurrent OpenAI calls = conv_workers * qa_workers. Default qa=16, "
+      "conv=4 → 64 concurrent (still under 5000 RPM). Cuts extraction "
+      "wall-time from ~43min sequential to ~10-12min at conv_workers=4-5. "
+      "Memory-pipeline LoCoMo only.",
+   )
    args = parser.parse_args()
 
    sweep_models = _parse_sweep_models(args.sweep_extraction_models)
@@ -2451,15 +2665,10 @@ def _parse_sweep_models(spec):
    return out
 
 
-def _run_one(args, extraction_provider, extraction_model):
-   """Run the benchmark once with the given extraction-model override and
-   return the results dict.  Spawns a fresh bench process — one per call so
-   per-model state never leaks across iterations of a sweep."""
-   mode_label = "raw" if args.raw else "hybrid"
-   tag = f", extraction={extraction_provider}:{extraction_model}" if extraction_model else ""
-   print(f"  Starting bench_retrieval ({args.provider}, {mode_label}{tag})...",
-         file=sys.stderr)
-   engine = BenchRetrieval(
+def _spawn_engine(args, extraction_provider, extraction_model):
+   """Construct one BenchRetrieval from the parsed CLI args.  Hoisted so
+   _run_one can spawn N copies for --conv-workers parallelism."""
+   return BenchRetrieval(
       args.binary,
       provider=args.provider,
       model=args.model,
@@ -2479,17 +2688,36 @@ def _run_one(args, extraction_provider, extraction_model):
       graph_query_scoring=args.graph_query_scoring,
       entity_bonus=args.entity_bonus,
    )
-   print(f"  Ready: {engine.dims} dims, provider={engine.provider}, "
-         f"mode={engine.mode}, extraction="
-         f"{engine.ready_info.get('extraction_provider', '?')}:"
-         f"{engine.ready_info.get('extraction_model', '?')}",
-         file=sys.stderr)
+
+
+def _run_one(args, extraction_provider, extraction_model):
+   """Run the benchmark once with the given extraction-model override and
+   return the results dict.  Spawns a fresh bench process — one per call so
+   per-model state never leaks across iterations of a sweep.  When
+   --conv-workers > 1 (LoCoMo memory-pipeline only), spawns that many
+   bench_retrieval subprocesses so convs can be processed in parallel."""
+   mode_label = "raw" if args.raw else "hybrid"
+   tag = f", extraction={extraction_provider}:{extraction_model}" if extraction_model else ""
+   # conv_workers > 1 only matters for the LoCoMo memory-pipeline path.
+   n_engines = 1
+   if args.benchmark == "locomo" and args.memory_pipeline and args.conv_workers > 1:
+      n_engines = max(1, int(args.conv_workers))
+   print(f"  Starting {n_engines} bench_retrieval subprocess(es) "
+         f"({args.provider}, {mode_label}{tag})...", file=sys.stderr)
+   engines = [_spawn_engine(args, extraction_provider, extraction_model)
+              for _ in range(n_engines)]
+   e0 = engines[0]
+   print(f"  Ready: {e0.dims} dims, provider={e0.provider}, "
+         f"mode={e0.mode}, extraction="
+         f"{e0.ready_info.get('extraction_provider', '?')}:"
+         f"{e0.ready_info.get('extraction_model', '?')}"
+         f"  (engines={len(engines)})", file=sys.stderr)
 
    try:
       if args.benchmark == "longmemeval":
          gran = "turn" if args.granularity == "turn" else "session"
          results = run_longmemeval(
-            engine, args.dataset, limit=args.limit,
+            e0, args.dataset, limit=args.limit,
             granularity=gran, turn_scoring=args.turn_scoring)
       elif args.benchmark == "locomo":
          if args.memory_pipeline:
@@ -2524,25 +2752,31 @@ def _run_one(args, extraction_provider, extraction_model):
                   if tok:
                      exclude_cats.append(tok)
             results = run_locomo_memory(
-               engine, args.dataset, limit=args.limit, top_k=args.top_k,
+               engines, args.dataset, limit=args.limit, top_k=args.top_k,
                cache_dir=args.cache_dir, no_cache=args.no_cache,
                judge=judge, generator=generator,
                correctness_judge=correctness_judge,
                with_source=args.with_source,
                source_budget=args.source_budget,
                exclude_categories=exclude_cats,
-               prompt_style=args.prompt_style)
+               prompt_style=args.prompt_style,
+               dump_failures_path=args.dump_failures,
+               qa_workers=args.qa_workers)
          else:
             results = run_locomo(
-               engine, args.dataset, limit=args.limit,
+               e0, args.dataset, limit=args.limit,
                granularity=args.granularity,
                sentence_chunks=args.sentence_chunks, top_k=args.top_k)
       elif args.benchmark == "convomem":
-         results = run_convomem(engine, args.dataset, limit=args.limit or 100)
+         results = run_convomem(e0, args.dataset, limit=args.limit or 100)
       else:
          raise ValueError(f"unknown benchmark: {args.benchmark}")
    finally:
-      engine.quit()
+      for e in engines:
+         try:
+            e.quit()
+         except Exception:
+            pass
 
    return results
 
