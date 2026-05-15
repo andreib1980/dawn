@@ -26,6 +26,7 @@
 
 #include "memory/memory_embeddings.h"
 
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -1147,6 +1148,247 @@ int memory_embeddings_hybrid_search(int user_id,
    int result_count = merged_count > max_results ? max_results : merged_count;
    memcpy(out_results, merged, result_count * sizeof(embedding_search_result_t));
 
+   return result_count;
+}
+
+/* =============================================================================
+ * Reciprocal Rank Fusion (RRF) Search
+ *
+ * Three-channel parallel-rank fusion alternative to the weighted-sum
+ * composite in memory_embeddings_hybrid_search().  See header for citations
+ * and the empirical basis.  Gate via g_config.memory.rrf_enabled.
+ *
+ * Algorithm:
+ *   1. Build a candidate pool from the cache + keyword-only facts.  Each
+ *      pool entry carries its raw score in three channels (cosine, kw,
+ *      temporal-proximity).
+ *   2. For each channel, compute per-candidate rank — facts with non-zero
+ *      raw score in that channel get rank 1..N; the rest get INT_MAX
+ *      (sentinel meaning "missing from this channel").
+ *   3. RRF score = Σ 1/(60 + rank_i) over channels where rank ≠ INT_MAX.
+ *   4. Sort by RRF score desc, return top-K.
+ *
+ * Rank computation is O(N²) per channel — fine for typical N ≤ 500.
+ * ============================================================================= */
+
+#define RRF_K_CONSTANT 60.0f
+
+/* Per-channel candidate cap.  Facts ranked beyond this position in any
+ * given channel get rank=INT_MAX (no contribution from that channel).
+ *
+ * Why: the semantic channel typically holds the entire user fact cache
+ * (~300 facts), while the keyword channel holds 5-10.  Without a cap,
+ * mid-rank semantic facts (positions 30-100) contribute 60/(60+rank) =
+ * 0.375-0.667 and accumulate enough RRF score to outrank legitimately-
+ * relevant facts, regressing top-K quality.  Cap matches canonical IR
+ * practice (Mem0 v2 / Hindsight TEMPR cite top-N-per-channel before RRF).
+ *
+ * 50 is conservative for DAWN's scale — final top-K is typically 10, so
+ * a cap of 50 still allows 5x oversampling per channel for stacking. */
+#define RRF_PER_CHANNEL_CAP 50
+
+int memory_embeddings_rrf_search(int user_id,
+                                 const char *query,
+                                 const int64_t *keyword_facts,
+                                 const int *keyword_scores,
+                                 int keyword_count,
+                                 int token_count,
+                                 embedding_search_result_t *out_results,
+                                 int max_results) {
+   if (!out_results || max_results <= 0)
+      return 0;
+
+   /* Parse temporal expression once.  Only when the soft temporal_weight
+    * is non-zero — same gate as the composite path so toggling rrf_enabled
+    * doesn't silently start firing the parser. */
+   time_query_t tq = { 0 };
+   bool has_temporal = false;
+   if (query && g_config.memory.temporal_weight > 0.0f) {
+      time_query_parse(query, (int64_t)time(NULL), &tq);
+      has_temporal = tq.found;
+   }
+
+   /* No embeddings or no query → keyword-only fallback (matches hybrid_search). */
+   if (!memory_embeddings_available() || !query) {
+      int count = keyword_count > max_results ? max_results : keyword_count;
+      for (int i = 0; i < count; i++) {
+         out_results[i].fact_id = keyword_facts[i];
+         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
+                                                  : 1.0f;
+      }
+      return count;
+   }
+
+   /* Embed the query. */
+   float query_emb[MAX_EMBEDDING_DIMS];
+   int dims = 0;
+   if (memory_embeddings_embed(query, query_emb, &dims) != 0 || dims != embedding_engine_dims()) {
+      int count = keyword_count > max_results ? max_results : keyword_count;
+      for (int i = 0; i < count; i++) {
+         out_results[i].fact_id = keyword_facts[i];
+         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
+                                                  : 1.0f;
+      }
+      return count;
+   }
+   float query_norm = memory_embeddings_l2_norm(query_emb, dims);
+
+   /* Per-candidate scratch.  Capped by EMBEDDING_SEARCH_CAP (2000); at 24 B
+    * each = ~48 KB stack.  Well within the 8 MB pthread default. */
+   typedef struct {
+      int64_t fact_id;
+      float cosine;
+      float kw_score;
+      float tprox;
+   } rrf_cand_t;
+   rrf_cand_t pool[EMBEDDING_SEARCH_CAP];
+   int pool_count = 0;
+
+   pthread_mutex_lock(&s_cache.mutex);
+   if (cache_load(user_id) != 0) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      int count = keyword_count > max_results ? max_results : keyword_count;
+      for (int i = 0; i < count; i++) {
+         out_results[i].fact_id = keyword_facts[i];
+         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
+                                                  : 1.0f;
+      }
+      return count;
+   }
+
+   /* Cache pass: every cached fact becomes a candidate, scored across all
+    * three channels. */
+   for (int i = 0; i < s_cache.count && pool_count < EMBEDDING_SEARCH_CAP; i++) {
+      float cosine = memory_embeddings_cosine_with_norms(query_emb, s_cache.embeddings + i * dims,
+                                                         dims, query_norm, s_cache.norms[i]);
+      float kw_score = 0.0f;
+      for (int k = 0; k < keyword_count; k++) {
+         if (keyword_facts[k] == s_cache.ids[i]) {
+            kw_score = (token_count > 0) ? (float)keyword_scores[k] / (float)token_count : 1.0f;
+            break;
+         }
+      }
+      float tprox = 0.0f;
+      if (has_temporal && s_cache.created_ats[i] > 0) {
+         tprox = time_query_proximity(&tq, s_cache.created_ats[i]);
+      }
+
+      /* Drop candidates with no signal in any channel — they would contribute
+       * 0 to RRF anyway. */
+      if (cosine <= 0.01f && kw_score <= 0.0f && tprox <= 0.0f)
+         continue;
+
+      pool[pool_count].fact_id = s_cache.ids[i];
+      pool[pool_count].cosine = cosine;
+      pool[pool_count].kw_score = kw_score;
+      pool[pool_count].tprox = tprox;
+      pool_count++;
+   }
+
+   /* Keyword-only facts (not in cache) — keyword channel only. */
+   for (int k = 0; k < keyword_count && pool_count < EMBEDDING_SEARCH_CAP; k++) {
+      bool already = false;
+      for (int p = 0; p < pool_count; p++) {
+         if (pool[p].fact_id == keyword_facts[k]) {
+            already = true;
+            break;
+         }
+      }
+      if (already)
+         continue;
+      pool[pool_count].fact_id = keyword_facts[k];
+      pool[pool_count].cosine = 0.0f;
+      pool[pool_count].kw_score = (token_count > 0) ? (float)keyword_scores[k] / (float)token_count
+                                                    : 1.0f;
+      pool[pool_count].tprox = 0.0f;
+      pool_count++;
+   }
+
+   pthread_mutex_unlock(&s_cache.mutex);
+
+   if (pool_count == 0)
+      return 0;
+
+   /* Compute per-channel rank for each candidate.  Rank = 1 + (count of
+    * peers with strictly greater non-zero score in that channel).  Facts
+    * with zero/near-zero score in a channel get rank=INT_MAX, indicating
+    * "missing from this channel" → contributes 0 to RRF.
+    *
+    * Also: if computed rank exceeds RRF_PER_CHANNEL_CAP, treat as missing.
+    * Mid-rank candidates in a large channel (e.g., the 100th-best by
+    * cosine in a 325-fact cache) would otherwise accumulate enough score
+    * to displace legitimately-relevant facts. */
+   int rank_sem[EMBEDDING_SEARCH_CAP];
+   int rank_kw[EMBEDDING_SEARCH_CAP];
+   int rank_tmp[EMBEDDING_SEARCH_CAP];
+   for (int i = 0; i < pool_count; i++) {
+      if (pool[i].cosine > 0.01f) {
+         int r = 1;
+         for (int j = 0; j < pool_count; j++) {
+            if (j != i && pool[j].cosine > pool[i].cosine)
+               r++;
+         }
+         rank_sem[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
+      } else {
+         rank_sem[i] = INT_MAX;
+      }
+      if (pool[i].kw_score > 0.0f) {
+         int r = 1;
+         for (int j = 0; j < pool_count; j++) {
+            if (j != i && pool[j].kw_score > pool[i].kw_score)
+               r++;
+         }
+         rank_kw[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
+      } else {
+         rank_kw[i] = INT_MAX;
+      }
+      if (has_temporal && pool[i].tprox > 0.0f) {
+         int r = 1;
+         for (int j = 0; j < pool_count; j++) {
+            if (j != i && pool[j].tprox > pool[i].tprox)
+               r++;
+         }
+         rank_tmp[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
+      } else {
+         rank_tmp[i] = INT_MAX;
+      }
+   }
+
+   /* RRF score = Σ K/(K + rank_i) over channels with non-sentinel rank.
+    *
+    * Canonical RRF is `1/(K + rank)`; we scale by K so each channel's
+    * rank-1 contribution = K/(K+1) ≈ 0.984 instead of 0.0164.  This puts
+    * the output in the same [0, ~num_channels] range that
+    * `g_config.memory.search_score_floor` (default 0.30) was calibrated
+    * for — without it, every RRF result falls below the floor and gets
+    * silently dropped.  Multi-channel facts can exceed 1.0 (max ≈ 2.95
+    * for rank-1 in all three channels), which the floor passes cleanly. */
+   embedding_search_result_t scored[EMBEDDING_SEARCH_CAP];
+   for (int i = 0; i < pool_count; i++) {
+      float s = 0.0f;
+      if (rank_sem[i] != INT_MAX)
+         s += RRF_K_CONSTANT / (RRF_K_CONSTANT + (float)rank_sem[i]);
+      if (rank_kw[i] != INT_MAX)
+         s += RRF_K_CONSTANT / (RRF_K_CONSTANT + (float)rank_kw[i]);
+      if (rank_tmp[i] != INT_MAX)
+         s += RRF_K_CONSTANT / (RRF_K_CONSTANT + (float)rank_tmp[i]);
+      scored[i].fact_id = pool[i].fact_id;
+      scored[i].score = s;
+   }
+
+   /* Sort by RRF score desc — insertion sort, small N. */
+   for (int i = 1; i < pool_count; i++) {
+      embedding_search_result_t tmp = scored[i];
+      int j = i - 1;
+      while (j >= 0 && scored[j].score < tmp.score) {
+         scored[j + 1] = scored[j];
+         j--;
+      }
+      scored[j + 1] = tmp;
+   }
+
+   int result_count = pool_count > max_results ? max_results : pool_count;
+   memcpy(out_results, scored, result_count * sizeof(embedding_search_result_t));
    return result_count;
 }
 

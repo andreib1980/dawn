@@ -576,6 +576,15 @@ typedef struct {
     * research synthesis).  Off-by-default for A/B; flip in
     * `config_defaults.c` after bench validation. */
    bool temporal_filter_enabled;
+   /* Reciprocal Rank Fusion retrieval.  When on, hybrid search builds three
+    * independent rank lists (semantic cosine, keyword multi-token, temporal
+    * proximity when applicable) over the same candidate pool and scores
+    * each fact by RRF: score = Σ 1/(60 + rank_i).  Replaces the weighted-
+    * sum composite (kw_weight * kw + vec_weight * cosine + temporal_weight
+    * * proximity).  Empirical basis: Mem0 v2 + Hindsight TEMPR both cite
+    * RRF over parallel channels as their primary retrieval lever.
+    * Off-by-default for A/B against the existing composite. */
+   bool rrf_enabled;
    /* Category backfill — cosine similarity above which a fact is assigned to a
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */

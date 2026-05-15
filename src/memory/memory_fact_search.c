@@ -196,10 +196,16 @@ int memory_fact_search_hybrid(int user_id,
          kw_ids[i] = kw_facts[i].id;
 
       embedding_search_result_t hybrid[HYBRID_FETCH_LIMIT];
-      int hybrid_count = memory_embeddings_hybrid_search(user_id, query, kw_ids, kw_scores,
-                                                         kw_count,
-                                                         (token_count > 0) ? token_count : 1,
-                                                         hybrid, work_cap);
+      int hybrid_count;
+      if (g_config.memory.rrf_enabled) {
+         hybrid_count = memory_embeddings_rrf_search(user_id, query, kw_ids, kw_scores, kw_count,
+                                                     (token_count > 0) ? token_count : 1, hybrid,
+                                                     work_cap);
+      } else {
+         hybrid_count = memory_embeddings_hybrid_search(user_id, query, kw_ids, kw_scores, kw_count,
+                                                        (token_count > 0) ? token_count : 1, hybrid,
+                                                        work_cap);
+      }
       if (hybrid_count > 0) {
          int produced = 0;
          for (int h = 0; h < hybrid_count && produced < max; h++) {

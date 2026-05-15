@@ -1245,6 +1245,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(embeddings, "vector_weight", config->embedding_vector_weight);
       PARSE_DOUBLE(embeddings, "temporal_weight", config->temporal_weight);
       PARSE_BOOL(embeddings, "temporal_filter_enabled", config->temporal_filter_enabled);
+      PARSE_BOOL(embeddings, "rrf_enabled", config->rrf_enabled);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
       PARSE_DOUBLE(embeddings, "search_score_floor", config->search_score_floor);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
