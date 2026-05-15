@@ -564,6 +564,18 @@ typedef struct {
     * gets `temporal_weight * gaussian_proximity(fact.created_at)` added.
     * 0 disables; 0.10–0.30 is the useful range. */
    float temporal_weight;
+   /* Hard temporal filter on memory.search results.  When the query contains
+    * a parsed temporal expression AND this flag is on, retrieved facts are
+    * stable-partitioned by whether their source conversation's `anchor_date`
+    * falls inside the parsed window — in-window facts move to the front,
+    * out-of-window facts move to the back but are NOT dropped.  Distinct
+    * from `temporal_weight` (soft Gaussian decay on fact.created_at):
+    * filter targets conv.anchor_date (when the user *spoke* about the
+    * event) instead of fact.created_at (extraction time).  Empirical basis:
+    * Mem0 v2 +29.6pp on temporal questions via metadata filter (May 2026
+    * research synthesis).  Off-by-default for A/B; flip in
+    * `config_defaults.c` after bench validation. */
+   bool temporal_filter_enabled;
    /* Category backfill — cosine similarity above which a fact is assigned to a
     * non-general category.  Calibrated for MiniLM-L6 at 0.25; other models
     * (mpnet, nomic, OpenAI) may need different values. */

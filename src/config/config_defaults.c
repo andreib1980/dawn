@@ -313,6 +313,9 @@ void config_set_defaults(dawn_config_t *config) {
     * at weight=0.20; plateau at 0.30. Zero cost on queries without temporal
     * expressions (parser returns "not found", no boost applied).  Safe default. */
    config->memory.temporal_weight = 0.20f;
+   /* Hard temporal filter on memory.search results.  Off-by-default until
+    * bench-validated; complements (does not replace) soft temporal_weight. */
+   config->memory.temporal_filter_enabled = false;
    config->memory.category_threshold = 0.25f;
    /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
     * entity_grounding_bonus 0.4 sits between the 0.30 search floor and

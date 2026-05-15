@@ -37,6 +37,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
+#include "core/time_query_parser.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_callback_internal.h"
@@ -665,6 +666,60 @@ char *memory_action_search(int user_id,
             fact_ids[i] = facts[i].id;
          memory_db_facts_get_sources(user_id, fact_ids, fact_count, fact_conv, fact_start,
                                      fact_end);
+      }
+
+      /* Hard temporal filter (off-by-default; tier-1 candidate from the
+       * 2026-05-15 research synthesis).  When the query contains a parsed
+       * temporal expression, DROP retrieved facts whose source conversation's
+       * anchor_date is outside the parsed window.  Distinct from
+       * `temporal_weight` (soft Gaussian decay on fact.created_at): this
+       * filter targets conv.anchor_date (when the user *spoke* about the
+       * event), which is a better proxy for event time than extraction
+       * time.  Safety: if hard-drop would leave fewer than MIN_KEEP facts,
+       * keep all (parser may have misread the date; better to surface
+       * everything than starve the LLM).  Mem0 v2 empirical lift +29.6pp
+       * on temporal questions came from this style of hard metadata filter
+       * (vs DAWN's prior soft Gaussian weight). */
+      enum {
+         MEMORY_TEMPORAL_FILTER_MIN_KEEP = 3
+      };
+      if (g_config.memory.temporal_filter_enabled && with_source && fact_count > 1 && keywords &&
+          *keywords) {
+         time_query_t tq = { 0 };
+         if (time_query_parse(keywords, (int64_t)time(NULL), &tq) == 0 && tq.found &&
+             tq.target_ts > 0 && tq.window_seconds > 0) {
+            int64_t t_lo = tq.target_ts - tq.window_seconds;
+            int64_t t_hi = tq.target_ts + tq.window_seconds;
+            /* Per-fact anchor lookup — N=fact_count ≤ 10, ~1ms each on
+             * Jetson NVMe, no batch helper needed at this scale. */
+            int in_idx[10];
+            int in_count = 0;
+            for (int i = 0; i < fact_count; i++) {
+               int64_t anchor = 0;
+               if (fact_conv[i] > 0 && conv_db_get_anchor_date(fact_conv[i], &anchor) == 0 &&
+                   anchor > 0 && anchor >= t_lo && anchor <= t_hi) {
+                  in_idx[in_count++] = i;
+               }
+            }
+            /* Apply hard drop only if it leaves >= MIN_KEEP facts. */
+            if (in_count >= MEMORY_TEMPORAL_FILTER_MIN_KEEP && in_count < fact_count) {
+               memory_fact_t tmp_facts[10];
+               int64_t tmp_conv[10], tmp_start[10], tmp_end[10];
+               for (int i = 0; i < in_count; i++) {
+                  tmp_facts[i] = facts[in_idx[i]];
+                  tmp_conv[i] = fact_conv[in_idx[i]];
+                  tmp_start[i] = fact_start[in_idx[i]];
+                  tmp_end[i] = fact_end[in_idx[i]];
+               }
+               for (int i = 0; i < in_count; i++) {
+                  facts[i] = tmp_facts[i];
+                  fact_conv[i] = tmp_conv[i];
+                  fact_start[i] = tmp_start[i];
+                  fact_end[i] = tmp_end[i];
+               }
+               fact_count = in_count;
+            }
+         }
       }
 
       int elided = 0;

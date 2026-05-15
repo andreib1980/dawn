@@ -2010,6 +2010,348 @@ def run_locomo_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=None,
 
 
 # =============================================================================
+# LongMemEval — memory-pipeline mode
+# =============================================================================
+#
+# Mirror of run_locomo_memory() adapted to LongMemEval's per-question haystack
+# shape.  Each question has its own ~47-session haystack with timestamps;
+# we treat each haystack_session as a DAWN conversation (anchor_date set from
+# the session's haystack_dates entry), extract per session, then score the
+# single QA via memory_action_search.  Scoring metric: did retrieved facts'
+# source conv map to any of the question's answer_session_ids?
+#
+# Built 2026-05-15 to validate the hard temporal filter — LoCoMo questions
+# don't contain temporal anchors so the parser never fires; LongMemEval's
+# temporal-reasoning category does.  Generalizable to other question types
+# for future temporal/multi-hop work.
+
+
+def parse_longmemeval_date(s):
+   """Parse LongMemEval date strings ('2022/12/19 (Mon) 12:04') to Unix seconds.
+   Returns None if unparseable — caller should fall back to no anchor."""
+   if not s:
+      return None
+   import re as _re
+   m = _re.match(r"^(\d{4})/(\d{2})/(\d{2})\s*\([A-Za-z]+\)\s*(\d{2}):(\d{2})", s)
+   if not m:
+      return None
+   try:
+      from datetime import datetime
+      dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                    int(m.group(4)), int(m.group(5)))
+      return int(dt.timestamp())
+   except (ValueError, OverflowError):
+      return None
+
+
+def _lme_haystack_hash(entry):
+   """Stable hash over a LongMemEval entry's haystack for snapshot cache key.
+   Iterates haystack_session_ids + haystack_sessions in order; per-message
+   (role, content) tuple."""
+   h = hashlib.sha256()
+   for sid, sess in zip(entry.get("haystack_session_ids", []),
+                        entry.get("haystack_sessions", [])):
+      h.update(sid.encode("utf-8"))
+      h.update(b"\x1f")
+      for msg in sess:
+         h.update((msg.get("role", "") or "").encode("utf-8"))
+         h.update(b"\x1f")
+         h.update((msg.get("content", "") or "").encode("utf-8"))
+         h.update(b"\x1e")
+   return h.hexdigest()
+
+
+def _lme_snapshot_paths(cache_dir, engine, qidx, entry):
+   """Per-question snapshot paths.  Cache key incorporates extraction model +
+   embedding provider + question_id + haystack content hash."""
+   qid = entry.get("question_id", f"q{qidx}")
+   key_input = "\x1f".join([
+      f"v{SNAPSHOT_FORMAT_VERSION}",
+      engine.ready_info.get("extraction_provider", ""),
+      engine.ready_info.get("extraction_model", ""),
+      engine.provider,
+      str(engine.dims),
+      qid,
+      _lme_haystack_hash(entry),
+   ])
+   key = hashlib.sha256(key_input.encode("utf-8")).hexdigest()[:16]
+   db_path = Path(cache_dir) / f"lme_{key}.db"
+   map_path = Path(cache_dir) / f"lme_{key}.json"
+   return db_path, map_path, key
+
+
+def run_longmemeval_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=None,
+                           no_cache=False, judge=None, generator=None,
+                           correctness_judge=None,
+                           with_source=False, source_budget=0,
+                           question_types=None, prompt_style="strict",
+                           dump_failures_path="", qa_workers=1):
+   """Run LongMemEval through DAWN's memory-pipeline (extraction + memory_action_search).
+   Per-question haystack: each session becomes a DAWN conversation with
+   anchor_date from haystack_dates.  Retrieval scoring: covered_session_ids
+   ∩ answer_session_ids / |answer_session_ids|.  Generation scoring matches
+   LoCoMo memory-pipeline (judge/generator/correctness)."""
+   with open(dataset_path) as f:
+      data = json.load(f)
+   if question_types:
+      qt_set = set(question_types)
+      data = [e for e in data if e.get("question_type") in qt_set]
+   if limit > 0:
+      data = data[:limit]
+   if cache_dir and not no_cache:
+      Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+   primary_engine = engines[0] if isinstance(engines, list) else engines
+   gen_and_judge = generator is not None and correctness_judge is not None
+
+   dump_fp = None
+   if dump_failures_path:
+      dump_fp = open(dump_failures_path, "w")
+      print(f"  dump-failures: writing per-Q records to {dump_failures_path}",
+            file=sys.stderr)
+   t0 = time.time()
+
+   def process_one_question(engine, qidx, entry):
+      """Per-question worker — extract haystack OR load cache, score the single
+      QA, return aggregated result dict.  Each call is independent — engine is
+      reset, fresh memory built per question."""
+      qid = entry.get("question_id", f"q{qidx}")
+      cr = {
+         "qidx": qidx,
+         "qid": qid,
+         "question_type": entry.get("question_type", "unknown"),
+         "per_qa_records": [],
+         "recall": None,
+         "generation": None,
+         "gen_failure": False,
+         "corr_failure": False,
+         "facts_added": 0,
+         "extractions": 0,
+         "extract_seconds": 0.0,
+         "cache_hit": False,
+         "cache_miss": False,
+      }
+
+      # Cache lookup
+      cache_hit = False
+      db_path = map_path = None
+      cache_key = None
+      if cache_dir and not no_cache:
+         db_path, map_path, cache_key = _lme_snapshot_paths(cache_dir, engine, qidx, entry)
+         if db_path.exists() and map_path.exists():
+            try:
+               lresp = engine.snapshot_load(db_path, map_path)
+               if lresp.get("status") == "ok":
+                  cache_hit = True
+                  cr["cache_hit"] = True
+                  print(f"  [Q {qidx} {cr['question_type']}] cache HIT "
+                        f"facts={lresp.get('facts', 0)}", file=sys.stderr)
+            except Exception as exc:
+               print(f"  [Q {qidx}] snapshot_load failed ({exc})",
+                     file=sys.stderr)
+
+      if not cache_hit:
+         cr["cache_miss"] = True
+         engine.reset_memory()
+         session_ids = entry.get("haystack_session_ids", [])
+         sessions = entry.get("haystack_sessions", [])
+         dates = entry.get("haystack_dates", [])
+         for si, (sid, sess) in enumerate(zip(session_ids, sessions)):
+            ts = parse_longmemeval_date(dates[si]) if si < len(dates) else None
+            cresp = engine.conv_create(title=f"lme_{qid}_{sid}", anchor_date=ts)
+            conv_id = cresp.get("conv_id")
+            if not conv_id:
+               continue
+            dia_idx = 0
+            for msg in sess:
+               content = msg.get("content", "")
+               if not content:
+                  continue
+               role = msg.get("role", "user")
+               dia_id = f"{sid}_t{dia_idx}"
+               engine.add_message(conv_id, dia_id, role, content)
+               dia_idx += 1
+            eresp = engine.extract(conv_id, session_id=f"lme_{qid}_{sid}",
+                                   timeout_ms=600000, anchor_date=ts)
+            cr["extractions"] += 1
+            cr["extract_seconds"] += eresp.get("duration_ms", 0) / 1000.0
+            cr["facts_added"] += eresp.get("facts_added", 0)
+         print(f"  [Q {qidx} {cr['question_type']}] extracted facts={cr['facts_added']} "
+               f"sessions={cr['extractions']} dur={cr['extract_seconds']:.1f}s",
+               file=sys.stderr)
+         if cache_dir and not no_cache and db_path and map_path:
+            try:
+               sresp = engine.snapshot_save(db_path, map_path)
+               if sresp.get("status") == "ok":
+                  print(f"  [Q {qidx}] cache SAVE key={cache_key} "
+                        f"facts={sresp.get('facts', 0)}", file=sys.stderr)
+            except Exception as exc:
+               print(f"  [Q {qidx}] snapshot_save error: {exc}",
+                     file=sys.stderr)
+
+      # Score the single QA
+      question = entry.get("question", "")
+      gold_answer = str(entry.get("answer", "") or "")
+      answer_sids = set(entry.get("answer_session_ids", []))
+
+      qresp = engine.query_memory(question, top_k=top_k)
+      retrieved = qresp.get("results", [])
+      # Map covered dia_ids back to session_ids via the "{sid}_t{idx}" prefix.
+      covered_sids = set()
+      for r in retrieved:
+         for dia in r.get("covered_dia_ids", []):
+            if "_t" in dia:
+               covered_sids.add(dia.rsplit("_t", 1)[0])
+      recall = (len(covered_sids & answer_sids) / max(1, len(answer_sids))) if answer_sids else 0.0
+      cr["recall"] = recall
+
+      memory_text = None
+      generated = None
+      corr_score = None
+      if gen_and_judge and gold_answer:
+         if with_source:
+            cbresp = engine.query_memory_callback(question, with_source=True,
+                                                  source_budget=source_budget)
+            memory_text = cbresp.get("text", "")
+            generated, _ = generator.generate_from_memory_text(question, memory_text)
+         else:
+            fact_texts = [r.get("text", "") for r in retrieved if r.get("text")]
+            generated, _ = generator.generate(question, fact_texts)
+         if generated is None:
+            cr["gen_failure"] = True
+         else:
+            corr_score, _ = correctness_judge.judge(question, gold_answer, generated)
+            if corr_score is None:
+               cr["corr_failure"] = True
+            else:
+               cr["generation"] = corr_score
+
+      cr["per_qa_records"].append({
+         "qidx": qidx,
+         "question_id": qid,
+         "question_type": cr["question_type"],
+         "question": question,
+         "gold_answer": gold_answer,
+         "answer_session_ids": sorted(answer_sids),
+         "retrieved_session_ids": sorted(covered_sids),
+         "recall": recall,
+         "memory_text": memory_text,
+         "generated": generated,
+         "correctness": corr_score,
+      })
+
+      gen_disp = "-" if corr_score is None else f"{corr_score:.0f}"
+      print(f"  [Q {qidx} {cr['question_type']} done] recall={recall:.3f} gen={gen_disp}",
+            file=sys.stderr)
+      return cr
+
+   # Dispatcher — parallel across questions when len(engines) > 1.
+   per_q_results = []
+   if isinstance(engines, list) and len(engines) > 1:
+      eq = queue.Queue()
+      for e in engines:
+         eq.put(e)
+
+      def _worker(idx_entry):
+         qidx, entry = idx_entry
+         eng = eq.get()
+         try:
+            return process_one_question(eng, qidx, entry)
+         finally:
+            eq.put(eng)
+
+      with ThreadPoolExecutor(max_workers=len(engines)) as pool:
+         for cr in pool.map(_worker, list(enumerate(data))):
+            per_q_results.append(cr)
+   else:
+      eng = engines[0] if isinstance(engines, list) else engines
+      for qidx, entry in enumerate(data):
+         per_q_results.append(process_one_question(eng, qidx, entry))
+
+   # Aggregator
+   all_recall = []
+   all_generation = []
+   per_type = {}
+   per_type_generation = {}
+   per_type_gen_fail = {}
+   per_type_corr_fail = {}
+   total_q_evaluated = 0
+   total_facts = 0
+   total_extractions = 0
+   total_extract_seconds = 0.0
+   cache_hits = 0
+   cache_misses = 0
+   for cr in per_q_results:
+      qt = cr["question_type"]
+      if cr["recall"] is not None:
+         all_recall.append(cr["recall"])
+         per_type.setdefault(qt, []).append(cr["recall"])
+         total_q_evaluated += 1
+      if cr["generation"] is not None:
+         all_generation.append(cr["generation"])
+         per_type_generation.setdefault(qt, []).append(cr["generation"])
+      if cr["gen_failure"]:
+         per_type_gen_fail[qt] = per_type_gen_fail.get(qt, 0) + 1
+      if cr["corr_failure"]:
+         per_type_corr_fail[qt] = per_type_corr_fail.get(qt, 0) + 1
+      total_facts += cr["facts_added"]
+      total_extractions += cr["extractions"]
+      total_extract_seconds += cr["extract_seconds"]
+      if cr["cache_hit"]:
+         cache_hits += 1
+      if cr["cache_miss"]:
+         cache_misses += 1
+      if dump_fp is not None:
+         for rec in cr["per_qa_records"]:
+            dump_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+   if dump_fp is not None:
+      dump_fp.close()
+      print(f"  dump-failures: wrote {total_q_evaluated} per-Q records to "
+            f"{dump_failures_path}", file=sys.stderr)
+
+   elapsed = time.time() - t0
+   results = {
+      "mode": "longmemeval-memory-pipeline",
+      "granularity": "per_lme_question",
+      "scoring": "recall = |retrieved_session_ids ∩ answer_session_ids| / |answer_session_ids|",
+      "prompt_style": prompt_style,
+      "question_types": sorted(question_types) if question_types else "all",
+      "extraction_provider": primary_engine.ready_info.get("extraction_provider", ""),
+      "extraction_model": primary_engine.ready_info.get("extraction_model", ""),
+      "total_q_evaluated": total_q_evaluated,
+      "questions": len(data),
+      "total_facts_extracted": total_facts,
+      "total_extractions": total_extractions,
+      "extraction_total_seconds": total_extract_seconds,
+      "cache_hits": cache_hits,
+      "cache_misses": cache_misses,
+      "elapsed_seconds": elapsed,
+      "avg_recall_session": sum(all_recall) / len(all_recall) if all_recall else 0,
+      "per_type_recall": {qt: sum(v) / len(v) for qt, v in sorted(per_type.items())},
+   }
+   if gen_and_judge:
+      results["generator_model"] = generator.model
+      results["generator_provider"] = generator.provider
+      results["with_source"] = bool(with_source)
+      results["source_budget"] = int(source_budget)
+      results["generator_calls_made"] = generator.calls_made
+      results["generator_cache_hits"] = generator.cache_hits
+      results["generator_failures"] = generator.failures
+      results["correctness_calls_made"] = correctness_judge.calls_made
+      results["correctness_cache_hits"] = correctness_judge.cache_hits
+      results["correctness_failures"] = correctness_judge.failures
+      results["recall_generation"] = (
+         sum(all_generation) / len(all_generation) if all_generation else 0)
+      results["generation_evaluated"] = len(all_generation)
+      results["per_type_generation"] = {
+         qt: sum(v) / len(v) for qt, v in sorted(per_type_generation.items())}
+      results["per_type_gen_failures"] = dict(sorted(per_type_gen_fail.items()))
+      results["per_type_corr_failures"] = dict(sorted(per_type_corr_fail.items()))
+   return results
+
+
+# =============================================================================
 # ConvoMem Benchmark
 # =============================================================================
 
@@ -2611,6 +2953,16 @@ def main():
       "Set 1 to force sequential (debug). Memory-pipeline LoCoMo only.",
    )
    parser.add_argument(
+      "--question-types",
+      default="",
+      dest="question_types",
+      help="LongMemEval memory-pipeline only: comma-separated question_type "
+      "filter (e.g., 'temporal-reasoning' or 'multi-session,knowledge-update'). "
+      "Empty = all types. Categories in longmemeval_s_cleaned.json: "
+      "single-session-user, multi-session, single-session-preference, "
+      "temporal-reasoning, knowledge-update, single-session-assistant.",
+   )
+   parser.add_argument(
       "--conv-workers",
       type=int,
       default=1,
@@ -2700,7 +3052,8 @@ def _run_one(args, extraction_provider, extraction_model):
    tag = f", extraction={extraction_provider}:{extraction_model}" if extraction_model else ""
    # conv_workers > 1 only matters for the LoCoMo memory-pipeline path.
    n_engines = 1
-   if args.benchmark == "locomo" and args.memory_pipeline and args.conv_workers > 1:
+   if args.memory_pipeline and args.conv_workers > 1 \
+         and args.benchmark in ("locomo", "longmemeval"):
       n_engines = max(1, int(args.conv_workers))
    print(f"  Starting {n_engines} bench_retrieval subprocess(es) "
          f"({args.provider}, {mode_label}{tag})...", file=sys.stderr)
@@ -2715,10 +3068,46 @@ def _run_one(args, extraction_provider, extraction_model):
 
    try:
       if args.benchmark == "longmemeval":
-         gran = "turn" if args.granularity == "turn" else "session"
-         results = run_longmemeval(
-            e0, args.dataset, limit=args.limit,
-            granularity=gran, turn_scoring=args.turn_scoring)
+         if args.memory_pipeline:
+            # Memory-pipeline mode: extract haystack via memory_callback,
+            # score recall via session-overlap + judge/gen/correctness like LoCoMo.
+            resolved_style = apply_prompt_style(args.prompt_style)
+            if resolved_style != args.prompt_style:
+               print(f"  prompt-style: '{args.prompt_style}' unrecognized; using "
+                     f"'strict'.", file=sys.stderr)
+            else:
+               print(f"  prompt-style: {resolved_style}", file=sys.stderr)
+            judge = make_entailment_judge(args)
+            generator = make_generator(args)
+            correctness_judge = make_correctness_judge(args) if generator else None
+            if args.generator_model and not args.judge_model:
+               print("  generator: --generator-model requires --judge-model "
+                     "(needed for correctness verdict). Generation disabled.",
+                     file=sys.stderr)
+               generator = None
+               correctness_judge = None
+            qt_filter = []
+            if args.question_types:
+               for tok in args.question_types.split(","):
+                  tok = tok.strip()
+                  if tok:
+                     qt_filter.append(tok)
+            results = run_longmemeval_memory(
+               engines, args.dataset, limit=args.limit, top_k=args.top_k,
+               cache_dir=args.cache_dir, no_cache=args.no_cache,
+               judge=judge, generator=generator,
+               correctness_judge=correctness_judge,
+               with_source=args.with_source,
+               source_budget=args.source_budget,
+               question_types=qt_filter,
+               prompt_style=args.prompt_style,
+               dump_failures_path=args.dump_failures,
+               qa_workers=args.qa_workers)
+         else:
+            gran = "turn" if args.granularity == "turn" else "session"
+            results = run_longmemeval(
+               e0, args.dataset, limit=args.limit,
+               granularity=gran, turn_scoring=args.turn_scoring)
       elif args.benchmark == "locomo":
          if args.memory_pipeline:
             # Apply --prompt-style BEFORE constructing judges/generators so

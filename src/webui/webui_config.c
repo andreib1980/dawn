@@ -782,6 +782,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_DOUBLE(section, "embedding_vector_weight",
                             config->memory.embedding_vector_weight);
       JSON_TO_CONFIG_DOUBLE(section, "temporal_weight", config->memory.temporal_weight);
+      JSON_TO_CONFIG_BOOL(section, "temporal_filter_enabled",
+                          config->memory.temporal_filter_enabled);
       JSON_TO_CONFIG_DOUBLE(section, "category_threshold", config->memory.category_threshold);
       JSON_TO_CONFIG_DOUBLE(section, "search_score_floor", config->memory.search_score_floor);
       {
