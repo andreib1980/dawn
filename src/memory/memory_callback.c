@@ -71,12 +71,32 @@
  * ~12 KiB for the budget sweep, so the cap is set well above that. */
 #define MEMORY_SOURCE_BUDGET_MAX (32 * 1024)
 
+/* Per-fact cap on how many messages from a fact's provenance range are
+ * emitted as verbatim source excerpts.  Replaces the pre-2026-05-14 behavior
+ * that dumped EVERY message in the range — for facts whose provenance spans
+ * a whole session (e.g., msgs=59-76, 18 messages) that produced ~10 KB of
+ * mostly off-topic dialog per fact and the generator (gpt-4o-mini under the
+ * Mem0 protocol's <6-word constraint) refused to answer ~60% of the time
+ * despite the gold answer being present in the excerpt.  Top-K selection
+ * shrinks per-fact noise; ranking by (query + fact_text) token overlap
+ * surfaces the dialog turn(s) most likely to evidence the fact.  Bench
+ * validated on LoCoMo 1536 QA — see /tmp/locomo_failures.jsonl analysis. */
+#define MEMORY_SOURCE_TOP_MESSAGES 3
+
 /* =============================================================================
  * Helper: Append verbatim source excerpt for a (conv_id, msg-range) tuple
  * (with_source=true).
  *
  * Appends "[source: conv=N msgs=X-Y]\n<role>: <content>\n..." to buf.
  * Respects the shared budget; returns 1 if anything rendered, 0 otherwise.
+ *
+ * Selection: up to MEMORY_SOURCE_TOP_MESSAGES messages from the range are
+ * emitted, picked by case-insensitive substring overlap against the
+ * (query + fact_text) token set.  When that score set is empty (or all
+ * messages tie at zero), insertion order wins — the first K user/assistant
+ * messages of the range.  Tool / system messages are skipped.  Emitted
+ * messages are re-sorted into original dialog order so the excerpt reads
+ * coherently regardless of which K were picked.
  *
  * Dedup: when a non-NULL source_dedup_set_t is passed, repeated ranges emit a
  * single back-ref line ("[source: same as above ...]") instead of refetching
@@ -85,44 +105,107 @@
  * leak its existence as a "same as above" marker on a later public record.
  * ============================================================================= */
 
-struct source_msg_ctx {
-   strbuf_t *sb;
-   int *budget;
+/* Forward decl — defined later in this file. */
+static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens);
+
+struct top_k_slot {
+   int score; /* token-overlap score */
+   int order; /* position in the original message stream, for stable emit order */
+   char role[16];
+   char content[520];
 };
+
+struct top_k_collector {
+   struct top_k_slot slots[MEMORY_SOURCE_TOP_MESSAGES];
+   int filled;
+   int min_idx;        /* index of lowest-score slot, recomputed on each replace */
+   char tokens[8][64]; /* MAX_SEARCH_TOKENS from tokenize_query; redeclared here so this block
+                          precedes its definition */
+   int n_tokens;
+   int seen; /* count of user/assistant messages observed; monotonic emit order */
+};
+
+static int score_against_tokens(const char *content, const char tokens[][64], int n_tokens) {
+   if (n_tokens <= 0 || !content)
+      return 0;
+   int score = 0;
+   for (int i = 0; i < n_tokens; i++) {
+      if (tokens[i][0] && strcasestr(content, tokens[i]))
+         score++;
+   }
+   return score;
+}
+
+static int collect_top_k_callback(const conversation_message_t *msg, void *ctx_ptr) {
+   struct top_k_collector *ctx = (struct top_k_collector *)ctx_ptr;
+   if (!ctx || !msg || !msg->content)
+      return 1;
+   if (strcmp(msg->role, "user") != 0 && strcmp(msg->role, "assistant") != 0)
+      return 0;
+
+   int score = score_against_tokens(msg->content, ctx->tokens, ctx->n_tokens);
+   int order = ctx->seen++;
+
+   if (ctx->filled < MEMORY_SOURCE_TOP_MESSAGES) {
+      struct top_k_slot *s = &ctx->slots[ctx->filled];
+      s->score = score;
+      s->order = order;
+      snprintf(s->role, sizeof(s->role), "%s", msg->role);
+      snprintf(s->content, sizeof(s->content), "%s", msg->content);
+      ctx->filled++;
+      if (ctx->filled == MEMORY_SOURCE_TOP_MESSAGES) {
+         ctx->min_idx = 0;
+         for (int i = 1; i < MEMORY_SOURCE_TOP_MESSAGES; i++) {
+            if (ctx->slots[i].score < ctx->slots[ctx->min_idx].score)
+               ctx->min_idx = i;
+         }
+      }
+      return 0;
+   }
+
+   /* Strictly greater so an early high-scoring message holds its slot
+    * against a later tie — preserves first-occurrence preference on ties. */
+   if (score > ctx->slots[ctx->min_idx].score) {
+      struct top_k_slot *s = &ctx->slots[ctx->min_idx];
+      s->score = score;
+      s->order = order;
+      snprintf(s->role, sizeof(s->role), "%s", msg->role);
+      snprintf(s->content, sizeof(s->content), "%s", msg->content);
+      ctx->min_idx = 0;
+      for (int i = 1; i < MEMORY_SOURCE_TOP_MESSAGES; i++) {
+         if (ctx->slots[i].score < ctx->slots[ctx->min_idx].score)
+            ctx->min_idx = i;
+      }
+   }
+   return 0;
+}
+
+static int slot_order_cmp(const void *a, const void *b) {
+   const struct top_k_slot *aa = (const struct top_k_slot *)a;
+   const struct top_k_slot *bb = (const struct top_k_slot *)b;
+   return aa->order - bb->order;
+}
 
 /* source_dedup_seen / source_dedup_add live in memory_source_dedup.c so unit
  * tests can link them without the full memory_callback dependency cone. */
-
-static int source_msg_callback(const conversation_message_t *msg, void *ctx_ptr) {
-   struct source_msg_ctx *ctx = (struct source_msg_ctx *)ctx_ptr;
-   if (!ctx || !ctx->sb || !ctx->budget || !msg || !msg->content || *ctx->budget <= 0)
-      return 1; /* stop */
-   /* Skip system/tool messages in verbatim excerpt */
-   if (strcmp(msg->role, "user") != 0 && strcmp(msg->role, "assistant") != 0)
-      return 0;
-   int written = strbuf_appendf(ctx->sb, "%s: %.500s\n", msg->role, msg->content);
-   if (written < 0) {
-      /* STRBUF_E_OOM — buffer cap exhausted.  Drain budget so the caller's
-       * outer loop also bails (memory_action_search checks strbuf_oom after
-       * each excerpt, but zeroing budget short-circuits any other consumers
-       * that watch budget rather than oom). */
-      *ctx->budget = 0;
-      return 1;
-   }
-   *ctx->budget -= written;
-   return 0;
-}
 
 /* Core renderer — caller passes a (conv_id, range) triple already filtered
  * upstream (typically from a *_get_sources batch API which excludes private
  * conversations in SQL).  Caller is responsible for passing conv_id > 0;
  * conv_id = 0 means "no provenance" and we silently skip.
  *
+ * `query` and `fact_text` are optional scoring signals.  When non-NULL, they
+ * are concatenated and tokenized so messages in the range can be ranked by
+ * substring overlap.  When both are NULL (or yield zero tokens), the first
+ * K user/assistant messages of the range are emitted in original order.
+ *
  * `seen` may be NULL to disable dedup. */
 static int append_source_excerpt_from_range(int user_id,
                                             int64_t conv_id,
                                             int64_t start_id,
                                             int64_t end_id,
+                                            const char *query,
+                                            const char *fact_text,
                                             strbuf_t *sb,
                                             int *budget_remaining,
                                             source_dedup_set_t *seen) {
@@ -144,17 +227,67 @@ static int append_source_excerpt_from_range(int user_id,
       return 1;
    }
 
-   /* Header */
+   /* Build scoring token set from (query + fact_text).  Either may be NULL.
+    * 512 chars is plenty for a tokenizer that hard-caps at 8 tokens of ≤64
+    * chars; tokenize_query truncates internally if its 512-byte buffer
+    * overflows.  If both inputs are absent, n_tokens stays 0 and the
+    * top-K collector degrades to first-K insertion order. */
+   struct top_k_collector coll = { 0 };
+   if ((query && *query) || (fact_text && *fact_text)) {
+      char score_buf[512];
+      int q_len = (query && *query) ? snprintf(score_buf, sizeof(score_buf), "%s", query) : 0;
+      if (q_len < 0)
+         q_len = 0;
+      if (fact_text && *fact_text && (size_t)q_len < sizeof(score_buf) - 1) {
+         if (q_len > 0 && (size_t)q_len < sizeof(score_buf) - 1) {
+            score_buf[q_len++] = ' ';
+            score_buf[q_len] = '\0';
+         }
+         snprintf(score_buf + q_len, sizeof(score_buf) - (size_t)q_len, "%s", fact_text);
+      }
+      coll.n_tokens = tokenize_query(score_buf, coll.tokens,
+                                     (int)(sizeof(coll.tokens) / sizeof(coll.tokens[0])));
+   }
+
+   /* Collect candidates — cap range at 500 messages per dedup spec; the
+    * top-K collector reduces the emit set further to MEMORY_SOURCE_TOP_MESSAGES. */
+   int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
+   conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, /*include_private=*/false,
+                                 collect_top_k_callback, &coll);
+
+   if (coll.filled == 0) {
+      /* No emittable user/assistant messages in this range (e.g., the
+       * provenance pointed at tool/system messages only).  Skip header
+       * AND skip dedup — a later identical range with real content should
+       * still get a chance to render. */
+      return 0;
+   }
+
+   /* Sort picks back into original dialog order so the excerpt reads
+    * coherently even though we cherry-picked by score. */
+   if (coll.filled > 1)
+      qsort(coll.slots, (size_t)coll.filled, sizeof(struct top_k_slot), slot_order_cmp);
+
+   /* Header — emitted only when we have something to render under it. */
    int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]\n", (long long)conv_id,
                             (long long)start_id, (long long)end_id);
    if (hdr > 0)
       *budget_remaining -= hdr;
 
-   /* Verbatim messages — cap range at 500 messages per spec */
-   int64_t capped_end = (end_id - start_id > 500) ? start_id + 500 : end_id;
-   struct source_msg_ctx msg_ctx = { sb, budget_remaining };
-   conv_db_get_messages_by_range(conv_id, user_id, start_id, capped_end, /*include_private=*/false,
-                                 source_msg_callback, &msg_ctx);
+   for (int i = 0; i < coll.filled; i++) {
+      if (*budget_remaining <= 0)
+         break;
+      int written = strbuf_appendf(sb, "%s: %.500s\n", coll.slots[i].role, coll.slots[i].content);
+      if (written < 0) {
+         /* STRBUF_E_OOM — buffer cap exhausted.  Drain budget so the
+          * caller's outer loop also bails (memory_action_search checks
+          * strbuf_oom after each excerpt, but zeroing budget short-circuits
+          * any other consumers that watch budget rather than oom). */
+         *budget_remaining = 0;
+         break;
+      }
+      *budget_remaining -= written;
+   }
 
    /* Mark range as seen — only after a successful (privacy-filtered) fetch. */
    source_dedup_add(seen, conv_id, start_id, end_id);
@@ -386,8 +519,9 @@ static void append_graph_context(int user_id,
       for (int r = 0; r < rel_count; r++) {
          strbuf_appendf(sb, "  %s: %s\n", rels[r].relation, rels[r].object_name);
          if (render_rel_source && out_conv[r] > 0 && *source_budget > 0) {
-            append_source_excerpt_from_range(user_id, out_conv[r], out_start[r], out_end[r], sb,
-                                             source_budget, seen);
+            append_source_excerpt_from_range(user_id, out_conv[r], out_start[r], out_end[r],
+                                             keywords, rels[r].object_name, sb, source_budget,
+                                             seen);
             if (strbuf_oom(sb))
                return;
          }
@@ -541,8 +675,9 @@ char *memory_action_search(int user_id,
                         facts[i].fact_text, facts[i].confidence * 100, time_str);
 
          if (with_source && source_budget > 0 && fact_conv[i] > 0) {
-            append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i], &sb,
-                                             &source_budget, &seen);
+            append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i],
+                                             keywords, facts[i].fact_text, &sb, &source_budget,
+                                             &seen);
          } else if (with_source && source_budget <= 0) {
             elided++;
          }
@@ -584,8 +719,8 @@ char *memory_action_search(int user_id,
          strbuf_appendf(&sb, "- %s: %s (reinforced %d times)\n", prefs[i].category, prefs[i].value,
                         prefs[i].reinforcement_count);
          if (with_source && source_budget > 0 && pref_conv[i] > 0) {
-            append_source_excerpt_from_range(user_id, pref_conv[i], pref_start[i], pref_end[i], &sb,
-                                             &source_budget, &seen);
+            append_source_excerpt_from_range(user_id, pref_conv[i], pref_start[i], pref_end[i],
+                                             keywords, prefs[i].value, &sb, &source_budget, &seen);
             if (strbuf_oom(&sb))
                break;
          }
@@ -651,8 +786,9 @@ char *memory_action_search(int user_id,
          strbuf_appendf(&sb, "- [%s] %s\n  Topics: %s\n", time_str, summaries[i].summary,
                         summaries[i].topics);
          if (with_source && source_budget > 0 && sum_conv[i] > 0) {
-            append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i], &sb,
-                                             &source_budget, &seen);
+            append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i],
+                                             keywords, summaries[i].summary, &sb, &source_budget,
+                                             &seen);
             if (strbuf_oom(&sb))
                break;
          }
@@ -922,8 +1058,11 @@ char *memory_action_recent(int user_id,
          strbuf_appendf(&sb, "- [ID:%lld] %s (%s, %s)\n", (long long)facts[i].id,
                         facts[i].fact_text, facts[i].source, time_str);
          if (with_source && source_budget > 0 && fact_conv[i] > 0) {
-            append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i], &sb,
-                                             &source_budget, &seen);
+            /* memory_action_recent is time-windowed, not query-driven — pass
+             * NULL for the query scoring slot and use the fact_text alone
+             * to rank dialog messages within the provenance range. */
+            append_source_excerpt_from_range(user_id, fact_conv[i], fact_start[i], fact_end[i],
+                                             NULL, facts[i].fact_text, &sb, &source_budget, &seen);
          } else if (with_source && source_budget <= 0) {
             elided++;
          }
@@ -971,8 +1110,9 @@ char *memory_action_recent(int user_id,
                             summaries[i].topics) < 0)
             break;
          if (with_source && source_budget > 0 && sum_conv[i] > 0) {
-            append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i], &sb,
-                                             &source_budget, &seen);
+            /* Time-windowed (no query) — see fact branch above. */
+            append_source_excerpt_from_range(user_id, sum_conv[i], sum_start[i], sum_end[i], NULL,
+                                             summaries[i].summary, &sb, &source_budget, &seen);
          }
          /* Mirror memory_action_search's OOM-bail pattern (Arch review M4). */
          if (strbuf_oom(&sb))
