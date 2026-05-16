@@ -33,24 +33,19 @@ high-level adaptations are summarized here:
      into C as memory_bm25_get_params() / memory_bm25_normalize().
 
   2. Extraction prompt specificity rules — proper-noun preservation, numerical
-     precision, qualifier preservation, no-echo, no-meta-extraction, and
-     "casual topics are still extractable" framing.  Adapted verbatim or
-     near-verbatim from
+     precision, qualifier preservation, no-meta-extraction with wrong/right
+     examples, and "casual topics are still extractable" framing.  Adapted
+     verbatim or near-verbatim from
          mem0/configs/prompts.py::ADDITIVE_EXTRACTION_PROMPT
      into D.A.W.N.'s MEMORY_EXTRACTION_PROMPT_TEMPLATE (in
      src/memory/memory_extraction.c).
 
-  3. Spread-attenuated entity boost formula
-         boost = similarity * 0.5 * 1 / (1 + 0.001 * (n - 1)^2)
-     ported from Mem0's entity-grounding logic into
-         src/memory/memory_graph_retrieval.c.
-
-  4. The architectural pattern of an additive (semantic + keyword + entity)
-     scoring composition with an adaptive max-possible divisor (see
+  3. The architectural pattern of an additive (semantic + keyword + entity)
+     scoring composition (see
          mem0/utils/scoring.py::score_and_rank
-     ).  D.A.W.N.'s composition retains semantic-dominant weighting (0.6:0.4)
-     rather than Mem0's equal weighting; see docs/MEM0_ARCHITECTURAL_PARITY.md
-     for the rationale.
+     ).  D.A.W.N.'s composition retains semantic-dominant weighting (0.3
+     keyword : 0.7 vector) rather than Mem0's softer weighting; see
+     docs/MEM0_ARCHITECTURAL_PARITY.md for the rationale.
 
 Changes from upstream Mem0:
 
@@ -60,6 +55,16 @@ Changes from upstream Mem0:
   - Extraction prompt preserves D.A.W.N.'s atomic-with-composite-exception
     fact-shape philosophy and entity-graph contract; Mem0's "contextually
     rich, not atomic" guidance is deliberately not adopted.
+  - Mem0's no-echo rule (filter out facts the assistant restated from user
+    turns) is deliberately not adopted — bench-validated as over-aggressive
+    against D.A.W.N.'s existing provenance + source-excerpt machinery, which
+    already disambiguates the originating turn.
+  - Mem0's spread-attenuated entity boost
+        boost = similarity * 0.5 * 1 / (1 + 0.001 * (n - 1)^2)
+    is deliberately not adopted — bench-validated as structurally redundant
+    with D.A.W.N.'s entity-graph 1-hop retrieval (Phase 1A, May 2026), which
+    achieves the same "cap high-degree entities from dominating" goal via a
+    different mechanism (per-seed fan-out budget + dedup across seeds).
   - Output composition includes facts + preferences + summaries + entity-graph
     block, configurable via dawn.toml.  Mem0's facts-only collapse is one
     optional mode (memory_text_minimal), not the default.
