@@ -58,6 +58,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <json-c/json.h>
+#include <openssl/sha.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdbool.h>
@@ -1218,6 +1219,30 @@ static int copy_file(const char *src, const char *dst) {
    return rc;
 }
 
+/* SHA-256 of the live MEMORY_EXTRACTION_PROMPT_TEMPLATE body, lowercase hex.
+ * Computed once on first call and cached.  Used by both the ready-message
+ * publisher (so the Python harness can mix it into its cache key) and by the
+ * snapshot save/load path (so a stale snapshot is detected at load time
+ * instead of silently corrupting bench numbers).
+ *
+ * See benchmarks/run_benchmark.py for the matching consumer. */
+const char *bench_mp_extraction_prompt_sha256(void) {
+   static char hex[SHA256_DIGEST_LENGTH * 2 + 1] = { 0 };
+   static int computed = 0;
+   if (computed)
+      return hex;
+   const char *tmpl = MEMORY_EXTRACTION_PROMPT_TEMPLATE;
+   size_t tmpl_len = tmpl ? strlen(tmpl) : 0;
+   unsigned char digest[SHA256_DIGEST_LENGTH];
+   SHA256((const unsigned char *)(tmpl ? tmpl : ""), tmpl_len, digest);
+   for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+      snprintf(hex + i * 2, 3, "%02x", digest[i]);
+   }
+   hex[SHA256_DIGEST_LENGTH * 2] = '\0';
+   computed = 1;
+   return hex;
+}
+
 static int handle_snapshot_save(struct json_object *cmd) {
    struct json_object *db_obj = NULL, *map_obj = NULL;
    if (!json_object_object_get_ex(cmd, "db_path", &db_obj) ||
@@ -1254,7 +1279,13 @@ static int handle_snapshot_save(struct json_object *cmd) {
       return 1;
    }
 
-   /* Persist dia_map alongside.  JSON: [{dia_id, msg_id}, ...] */
+   /* Persist dia_map + extraction prompt fingerprint.  Wrapper-object shape:
+    *   {extraction_prompt_sha256: "<hex>",
+    *    dia_map: [{dia_id, msg_id}, ...]}
+    * The wrapper lets snapshot_load refuse a stale snapshot whose prompt
+    * differs from the running code's prompt (otherwise the harness would
+    * compare apples to oranges).  Bare-array files from older bench builds
+    * still parse (back-compat in handle_snapshot_load below). */
    struct json_object *arr = json_object_new_array();
    for (int i = 0; i < s_dia_map_count; i++) {
       struct json_object *e = json_object_new_object();
@@ -1262,8 +1293,12 @@ static int handle_snapshot_save(struct json_object *cmd) {
       json_object_object_add(e, "msg_id", json_object_new_int64(s_dia_map[i].msg_id));
       json_object_array_add(arr, e);
    }
-   int wrote = json_object_to_file_ext(map_path, arr, JSON_C_TO_STRING_PLAIN);
-   json_object_put(arr);
+   struct json_object *wrapper = json_object_new_object();
+   json_object_object_add(wrapper, "extraction_prompt_sha256",
+                          json_object_new_string(bench_mp_extraction_prompt_sha256()));
+   json_object_object_add(wrapper, "dia_map", arr); /* takes ownership */
+   int wrote = json_object_to_file_ext(map_path, wrapper, JSON_C_TO_STRING_PLAIN);
+   json_object_put(wrapper);
    if (wrote != 0) {
       unlink(db_path);
       respond_error("snapshot_save: write map_path failed");
@@ -1298,6 +1333,63 @@ static int handle_snapshot_load(struct json_object *cmd) {
       return 1;
    }
 
+   /* Pre-flight: parse map_path BEFORE the destructive teardown so we can
+    * validate the extraction-prompt fingerprint and bail with no side effects
+    * on mismatch.  Wrapper shape:
+    *   {extraction_prompt_sha256: "<hex>", dia_map: [...]}
+    * A bare array (legacy pre-fingerprint snapshots) is rejected loudly — we
+    * deliberately refuse silent fall-through to re-extraction because a fresh
+    * extraction costs real $ in LLM calls and the user expected a cache hit. */
+   struct json_object *map_root = json_object_from_file(map_path);
+   if (!map_root) {
+      respond_error("snapshot_load: parse map_path failed");
+      return 1;
+   }
+   struct json_object *dia_arr = NULL;
+   const char *stored_hash = NULL;
+   if (json_object_is_type(map_root, json_type_object)) {
+      struct json_object *jhash = NULL, *jarr = NULL;
+      if (json_object_object_get_ex(map_root, "extraction_prompt_sha256", &jhash))
+         stored_hash = json_object_get_string(jhash);
+      if (json_object_object_get_ex(map_root, "dia_map", &jarr) &&
+          json_object_is_type(jarr, json_type_array)) {
+         dia_arr = jarr;
+      }
+   } else if (json_object_is_type(map_root, json_type_array)) {
+      /* Legacy bare-array snapshot (pre-fingerprint).  Reject loudly. */
+      json_object_put(map_root);
+      char err[512];
+      snprintf(err, sizeof(err),
+               "snapshot_load: legacy snapshot lacks extraction_prompt_sha256 "
+               "(map_path=%s).  This snapshot predates the prompt-hash cache "
+               "key and CANNOT be safely reused — its extracted facts may "
+               "have come from a different extraction prompt.  Re-run without "
+               "this cache dir, or delete the snapshot files.",
+               map_path);
+      respond_error(err);
+      return 1;
+   }
+   if (!stored_hash || !dia_arr) {
+      json_object_put(map_root);
+      respond_error("snapshot_load: map_path missing extraction_prompt_sha256 "
+                    "or dia_map");
+      return 1;
+   }
+   const char *current_hash = bench_mp_extraction_prompt_sha256();
+   if (strcmp(stored_hash, current_hash) != 0) {
+      char err[768];
+      snprintf(err, sizeof(err),
+               "snapshot_load: extraction prompt hash mismatch.  "
+               "snapshot=%s current=%s map_path=%s.  Snapshot was produced "
+               "under a different extraction prompt; reusing it would compare "
+               "apples to oranges.  Use a fresh --cache-dir or delete the "
+               "stale snapshot files.",
+               stored_hash, current_hash, map_path);
+      json_object_put(map_root);
+      respond_error(err);
+      return 1;
+   }
+
    /* Tear down current DB cleanly (finalizes all 43 prepared statements,
     * checkpoints WAL, closes the handle).  s_db.initialized goes false. */
    auth_db_shutdown();
@@ -1323,18 +1415,13 @@ static int handle_snapshot_load(struct json_object *cmd) {
     * post-first-snapshot query returns stale results and recall collapses. */
    memory_embeddings_invalidate_all();
 
-   /* Restore dia_map. */
+   /* Restore dia_map.  map_root + dia_arr were parsed and validated in the
+    * pre-flight block above; dia_arr is a borrowed reference owned by
+    * map_root and stays valid until we put map_root. */
    dia_map_clear();
-   struct json_object *arr = json_object_from_file(map_path);
-   if (!arr || !json_object_is_type(arr, json_type_array)) {
-      if (arr)
-         json_object_put(arr);
-      respond_error("snapshot_load: parse map_path failed");
-      return 1;
-   }
-   size_t n = json_object_array_length(arr);
+   size_t n = json_object_array_length(dia_arr);
    for (size_t i = 0; i < n; i++) {
-      struct json_object *e = json_object_array_get_idx(arr, i);
+      struct json_object *e = json_object_array_get_idx(dia_arr, i);
       struct json_object *did = NULL, *mid = NULL;
       if (!json_object_object_get_ex(e, "dia_id", &did) ||
           !json_object_object_get_ex(e, "msg_id", &mid))
@@ -1344,7 +1431,7 @@ static int handle_snapshot_load(struct json_object *cmd) {
       if (dia_id && *dia_id)
          dia_map_add(dia_id, msg_id);
    }
-   json_object_put(arr);
+   json_object_put(map_root);
 
    int facts = 0, entities = 0, convs = 0, msgs = 0;
    counts_for_response(&facts, &entities, &convs, &msgs);

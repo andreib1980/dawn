@@ -27,7 +27,7 @@
  * a layer boundary.
  *
  * Note on physical location: this header lives next to `focus_source.h`
- * because the framework already owns `include/memory/focus_*.h` for the
+ * because the framework already owns `include/core/focus/focus_*.h` for the
  * same architectural reason — adapters polymorphically register against
  * the framework, so the shared helpers travel with the framework, not
  * with their primary consumer.

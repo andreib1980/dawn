@@ -17,11 +17,11 @@
  * the project author(s).
  *
  * Dominant-token over-inclusion heuristic — implementation.  See
- * include/memory/focus_dominant_token.h for the contract and algorithm
+ * include/core/focus/focus_dominant_token.h for the contract and algorithm
  * details.
  */
 
-#include "memory/focus_dominant_token.h"
+#include "core/focus/focus_dominant_token.h"
 
 #include <ctype.h>
 #include <stdbool.h>

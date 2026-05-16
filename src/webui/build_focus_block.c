@@ -31,11 +31,11 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_source.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/focus_source.h"
 #include "memory/memory_embeddings.h"
 #include "webui/webui_server.h"
 

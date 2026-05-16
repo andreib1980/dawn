@@ -33,9 +33,13 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_source.h"
 #include "dawn_error.h"
-#include "memory/focus_source.h"
 #include "memory/memory_embeddings.h"
+
+/* Forward declaration of session — production lives in webui_server.h but
+ * this stub avoids pulling in the libwebsockets-laden full header. */
+struct session;
 
 /* g_config is defined here as the single owner — the test TU references
  * it via extern.  All ranker tests pre-populate before each compose. */
@@ -91,4 +95,16 @@ void webui_broadcast_context_injection(int user_id,
    (void)conv_id;
    (void)turn_id;
    (void)result;
+}
+
+/* =============================================================================
+ * webui_get_active_conversation_id stub — build_focus_block.c re-reads the
+ * active conversation_id from the dispatch session right before broadcast
+ * (first-turn race fix, May 2026).  Tests don't exercise the WebSocket
+ * server's session registry, so returning 0 is the safe no-op (caller
+ * falls back to the captured value).
+ * ============================================================================= */
+int64_t webui_get_active_conversation_id(struct session *session) {
+   (void)session;
+   return 0;
 }

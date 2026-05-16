@@ -333,11 +333,26 @@ for what that does and doesn't measure.
 Extraction is the slow part (hundreds of cloud LLM calls per LoCoMo run).  The
 runner caches per-conversation extraction state under `--cache-dir` (default
 `./benchmarks/snapshots/`) and reuses it on subsequent runs.  Cache keys
-include the snapshot format version, extraction provider/model, embedding
+include the snapshot format version, extraction provider/model, **a SHA-256
+of the live `MEMORY_EXTRACTION_PROMPT_TEMPLATE` body**, embedding
 provider/dims, conv index, and a SHA-256 hash of the conversation contents,
-so any change to those auto-invalidates old entries.  First-run timing on a
-single LoCoMo conv with `claude-haiku-4-5` is ~130 s; cache-hit re-run is
-~2.6 s (≈50× speedup), and recall numbers are bit-identical between runs.
+so any change to those — including any edit to the extraction prompt — auto-
+invalidates old entries.  First-run timing on a single LoCoMo conv with
+`claude-haiku-4-5` is ~130 s; cache-hit re-run is ~2.6 s (≈50× speedup), and
+recall numbers are bit-identical between runs.
+
+**Why the prompt hash is part of the key.**  Before May 2026 the cache key did
+NOT include the prompt body, so editing `MEMORY_EXTRACTION_PROMPT_TEMPLATE`
+left old snapshots looking valid — re-running against a stale `--cache-dir`
+silently served fact corpora extracted under an older prompt, producing
+apples-to-oranges numbers.  The bench engine now emits
+`extraction_prompt_sha256` in its `ready` JSON, the harness mixes it into
+the cache key, and the C side writes it into the snapshot map JSON.  On load
+the C side verifies the stored hash against the live code's hash and **fails
+loudly** if they disagree (rather than silently falling back to re-extraction,
+which costs real $ in LLM calls).  Pre-May-2026 snapshots (bare JSON arrays
+without the fingerprint) are also rejected loudly — delete them or point at a
+fresh `--cache-dir`.
 
 ```bash
 # First run: extracts + saves snapshots under ./benchmarks/snapshots/

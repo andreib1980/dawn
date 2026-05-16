@@ -249,20 +249,14 @@ int memory_graph_expand_fact_linked(int user_id,
          if (seen)
             continue;
 
+         /* memory_db_fact_get is now user-scoped at the SQL layer
+          * (CWE-639 defense-in-depth) — a relations row pointing at
+          * another user's fact returns MEMORY_DB_NOT_FOUND here, which
+          * would still indicate a schema invariant violation but no
+          * longer requires a post-fetch user_id mismatch check. */
          memory_fact_t fact = { 0 };
-         if (memory_db_fact_get(fid, &fact) != MEMORY_DB_SUCCESS)
+         if (memory_db_fact_get(fid, user_id, &fact) != MEMORY_DB_SUCCESS)
             continue;
-         /* Defense-in-depth user-scoping — memory_db_fact_get is NOT
-          * user-scoped (it's keyed by fact_id alone).  Skip foreign
-          * facts and log ERROR — if this ever fires, the relations
-          * table has a row with a fact_id that points to a fact in
-          * another user's pool, which would be a schema invariant
-          * violation. */
-         if (fact.user_id != user_id) {
-            OLOG_ERROR("memory_graph: fact_id=%lld owned by user_id=%d (expected %d) — skipping",
-                       (long long)fid, fact.user_id, user_id);
-            continue;
-         }
 
          out_facts[produced] = fact;
          out_scores[produced] = bonus;

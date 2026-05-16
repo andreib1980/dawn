@@ -24,6 +24,8 @@
  * and background backfill for semantic memory search.
  */
 
+#define _GNU_SOURCE /* qsort_r — GNU signature with thread-local arg */
+
 #include "memory/memory_embeddings.h"
 
 #include <limits.h>
@@ -48,7 +50,13 @@
 
 /* In-memory embedding cache for fast cosine search.
  * created_ats added in #3 — per-fact origin timestamps used by temporal-query
- * scoring.  Loaded together with embeddings so scoring stays single-pass. */
+ * scoring.  Loaded together with embeddings so scoring stays single-pass.
+ *
+ * saturated_warned_user_id: when the cache loader fills to capacity it
+ * triggers a one-shot OLOG_WARNING per (user_id) — this field stores the
+ * user_id we have already warned for so we don't spam the log on every
+ * subsequent reload.  Reset to 0 (no user, so harmless first-warn) on any
+ * cache invalidation path. */
 static struct {
    pthread_mutex_t mutex;
    int user_id;
@@ -61,6 +69,7 @@ static struct {
    int dims;
    bool valid;
    atomic_bool dirty; /* set by backfill after each store */
+   int saturated_warned_user_id;
 } s_cache = {
    .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
@@ -569,6 +578,19 @@ static int cache_load(int user_id) {
    atomic_store(&s_cache.dirty, false);
 
    OLOG_INFO("memory_embeddings: loaded %d embeddings into cache for user %d", loaded, user_id);
+
+   /* Saturation warning (efficiency H1).  When the cache loader fills the
+    * entire EMBEDDING_SEARCH_CAP slot allocation, the (cap+1)th+ rows for
+    * this user silently never enter the cache and are excluded from
+    * cosine ranking.  Emit a one-shot WARNING per user so the operator
+    * notices before retrieval quality visibly degrades.  Subsequent
+    * reloads for the same user keep the high-water mark and stay silent. */
+   if (loaded >= cap && s_cache.saturated_warned_user_id != user_id) {
+      OLOG_WARNING("memory_embeddings: cache saturated at %d facts for user_id=%d — additional "
+                   "facts will not participate in cosine ranking (see EMBEDDING_SEARCH_CAP)",
+                   loaded, user_id);
+      s_cache.saturated_warned_user_id = user_id;
+   }
    return 0;
 }
 
@@ -1012,14 +1034,32 @@ int memory_embeddings_entity_cosine(int user_id,
  * Hybrid Search
  * ============================================================================= */
 
-int memory_embeddings_hybrid_search(int user_id,
-                                    const char *query,
-                                    const int64_t *keyword_facts,
-                                    const int *keyword_scores,
-                                    int keyword_count,
-                                    int token_count,
-                                    embedding_search_result_t *out_results,
-                                    int max_results) {
+/* Helper: write keyword-only fallback (no embeddings available or embed failed). */
+static int hybrid_fallback_keyword_only(const int64_t *keyword_facts,
+                                        const int *keyword_scores,
+                                        int keyword_count,
+                                        int token_count,
+                                        embedding_search_result_t *out_results,
+                                        int max_results) {
+   int count = keyword_count > max_results ? max_results : keyword_count;
+   for (int i = 0; i < count; i++) {
+      out_results[i].fact_id = keyword_facts[i];
+      out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
+                                               : 1.0f;
+   }
+   return count;
+}
+
+int memory_embeddings_hybrid_search_ex(int user_id,
+                                       const char *query,
+                                       const float *query_emb_in,
+                                       float query_norm_in,
+                                       const int64_t *keyword_facts,
+                                       const int *keyword_scores,
+                                       int keyword_count,
+                                       int token_count,
+                                       embedding_search_result_t *out_results,
+                                       int max_results) {
    if (!out_results || max_results <= 0)
       return 0;
 
@@ -1036,53 +1076,60 @@ int memory_embeddings_hybrid_search(int user_id,
 
    /* If no embeddings available, return keyword results directly */
    if (!memory_embeddings_available() || !query) {
-      int count = keyword_count > max_results ? max_results : keyword_count;
-      for (int i = 0; i < count; i++) {
-         out_results[i].fact_id = keyword_facts[i];
-         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
-                                                  : 1.0f;
-      }
-      return count;
+      return hybrid_fallback_keyword_only(keyword_facts, keyword_scores, keyword_count, token_count,
+                                          out_results, max_results);
    }
 
-   /* Embed the query */
-   float query_emb[MAX_EMBEDDING_DIMS];
+   /* Resolve the query embedding: caller-supplied if non-NULL with a usable
+    * norm; otherwise embed internally (legacy behavior).  Efficiency M3 —
+    * upstream callers that have already embedded the same query (rescore,
+    * adapter framework) thread the pair through to skip a second ONNX
+    * inference (~15 ms saved on bge-small INT8 / Jetson).
+    *
+    * Note on stack: query_emb_local[MAX_EMBEDDING_DIMS] is 8 KB and lives
+    * at function scope.  When caller supplies a pre-embedded query, the
+    * scratch goes unused but is still allocated.  Phase 9.5 reviewed
+    * scoping it into an else-only block but query_emb aliases this buffer
+    * across the rest of the function — restructure would require either
+    * heap-alloc or a full function refactor, neither worth 8 KB on the
+    * Jetson 8 GB system.  Accepted overhead. */
+   float query_emb_local[MAX_EMBEDDING_DIMS];
+   const float *query_emb;
+   float query_norm;
    int dims = 0;
-   if (memory_embeddings_embed(query, query_emb, &dims) != 0 || dims != embedding_engine_dims()) {
-      /* Embedding failed — fall back to keyword only */
-      int count = keyword_count > max_results ? max_results : keyword_count;
-      for (int i = 0; i < count; i++) {
-         out_results[i].fact_id = keyword_facts[i];
-         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
-                                                  : 1.0f;
+   if (query_emb_in != NULL && query_norm_in >= 1e-6f) {
+      query_emb = query_emb_in;
+      query_norm = query_norm_in;
+      dims = embedding_engine_dims();
+   } else {
+      if (memory_embeddings_embed(query, query_emb_local, &dims) != 0 ||
+          dims != embedding_engine_dims()) {
+         /* Embedding failed — fall back to keyword only */
+         return hybrid_fallback_keyword_only(keyword_facts, keyword_scores, keyword_count,
+                                             token_count, out_results, max_results);
       }
-      return count;
+      query_norm = memory_embeddings_l2_norm(query_emb_local, dims);
+      query_emb = query_emb_local;
    }
-
-   float query_norm = memory_embeddings_l2_norm(query_emb, dims);
 
    /* Load cache under lock */
    pthread_mutex_lock(&s_cache.mutex);
    if (cache_load(user_id) != 0) {
       pthread_mutex_unlock(&s_cache.mutex);
       /* Cache load failed — keyword only */
-      int count = keyword_count > max_results ? max_results : keyword_count;
-      for (int i = 0; i < count; i++) {
-         out_results[i].fact_id = keyword_facts[i];
-         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
-                                                  : 1.0f;
-      }
-      return count;
+      return hybrid_fallback_keyword_only(keyword_facts, keyword_scores, keyword_count, token_count,
+                                          out_results, max_results);
    }
 
-   /* Build result set: start with keyword facts, add vector matches */
-   /* Temporary merged set */
+   /* Build result set: start with keyword facts, add vector matches.
+    * Per-call scratch capped at MEMORY_HYBRID_SCRATCH_CAP (2000) — decoupled
+    * from EMBEDDING_SEARCH_CAP so the cache can grow without inflating the
+    * stack frame.  ~24 KB on the stack, safe on 256 KB pthread stacks. */
    int merged_cap = keyword_count + s_cache.count;
-   if (merged_cap > EMBEDDING_SEARCH_CAP)
-      merged_cap = EMBEDDING_SEARCH_CAP;
+   if (merged_cap > MEMORY_HYBRID_SCRATCH_CAP)
+      merged_cap = MEMORY_HYBRID_SCRATCH_CAP;
 
-   /* Stack-allocated — EMBEDDING_SEARCH_CAP * 12 bytes = 24KB, well within 8MB stack */
-   embedding_search_result_t merged[EMBEDDING_SEARCH_CAP];
+   embedding_search_result_t merged[MEMORY_HYBRID_SCRATCH_CAP];
    int merged_count = 0;
 
    /* Score all cached embeddings by vector similarity */
@@ -1151,6 +1198,20 @@ int memory_embeddings_hybrid_search(int user_id,
    return result_count;
 }
 
+int memory_embeddings_hybrid_search(int user_id,
+                                    const char *query,
+                                    const int64_t *keyword_facts,
+                                    const int *keyword_scores,
+                                    int keyword_count,
+                                    int token_count,
+                                    embedding_search_result_t *out_results,
+                                    int max_results) {
+   /* Back-compat shim — NULL/0 pair forces internal embed (legacy behavior). */
+   return memory_embeddings_hybrid_search_ex(user_id, query, NULL, 0.0f, keyword_facts,
+                                             keyword_scores, keyword_count, token_count,
+                                             out_results, max_results);
+}
+
 /* =============================================================================
  * Reciprocal Rank Fusion (RRF) Search
  *
@@ -1187,14 +1248,73 @@ int memory_embeddings_hybrid_search(int user_id,
  * a cap of 50 still allows 5x oversampling per channel for stacking. */
 #define RRF_PER_CHANNEL_CAP 50
 
-int memory_embeddings_rrf_search(int user_id,
-                                 const char *query,
-                                 const int64_t *keyword_facts,
-                                 const int *keyword_scores,
-                                 int keyword_count,
-                                 int token_count,
-                                 embedding_search_result_t *out_results,
-                                 int max_results) {
+/* Per-candidate scratch entry.  At 24 B × MEMORY_HYBRID_SCRATCH_CAP (2000) =
+ * ~48 KB stack — fits within the smallest production pthread stack (256 KB,
+ * llm_context.c). */
+typedef struct {
+   int64_t fact_id;
+   float cosine;
+   float kw_score;
+   float tprox;
+} rrf_cand_t;
+
+/* qsort helpers (Fix H2): pre-sort each channel index array so rank
+ * assignment is O(N log N) total instead of O(N²) per channel. */
+struct rrf_rank_ctx {
+   const rrf_cand_t *pool;
+   int channel; /* 0=cosine, 1=kw, 2=tprox */
+};
+
+static int rrf_cmp_desc(const void *a, const void *b, void *ctx_v) {
+   const struct rrf_rank_ctx *ctx = (const struct rrf_rank_ctx *)ctx_v;
+   int ia = *(const int *)a;
+   int ib = *(const int *)b;
+   float sa, sb;
+   switch (ctx->channel) {
+      case 0:
+         sa = ctx->pool[ia].cosine;
+         sb = ctx->pool[ib].cosine;
+         break;
+      case 1:
+         sa = ctx->pool[ia].kw_score;
+         sb = ctx->pool[ib].kw_score;
+         break;
+      default:
+         sa = ctx->pool[ia].tprox;
+         sb = ctx->pool[ib].tprox;
+         break;
+   }
+   /* qsort_r comparator contract: returns -1 / 0 / +1 (not SUCCESS/FAILURE).
+    * Descending: higher score first.  Stable-ish on ties by pool index. */
+   if (sa > sb)
+      return -1;
+   if (sa < sb)
+      return 1;
+   return ia - ib;
+}
+
+/* Comparator for sorting embedding_search_result_t by score DESC.
+ * qsort contract — returns -1 / 0 / +1, not SUCCESS/FAILURE. */
+static int score_cmp_desc(const void *a, const void *b) {
+   float sa = ((const embedding_search_result_t *)a)->score;
+   float sb = ((const embedding_search_result_t *)b)->score;
+   if (sa > sb)
+      return -1;
+   if (sa < sb)
+      return 1;
+   return 0;
+}
+
+int memory_embeddings_rrf_search_ex(int user_id,
+                                    const char *query,
+                                    const float *query_emb_in,
+                                    float query_norm_in,
+                                    const int64_t *keyword_facts,
+                                    const int *keyword_scores,
+                                    int keyword_count,
+                                    int token_count,
+                                    embedding_search_result_t *out_results,
+                                    int max_results) {
    if (!out_results || max_results <= 0)
       return 0;
 
@@ -1210,55 +1330,45 @@ int memory_embeddings_rrf_search(int user_id,
 
    /* No embeddings or no query → keyword-only fallback (matches hybrid_search). */
    if (!memory_embeddings_available() || !query) {
-      int count = keyword_count > max_results ? max_results : keyword_count;
-      for (int i = 0; i < count; i++) {
-         out_results[i].fact_id = keyword_facts[i];
-         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
-                                                  : 1.0f;
-      }
-      return count;
+      return hybrid_fallback_keyword_only(keyword_facts, keyword_scores, keyword_count, token_count,
+                                          out_results, max_results);
    }
 
-   /* Embed the query. */
-   float query_emb[MAX_EMBEDDING_DIMS];
+   /* Resolve the query embedding — caller-supplied if non-NULL, otherwise
+    * embed internally.  Efficiency M3 — pairs with hybrid_search_ex. */
+   float query_emb_local[MAX_EMBEDDING_DIMS];
+   const float *query_emb;
+   float query_norm;
    int dims = 0;
-   if (memory_embeddings_embed(query, query_emb, &dims) != 0 || dims != embedding_engine_dims()) {
-      int count = keyword_count > max_results ? max_results : keyword_count;
-      for (int i = 0; i < count; i++) {
-         out_results[i].fact_id = keyword_facts[i];
-         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
-                                                  : 1.0f;
+   if (query_emb_in != NULL && query_norm_in >= 1e-6f) {
+      query_emb = query_emb_in;
+      query_norm = query_norm_in;
+      dims = embedding_engine_dims();
+   } else {
+      if (memory_embeddings_embed(query, query_emb_local, &dims) != 0 ||
+          dims != embedding_engine_dims()) {
+         return hybrid_fallback_keyword_only(keyword_facts, keyword_scores, keyword_count,
+                                             token_count, out_results, max_results);
       }
-      return count;
+      query_norm = memory_embeddings_l2_norm(query_emb_local, dims);
+      query_emb = query_emb_local;
    }
-   float query_norm = memory_embeddings_l2_norm(query_emb, dims);
 
-   /* Per-candidate scratch.  Capped by EMBEDDING_SEARCH_CAP (2000); at 24 B
-    * each = ~48 KB stack.  Well within the 8 MB pthread default. */
-   typedef struct {
-      int64_t fact_id;
-      float cosine;
-      float kw_score;
-      float tprox;
-   } rrf_cand_t;
-   rrf_cand_t pool[EMBEDDING_SEARCH_CAP];
+   /* Per-candidate scratch — bounded by MEMORY_HYBRID_SCRATCH_CAP so cache
+    * growth (Fix H1) doesn't inflate per-call stack. */
+   rrf_cand_t pool[MEMORY_HYBRID_SCRATCH_CAP];
    int pool_count = 0;
 
    pthread_mutex_lock(&s_cache.mutex);
    if (cache_load(user_id) != 0) {
       pthread_mutex_unlock(&s_cache.mutex);
-      int count = keyword_count > max_results ? max_results : keyword_count;
-      for (int i = 0; i < count; i++) {
-         out_results[i].fact_id = keyword_facts[i];
-         out_results[i].score = (token_count > 0) ? (float)keyword_scores[i] / (float)token_count
-                                                  : 1.0f;
-      }
-      return count;
+      return hybrid_fallback_keyword_only(keyword_facts, keyword_scores, keyword_count, token_count,
+                                          out_results, max_results);
    }
 
    /* Cache pass: every cached fact becomes a candidate, scored across all
     * three channels. */
-   for (int i = 0; i < s_cache.count && pool_count < EMBEDDING_SEARCH_CAP; i++) {
+   for (int i = 0; i < s_cache.count && pool_count < MEMORY_HYBRID_SCRATCH_CAP; i++) {
       float cosine = memory_embeddings_cosine_with_norms(query_emb, s_cache.embeddings + i * dims,
                                                          dims, query_norm, s_cache.norms[i]);
       float kw_score = 0.0f;
@@ -1286,7 +1396,7 @@ int memory_embeddings_rrf_search(int user_id,
    }
 
    /* Keyword-only facts (not in cache) — keyword channel only. */
-   for (int k = 0; k < keyword_count && pool_count < EMBEDDING_SEARCH_CAP; k++) {
+   for (int k = 0; k < keyword_count && pool_count < MEMORY_HYBRID_SCRATCH_CAP; k++) {
       bool already = false;
       for (int p = 0; p < pool_count; p++) {
          if (pool[p].fact_id == keyword_facts[k]) {
@@ -1309,48 +1419,68 @@ int memory_embeddings_rrf_search(int user_id,
    if (pool_count == 0)
       return 0;
 
-   /* Compute per-channel rank for each candidate.  Rank = 1 + (count of
-    * peers with strictly greater non-zero score in that channel).  Facts
-    * with zero/near-zero score in a channel get rank=INT_MAX, indicating
-    * "missing from this channel" → contributes 0 to RRF.
+   /* Efficiency H2: compute per-channel ranks in O(N log N) per channel via
+    * qsort_r, not O(N²) per-channel as before.  At N=2000 that's ~7 µs per
+    * channel × 3 channels = ~20 µs total vs ~24 ms per channel × 3 = ~70 ms
+    * pre-fix.  At the new cache cap of 8192 (capped here at 2000), the
+    * O(N²) cost would have grown to ~280 ms/query in the worst case —
+    * fixing now keeps RRF correct + scalable when re-tested in Phase 7's
+    * dead-letter decision (currently default-off via [memory] rrf_enabled).
     *
-    * Also: if computed rank exceeds RRF_PER_CHANNEL_CAP, treat as missing.
-    * Mid-rank candidates in a large channel (e.g., the 100th-best by
-    * cosine in a 325-fact cache) would otherwise accumulate enough score
-    * to displace legitimately-relevant facts. */
-   int rank_sem[EMBEDDING_SEARCH_CAP];
-   int rank_kw[EMBEDDING_SEARCH_CAP];
-   int rank_tmp[EMBEDDING_SEARCH_CAP];
+    * Phase 9.5 stack reduction: idx scratch is a single shared buffer reused
+    * across the three channel sorts (was 3 × N int = 24 KB).  rank arrays
+    * remain separate because they are read in the score-summation loop
+    * below.  Total function stack at N=2000 was ~136 KB pre-9.5, ~120 KB
+    * post-9.5.  Worker pthread stack is ~256 KB.  Still tight; further
+    * reductions would require heap-allocating pool[]. */
+   int idx_scratch[MEMORY_HYBRID_SCRATCH_CAP];
+   int rank_sem[MEMORY_HYBRID_SCRATCH_CAP];
+   int rank_kw[MEMORY_HYBRID_SCRATCH_CAP];
+   int rank_tmp[MEMORY_HYBRID_SCRATCH_CAP];
    for (int i = 0; i < pool_count; i++) {
+      rank_sem[i] = INT_MAX;
+      rank_kw[i] = INT_MAX;
+      rank_tmp[i] = INT_MAX;
+   }
+
+   /* Channel 0: semantic.  Fill scratch with [0..N), qsort, walk to fill rank. */
+   for (int i = 0; i < pool_count; i++)
+      idx_scratch[i] = i;
+   struct rrf_rank_ctx ctx_sem = { .pool = pool, .channel = 0 };
+   qsort_r(idx_scratch, (size_t)pool_count, sizeof(int), rrf_cmp_desc, &ctx_sem);
+   for (int pos = 0; pos < pool_count; pos++) {
+      int i = idx_scratch[pos];
       if (pool[i].cosine > 0.01f) {
-         int r = 1;
-         for (int j = 0; j < pool_count; j++) {
-            if (j != i && pool[j].cosine > pool[i].cosine)
-               r++;
-         }
+         int r = pos + 1;
          rank_sem[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
-      } else {
-         rank_sem[i] = INT_MAX;
       }
+   }
+
+   /* Channel 1: keyword.  Reuse scratch. */
+   for (int i = 0; i < pool_count; i++)
+      idx_scratch[i] = i;
+   struct rrf_rank_ctx ctx_kw = { .pool = pool, .channel = 1 };
+   qsort_r(idx_scratch, (size_t)pool_count, sizeof(int), rrf_cmp_desc, &ctx_kw);
+   for (int pos = 0; pos < pool_count; pos++) {
+      int i = idx_scratch[pos];
       if (pool[i].kw_score > 0.0f) {
-         int r = 1;
-         for (int j = 0; j < pool_count; j++) {
-            if (j != i && pool[j].kw_score > pool[i].kw_score)
-               r++;
-         }
+         int r = pos + 1;
          rank_kw[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
-      } else {
-         rank_kw[i] = INT_MAX;
       }
-      if (has_temporal && pool[i].tprox > 0.0f) {
-         int r = 1;
-         for (int j = 0; j < pool_count; j++) {
-            if (j != i && pool[j].tprox > pool[i].tprox)
-               r++;
+   }
+
+   /* Channel 2: temporal proximity.  Only if temporal expression parsed. */
+   if (has_temporal) {
+      for (int i = 0; i < pool_count; i++)
+         idx_scratch[i] = i;
+      struct rrf_rank_ctx ctx_tmp = { .pool = pool, .channel = 2 };
+      qsort_r(idx_scratch, (size_t)pool_count, sizeof(int), rrf_cmp_desc, &ctx_tmp);
+      for (int pos = 0; pos < pool_count; pos++) {
+         int i = idx_scratch[pos];
+         if (pool[i].tprox > 0.0f) {
+            int r = pos + 1;
+            rank_tmp[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
          }
-         rank_tmp[i] = (r <= RRF_PER_CHANNEL_CAP) ? r : INT_MAX;
-      } else {
-         rank_tmp[i] = INT_MAX;
       }
    }
 
@@ -1363,7 +1493,7 @@ int memory_embeddings_rrf_search(int user_id,
     * for — without it, every RRF result falls below the floor and gets
     * silently dropped.  Multi-channel facts can exceed 1.0 (max ≈ 2.95
     * for rank-1 in all three channels), which the floor passes cleanly. */
-   embedding_search_result_t scored[EMBEDDING_SEARCH_CAP];
+   embedding_search_result_t scored[MEMORY_HYBRID_SCRATCH_CAP];
    for (int i = 0; i < pool_count; i++) {
       float s = 0.0f;
       if (rank_sem[i] != INT_MAX)
@@ -1376,20 +1506,27 @@ int memory_embeddings_rrf_search(int user_id,
       scored[i].score = s;
    }
 
-   /* Sort by RRF score desc — insertion sort, small N. */
-   for (int i = 1; i < pool_count; i++) {
-      embedding_search_result_t tmp = scored[i];
-      int j = i - 1;
-      while (j >= 0 && scored[j].score < tmp.score) {
-         scored[j + 1] = scored[j];
-         j--;
-      }
-      scored[j + 1] = tmp;
-   }
+   /* Sort by RRF score desc.  pool_count can reach MEMORY_HYBRID_SCRATCH_CAP
+    * (2000) — insertion sort here was ~4 ms at N=2000 (O(N²)); qsort is
+    * ~70 µs (O(N log N)). */
+   qsort(scored, (size_t)pool_count, sizeof(embedding_search_result_t), score_cmp_desc);
 
    int result_count = pool_count > max_results ? max_results : pool_count;
    memcpy(out_results, scored, result_count * sizeof(embedding_search_result_t));
    return result_count;
+}
+
+int memory_embeddings_rrf_search(int user_id,
+                                 const char *query,
+                                 const int64_t *keyword_facts,
+                                 const int *keyword_scores,
+                                 int keyword_count,
+                                 int token_count,
+                                 embedding_search_result_t *out_results,
+                                 int max_results) {
+   /* Back-compat shim — NULL/0 pair forces internal embed (legacy behavior). */
+   return memory_embeddings_rrf_search_ex(user_id, query, NULL, 0.0f, keyword_facts, keyword_scores,
+                                          keyword_count, token_count, out_results, max_results);
 }
 
 int memory_embeddings_rescore_against_query(int user_id,

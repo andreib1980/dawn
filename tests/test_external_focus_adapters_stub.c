@@ -41,9 +41,9 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "memory/memory_embeddings.h"
-#include "memory/memory_filter.h"
 #include "test_external_focus_adapters_mocks.h"
 #include "tools/calendar_db.h"
 #include "tools/document_db.h"

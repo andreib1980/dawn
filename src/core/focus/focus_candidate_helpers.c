@@ -19,7 +19,7 @@
  * Candidate allocation / cleanup helpers — see focus_candidate_helpers.h.
  */
 
-#include "memory/focus_candidate_helpers.h"
+#include "core/focus/focus_candidate_helpers.h"
 
 #include <stdio.h>
 #include <stdlib.h>

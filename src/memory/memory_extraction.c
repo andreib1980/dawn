@@ -37,6 +37,7 @@
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
 #include "core/iso8601.h"
+#include "core/memory_filter.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
@@ -45,7 +46,6 @@
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
-#include "memory/memory_filter.h"
 #include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
 
@@ -910,13 +910,13 @@ static void process_extraction_response(int user_id,
                    * pairs relations with fact_id directly; no text match
                    * needed). */
                   memory_fact_t existing = { 0 };
-                  if (memory_db_fact_get(matched_id, &existing) == MEMORY_DB_SUCCESS) {
+                  if (memory_db_fact_get(matched_id, user_id, &existing) == MEMORY_DB_SUCCESS) {
                      float new_conf = existing.confidence + 0.1f;
                      if (new_conf > 1.0f)
                         new_conf = 1.0f;
-                     memory_db_fact_update_confidence(matched_id, new_conf);
+                     memory_db_fact_update_confidence(matched_id, user_id, new_conf);
                   } else {
-                     memory_db_fact_update_confidence(matched_id, 0.8f);
+                     memory_db_fact_update_confidence(matched_id, user_id, 0.8f);
                   }
                   if (prov && prov->conv_id > 0) {
                      memory_db_fact_provenance_extend(matched_id, user_id, prov->conv_id,
@@ -957,7 +957,7 @@ static void process_extraction_response(int user_id,
                float new_conf = similar[0].confidence + 0.1f;
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
-               memory_db_fact_update_confidence(similar[0].id, new_conf);
+               memory_db_fact_update_confidence(similar[0].id, user_id, new_conf);
                fact_id = similar[0].id;
             }
          }
@@ -1125,7 +1125,7 @@ static void process_extraction_response(int user_id,
                 * extraction by a concurrent worker). */
                int64_t rel_fact_id = fact_id;
                memory_fact_t fact_check;
-               if (memory_db_fact_get(rel_fact_id, &fact_check) != MEMORY_DB_SUCCESS) {
+               if (memory_db_fact_get(rel_fact_id, user_id, &fact_check) != MEMORY_DB_SUCCESS) {
                   OLOG_WARNING("memory_extraction: fact_id=%lld vanished before relation "
                                "supersede (subj=%s pred=%s obj=%s) — storing with NULL fact link",
                                (long long)fact_id, r_subj, canon_pred, r_obj);
@@ -1138,7 +1138,8 @@ static void process_extraction_response(int user_id,
                                                          rel_fact_id, 0.8f, valid_from, valid_to,
                                                          prov, &old_fact_id);
                if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
-                  if (memory_db_fact_supersede(old_fact_id, rel_fact_id) == MEMORY_DB_SUCCESS) {
+                  if (memory_db_fact_supersede(old_fact_id, rel_fact_id, user_id) ==
+                      MEMORY_DB_SUCCESS) {
                      OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
                                "(relation: %s)",
                                (long)old_fact_id, (long)rel_fact_id, canon_pred);
@@ -1212,7 +1213,7 @@ static void process_extraction_response(int user_id,
                memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", NULL, prov,
                                         conv_created_at, &new_id);
                if (new_id > 0) {
-                  memory_db_fact_supersede(similar[0].id, new_id);
+                  memory_db_fact_supersede(similar[0].id, new_id, user_id);
                   OLOG_INFO("memory_extraction: corrected fact: %s -> %s", old_fact, new_fact);
                   /* Embed the corrected fact */
                   if (memory_embeddings_available()) {

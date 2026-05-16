@@ -45,7 +45,7 @@
 
 #include <stddef.h>
 
-#include "memory/focus_source.h"
+#include "core/focus/focus_source.h"
 
 #ifdef __cplusplus
 extern "C" {

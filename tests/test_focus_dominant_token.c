@@ -16,12 +16,12 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for src/memory/focus_dominant_token.c — the Phase B-ii
+ * Unit tests for src/core/focus/focus_dominant_token.c — the Phase B-ii
  * dominant-token over-inclusion heuristic.  Each test constructs a
  * working pool, calls the public penalty function, and asserts on the
  * mutated semantic_score values.  No DB, no embedding engine, no LLM.
  *
- * Coverage mirrors the design contract in include/memory/focus_dominant_token.h:
+ * Coverage mirrors the design contract in include/core/focus/focus_dominant_token.h:
  *   - no-op cases (disabled, empty query, single-candidate pool)
  *   - dominance detection at the threshold boundary
  *   - full penalty when only dominant tokens match
@@ -36,8 +36,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "memory/focus_dominant_token.h"
-#include "memory/focus_source.h"
+#include "core/focus/focus_dominant_token.h"
+#include "core/focus/focus_source.h"
 #include "unity.h"
 
 void setUp(void) {

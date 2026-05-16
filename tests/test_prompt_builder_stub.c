@@ -31,9 +31,9 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_source.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
-#include "memory/focus_source.h"
 #include "memory/memory_embeddings.h"
 
 dawn_config_t g_config;

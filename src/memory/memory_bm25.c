@@ -35,6 +35,14 @@
 
 #include <math.h>
 
+/* Query-length tier breakpoints (inclusive upper bound for each tier).
+ * Adapted from mem0/utils/scoring.py::get_bm25_params (Apache-2.0).
+ * Above BM25_TIER_VLONG_MAX terms, the "very long query" parameters apply. */
+#define BM25_TIER_SHORT_MAX 3
+#define BM25_TIER_MEDIUM_MAX 6
+#define BM25_TIER_LONG_MAX 9
+#define BM25_TIER_VLONG_MAX 15
+
 void memory_bm25_get_params(int num_terms, float *midpoint_out, float *steepness_out) {
    /* Adapted from mem0/utils/scoring.py::get_bm25_params (Apache-2.0).
     * Treat any non-positive count as a single-term query — the resolver
@@ -43,16 +51,16 @@ void memory_bm25_get_params(int num_terms, float *midpoint_out, float *steepness
    float midpoint;
    float steepness;
 
-   if (num_terms <= 3) {
+   if (num_terms <= BM25_TIER_SHORT_MAX) {
       midpoint = 5.0f;
       steepness = 0.7f;
-   } else if (num_terms <= 6) {
+   } else if (num_terms <= BM25_TIER_MEDIUM_MAX) {
       midpoint = 7.0f;
       steepness = 0.6f;
-   } else if (num_terms <= 9) {
+   } else if (num_terms <= BM25_TIER_LONG_MAX) {
       midpoint = 9.0f;
       steepness = 0.5f;
-   } else if (num_terms <= 15) {
+   } else if (num_terms <= BM25_TIER_VLONG_MAX) {
       midpoint = 10.0f;
       steepness = 0.5f;
    } else {

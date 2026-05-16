@@ -56,3 +56,4 @@ llm_testing/scripts/archive/
 
 # Local planning/tracking docs (not for git)
 docs/TODO.md
+.cleanup-state.md

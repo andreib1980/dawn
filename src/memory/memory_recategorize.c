@@ -34,12 +34,12 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
-#include "memory/memory_filter.h"
 #include "memory/memory_types.h"
 
 #define RECAT_BATCH_SIZE 25
@@ -77,7 +77,8 @@ static bool validate_category(const char *cat) {
    return false;
 }
 
-static int process_batch(memory_fact_t *facts,
+static int process_batch(int user_id,
+                         memory_fact_t *facts,
                          int count,
                          const llm_resolved_config_t *cfg,
                          int *out_updated) {
@@ -178,7 +179,7 @@ static int process_batch(memory_fact_t *facts,
          continue;
       }
 
-      if (memory_db_fact_update_category(fact_id, cat) == MEMORY_DB_SUCCESS)
+      if (memory_db_fact_update_category(fact_id, user_id, cat) == MEMORY_DB_SUCCESS)
          updated++;
    }
 
@@ -228,7 +229,7 @@ static void *recategorize_thread_fn(void *arg) {
       total_touched += count;
 
       int batch_updated = 0;
-      if (process_batch(facts, count, &cfg, &batch_updated) != SUCCESS) {
+      if (process_batch(user_id, facts, count, &cfg, &batch_updated) != SUCCESS) {
          failed_batches++;
          if (++consecutive_fails >= 3) {
             OLOG_ERROR("memory_recategorize: %d consecutive failures, aborting", consecutive_fails);

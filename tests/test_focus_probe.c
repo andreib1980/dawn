@@ -56,11 +56,11 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_candidate_helpers.h"
+#include "core/focus/focus_source.h"
+#include "core/focus/focus_source_internal.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
-#include "memory/focus_candidate_helpers.h"
-#include "memory/focus_source.h"
-#include "memory/focus_source_internal.h"
 #include "unity.h"
 #include "webui/build_focus_block.h"
 

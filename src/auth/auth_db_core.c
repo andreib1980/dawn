@@ -2299,7 +2299,13 @@ static int create_schema(const char *db_path) {
     * prepare_statements would fail on stmt_memory_fact_search_bm25 prep,
     * and the daemon would refuse to start with no operator-visible
     * recovery path. */
-   bool v48_ok = (current_version >= 48); /* already on v48 → nothing to do, OK */
+   /* v48 is OK without running the migration block in two cases:
+    * (a) DB is already at v48 or newer (nothing to do).
+    * (b) Fresh install (current_version == 0) — SCHEMA_SQL creates the
+    *     memory_facts_fts virtual table directly, so the migration block
+    *     (which only fires on >= 1 && < 48) is correctly skipped and
+    *     the schema_version bump still needs to proceed. */
+   bool v48_ok = (current_version >= 48) || (current_version == 0);
    if (current_version >= 1 && current_version < 48) {
       rc = sqlite3_exec(s_db.db,
                         "CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5("
@@ -3068,10 +3074,16 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
+    * rowid cannot leak a fact owned by another user.  Same shape as
+    * memory_db_fact_delete (`stmt_memory_fact_delete`) — wrong-user lookups
+    * return zero rows (caller maps to MEMORY_DB_NOT_FOUND, same response a
+    * legitimately-missing fact would get; no oracle). */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts WHERE id = ?",
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE id = ? AND user_id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_get failed: %s", sqlite3_errmsg(s_db.db));
@@ -3202,8 +3214,11 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   /* Per-fact category UPDATE used by the centroid backfill pass (v34). */
-   rc = sqlite3_prepare_v2(s_db.db, "UPDATE memory_facts SET category = ? WHERE id = ?", -1,
+   /* Per-fact category UPDATE used by the centroid backfill pass (v34).
+    * CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
+    * rowid cannot overwrite another user's category. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET category = ? WHERE id = ? AND user_id = ?", -1,
                            &s_db.stmt_memory_fact_update_category, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_update_category failed: %s",
@@ -3249,16 +3264,27 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db, "UPDATE memory_facts SET confidence = ? WHERE id = ?", -1,
-                           &s_db.stmt_memory_fact_update_confidence, NULL);
+   /* CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
+    * rowid cannot bump confidence on another user's fact. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET confidence = ? WHERE id = ? AND user_id = ?",
+                           -1, &s_db.stmt_memory_fact_update_confidence, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_update_confidence failed: %s",
                  sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db, "UPDATE memory_facts SET superseded_by = ? WHERE id = ?", -1,
-                           &s_db.stmt_memory_fact_supersede, NULL);
+   /* CWE-639 defense-in-depth: SQL filters on (id, user_id) for the
+    * superseded row AND requires the supersedes-row to be owned by the
+    * same user (EXISTS subquery).  A foreign new_fact_id would otherwise
+    * let a caller "hide" another user's fact from their own retrieval by
+    * pointing superseded_by at a foreign row, AND a foreign old_fact_id
+    * would let a caller corrupt another user's fact chain. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET superseded_by = ? WHERE id = ? AND user_id = ? "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+                           -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_supersede failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
@@ -3395,8 +3421,11 @@ static int prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-   rc = sqlite3_prepare_v2(s_db.db, "UPDATE memory_summaries SET consolidated = 1 WHERE id = ?", -1,
-                           &s_db.stmt_memory_summary_mark_consolidated, NULL);
+   /* CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
+    * rowid cannot mark another user's summary consolidated. */
+   rc = sqlite3_prepare_v2(
+       s_db.db, "UPDATE memory_summaries SET consolidated = 1 WHERE id = ? AND user_id = ?", -1,
+       &s_db.stmt_memory_summary_mark_consolidated, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_summary_mark_consolidated failed: %s",
                  sqlite3_errmsg(s_db.db));

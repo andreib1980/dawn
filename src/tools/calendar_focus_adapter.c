@@ -94,10 +94,10 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/focus/focus_candidate_helpers.h"
+#include "core/focus/focus_source.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/focus_candidate_helpers.h"
-#include "memory/focus_source.h"
 #include "tools/calendar_db.h"
 #include "tools/external_focus_adapters_internal.h"
 

@@ -48,8 +48,9 @@
 #include "memory/memory_fact_search.h"
 /* SOURCE_DEDUP_CAP / source_dedup_set_t / source_dedup_{seen,add} live in
  * memory_callback_internal.h so the unit tests can exercise them directly. */
-#include "memory/memory_filter.h"
+#include "core/memory_filter.h"
 #include "memory/memory_similarity.h"
+#include "memory/memory_stem.h"
 #include "memory/memory_types.h"
 #include "mosquitto_comms.h"
 #include "tools/time_utils.h"
@@ -362,36 +363,16 @@ static void format_time_ago(time_t timestamp, char *buf, size_t buf_size) {
 
 /* `multi_token_fact_search` was extracted to `src/memory/memory_fact_search.c`
  * (Phase 1c-i) so the focus-source fact adapter and the legacy recall path
- * share identical retrieval semantics.  `tokenize_query` stays here because
- * `append_graph_context` below also tokenizes the query for entity-keyword
- * fallback; promoting tokenize_query to a shared header would force
- * non-memory-callback callers to depend on this module's tokenization
- * conventions, which is not what we want at this scope. */
+ * share identical retrieval semantics.  `tokenize_query` here is now a thin
+ * wrapper over the shared `memory_stem_tokenize_in_place` helper — same
+ * delimiter set, min-length=2 filter, and working-buffer size as
+ * memory_fact_search.c::tokenize_query.  Kept file-local for caller
+ * convenience (fills the existing `char tokens[][64]` storage shape used by
+ * downstream search calls). */
 
 static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
-   if (!keywords || max_tokens <= 0) {
-      return 0;
-   }
-
-   char buf[512];
-   strncpy(buf, keywords, sizeof(buf) - 1);
-   buf[sizeof(buf) - 1] = '\0';
-
-   for (size_t i = 0; buf[i]; i++) {
-      buf[i] = tolower((unsigned char)buf[i]);
-   }
-
-   int count = 0;
-   char *saveptr = NULL;
-   char *tok = strtok_r(buf, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
-   while (tok && count < max_tokens) {
-      if (strlen(tok) > 1) {
-         snprintf(tokens[count], 64, "%s", tok);
-         count++;
-      }
-      tok = strtok_r(NULL, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
-   }
-   return count;
+   int cap = (max_tokens > MAX_SEARCH_TOKENS) ? MAX_SEARCH_TOKENS : max_tokens;
+   return memory_stem_tokenize_padded(keywords, tokens, cap, 2);
 }
 
 /* =============================================================================
@@ -606,18 +587,13 @@ char *memory_action_search(int user_id,
                   }
                }
                if (!found) {
+                  /* memory_db_fact_get is now user-scoped at the SQL layer
+                   * (CWE-639 defense-in-depth) — wrong-user lookups return
+                   * MEMORY_DB_NOT_FOUND, so the explicit user_id post-check
+                   * is no longer needed. */
                   memory_fact_t vec_fact;
-                  if (memory_db_fact_get(hybrid_results[h].fact_id, &vec_fact) ==
+                  if (memory_db_fact_get(hybrid_results[h].fact_id, user_id, &vec_fact) ==
                       MEMORY_DB_SUCCESS) {
-                     /* Defense-in-depth: hybrid_search currently scopes by user_id,
-                      * but `memory_db_fact_get` is NOT user-scoped.  Skip foreign
-                      * facts. */
-                     if (vec_fact.user_id != user_id) {
-                        OLOG_ERROR("memory_callback: vector-only fact_id=%lld owned by user_id=%d "
-                                   "(expected %d) — skipping",
-                                   (long long)hybrid_results[h].fact_id, vec_fact.user_id, user_id);
-                        continue;
-                     }
                      reordered[reordered_count++] = vec_fact;
                   }
                }
@@ -979,7 +955,7 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
                float new_conf = hash_matches[i].confidence + 0.1f;
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
-               memory_db_fact_update_confidence(hash_matches[i].id, new_conf);
+               memory_db_fact_update_confidence(hash_matches[i].id, user_id, new_conf);
                OLOG_INFO("memory_callback: duplicate detected (hash match), reinforced fact %ld",
                          (long)hash_matches[i].id);
                return strdup("I already know that. Increased my confidence in this fact.");
@@ -1002,7 +978,7 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
             float new_conf = similar[i].confidence + 0.1f;
             if (new_conf > 1.0f)
                new_conf = 1.0f;
-            memory_db_fact_update_confidence(similar[i].id, new_conf);
+            memory_db_fact_update_confidence(similar[i].id, user_id, new_conf);
             OLOG_INFO("memory_callback: duplicate detected (Jaccard=%.2f), reinforced fact %ld",
                       similarity, (long)similar[i].id);
             return strdup(
@@ -1051,18 +1027,16 @@ static char *memory_action_forget(int user_id, const char *fact_text) {
                     "to find the ID of the memory you want to forget.");
    }
 
-   /* Look up fact by ID and verify ownership */
+   /* Look up fact by ID and verify ownership (SQL filters by user_id —
+    * wrong-user lookups return MEMORY_DB_NOT_FOUND with the same response
+    * the LLM/user would get for a legitimately-missing fact, no oracle). */
    memory_fact_t fact;
-   int get_result = memory_db_fact_get((int64_t)id_val, &fact);
+   int get_result = memory_db_fact_get((int64_t)id_val, user_id, &fact);
    if (get_result != MEMORY_DB_SUCCESS) {
       char *msg = malloc(128);
       if (msg)
          snprintf(msg, 128, "No fact found with ID %lld.", id_val);
       return msg ? msg : strdup("Fact not found.");
-   }
-
-   if (fact.user_id != user_id) {
-      return strdup("Fact not found."); /* Don't reveal other users' facts */
    }
 
    int result = memory_db_fact_delete((int64_t)id_val, user_id);
@@ -1321,6 +1295,269 @@ char *memory_action_recent(int user_id,
 }
 
 /* =============================================================================
+ * Action: Save Contact
+ * ============================================================================= */
+
+static char *memory_action_save_contact(int user_id, const char *value) {
+   /* value format: "entity_name::field_type::type::value::val::label::lbl" */
+   if (!value || !value[0])
+      return strdup("Error: save_contact requires entity name, field_type, and value");
+
+   char entity_name[128] = "";
+   tool_param_extract_base(value, entity_name, sizeof(entity_name));
+
+   char field_type[32] = "";
+   tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type));
+
+   char contact_value[256] = "";
+   tool_param_extract_custom(value, "value", contact_value, sizeof(contact_value));
+
+   char label[32] = "";
+   tool_param_extract_custom(value, "label", label, sizeof(label));
+
+   /* Optional entity_id for disambiguation (from a prior fuzzy match prompt) */
+   char entity_id_str[32] = "";
+   tool_param_extract_custom(value, "entity_id", entity_id_str, sizeof(entity_id_str));
+
+   if (!entity_name[0] || !field_type[0] || !contact_value[0])
+      return strdup("Error: save_contact requires entity name, field_type, and value");
+
+   int64_t entity_id;
+
+   if (entity_id_str[0]) {
+      /* Explicit entity_id provided — use it directly (disambiguation resolved) */
+      entity_id = atoll(entity_id_str);
+      if (entity_id <= 0)
+         return strdup("Error: invalid entity_id");
+   } else {
+      /* Check for exact canonical match first */
+      char canonical[64];
+      memory_make_canonical_name(entity_name, canonical, sizeof(canonical));
+
+      memory_entity_t exact;
+      int exact_rc = memory_db_entity_get_by_name(user_id, canonical, &exact);
+
+      if (exact_rc == MEMORY_DB_SUCCESS) {
+         /* Exact match — use existing entity */
+         entity_id = exact.id;
+      } else {
+         /* No exact match — search for similar entities */
+         memory_entity_t similar[5];
+         int sim_count = 0;
+         memory_db_entity_search(user_id, entity_name, similar, 5, &sim_count);
+
+         /* Filter to person entities only */
+         int person_count = 0;
+         memory_entity_t persons[5];
+         for (int i = 0; i < sim_count; i++) {
+            if (strcmp(similar[i].entity_type, "person") == 0) {
+               persons[person_count++] = similar[i];
+            }
+         }
+
+         if (person_count > 0) {
+            /* Similar people found — return disambiguation prompt */
+            char *buf = malloc(2048);
+            if (!buf)
+               return strdup("Error: memory allocation failed");
+            int pos = snprintf(buf, 2048,
+                               "Similar people already exist. Which person should receive "
+                               "this contact info?\n");
+            for (int i = 0; i < person_count && pos < 1800; i++) {
+               pos += snprintf(buf + pos, 2048 - pos, "[%d] %s (%d mentions, id:%lld)\n", i + 1,
+                               persons[i].name, persons[i].mention_count, (long long)persons[i].id);
+            }
+            pos += snprintf(buf + pos, 2048 - pos,
+                            "[%d] Create new person '%s'\n\n"
+                            "Call save_contact again with entity_id parameter set to the "
+                            "chosen person's id, or set entity_id to 0 to create new.",
+                            person_count + 1, entity_name);
+            return buf;
+         }
+
+         /* No similar people — create new entity */
+         bool created = false;
+         if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
+                                     &entity_id) != MEMORY_DB_SUCCESS)
+            return strdup("Error: failed to create entity");
+      }
+   }
+
+   /* entity_id == 0 means "create new" from disambiguation */
+   if (entity_id == 0) {
+      char canonical[64];
+      memory_make_canonical_name(entity_name, canonical, sizeof(canonical));
+      bool created = false;
+      if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
+                                  &entity_id) != MEMORY_DB_SUCCESS)
+         return strdup("Error: failed to create entity");
+   }
+
+   if (contacts_add(user_id, entity_id, field_type, contact_value, label) != 0)
+      return strdup("Error: failed to save contact information");
+
+   char *result = malloc(512);
+   if (result)
+      snprintf(result, 512, "Saved %s %s for %s%s%s%s", field_type, contact_value, entity_name,
+               label[0] ? " (" : "", label, label[0] ? ")" : "");
+   return result ? result : strdup("Contact saved.");
+}
+
+/* =============================================================================
+ * Action: Find Contact
+ * ============================================================================= */
+
+static char *memory_action_find_contact(int user_id, const char *value) {
+   if (!value || !value[0])
+      return strdup("Error: find_contact requires a name to search for");
+
+   char name[128] = "";
+   tool_param_extract_base(value, name, sizeof(name));
+
+   char field_type[32] = "";
+   tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type));
+
+   contact_result_t results[10];
+   int count = 0;
+   contacts_find(user_id, name[0] ? name : value, field_type[0] ? field_type : NULL, results, 10,
+                 &count);
+
+   if (count <= 0)
+      return strdup("No contacts found matching that name.");
+
+   char *buf = malloc(2048);
+   if (!buf)
+      return strdup("Error: memory allocation failed");
+   int pos = snprintf(buf, 2048, "Contact results (%d):\n", count);
+   for (int i = 0; i < count && pos < 1900; i++) {
+      pos += snprintf(buf + pos, 2048 - pos, "- %s: %s = %s%s%s%s [id:%lld]\n",
+                      results[i].entity_name, results[i].field_type, results[i].value,
+                      results[i].label[0] ? " (" : "", results[i].label,
+                      results[i].label[0] ? ")" : "", (long long)results[i].contact_id);
+   }
+   return buf;
+}
+
+/* =============================================================================
+ * Action: List Contacts
+ * ============================================================================= */
+
+static char *memory_action_list_contacts(int user_id, const char *value) {
+   char field_type[32] = "";
+   if (value)
+      tool_param_extract_base(value, field_type, sizeof(field_type));
+
+   contact_result_t results[20];
+   int count = 0;
+   contacts_list(user_id, field_type[0] ? field_type : NULL, results, 20, 0, &count);
+
+   if (count <= 0)
+      return strdup("No contacts stored.");
+
+   char *buf = malloc(4096);
+   if (!buf)
+      return strdup("Error: memory allocation failed");
+   int pos = snprintf(buf, 4096, "All contacts (%d):\n", count);
+   for (int i = 0; i < count && pos < 3900; i++) {
+      pos += snprintf(buf + pos, 4096 - pos, "- %s: %s = %s%s%s%s\n", results[i].entity_name,
+                      results[i].field_type, results[i].value, results[i].label[0] ? " (" : "",
+                      results[i].label, results[i].label[0] ? ")" : "");
+   }
+   return buf;
+}
+
+/* =============================================================================
+ * Action: Merge Entities
+ * ============================================================================= */
+
+static char *memory_action_merge_entities(int user_id, const char *value) {
+   if (!value || !value[0])
+      return strdup("Error: merge_entities requires source_name (query) and target_name");
+
+   char source_name[128] = "";
+   tool_param_extract_base(value, source_name, sizeof(source_name));
+
+   char target_name[128] = "";
+   tool_param_extract_custom(value, "target_name", target_name, sizeof(target_name));
+
+   if (!source_name[0] || !target_name[0])
+      return strdup("Error: merge_entities requires both source_name (query) and target_name");
+
+   /* Run prompt-injection filter on both names before any DB lookup —
+    * mirrors what the resolver path will do at extraction time, and
+    * prevents a poisoned name from sliding into a downstream
+    * canonical_name field via a misdirected merge. */
+   if (memory_filter_check(source_name) || memory_filter_check(target_name)) {
+      return strdup("Error: entity name failed prompt-injection filter");
+   }
+
+   /* Look up both entities by canonical name */
+   char src_canonical[64], tgt_canonical[64];
+   memory_make_canonical_name(source_name, src_canonical, sizeof(src_canonical));
+   memory_make_canonical_name(target_name, tgt_canonical, sizeof(tgt_canonical));
+
+   memory_entity_t src_entity, tgt_entity;
+   if (memory_db_entity_get_by_name(user_id, src_canonical, &src_entity) != MEMORY_DB_SUCCESS)
+      return strdup("Error: source entity not found");
+   if (memory_db_entity_get_by_name(user_id, tgt_canonical, &tgt_entity) != MEMORY_DB_SUCCESS)
+      return strdup("Error: target entity not found");
+
+   /* Soft-link by default (entity-merge Phase 1, design §14): set
+    * canonical_id on the source row + audit-row insert.  The link is
+    * reversible — operators promote to permanent merge via
+    * `dawn-admin memory entity consolidate` (Phase 3). */
+   int64_t link_id = 0;
+   int rc = memory_db_entity_alias_link(user_id, src_entity.id, tgt_entity.id, "soft",
+                                        "llm-tool-action",
+                                        /* composite_score */ -1.0f,
+                                        /* evidence_json */ NULL, &link_id);
+   if (rc == MEMORY_DB_SUCCESS) {
+      char *result = malloc(768);
+      if (result)
+         snprintf(result, 768,
+                  "Linked '%s' as a soft alias of '%s' (link id %lld). "
+                  "The '%s' entity is preserved and will be resolved to '%s' on lookup. "
+                  "Use 'split' to undo, or 'dawn-admin memory entity consolidate' to make it "
+                  "permanent.",
+                  source_name, target_name, (long long)link_id, source_name, target_name);
+      return result ? result : strdup("Entities soft-linked.");
+   } else if (rc == MEMORY_DB_NOT_FOUND) {
+      /* Race: entity deleted between lookup and link */
+      OLOG_WARNING("memory_callback: merge_entities race — entity vanished between lookup and "
+                   "link (source='%s', target='%s')",
+                   source_name, target_name);
+      return strdup("Error: one or both entities no longer exist (may have been deleted)");
+   } else {
+      /* alias_link refuses self-link, source-with-existing-aliases (would
+       * orphan the equivalence class), and DB failures.  Distinct return
+       * codes aren't surfaced; report the operation refused. */
+      return strdup("Error: cannot link these entities "
+                    "(source may already be a canonical with its own aliases, or "
+                    "source and target are the same)");
+   }
+}
+
+/* =============================================================================
+ * Action: Delete Contact
+ * ============================================================================= */
+
+static char *memory_action_delete_contact(int user_id, const char *value) {
+   if (!value || !value[0])
+      return strdup("Error: delete_contact requires a contact ID");
+
+   char id_str[32] = "";
+   tool_param_extract_base(value, id_str, sizeof(id_str));
+   int64_t contact_id = strtoll(id_str[0] ? id_str : value, NULL, 10);
+   if (contact_id <= 0)
+      return strdup("Error: invalid contact ID");
+
+   if (contacts_delete(user_id, contact_id) != 0)
+      return strdup("Error: contact not found or already deleted");
+
+   return strdup("Contact deleted.");
+}
+
+/* =============================================================================
  * Main Callback
  * ============================================================================= */
 
@@ -1479,239 +1716,15 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
                                   sort_asc, limit, with_source,
                                   g_config.memory.source_budget_chars);
    } else if (strcmp(actionName, "save_contact") == 0) {
-      /* value format: "entity_name::field_type::type::value::val::label::lbl" */
-      if (!value || !value[0])
-         return strdup("Error: save_contact requires entity name, field_type, and value");
-
-      char entity_name[128] = "";
-      tool_param_extract_base(value, entity_name, sizeof(entity_name));
-
-      char field_type[32] = "";
-      tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type));
-
-      char contact_value[256] = "";
-      tool_param_extract_custom(value, "value", contact_value, sizeof(contact_value));
-
-      char label[32] = "";
-      tool_param_extract_custom(value, "label", label, sizeof(label));
-
-      /* Optional entity_id for disambiguation (from a prior fuzzy match prompt) */
-      char entity_id_str[32] = "";
-      tool_param_extract_custom(value, "entity_id", entity_id_str, sizeof(entity_id_str));
-
-      if (!entity_name[0] || !field_type[0] || !contact_value[0])
-         return strdup("Error: save_contact requires entity name, field_type, and value");
-
-      int64_t entity_id;
-
-      if (entity_id_str[0]) {
-         /* Explicit entity_id provided — use it directly (disambiguation resolved) */
-         entity_id = atoll(entity_id_str);
-         if (entity_id <= 0)
-            return strdup("Error: invalid entity_id");
-      } else {
-         /* Check for exact canonical match first */
-         char canonical[64];
-         memory_make_canonical_name(entity_name, canonical, sizeof(canonical));
-
-         memory_entity_t exact;
-         int exact_rc = memory_db_entity_get_by_name(user_id, canonical, &exact);
-
-         if (exact_rc == MEMORY_DB_SUCCESS) {
-            /* Exact match — use existing entity */
-            entity_id = exact.id;
-         } else {
-            /* No exact match — search for similar entities */
-            memory_entity_t similar[5];
-            int sim_count = 0;
-            memory_db_entity_search(user_id, entity_name, similar, 5, &sim_count);
-
-            /* Filter to person entities only */
-            int person_count = 0;
-            memory_entity_t persons[5];
-            for (int i = 0; i < sim_count; i++) {
-               if (strcmp(similar[i].entity_type, "person") == 0) {
-                  persons[person_count++] = similar[i];
-               }
-            }
-
-            if (person_count > 0) {
-               /* Similar people found — return disambiguation prompt */
-               char *buf = malloc(2048);
-               if (!buf)
-                  return strdup("Error: memory allocation failed");
-               int pos = snprintf(buf, 2048,
-                                  "Similar people already exist. Which person should receive "
-                                  "this contact info?\n");
-               for (int i = 0; i < person_count && pos < 1800; i++) {
-                  pos += snprintf(buf + pos, 2048 - pos, "[%d] %s (%d mentions, id:%lld)\n", i + 1,
-                                  persons[i].name, persons[i].mention_count,
-                                  (long long)persons[i].id);
-               }
-               pos += snprintf(buf + pos, 2048 - pos,
-                               "[%d] Create new person '%s'\n\n"
-                               "Call save_contact again with entity_id parameter set to the "
-                               "chosen person's id, or set entity_id to 0 to create new.",
-                               person_count + 1, entity_name);
-               return buf;
-            }
-
-            /* No similar people — create new entity */
-            bool created = false;
-            if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
-                                        &entity_id) != MEMORY_DB_SUCCESS)
-               return strdup("Error: failed to create entity");
-         }
-      }
-
-      /* entity_id == 0 means "create new" from disambiguation */
-      if (entity_id == 0) {
-         char canonical[64];
-         memory_make_canonical_name(entity_name, canonical, sizeof(canonical));
-         bool created = false;
-         if (memory_db_entity_upsert(user_id, entity_name, "person", canonical, &created,
-                                     &entity_id) != MEMORY_DB_SUCCESS)
-            return strdup("Error: failed to create entity");
-      }
-
-      if (contacts_add(user_id, entity_id, field_type, contact_value, label) != 0)
-         return strdup("Error: failed to save contact information");
-
-      char *result = malloc(512);
-      if (result)
-         snprintf(result, 512, "Saved %s %s for %s%s%s%s", field_type, contact_value, entity_name,
-                  label[0] ? " (" : "", label, label[0] ? ")" : "");
-      return result ? result : strdup("Contact saved.");
+      return memory_action_save_contact(user_id, value);
    } else if (strcmp(actionName, "find_contact") == 0) {
-      if (!value || !value[0])
-         return strdup("Error: find_contact requires a name to search for");
-
-      char name[128] = "";
-      tool_param_extract_base(value, name, sizeof(name));
-
-      char field_type[32] = "";
-      tool_param_extract_custom(value, "field_type", field_type, sizeof(field_type));
-
-      contact_result_t results[10];
-      int count = 0;
-      contacts_find(user_id, name[0] ? name : value, field_type[0] ? field_type : NULL, results, 10,
-                    &count);
-
-      if (count <= 0)
-         return strdup("No contacts found matching that name.");
-
-      char *buf = malloc(2048);
-      if (!buf)
-         return strdup("Error: memory allocation failed");
-      int pos = snprintf(buf, 2048, "Contact results (%d):\n", count);
-      for (int i = 0; i < count && pos < 1900; i++) {
-         pos += snprintf(buf + pos, 2048 - pos, "- %s: %s = %s%s%s%s [id:%lld]\n",
-                         results[i].entity_name, results[i].field_type, results[i].value,
-                         results[i].label[0] ? " (" : "", results[i].label,
-                         results[i].label[0] ? ")" : "", (long long)results[i].contact_id);
-      }
-      return buf;
+      return memory_action_find_contact(user_id, value);
    } else if (strcmp(actionName, "list_contacts") == 0) {
-      char field_type[32] = "";
-      if (value)
-         tool_param_extract_base(value, field_type, sizeof(field_type));
-
-      contact_result_t results[20];
-      int count = 0;
-      contacts_list(user_id, field_type[0] ? field_type : NULL, results, 20, 0, &count);
-
-      if (count <= 0)
-         return strdup("No contacts stored.");
-
-      char *buf = malloc(4096);
-      if (!buf)
-         return strdup("Error: memory allocation failed");
-      int pos = snprintf(buf, 4096, "All contacts (%d):\n", count);
-      for (int i = 0; i < count && pos < 3900; i++) {
-         pos += snprintf(buf + pos, 4096 - pos, "- %s: %s = %s%s%s%s\n", results[i].entity_name,
-                         results[i].field_type, results[i].value, results[i].label[0] ? " (" : "",
-                         results[i].label, results[i].label[0] ? ")" : "");
-      }
-      return buf;
+      return memory_action_list_contacts(user_id, value);
    } else if (strcmp(actionName, "merge_entities") == 0) {
-      if (!value || !value[0])
-         return strdup("Error: merge_entities requires source_name (query) and target_name");
-
-      char source_name[128] = "";
-      tool_param_extract_base(value, source_name, sizeof(source_name));
-
-      char target_name[128] = "";
-      tool_param_extract_custom(value, "target_name", target_name, sizeof(target_name));
-
-      if (!source_name[0] || !target_name[0])
-         return strdup("Error: merge_entities requires both source_name (query) and target_name");
-
-      /* Run prompt-injection filter on both names before any DB lookup —
-       * mirrors what the resolver path will do at extraction time, and
-       * prevents a poisoned name from sliding into a downstream
-       * canonical_name field via a misdirected merge. */
-      if (memory_filter_check(source_name) || memory_filter_check(target_name)) {
-         return strdup("Error: entity name failed prompt-injection filter");
-      }
-
-      /* Look up both entities by canonical name */
-      char src_canonical[64], tgt_canonical[64];
-      memory_make_canonical_name(source_name, src_canonical, sizeof(src_canonical));
-      memory_make_canonical_name(target_name, tgt_canonical, sizeof(tgt_canonical));
-
-      memory_entity_t src_entity, tgt_entity;
-      if (memory_db_entity_get_by_name(user_id, src_canonical, &src_entity) != MEMORY_DB_SUCCESS)
-         return strdup("Error: source entity not found");
-      if (memory_db_entity_get_by_name(user_id, tgt_canonical, &tgt_entity) != MEMORY_DB_SUCCESS)
-         return strdup("Error: target entity not found");
-
-      /* Soft-link by default (entity-merge Phase 1, design §14): set
-       * canonical_id on the source row + audit-row insert.  The link is
-       * reversible — operators promote to permanent merge via
-       * `dawn-admin memory entity consolidate` (Phase 3). */
-      int64_t link_id = 0;
-      int rc = memory_db_entity_alias_link(user_id, src_entity.id, tgt_entity.id, "soft",
-                                           "llm-tool-action",
-                                           /* composite_score */ -1.0f,
-                                           /* evidence_json */ NULL, &link_id);
-      if (rc == MEMORY_DB_SUCCESS) {
-         char *result = malloc(768);
-         if (result)
-            snprintf(result, 768,
-                     "Linked '%s' as a soft alias of '%s' (link id %lld). "
-                     "The '%s' entity is preserved and will be resolved to '%s' on lookup. "
-                     "Use 'split' to undo, or 'dawn-admin memory entity consolidate' to make it "
-                     "permanent.",
-                     source_name, target_name, (long long)link_id, source_name, target_name);
-         return result ? result : strdup("Entities soft-linked.");
-      } else if (rc == MEMORY_DB_NOT_FOUND) {
-         /* Race: entity deleted between lookup and link */
-         OLOG_WARNING("memory_callback: merge_entities race — entity vanished between lookup and "
-                      "link (source='%s', target='%s')",
-                      source_name, target_name);
-         return strdup("Error: one or both entities no longer exist (may have been deleted)");
-      } else {
-         /* alias_link refuses self-link, source-with-existing-aliases (would
-          * orphan the equivalence class), and DB failures.  Distinct return
-          * codes aren't surfaced; report the operation refused. */
-         return strdup("Error: cannot link these entities "
-                       "(source may already be a canonical with its own aliases, or "
-                       "source and target are the same)");
-      }
+      return memory_action_merge_entities(user_id, value);
    } else if (strcmp(actionName, "delete_contact") == 0) {
-      if (!value || !value[0])
-         return strdup("Error: delete_contact requires a contact ID");
-
-      char id_str[32] = "";
-      tool_param_extract_base(value, id_str, sizeof(id_str));
-      int64_t contact_id = strtoll(id_str[0] ? id_str : value, NULL, 10);
-      if (contact_id <= 0)
-         return strdup("Error: invalid contact ID");
-
-      if (contacts_delete(user_id, contact_id) != 0)
-         return strdup("Error: contact not found or already deleted");
-
-      return strdup("Contact deleted.");
+      return memory_action_delete_contact(user_id, value);
    } else {
       char *msg = malloc(128);
       if (msg) {

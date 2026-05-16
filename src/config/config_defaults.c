@@ -313,16 +313,22 @@ void config_set_defaults(dawn_config_t *config) {
     * at weight=0.20; plateau at 0.30. Zero cost on queries without temporal
     * expressions (parser returns "not found", no boost applied).  Safe default. */
    config->memory.temporal_weight = 0.20f;
-   /* Hard temporal filter on memory.search results.  Off-by-default until
-    * bench-validated; complements (does not replace) soft temporal_weight. */
-   config->memory.temporal_filter_enabled = false;
+   /* Hard temporal filter on memory.search results.  Graduated to default-on
+    * (May 2026) after +3.6pp LongMemEval temporal-reasoning validation.
+    * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
+    * regression observed; complements (does not replace) soft temporal_weight. */
+   config->memory.temporal_filter_enabled = true;
    /* RRF retrieval — off-by-default for A/B against the weighted-sum composite.
-    * Flip after bench shows lift; promote-or-retire after enough live signal. */
+    * Phase-1 bench showed -3.7pp regression vs composite scorer over DAWN's
+    * pre-BM25 keyword path.  Re-test trigger: post Phase 1 Mem0 parity now
+    * that BM25 + lemmatization landed (channels more balanced).  Keep flag
+    * for the re-evaluation; formally retire if still regressive. */
    config->memory.rrf_enabled = false;
-   /* Minimal memory_text format — off-by-default for A/B against the current
-    * verbose format.  Cuts ~30-50% of memory_text bytes by stripping per-fact
-    * metadata + demoting source excerpts to a single global block. */
-   config->memory.memory_text_minimal = false;
+   /* Minimal memory_text format — graduated to default-on (May 2026) after
+    * +0.98pp leader-comparable validation on n=1525.  Cuts ~30-50% of
+    * memory_text bytes by stripping per-fact metadata + demoting source
+    * excerpts to a single global block. */
+   config->memory.memory_text_minimal = true;
    /* BM25 keyword retrieval (FTS5 + Porter2).  Off-by-default while we
     * bench-validate against the legacy LIKE + multi-token match-count
     * path.  Flip in dawn.toml ([memory] bm25_enabled = true) once the

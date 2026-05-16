@@ -1140,12 +1140,16 @@ int main(int argc, char *argv[]) {
     * extraction config so the orchestrator can record it in the result JSON
     * without re-parsing dawn.toml itself. */
    if (memory_pipeline) {
+      /* extraction_prompt_sha256 lets the Python harness mix the live prompt
+       * body into its snapshot cache key — without it, the harness silently
+       * served stale snapshots after every prompt iteration. */
       fprintf(stdout,
               "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
               "\"mode\":\"memory-pipeline\","
-              "\"extraction_provider\":\"%s\",\"extraction_model\":\"%s\"}\n",
+              "\"extraction_provider\":\"%s\",\"extraction_model\":\"%s\","
+              "\"extraction_prompt_sha256\":\"%s\"}\n",
               embedding_engine_dims(), provider, g_config.memory.extraction_provider,
-              g_config.memory.extraction_model);
+              g_config.memory.extraction_model, bench_mp_extraction_prompt_sha256());
    } else {
       fprintf(stdout,
               "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","

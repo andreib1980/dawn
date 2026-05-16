@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "memory/memory_filter.h"
+#include "core/memory_filter.h"
 #include "unity.h"
 
 void setUp(void) {

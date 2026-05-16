@@ -19,7 +19,7 @@
  * Recency-decay implementation — see focus_recency.h.
  */
 
-#include "memory/focus_recency.h"
+#include "core/focus/focus_recency.h"
 
 #include <math.h>
 

@@ -20,7 +20,7 @@
  *
  * Sole consumer: src/webui/webui_server.c::dawn_build_prompt(), called
  * once per refresh.  Layer 4 (webui) — pulls in the L2 focus framework
- * via memory/focus_source.h and the L2 embedding engine via
+ * via core/focus/focus_source.h and the L2 embedding engine via
  * memory/memory_embeddings.h.
  */
 

@@ -604,7 +604,7 @@ void webui_broadcast_memory_notice(int user_id, const char *level, const char *m
 void webui_broadcast_memory_proposals_changed(int user_id);
 
 /* Forward declare the focus result type so this header doesn't pull in
- * memory/focus_source.h.  The broadcast helper takes a `const` pointer
+ * core/focus/focus_source.h.  The broadcast helper takes a `const` pointer
  * — caller still owns the struct and its heap. */
 struct focus_compose_result_s;
 typedef struct focus_compose_result_s focus_compose_result_t;

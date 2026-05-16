@@ -24,7 +24,6 @@
 
 #include "memory/memory_fact_search.h"
 
-#include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -38,6 +37,8 @@
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_graph_retrieval.h"
+#include "memory/memory_stem.h"
+#include "memory/memory_types.h"
 
 /* Token bookkeeping caps preserved verbatim from the original
  * `multi_token_fact_search` helper — bounded so the pipeline stays
@@ -47,30 +48,13 @@
 #define KEYWORD_FETCH_LIMIT 10
 #define HYBRID_FETCH_LIMIT 10
 
-/* Tokenize the query into lowercase 2+ char strings, splitting on the
- * same delimiter set the production extraction path uses. */
+/* Tokenize the query into lowercase 2+ char stems via the shared
+ * memory-subsystem tokenizer.  Thin local alias for
+ * memory_stem_tokenize_padded — call sites use the local symbol for grep
+ * familiarity but the implementation has one source of truth. */
 static int tokenize_query(const char *keywords, char tokens[][64], int max_tokens) {
-   if (keywords == NULL || max_tokens <= 0)
-      return 0;
-
-   char buf[512];
-   strncpy(buf, keywords, sizeof(buf) - 1);
-   buf[sizeof(buf) - 1] = '\0';
-
-   for (size_t i = 0; buf[i]; i++)
-      buf[i] = (char)tolower((unsigned char)buf[i]);
-
-   int count = 0;
-   char *saveptr = NULL;
-   char *tok = strtok_r(buf, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
-   while (tok != NULL && count < max_tokens) {
-      if (strlen(tok) > 1) {
-         snprintf(tokens[count], 64, "%s", tok);
-         count++;
-      }
-      tok = strtok_r(NULL, " \t\n\r,.;:!?\"'()[]{}/-", &saveptr);
-   }
-   return count;
+   int cap = (max_tokens > MAX_SEARCH_TOKENS) ? MAX_SEARCH_TOKENS : max_tokens;
+   return memory_stem_tokenize_padded(keywords, tokens, cap, 2);
 }
 
 /* Multi-token keyword search with per-fact match-count scoring.
@@ -143,16 +127,21 @@ static int multi_token_fact_search(int user_id,
    return count;
 }
 
-int memory_fact_search_hybrid(int user_id,
-                              const char *query,
-                              const float *query_embedding,
-                              size_t embed_dim,
-                              time_t since_ts,
-                              memory_fact_t *out_facts,
-                              float *out_scores,
-                              int max,
-                              int *out_count) {
-   (void)embed_dim; /* hybrid_search re-derives from the engine */
+/* Internal common implementation: `query_emb`/`query_norm` are optional
+ * pre-computed query embedding (NULL/0 → memory_embeddings_hybrid_search_ex
+ * embeds internally as the legacy path always did).  `gate_only` preserves
+ * the legacy public contract where the pointer was a sentinel "use hybrid
+ * path" gate and was never dereferenced. */
+static int fact_search_hybrid_impl(int user_id,
+                                   const char *query,
+                                   const float *query_emb,
+                                   float query_norm,
+                                   bool use_hybrid_path,
+                                   time_t since_ts,
+                                   memory_fact_t *out_facts,
+                                   float *out_scores,
+                                   int max,
+                                   int *out_count) {
    if (out_count != NULL)
       *out_count = 0;
    if (out_facts == NULL || out_scores == NULL || out_count == NULL || max <= 0)
@@ -221,11 +210,13 @@ int memory_fact_search_hybrid(int user_id,
                                          kw_facts, work_cap, since_ts, kw_scores);
    }
 
-   /* 3. Hybrid re-rank when embeddings are available AND caller provided
-    *    a query embedding.  Both gates required: hybrid_search consumes
+   /* 3. Hybrid re-rank when embeddings are available AND caller opted in
+    *    to the hybrid path.  Both gates required: hybrid_search consumes
     *    a query string + cached query embedding; if the engine isn't
-    *    ready we must not enter that path. */
-   if (query_embedding != NULL && memory_embeddings_available()) {
+    *    ready we must not enter that path.  When the caller supplied a
+    *    pre-computed (query_emb, query_norm) pair we thread it through
+    *    the _ex variants to skip a second ONNX inference (M3). */
+   if (use_hybrid_path && memory_embeddings_available()) {
       int64_t kw_ids[HYBRID_FETCH_LIMIT];
       for (int i = 0; i < kw_count; i++)
          kw_ids[i] = kw_facts[i].id;
@@ -233,11 +224,13 @@ int memory_fact_search_hybrid(int user_id,
       embedding_search_result_t hybrid[HYBRID_FETCH_LIMIT];
       int hybrid_count;
       if (g_config.memory.rrf_enabled) {
-         hybrid_count = memory_embeddings_rrf_search(user_id, query, kw_ids, kw_scores, kw_count,
-                                                     kw_score_denom, hybrid, work_cap);
+         hybrid_count = memory_embeddings_rrf_search_ex(user_id, query, query_emb, query_norm,
+                                                        kw_ids, kw_scores, kw_count, kw_score_denom,
+                                                        hybrid, work_cap);
       } else {
-         hybrid_count = memory_embeddings_hybrid_search(user_id, query, kw_ids, kw_scores, kw_count,
-                                                        kw_score_denom, hybrid, work_cap);
+         hybrid_count = memory_embeddings_hybrid_search_ex(user_id, query, query_emb, query_norm,
+                                                           kw_ids, kw_scores, kw_count,
+                                                           kw_score_denom, hybrid, work_cap);
       }
       if (hybrid_count > 0) {
          int produced = 0;
@@ -253,21 +246,16 @@ int memory_fact_search_hybrid(int user_id,
                }
             }
             if (!found) {
-               /* Vector-only hit — fetch and DEFENSE-IN-DEPTH check that
-                * the fetched fact really belongs to `user_id`.
-                * `memory_db_fact_get` is NOT user-scoped: a regression
-                * in hybrid_search's user scoping would otherwise let a
-                * foreign fact through.  Skip on mismatch, log as ERROR. */
+               /* Vector-only hit — fetch via the now-user-scoped
+                * `memory_db_fact_get` (SQL filters on (id, user_id) at the
+                * statement layer, CWE-639 defense-in-depth).  Wrong-user
+                * lookups return MEMORY_DB_NOT_FOUND, so the legacy
+                * `vec_fact.user_id != user_id` post-check is no longer
+                * needed. */
                memory_fact_t vec_fact;
-               int rc = memory_db_fact_get(hybrid[h].fact_id, &vec_fact);
+               int rc = memory_db_fact_get(hybrid[h].fact_id, user_id, &vec_fact);
                if (rc != MEMORY_DB_SUCCESS)
                   continue;
-               if (vec_fact.user_id != user_id) {
-                  OLOG_ERROR("memory_fact_search: vector-only fact_id=%lld owned by user_id=%d "
-                             "(expected %d) — skipping (defense-in-depth)",
-                             (long long)hybrid[h].fact_id, vec_fact.user_id, user_id);
-                  continue;
-               }
                out_facts[produced] = vec_fact;
                out_scores[produced] = hybrid[h].score;
                produced++;
@@ -289,6 +277,39 @@ int memory_fact_search_hybrid(int user_id,
    return SUCCESS;
 }
 
+int memory_fact_search_hybrid(int user_id,
+                              const char *query,
+                              const float *query_embedding,
+                              size_t embed_dim,
+                              time_t since_ts,
+                              memory_fact_t *out_facts,
+                              float *out_scores,
+                              int max,
+                              int *out_count) {
+   (void)embed_dim; /* legacy gate semantics — see header */
+   /* Legacy contract: query_embedding is a GATE only, never dereferenced.
+    * Translate to use_hybrid_path = (query_embedding != NULL) and let the
+    * impl embed internally inside hybrid_search_ex. */
+   const bool use_hybrid_path = (query_embedding != NULL);
+   return fact_search_hybrid_impl(user_id, query, NULL, 0.0f, use_hybrid_path, since_ts, out_facts,
+                                  out_scores, max, out_count);
+}
+
+int memory_fact_search_hybrid_ex(int user_id,
+                                 const char *query,
+                                 const float *query_emb,
+                                 float query_norm,
+                                 time_t since_ts,
+                                 memory_fact_t *out_facts,
+                                 float *out_scores,
+                                 int max,
+                                 int *out_count) {
+   /* Pre-computed embedding implies caller wants the hybrid path. */
+   const bool use_hybrid_path = true;
+   return fact_search_hybrid_impl(user_id, query, query_emb, query_norm, use_hybrid_path, since_ts,
+                                  out_facts, out_scores, max, out_count);
+}
+
 int memory_search_execute(int user_id,
                           const char *query,
                           time_t since_ts,
@@ -306,15 +327,34 @@ int memory_search_execute(int user_id,
    if (max > MEMORY_SEARCH_HYBRID_MAX)
       max = MEMORY_SEARCH_HYBRID_MAX;
 
+   /* Embed the query ONCE up-front so all downstream embedding-consuming
+    * paths reuse it.  Pre-fix the same query was being embedded twice per
+    * call: once inside memory_embeddings_hybrid_search, and again inside
+    * the graph rescore step below.  Saves ~15 ms/query on bge-small INT8
+    * / Jetson (efficiency M3).
+    *
+    * If the engine is unavailable or the embed fails, leave query_norm
+    * at 0 and pass NULL downstream — every consumer falls back cleanly. */
+   float query_emb[MAX_EMBEDDING_DIMS];
+   float query_norm = 0.0f;
+   bool query_emb_ready = false;
+   if (memory_embeddings_available()) {
+      int qdims = 0;
+      if (memory_embeddings_embed(query, query_emb, &qdims) == 0 &&
+          qdims == embedding_engine_dims()) {
+         query_norm = memory_embeddings_l2_norm(query_emb, qdims);
+         query_emb_ready = (query_norm >= 1e-6f);
+      }
+   }
+
    /* Step 1: hybrid keyword + cosine retrieval against the full corpus.
-    * The non-NULL `embed_gate` opts into hybrid re-rank when embeddings
-    * are available; the pointer is never dereferenced (hybrid_search
-    * re-embeds the query internally). */
-   const float embed_gate = 0.0f;
-   const float *gate_ptr = memory_embeddings_available() ? &embed_gate : NULL;
+    * Thread the precomputed query embedding through so hybrid_search
+    * doesn't re-embed.  When the engine is unavailable we pass NULL/0,
+    * which dispatches to the keyword-only fallback path internally. */
    int fact_count = 0;
-   if (memory_fact_search_hybrid(user_id, query, gate_ptr, 0, since_ts, out_facts, out_scores, max,
-                                 &fact_count) != SUCCESS) {
+   const float *threaded_emb = query_emb_ready ? query_emb : NULL;
+   if (memory_fact_search_hybrid_ex(user_id, query, threaded_emb, query_norm, since_ts, out_facts,
+                                    out_scores, max, &fact_count) != SUCCESS) {
       fact_count = 0;
    }
 
@@ -347,17 +387,9 @@ int memory_search_execute(int user_id,
             int64_t graph_fact_ids[MEMORY_GRAPH_INTERMEDIATE_CAP];
             for (int i = 0; i < graph_count; i++)
                graph_fact_ids[i] = graph_facts[i].id;
-            /* Embed query once and thread through the rescore so we don't
-             * pay a second ONNX inference on the hot path. */
-            float query_emb[MAX_EMBEDDING_DIMS];
-            int qdims = 0;
-            float query_norm = 0.0f;
-            if (memory_embeddings_available() &&
-                memory_embeddings_embed(query, query_emb, &qdims) == 0 &&
-                qdims == embedding_engine_dims()) {
-               query_norm = memory_embeddings_l2_norm(query_emb, qdims);
-            }
-            memory_embeddings_rescore_against_query(user_id, query_norm >= 1e-6f ? query_emb : NULL,
+            /* Reuse the query embedding computed above — no second ONNX
+             * inference on this hot path (M3). */
+            memory_embeddings_rescore_against_query(user_id, query_emb_ready ? query_emb : NULL,
                                                     query_norm,
                                                     g_config.memory.graph_retrieval.entity_bonus,
                                                     graph_fact_ids, graph_count, graph_scores);

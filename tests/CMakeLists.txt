@@ -174,8 +174,13 @@ dawn_add_unit_test(test_time_query_parser
 dawn_add_unit_test(test_temporal_relations
    SOURCES test_temporal_relations.c test_temporal_relations_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
-           # v48: memory_db.c calls memory_bm25_* + memory_stem_* helpers
+           # v48: memory_db_facts.c calls memory_bm25_* + memory_stem_* helpers
            # in the FTS5 sync path (fact_create / fact_delete) + search.
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
@@ -185,6 +190,11 @@ dawn_add_unit_test(test_temporal_relations
 dawn_add_unit_test(test_relation_supersede
    SOURCES test_relation_supersede.c test_relation_supersede_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
@@ -198,7 +208,15 @@ dawn_add_unit_test(test_relation_supersede
 dawn_add_unit_test(test_memory_db_alias
    SOURCES test_memory_db_alias.c test_memory_db_alias_stub.c
            ${SRC_ROOT}/src/memory/memory_db_alias.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_scorer.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_cascade.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_writes.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
            # WARNING: keep config_defaults.c a leaf module — it is linked
@@ -289,7 +307,7 @@ dawn_add_unit_test(test_missed_notifications_db
 
 dawn_add_unit_test(test_memory_filter
    SOURCES test_memory_filter.c
-           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/memory_filter.c
    LIBS    dawn_common unity
    LABEL   ci)
 
@@ -298,9 +316,9 @@ dawn_add_unit_test(test_memory_filter
 # the test provides g_config inline.
 dawn_add_unit_test(test_focus_source
    SOURCES test_focus_source.c
-           ${SRC_ROOT}/src/memory/focus_source.c
-           ${SRC_ROOT}/src/memory/focus_dominant_token.c
-           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/focus/focus_source.c
+           ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/memory_filter.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -311,7 +329,7 @@ dawn_add_unit_test(test_focus_source
 # integration smoke.
 dawn_add_unit_test(test_focus_dominant_token
    SOURCES test_focus_dominant_token.c
-           ${SRC_ROOT}/src/memory/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -333,10 +351,10 @@ dawn_add_unit_test(test_memory_focus_adapters
    SOURCES test_memory_focus_adapters.c test_memory_focus_adapters_stub.c
            ${SRC_ROOT}/src/memory/memory_focus_adapters.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
-           ${SRC_ROOT}/src/memory/focus_source.c
-           ${SRC_ROOT}/src/memory/focus_recency.c
-           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
-           ${SRC_ROOT}/src/memory/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/focus/focus_source.c
+           ${SRC_ROOT}/src/core/focus/focus_recency.c
+           ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
@@ -364,11 +382,11 @@ dawn_add_unit_test(test_prompt_builder
 # + webui_broadcast.
 dawn_add_unit_test(test_focus_probe
    SOURCES test_focus_probe.c test_focus_probe_stub.c
-           ${SRC_ROOT}/src/memory/focus_source.c
-           ${SRC_ROOT}/src/memory/focus_recency.c
-           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
-           ${SRC_ROOT}/src/memory/focus_dominant_token.c
-           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/focus/focus_source.c
+           ${SRC_ROOT}/src/core/focus/focus_recency.c
+           ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
@@ -387,10 +405,10 @@ dawn_add_unit_test(test_external_focus_adapters
            ${SRC_ROOT}/src/tools/document_focus_adapter.c
            ${SRC_ROOT}/src/tools/calendar_focus_adapter.c
            ${SRC_ROOT}/src/tools/external_focus_adapters_init.c
-           ${SRC_ROOT}/src/memory/focus_source.c
-           ${SRC_ROOT}/src/memory/focus_recency.c
-           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
-           ${SRC_ROOT}/src/memory/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/focus/focus_source.c
+           ${SRC_ROOT}/src/core/focus/focus_recency.c
+           ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
@@ -430,6 +448,11 @@ dawn_add_unit_test(test_strbuf
 dawn_add_unit_test(test_memory_provenance
    SOURCES test_memory_provenance.c test_memory_provenance_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
@@ -686,6 +709,11 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_callback.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
            ${SRC_ROOT}/src/memory/memory_source_dedup.c
@@ -695,7 +723,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_embeddings.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
-           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
@@ -748,11 +776,11 @@ dawn_add_unit_test(bench_contradiction
 dawn_add_unit_test(bench_focus_pipeline
    NO_TEST
    SOURCES ${SRC_ROOT}/benchmarks/bench_focus_pipeline.c
-           ${SRC_ROOT}/src/memory/focus_source.c
-           ${SRC_ROOT}/src/memory/focus_recency.c
-           ${SRC_ROOT}/src/memory/focus_candidate_helpers.c
-           ${SRC_ROOT}/src/memory/focus_dominant_token.c
-           ${SRC_ROOT}/src/memory/memory_filter.c
+           ${SRC_ROOT}/src/core/focus/focus_source.c
+           ${SRC_ROOT}/src/core/focus/focus_recency.c
+           ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
+           ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c

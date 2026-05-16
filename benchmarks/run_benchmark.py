@@ -1442,13 +1442,22 @@ def _snapshot_cache_paths(cache_dir, engine, conv_idx, conv):
    Cache key includes everything that would change the extracted state:
      - snapshot format version
      - extraction provider/model (LLM-driven)
+     - extraction prompt SHA-256 (from bench engine ready_info) — without this
+       a prompt-template edit silently resolves to OLDER cached extractions
+       and bench reports apples-to-oranges numbers
      - embedding provider + dims (embeddings stored alongside facts)
      - conv index + content hash
    Stored under: cache_dir/{key}.db and cache_dir/{key}.json"""
+   prompt_hash = engine.ready_info.get("extraction_prompt_sha256", "")
+   if not prompt_hash:
+      print("WARNING: bench engine did not emit extraction_prompt_sha256; "
+            "cache keys will not invalidate on prompt changes.  Rebuild "
+            "bench_retrieval against current source.", file=sys.stderr)
    key_input = "\x1f".join([
       f"v{SNAPSHOT_FORMAT_VERSION}",
       engine.ready_info.get("extraction_provider", ""),
       engine.ready_info.get("extraction_model", ""),
+      prompt_hash,
       engine.provider,
       str(engine.dims),
       str(conv_idx),
@@ -1947,6 +1956,8 @@ def run_locomo_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=None,
       "prompt_style": prompt_style,
       "extraction_provider": primary_engine.ready_info.get("extraction_provider", ""),
       "extraction_model": primary_engine.ready_info.get("extraction_model", ""),
+      "extraction_prompt_sha256": primary_engine.ready_info.get(
+         "extraction_prompt_sha256", ""),
       "avg_recall_reach": sum(all_recall) / len(all_recall) if all_recall else 0,
       "total_qa": total_qa,
       "conversations": len(entries),
@@ -2063,12 +2074,20 @@ def _lme_haystack_hash(entry):
 
 def _lme_snapshot_paths(cache_dir, engine, qidx, entry):
    """Per-question snapshot paths.  Cache key incorporates extraction model +
-   embedding provider + question_id + haystack content hash."""
+   extraction prompt hash + embedding provider + question_id + haystack
+   content hash.  See _snapshot_cache_paths for why the prompt hash is part
+   of the key."""
    qid = entry.get("question_id", f"q{qidx}")
+   prompt_hash = engine.ready_info.get("extraction_prompt_sha256", "")
+   if not prompt_hash:
+      print("WARNING: bench engine did not emit extraction_prompt_sha256; "
+            "LongMemEval cache keys will not invalidate on prompt changes.",
+            file=sys.stderr)
    key_input = "\x1f".join([
       f"v{SNAPSHOT_FORMAT_VERSION}",
       engine.ready_info.get("extraction_provider", ""),
       engine.ready_info.get("extraction_model", ""),
+      prompt_hash,
       engine.provider,
       str(engine.dims),
       qid,
@@ -2319,6 +2338,8 @@ def run_longmemeval_memory(engines, dataset_path, limit=0, top_k=10, cache_dir=N
       "question_types": sorted(question_types) if question_types else "all",
       "extraction_provider": primary_engine.ready_info.get("extraction_provider", ""),
       "extraction_model": primary_engine.ready_info.get("extraction_model", ""),
+      "extraction_prompt_sha256": primary_engine.ready_info.get(
+         "extraction_prompt_sha256", ""),
       "total_q_evaluated": total_q_evaluated,
       "questions": len(data),
       "total_facts_extracted": total_facts,

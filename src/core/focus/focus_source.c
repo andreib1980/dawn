@@ -23,18 +23,18 @@
  * email adapters that register via `focus_register_source()`.
  */
 
-#include "memory/focus_source.h"
+#include "core/focus/focus_source.h"
 
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_dominant_token.h"
+#include "core/focus/focus_source_internal.h"
+#include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/focus_dominant_token.h"
-#include "memory/focus_source_internal.h"
-#include "memory/memory_filter.h"
 
 /* =============================================================================
  * Registry — fixed-size linear array.

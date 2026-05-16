@@ -16,7 +16,7 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for src/memory/focus_source.c — adapter registry, filter-on-
+ * Unit tests for src/core/focus/focus_source.c — adapter registry, filter-on-
  * retrieval pipeline, three-factor ranker, top_k / min_score / token-budget
  * trim, memory ownership.
  *
@@ -32,9 +32,9 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_source.h"
+#include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
-#include "memory/focus_source.h"
-#include "memory/focus_source_internal.h"
 #include "unity.h"
 
 /* =============================================================================

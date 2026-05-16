@@ -113,6 +113,32 @@ int memory_fact_search_hybrid(int user_id,
                               int *out_count);
 
 /**
+ * @brief Variant of memory_fact_search_hybrid that threads a pre-computed
+ *        query embedding through to memory_embeddings_hybrid_search_ex /
+ *        memory_embeddings_rrf_search_ex.
+ *
+ * Efficiency M3 (May 2026): callers that have already embedded the query
+ * (e.g., memory_search_execute, which also feeds the embedding into the
+ * graph-rescore step) skip a second ONNX inference (~15 ms saved on
+ * bge-small INT8 / Jetson).
+ *
+ * Same semantics as memory_fact_search_hybrid otherwise.  Pass NULL/0/0.0f
+ * for the (query_emb, query_norm) pair to force internal embedding.
+ *
+ * @param query_emb Pre-computed query embedding (NULL → internal compute)
+ * @param query_norm Pre-computed L2 norm (must pair with @p query_emb)
+ */
+int memory_fact_search_hybrid_ex(int user_id,
+                                 const char *query,
+                                 const float *query_emb,
+                                 float query_norm,
+                                 time_t since_ts,
+                                 memory_fact_t *out_facts,
+                                 float *out_scores,
+                                 int max,
+                                 int *out_count);
+
+/**
  * @brief "I don't remember" gate — compact a fact/score parallel array by
  *        dropping entries whose score falls below @p score_floor.
  *

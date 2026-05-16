@@ -36,9 +36,9 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_source.h"
+#include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
-#include "memory/focus_source.h"
-#include "memory/focus_source_internal.h"
 #include "test_external_focus_adapters_mocks.h"
 #include "tools/external_focus_adapters.h"
 #include "unity.h"

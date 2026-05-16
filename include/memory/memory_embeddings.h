@@ -41,8 +41,32 @@ extern "C" {
 /* Maximum embedding dimensions (all-MiniLM = 384, OpenAI ada = 1536) */
 #define MAX_EMBEDDING_DIMS 2048
 
-/* Maximum facts to cache for vector search */
-#define EMBEDDING_SEARCH_CAP 2000
+/* Maximum facts to cache for vector search.
+ *
+ * Sizing rationale (May 2026, efficiency H1):
+ *   - per-user RAM at 8192 × 384 dims × 4 B = 12 MB embeddings + 12 KB norms +
+ *     64 KB ids + 64 KB created_ats ≈ 12.1 MB per user — comfortable on Jetson.
+ *   - At ~6 facts/conv, 8192 facts represents ~1300 conversations of memory,
+ *     ~4-6 months of growth headroom at typical use.
+ *   - When the cap is hit, the cache silently truncates additional rows.
+ *     `cache_load_saturated_warn()` emits a one-shot OLOG_WARNING per user so
+ *     the operator notices before retrieval quality degrades.
+ *
+ * NOTE: the per-call scratch arrays (merged, pool, rank_X, scored) in
+ * memory_embeddings.c are sized via MEMORY_HYBRID_SCRATCH_CAP, NOT this
+ * constant, so bumping this value does NOT blow per-call stack frames.
+ * Production pthread stacks are as small as 256 KB (llm_context.c), so the
+ * scratch bound is intentionally decoupled. */
+#define EMBEDDING_SEARCH_CAP 8192
+
+/* Per-call scratch bound for hybrid/rrf search.  Caps the in-flight working
+ * set independently of the cache size — keeps stack frames at ~24 KB
+ * (hybrid) / ~384 KB (rrf, gated by smaller pthread stacks elsewhere if
+ * relevant) regardless of how large the cache grows.
+ *
+ * Picked at the historical EMBEDDING_SEARCH_CAP value (2000) so behavior
+ * matches pre-bump for callers below that scale. */
+#define MEMORY_HYBRID_SCRATCH_CAP 2000
 
 _Static_assert(MAX_EMBEDDING_DIMS * sizeof(float) <= 8192, "Embedding stack buffer exceeds 8KB");
 
@@ -199,6 +223,42 @@ int memory_embeddings_hybrid_search(int user_id,
                                     int max_results);
 
 /**
+ * @brief Variant of memory_embeddings_hybrid_search that accepts an optional
+ *        pre-computed query embedding to avoid re-embedding on the hot path.
+ *
+ * Efficiency M3 (May 2026): callers that have already embedded the query for
+ * another retrieval step (e.g., entity rescore, graph re-rank) can thread the
+ * (vec, norm) pair through to skip the second ONNX inference (~15 ms saved on
+ * bge-small INT8 / Jetson per call).
+ *
+ * If @p query_emb is NULL or @p query_norm < 1e-6f, the function falls back to
+ * embedding the query string internally — preserving the exact behavior of
+ * memory_embeddings_hybrid_search().  Dim is taken from embedding_engine_dims().
+ *
+ * @param user_id User ID
+ * @param query Search query text (still used for temporal-expression parsing)
+ * @param query_emb Optional pre-computed query embedding (NULL → compute internally)
+ * @param query_norm Optional pre-computed L2 norm (paired with @p query_emb)
+ * @param keyword_facts Pre-searched keyword results (fact IDs)
+ * @param keyword_scores Keyword scores per fact (from multi_token_fact_search)
+ * @param keyword_count Number of keyword results
+ * @param token_count Number of search tokens (for score normalization)
+ * @param out_results Output: sorted hybrid results
+ * @param max_results Maximum results to return
+ * @return Number of results
+ */
+int memory_embeddings_hybrid_search_ex(int user_id,
+                                       const char *query,
+                                       const float *query_emb,
+                                       float query_norm,
+                                       const int64_t *keyword_facts,
+                                       const int *keyword_scores,
+                                       int keyword_count,
+                                       int token_count,
+                                       embedding_search_result_t *out_results,
+                                       int max_results);
+
+/**
  * @brief Reciprocal Rank Fusion search — parallel-channel alternative to
  *        `memory_embeddings_hybrid_search`.
  *
@@ -240,6 +300,25 @@ int memory_embeddings_rrf_search(int user_id,
                                  int token_count,
                                  embedding_search_result_t *out_results,
                                  int max_results);
+
+/**
+ * @brief Variant of memory_embeddings_rrf_search that accepts an optional
+ *        pre-computed query embedding — same contract as
+ *        memory_embeddings_hybrid_search_ex.
+ *
+ * @param query_emb Optional pre-computed query embedding (NULL → compute internally)
+ * @param query_norm Optional pre-computed L2 norm (paired with @p query_emb)
+ */
+int memory_embeddings_rrf_search_ex(int user_id,
+                                    const char *query,
+                                    const float *query_emb,
+                                    float query_norm,
+                                    const int64_t *keyword_facts,
+                                    const int *keyword_scores,
+                                    int keyword_count,
+                                    int token_count,
+                                    embedding_search_result_t *out_results,
+                                    int max_results);
 
 /** Sentinel score returned by `memory_embeddings_rescore_against_query`
  * for facts that could not be scored (no embedding in the per-user cache,

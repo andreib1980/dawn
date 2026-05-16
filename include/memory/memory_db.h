@@ -123,10 +123,11 @@ int memory_db_fact_search_by_category(int user_id,
  * backfill pass and the future LLM recategorize-all admin command.
  *
  * @param fact_id Fact ID
+ * @param user_id User ID (ownership check — SQL filter, defense-in-depth)
  * @param category New category (must be one of MEMORY_FACT_CATEGORIES)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_update_category(int64_t fact_id, const char *category);
+int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *category);
 
 /**
  * @brief List facts with category='general' for a user, paginated by id.
@@ -156,13 +157,18 @@ int memory_db_fact_list_general(int user_id,
 int memory_db_fact_count_general(int user_id, int *count_out);
 
 /**
- * @brief Get a fact by ID
+ * @brief Get a fact by ID, scoped to a user (CWE-639 defense-in-depth).
+ *
+ * SQL filters on `(id = ? AND user_id = ?)`, so a fact owned by a different
+ * user returns MEMORY_DB_NOT_FOUND — same response a legitimately-missing
+ * fact would get.  Don't use the response to distinguish the two cases.
  *
  * @param fact_id Fact ID to retrieve
+ * @param user_id User ID (ownership check)
  * @param out_fact Output: populated fact structure
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
  */
-int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact);
+int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact);
 
 /**
  * @brief List facts for a user (non-superseded only)
@@ -268,10 +274,11 @@ int memory_db_fact_update_access(int64_t fact_id, int user_id);
  * @brief Update fact confidence
  *
  * @param fact_id Fact ID
+ * @param user_id User ID (ownership check — SQL filter, defense-in-depth)
  * @param confidence New confidence value
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_update_confidence(int64_t fact_id, float confidence);
+int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confidence);
 
 /**
  * @brief Set the subject_entity_id FK on an existing fact (v47).
@@ -292,13 +299,17 @@ int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t enti
 /**
  * @brief Mark a fact as superseded by another
  *
- * Used when a fact is corrected or updated.
+ * Used when a fact is corrected or updated.  Both fact IDs must belong to
+ * the same user (defense-in-depth: foreign-rowid CWE-639 + cross-user
+ * pointer prevention — a foreign new_fact_id could otherwise "hide" another
+ * user's fact from their own retrieval).  SQL enforces both owners.
  *
  * @param old_fact_id Fact being superseded
  * @param new_fact_id Fact that supersedes it
+ * @param user_id     User ID (ownership check for BOTH fact IDs)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id);
+int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id);
 
 /**
  * @brief Delete a fact
@@ -731,9 +742,10 @@ int memory_db_summary_list(int user_id,
  * @brief Mark a summary as consolidated
  *
  * @param summary_id Summary ID
+ * @param user_id    User ID (ownership check — SQL filter, defense-in-depth)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_summary_mark_consolidated(int64_t summary_id);
+int memory_db_summary_mark_consolidated(int64_t summary_id, int user_id);
 
 /**
  * @brief Search summaries by keyword

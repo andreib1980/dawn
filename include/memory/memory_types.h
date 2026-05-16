@@ -94,6 +94,18 @@ typedef struct {
  * ============================================================================= */
 
 #define MEMORY_FACT_TEXT_MAX 512
+/* Canonical size for buffers holding stemmed fact_text + tokenizer working
+ * copies across the memory subsystem.  Porter2 only shortens tokens (suffix
+ * manipulation) and the tokenizer replaces delimiters 1-to-1 with spaces, so
+ * stem-side output is always <= input length.  Sized 256 bytes over
+ * MEMORY_FACT_TEXT_MAX (=512) to give the stem framing and tokenizer
+ * working copies a comfortable margin against edge cases (e.g., the tokenizer
+ * dropping multi-byte UTF-8 punctuation in favor of single spaces) without
+ * silent mid-token truncation.  Lives here next to MEMORY_FACT_TEXT_MAX so
+ * the stem / fact_search / callback tokenizer call sites share one source
+ * of truth — keeping the BM25 ranking pipeline free of size-drift across
+ * the token-bookkeeping path. */
+#define MEMORY_FACT_STEMS_MAX 768
 #define MEMORY_SOURCE_MAX 16
 #define MEMORY_CATEGORY_MAX 32
 #define MEMORY_PREF_VALUE_MAX 256

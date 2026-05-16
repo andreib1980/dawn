@@ -260,7 +260,13 @@ static void test_chrome_legitimate_article_not_flagged(void) {
 
 static void test_chrome_mixed_content_below_threshold(void) {
    /* Article with nav bar at top but body underneath — combined density
-    * should NOT trip detection because prose dominates the total. */
+    * should NOT trip detection because prose dominates the total.
+    *
+    * Paragraphs in this fixture MUST exceed PROSE_RUN_MIN_CHARS (200) for
+    * the detector to count them — the earlier 164-char `more` string fell
+    * below the floor so only the article body counted as prose, falsely
+    * tripping detection.  Real article paragraphs typically run 200-500+
+    * chars, so this fixture now uses ~300-char paragraphs to match. */
    char buf[6144];
    memset(buf, 0, sizeof(buf));
    strcpy(buf, "* [Home](http://example.com/)\n"
@@ -270,11 +276,15 @@ static void test_chrome_mixed_content_below_threshold(void) {
                "This is the actual article body, a substantial paragraph of prose "
                "that goes on for several hundred characters explaining the subject "
                "matter in genuine detail with complete sentences and reasonable "
-               "topic flow throughout the piece.\n\n");
-   /* Repeat the prose paragraph to bulk out the size. */
+               "topic flow throughout the piece that a reader would naturally "
+               "consume start to finish without getting lost in chrome.\n\n");
+   /* Repeat the prose paragraph to bulk out the size.  Each repeat must
+    * exceed PROSE_RUN_MIN_CHARS (200) so the detector counts it as prose. */
    const char *more = "More prose continues here for paragraphs upon paragraphs, "
                       "discussing the topic in further depth with examples and "
-                      "context that mirror how real articles are written.\n\n";
+                      "context that mirror how real articles are written, with "
+                      "sentences that flow naturally and convey substantive meaning "
+                      "to the reader across multiple lines of text.\n\n";
    while (strlen(buf) + strlen(more) < sizeof(buf) - 1) {
       strcat(buf, more);
    }

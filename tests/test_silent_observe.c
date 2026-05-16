@@ -30,9 +30,9 @@
 #include <string.h>
 
 #include "config/dawn_config.h"
+#include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
-#include "memory/memory_filter.h"
 #include "unity.h"
 
 /* =============================================================================

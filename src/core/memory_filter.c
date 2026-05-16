@@ -24,7 +24,7 @@
  * bidi overrides, tag characters).
  */
 
-#include "memory/memory_filter.h"
+#include "core/memory_filter.h"
 
 #include <ctype.h>
 #include <stdbool.h>

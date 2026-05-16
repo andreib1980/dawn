@@ -183,11 +183,13 @@ static int prepare_statements(void) {
 
    /* memory_db_fact_get is used by the new provenance-extend + cleanup-meta-
     * facts tests to verify row-level state.  Production DDL keeps these
-    * columns; mirror that here. */
+    * columns; mirror that here.  SQL filters on (id, user_id) to mirror
+    * the CWE-639 defense-in-depth in production. */
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts WHERE id = ?",
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE id = ? AND user_id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -806,9 +808,9 @@ void test_cleanup_meta_facts_dry_run_counts_without_delete(void) {
 
    /* All three rows should still be present. */
    memory_fact_t got = { 0 };
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id1, &got));
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id2, &got));
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id3, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id1, 1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id2, 1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id3, 1, &got));
 }
 
 void test_cleanup_meta_facts_commit_deletes_matches_only(void) {
@@ -829,11 +831,13 @@ void test_cleanup_meta_facts_commit_deletes_matches_only(void) {
    TEST_ASSERT_EQUAL(2, deleted);
 
    memory_fact_t got = { 0 };
-   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_meta1, &got));
-   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_meta2, &got));
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id_keep, &got));
-   /* Other user's row preserved. */
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id_other_user, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_meta1, 1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_meta2, 1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id_keep, 1, &got));
+   /* Other user's row preserved (still present under user 2's scope). */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id_other_user, 2, &got));
+   /* And user 1 cannot see user 2's row (CWE-639 defense-in-depth). */
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(id_other_user, 1, &got));
 }
 
 void test_cleanup_meta_facts_no_match_returns_zero(void) {
@@ -847,7 +851,7 @@ void test_cleanup_meta_facts_no_match_returns_zero(void) {
    TEST_ASSERT_EQUAL(0, matched);
 
    memory_fact_t got = { 0 };
-   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id, 1, &got));
 }
 
 int main(void) {

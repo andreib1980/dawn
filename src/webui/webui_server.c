@@ -42,9 +42,9 @@
 #include <sys/random.h>
 #include <unistd.h>
 
-#include "memory/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
-#include "memory/focus_source.h"            /* focus_compose_result_t */
-#include "memory/memory_db_aliases.h"       /* memory_db_proposal_count_pending */
+#include "core/focus/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
+#include "core/focus/focus_source.h"            /* focus_compose_result_t */
+#include "memory/memory_db_aliases.h"           /* memory_db_proposal_count_pending */
 #include "webui/build_focus_block.h"
 #include "webui/webui_internal.h"
 

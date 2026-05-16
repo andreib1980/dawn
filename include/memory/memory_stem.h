@@ -35,18 +35,20 @@
 
 #include <stddef.h>
 
+#include "memory/memory_types.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Canonical size for buffers holding stemmed fact_text.  Porter2 only
- * shortens tokens (suffix manipulation), so the stem output is always
- * less-than-or-equal to the input length.  fact_text is bounded by
- * MEMORY_FACT_TEXT_MAX (512) — this leaves a comfortable margin for the
- * delimiter-replacing-with-space framing and any edge cases (e.g., the
- * tokenizer dropping multi-byte UTF-8 punctuation in favor of single
- * spaces). */
-#define MEMORY_FACT_STEMS_MAX 768
+/* Canonical memory-subsystem tokenizer delimiter set.  Whitespace plus the
+ * punctuation classes the extraction prompt + LLM tool query path treat as
+ * word boundaries.  Shared across memory_stem_string, memory_stem_count,
+ * memory_fact_search.c::tokenize_query, and memory_callback.c::tokenize_query
+ * so extraction-time stems and query-time tokens collide on the same token
+ * shape.  NOT used by memory_db.c::build_fts5_match_expr — that path splits
+ * already-stemmed space-separated input on " " only. */
+extern const char *const MEMORY_TOKEN_DELIMS;
 
 /**
  * @brief Initialize the global Porter2 stemmer.
@@ -56,7 +58,7 @@ extern "C" {
  * via internal mutex (libstemmer instances are NOT individually
  * thread-safe per its docs).
  *
- * @return 0 on success, non-zero if libstemmer init fails.
+ * @return SUCCESS (0) on success, FAILURE (1) if libstemmer init fails.
  */
 int memory_stem_init(void);
 
@@ -99,6 +101,53 @@ int memory_stem_string(const char *input, char *out, size_t out_sz);
  * @return Number of tokens (>= 0) that would survive memory_stem_string.
  */
 int memory_stem_count(const char *input);
+
+/**
+ * @brief Tokenize @p input in place on the canonical memory-subsystem
+ *        delimiter set (`MEMORY_TOKEN_DELIMS`), lowercasing each token.
+ *
+ * Writes pointers to each surviving token into @p tokens_out.  Tokens are
+ * pointers INTO @p input — they share its lifetime and remain valid only
+ * while @p input is in scope.  Caller is responsible for providing a
+ * writable working copy of any string they don't want mutated.
+ *
+ * Shared across memory_stem_string / memory_stem_count and the per-call-site
+ * query tokenizers (memory_fact_search.c, memory_callback.c) so the BM25
+ * ranking pipeline sees one source of truth for token shape + filter rules.
+ *
+ * @param input       Input UTF-8 string (will be modified — NUL bytes written
+ *                    at every delimiter, all characters lowercased).
+ * @param tokens_out  Output array of pointers into @p input.  Each entry
+ *                    points to a NUL-terminated token of length >= @p min_len.
+ * @param max_tokens  Capacity of @p tokens_out (excess tokens discarded).
+ * @param min_len     Minimum token length to keep (typically 2).
+ * @return Number of tokens written (0..max_tokens).
+ */
+int memory_stem_tokenize_in_place(char *input,
+                                  const char **tokens_out,
+                                  int max_tokens,
+                                  int min_len);
+
+/**
+ * @brief Tokenize @p keywords into the caller-supplied padded-row buffer.
+ *
+ * Convenience wrapper around `memory_stem_tokenize_in_place` for sites that
+ * use a `char tokens[N][64]` storage shape (memory_callback.c +
+ * memory_fact_search.c).  Internally allocates a stack working buffer sized
+ * to MEMORY_FACT_STEMS_MAX, lowercases + tokenizes via the canonical
+ * delimiter set, and snprintfs each surviving token into the padded row.
+ *
+ * @param keywords    Input UTF-8 string (caller's storage; not modified).
+ * @param tokens      Output: `tokens[i]` is a NUL-terminated lowercase stem.
+ *                    Each row holds up to 63 bytes plus NUL.
+ * @param max_tokens  Capacity of @p tokens (rows); excess tokens discarded.
+ * @param min_len     Minimum stem length to keep (typically 2).
+ * @return Number of rows written (0..max_tokens).
+ */
+int memory_stem_tokenize_padded(const char *keywords,
+                                char tokens[][64],
+                                int max_tokens,
+                                int min_len);
 
 #ifdef __cplusplus
 }

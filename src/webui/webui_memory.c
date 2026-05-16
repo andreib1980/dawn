@@ -29,13 +29,13 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/memory_filter.h"
 #include "core/strbuf.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
-#include "memory/memory_filter.h"
 #include "memory/memory_similarity.h"
 #include "webui/webui_internal.h"
 

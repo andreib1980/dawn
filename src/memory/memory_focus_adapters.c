@@ -36,7 +36,7 @@
  * on the adapter's `source_type` whether to filter.  Memory adapters
  * here are FOCUS_SOURCE_INTERNAL → skipped at retrieval (filtered at
  * extraction-time ingestion gate is the model).  See trust-tier comment
- * in src/memory/focus_source.c::focus_compose for the full rationale.
+ * in src/core/focus/focus_source.c::focus_compose for the full rationale.
  *
  * Memory ownership: each adapter mallocs the candidate array AND each
  * candidate's `text` + `item_id`.  Framework owns on SUCCESS.  On
@@ -56,11 +56,11 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_candidate_helpers.h"
+#include "core/focus/focus_recency.h"
+#include "core/focus/focus_source.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/focus_candidate_helpers.h"
-#include "memory/focus_recency.h"
-#include "memory/focus_source.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_db_provenance.h"

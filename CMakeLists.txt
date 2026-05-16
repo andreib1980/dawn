@@ -646,13 +646,21 @@ list(APPEND DAWN_SOURCES
 list(APPEND DAWN_SOURCES
     src/auth/auth_db_core.c
     src/memory/memory_db.c
+    src/memory/memory_db_facts.c
+    src/memory/memory_db_summaries.c
+    src/memory/memory_db_prefs.c
+    src/memory/memory_db_entities.c
+    src/memory/memory_db_relations.c
     src/memory/memory_db_admin.c
     src/memory/memory_db_alias.c
+    src/memory/memory_db_alias_scorer.c
+    src/memory/memory_db_alias_cascade.c
+    src/memory/memory_db_alias_writes.c
     src/memory/memory_db_provenance.c
-    src/memory/focus_source.c
-    src/memory/focus_recency.c
-    src/memory/focus_candidate_helpers.c
-    src/memory/focus_dominant_token.c
+    src/core/focus/focus_source.c
+    src/core/focus/focus_recency.c
+    src/core/focus/focus_candidate_helpers.c
+    src/core/focus/focus_dominant_token.c
     src/memory/memory_fact_search.c
     src/memory/memory_focus_adapters.c
     src/memory/memory_source_dedup.c
@@ -665,7 +673,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_callback.c
     src/memory/memory_extraction.c
     src/memory/memory_similarity.c
-    src/memory/memory_filter.c
+    src/core/memory_filter.c
     src/memory/memory_maintenance.c
     src/memory/memory_recovery.c
     src/memory/memory_history_loader.c

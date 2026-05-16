@@ -558,6 +558,21 @@ int memory_db_proposal_list_pending(int user_id,
 int memory_db_proposal_count_pending(int user_id, int *count_out);
 
 /**
+ * @brief Look up the user_self anchor entity id for @p user_id.
+ *
+ * Thin getter over the partial UNIQUE index on memory_entities.is_user_self.
+ * Returns the entity id of the row with is_user_self=1 for the user, or
+ * 0 if no anchor has been set yet.  Used by extraction-time gates that
+ * want to skip the auto-promote helper once an anchor exists (saving
+ * N redundant lock acquisitions per extraction).
+ *
+ * @param user_id   User ID
+ * @param out_id    Output: entity id (0 if no anchor)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id);
+
+/**
  * @brief Auto-promote a freshly-extracted entity to is_user_self=1 when its
  * canonical name matches the user's real_name (or one of their identity
  * aliases) AND no user_self row exists yet for the user.
@@ -579,21 +594,6 @@ int memory_db_proposal_count_pending(int user_id, int *count_out);
  * @param out_promoted     Optional: set true if the row was promoted
  * @return MEMORY_DB_SUCCESS even when no-op; MEMORY_DB_FAILURE on real error
  */
-/**
- * @brief Look up the user_self anchor entity id for @p user_id.
- *
- * Thin getter over the partial UNIQUE index on memory_entities.is_user_self.
- * Returns the entity id of the row with is_user_self=1 for the user, or
- * 0 if no anchor has been set yet.  Used by extraction-time gates that
- * want to skip the auto-promote helper once an anchor exists (saving
- * N redundant lock acquisitions per extraction).
- *
- * @param user_id   User ID
- * @param out_id    Output: entity id (0 if no anchor)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id);
-
 int memory_db_entity_maybe_auto_promote_user_self(int user_id,
                                                   int64_t entity_id,
                                                   const char *canonical_name,

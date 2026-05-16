@@ -74,4 +74,22 @@ int bench_mp_run_smoke(const char *locomo_path, int conv_idx);
  */
 int bench_mp_dispatch(struct json_object *cmd);
 
+/**
+ * Return SHA-256 (lowercase hex, 64 chars + NUL) of the live
+ * MEMORY_EXTRACTION_PROMPT_TEMPLATE body.  Computed once on first call and
+ * cached.
+ *
+ * The Python harness embeds this in the snapshot cache key so that any change
+ * to the extraction prompt template invalidates older cached snapshots
+ * (which were produced under a different prompt and therefore would yield
+ * apples-to-oranges results if reused).  The hash is also written into the
+ * snapshot map JSON on save and validated on load — a loud failure on
+ * mismatch is preferred over silent re-extraction (which would cost real
+ * money in LLM calls).
+ *
+ * @return Pointer to a NUL-terminated 64-char lowercase hex string.  The
+ *         buffer is static; do not free.  Never NULL.
+ */
+const char *bench_mp_extraction_prompt_sha256(void);
+
 #endif /* BENCH_MEMORY_PIPELINE_H */

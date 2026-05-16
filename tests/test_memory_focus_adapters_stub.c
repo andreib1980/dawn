@@ -37,11 +37,11 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/memory_filter.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
-#include "memory/memory_filter.h"
 #include "memory/memory_types.h"
 #include "test_memory_focus_adapters_mocks.h"
 
@@ -146,9 +146,9 @@ int memory_db_fact_search_since(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_get(int64_t fact_id, memory_fact_t *out_fact) {
+int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact) {
    for (int i = 0; i < s_mock.fact_count; i++) {
-      if (s_mock.facts[i].id == fact_id) {
+      if (s_mock.facts[i].id == fact_id && s_mock.facts[i].user_id == user_id) {
          *out_fact = s_mock.facts[i];
          return MEMORY_DB_SUCCESS;
       }
@@ -455,4 +455,127 @@ int memory_embeddings_hybrid_search(int user_id,
 bool memory_filter_check(const char *text) {
    (void)text;
    return false;
+}
+
+/* =============================================================================
+ * Phase 1A graph retrieval + RRF + Phase 2 Step 1 stubs (May 2026 ships).
+ *
+ * Adapter tests don't exercise these paths — they exercise the upstream
+ * adapter dispatch + focus composition.  No-op stubs return SUCCESS / 0
+ * with `count_out = 0` so the linker is satisfied and any path that
+ * accidentally hits these gets a quiet empty result rather than a crash.
+ * ============================================================================= */
+
+int memory_embeddings_rrf_search(int user_id,
+                                 const char *query,
+                                 const int64_t *keyword_facts,
+                                 const int *keyword_scores,
+                                 int keyword_count,
+                                 int token_count,
+                                 embedding_search_result_t *out_results,
+                                 int max_results) {
+   (void)user_id;
+   (void)query;
+   (void)keyword_facts;
+   (void)keyword_scores;
+   (void)keyword_count;
+   (void)token_count;
+   (void)out_results;
+   (void)max_results;
+   return 0;
+}
+
+int memory_graph_extract_seed_entities(int user_id,
+                                       const char *query,
+                                       int64_t *out_entity_ids,
+                                       int max,
+                                       int *out_count) {
+   (void)user_id;
+   (void)query;
+   (void)out_entity_ids;
+   (void)max;
+   if (out_count != NULL)
+      *out_count = 0;
+   return SUCCESS;
+}
+
+int memory_graph_expand_fact_linked(int user_id,
+                                    const int64_t *seed_entity_ids,
+                                    int seed_count,
+                                    memory_fact_t *out_facts,
+                                    float *out_scores,
+                                    int max,
+                                    int *out_count) {
+   (void)user_id;
+   (void)seed_entity_ids;
+   (void)seed_count;
+   (void)out_facts;
+   (void)out_scores;
+   (void)max;
+   if (out_count != NULL)
+      *out_count = 0;
+   return SUCCESS;
+}
+
+int memory_embeddings_embed(const char *text, float *out, int *out_dims) {
+   (void)text;
+   (void)out;
+   if (out_dims != NULL)
+      *out_dims = 0;
+   return FAILURE;
+}
+
+int embedding_engine_dims(void) {
+   return 0;
+}
+
+int memory_embeddings_rescore_against_query(int user_id,
+                                            const float *query_emb,
+                                            float query_norm,
+                                            float entity_bonus,
+                                            const int64_t *fact_ids,
+                                            int fact_count,
+                                            float *out_scores) {
+   (void)user_id;
+   (void)query_emb;
+   (void)query_norm;
+   (void)entity_bonus;
+   (void)fact_ids;
+   if (out_scores != NULL) {
+      for (int i = 0; i < fact_count; i++)
+         out_scores[i] = MEMORY_EMBEDDINGS_RESCORE_SENTINEL;
+   }
+   return SUCCESS;
+}
+
+int memory_search_apply_score_floor(memory_fact_t *facts,
+                                    float *scores,
+                                    int count,
+                                    float score_floor) {
+   (void)facts;
+   (void)scores;
+   (void)score_floor;
+   return count;
+}
+
+int memory_db_summary_search_semantic(int user_id,
+                                      const float *query_vec,
+                                      int query_dims,
+                                      time_t since_ts,
+                                      int max_summaries,
+                                      int max_scan,
+                                      memory_summary_t *out_summaries,
+                                      float *out_scores,
+                                      int *count_out) {
+   (void)user_id;
+   (void)query_vec;
+   (void)query_dims;
+   (void)since_ts;
+   (void)max_summaries;
+   (void)max_scan;
+   (void)out_summaries;
+   (void)out_scores;
+   if (count_out != NULL)
+      *count_out = 0;
+   return MEMORY_DB_SUCCESS;
 }

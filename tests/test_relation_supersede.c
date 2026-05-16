@@ -122,9 +122,14 @@ static void setup_db(void) {
       exit(1);
    }
 
-   /* Prepare statements used by memory_db_fact_supersede() */
-   rc = sqlite3_prepare_v2(s_db.db, "UPDATE memory_facts SET superseded_by = ? WHERE id = ?", -1,
-                           &s_db.stmt_memory_fact_supersede, NULL);
+   /* Prepare statements used by memory_db_fact_supersede() — SQL mirrors
+    * the CWE-639 defense-in-depth in production: (old_id, user_id) gates
+    * the UPDATE and an EXISTS subquery enforces same-user ownership of
+    * new_fact_id (cross-user pointer prevention). */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_facts SET superseded_by = ? WHERE id = ? AND user_id = ? "
+                           "AND EXISTS (SELECT 1 FROM memory_facts WHERE id = ? AND user_id = ?)",
+                           -1, &s_db.stmt_memory_fact_supersede, NULL);
    if (rc != SQLITE_OK) {
       fprintf(stderr, "prepare fact_supersede failed: %s\n", sqlite3_errmsg(s_db.db));
       exit(1);
@@ -224,7 +229,7 @@ static void test_exclusive_supersede_returns_old_fact_id(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT64(fact_a, old_fact_id);
 
-   memory_db_fact_supersede(old_fact_id, fact_b);
+   memory_db_fact_supersede(old_fact_id, fact_b, user_id);
    int64_t superseded_by = get_fact_superseded_by(fact_a);
    TEST_ASSERT_EQUAL_INT64(fact_b, superseded_by);
 }

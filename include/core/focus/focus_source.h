@@ -43,11 +43,13 @@
  *     it in the result set.  Defense in depth — correctness must not
  *     depend on adapter discipline.
  *
- * Layer: 2.  Header pulls only `memory_types.h` + libc.  Adapters that
- * link against L3 modules (document_search, calendar, email) register
- * polymorphically via function pointer — the framework has zero link-time
- * dependency on any adapter's source.  Bench / L2-only binaries link the
- * framework and register only their L2 adapters.
+ * Layer: 1.  Header pulls only `memory_types.h` + libc.  Implementation
+ * depends on `core/memory_filter.h` (Layer 1 leaf — blocklist + Unicode
+ * normalize, no upstream deps).  Adapters that link against L2/L3 modules
+ * (document_search, calendar, email) register polymorphically via function
+ * pointer — the framework has zero link-time dependency on any adapter's
+ * source.  Bench / L2-only binaries link the framework and register only
+ * their L2 adapters.
  *
  * Thread safety: registration is mutex-protected and expected only at
  * daemon init.  After init completes, the registry is read-only and
