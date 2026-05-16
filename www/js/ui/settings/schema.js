@@ -1058,8 +1058,15 @@
                      displayValue: (v) => Math.round(v * 100) + '%',
                      advanced: true,
                   },
+                  bm25_enabled: {
+                     type: 'checkbox',
+                     label: 'BM25 Keyword Ranking (Experimental)',
+                     hint: 'Use BM25 ranking with stemming for the keyword half of memory search. Matches plurals and tense variants ("memories" finds "memory", "attending" finds "attend"), and ranks rare words above common ones. Off-by-default while it bench-validates against the existing path.',
+                     configPath: 'memory.bm25_enabled',
+                     advanced: true,
+                  },
                   graph_use_query_scoring: {
-                     type: 'toggle',
+                     type: 'checkbox',
                      label: 'Query-Aware Graph Scoring',
                      hint: 'Re-score entity-graph candidates against the query using cosine similarity, instead of a flat entity bonus. ON (default): graph candidates compete with hybrid hits on the same semantic-relevance scale. OFF: legacy flat-bonus scoring.',
                      configPath: 'memory.graph_retrieval.use_query_scoring',
@@ -2445,6 +2452,14 @@
                   <span class="range-value" id="${inputId}-value">${escapeHtml(String(displayValue))}</span>
                </div>`;
             break;
+         default:
+            // Unhandled type — fail loudly so a typo'd or unrenderable field
+            // can't silently ship as a label-only orphan with no input.
+            console.error(
+               `settings/schema: unhandled field type "${def.type}" for key "${fullKey}". ` +
+                  `Field will not render a control.`
+            );
+            inputHtml = `<span class="settings-error">unhandled type: ${escapeHtml(String(def.type))}</span>`;
       }
 
       if (def.type === 'checkbox') {

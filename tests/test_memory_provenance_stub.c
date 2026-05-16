@@ -50,6 +50,15 @@ void memory_embeddings_invalidate_cache(void) {
 void memory_embeddings_invalidate_entity_cache(void) {
 }
 
+/* memory_db.c calls these when reading/writing entity embeddings; the
+ * provenance tests touch fact rows, not embeddings, so a noop stub is
+ * link-time-sufficient. */
+float memory_embeddings_l2_norm(const float *v, int dims) {
+   (void)v;
+   (void)dims;
+   return 0.0f;
+}
+
 /* Stub: check is_private column directly via the existing s_db handle. */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    (void)user_id;

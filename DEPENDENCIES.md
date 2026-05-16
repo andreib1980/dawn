@@ -40,6 +40,7 @@ This document tracks all third-party dependencies used by the DAWN project.
 | freetype2 | FreeType (BSD-like) | MuPDF font rendering dependency |
 | harfbuzz | MIT | MuPDF text shaping dependency |
 | libmujs-dev, libgumbo-dev, libopenjp2-7-dev, libjbig2dec0-dev | Various (MIT/LGPL/BSD) | MuPDF static link dependencies |
+| libstemmer (Snowball) | BSD-3-Clause | Porter2 stemming for BM25 keyword indexing (`src/memory/memory_stem.c`). Install: `sudo apt install libstemmer-dev`. |
 | mosquitto | EPL/EDL | MQTT broker (runtime dependency) |
 
 ### Audio Processing
@@ -133,3 +134,11 @@ curl -sL "https://cdn.jsdelivr.net/npm/dompurify@latest/dist/purify.min.js" -o w
 System libraries should be updated through the package manager (apt on Ubuntu/Debian).
 
 See `README.md` for full installation instructions.
+
+## Architectural Influences
+
+These are not runtime dependencies — no third-party code is linked, bundled, or executed at runtime from these sources. Listed for attribution because portions of DAWN's design (algorithms, prompt text, scoring formulas) are adapted from them.
+
+| Project | License | Source | Adapted into |
+|---------|---------|--------|--------------|
+| [mem0ai/mem0](https://github.com/mem0ai/mem0) | Apache 2.0 | © 2023 Taranjeet Singh | Memory subsystem: BM25 sigmoid normalization (`memory_bm25_*`), extraction prompt specificity rules (`MEMORY_EXTRACTION_PROMPT_TEMPLATE`), spread-attenuated entity boost (`memory_graph_retrieval.c`), additive scoring composition pattern. Per-file `Adapted from mem0ai/mem0` comments mark the borrowing point of use. See `NOTICE` for the full attribution, summary of changes, and rationale for deviations. See `docs/MEM0_ARCHITECTURAL_PARITY.md` for the planning context. |

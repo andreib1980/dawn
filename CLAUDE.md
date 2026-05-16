@@ -166,3 +166,7 @@ When writing a number for an external audience (atlas, X post, paper, README), c
 ## License
 
 GPLv3 or later. Every new source file includes the GPL header block (see Code Standards above).
+
+### Third-party attribution
+
+Portions of the memory subsystem are adapted from [mem0ai/mem0](https://github.com/mem0ai/mem0) (Apache 2.0, © 2023 Taranjeet Singh) — see `NOTICE` and `DEPENDENCIES.md` (Architectural Influences). When you port or adapt code from Mem0, add a `/* Adapted from mem0ai/mem0 (Apache-2.0). See NOTICE. */` comment block at the point of use describing what was changed. Apache 2.0 §4 requires preserving the copyright notice and stating significant modifications — the per-file comment plus the central NOTICE/DEPENDENCIES entries satisfy both.

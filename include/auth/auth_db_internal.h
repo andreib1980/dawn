@@ -48,7 +48,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 47
+#define AUTH_DB_SCHEMA_VERSION 48
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -156,6 +156,18 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_find_by_hash;
    sqlite3_stmt *stmt_memory_fact_prune_superseded;
    sqlite3_stmt *stmt_memory_fact_prune_stale;
+
+   /* v48: FTS5 BM25 keyword search.  See docs/MEM0_ARCHITECTURAL_PARITY.md
+    * Phase 1.  External-content rows live in memory_facts_fts; the search
+    * statement JOINs back to memory_facts to filter superseded rows and
+    * scope by user_id.  `_since` variant adds `AND mf.created_at >= ?`
+    * so time-windowed callers (focus-adapter recent windows + memory.recent
+    * with since_ts) use BM25 too rather than silently falling back to the
+    * legacy LIKE path. */
+   sqlite3_stmt *stmt_memory_fact_search_bm25;
+   sqlite3_stmt *stmt_memory_fact_search_bm25_since;
+   sqlite3_stmt *stmt_memory_facts_fts_insert;
+   sqlite3_stmt *stmt_memory_facts_fts_delete;
 
    sqlite3_stmt *stmt_memory_pref_upsert;
    sqlite3_stmt *stmt_memory_pref_get;

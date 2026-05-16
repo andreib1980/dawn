@@ -45,6 +45,7 @@
 #include "auth/auth_db_internal.h"
 #include "core/path_utils.h"
 #include "logging.h"
+#include "memory/memory_stem.h"
 
 /* =============================================================================
  * Shared State Definition
@@ -322,6 +323,26 @@ static const char *SCHEMA_SQL =
      * after ALTER TABLE adds the column).  Keeping it here would fail on an
      * existing pre-v34 DB because CREATE TABLE IF NOT EXISTS is a no-op for
      * the already-existing table, so the column isn't added until migrations run. */
+
+    /* v48: FTS5 BM25 keyword index.  Contentless — application is responsible
+     * for keeping rowid in sync with memory_facts.id and writing
+     * pre-stemmed text into fact_stems.  See memory_db.c::fts5_insert_fact_stems_locked /
+     * fts5_delete_fact_stems_locked and the v48 migration block for the
+     * backfill path.  Tokenizer: unicode61 with diacritic folding so
+     * "café" matches "cafe".
+     *
+     * NOTE: this is a SINGLE global FTS5 index across all users.  The
+     * BM25 search statement joins to memory_facts and filters by
+     * user_id, so users only see their own rows — but bm25() computes
+     * its IDF over the GLOBAL token frequency.  At DAWN's threat-model
+     * scale (small trusted user set on a Jetson) the residual side-
+     * channel is negligible; if user counts grow significantly, consider
+     * per-user FTS5 tables to isolate IDF.  See docs/MEM0_ARCHITECTURAL_PARITY.md. */
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5("
+    "   fact_stems,"
+    "   tokenize='unicode61 remove_diacritics 2',"
+    "   content=''"
+    ");"
 
     "CREATE TABLE IF NOT EXISTS memory_preferences ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -2267,6 +2288,99 @@ static int create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v48 migration: BM25 keyword index via FTS5 virtual table.
+    * docs/MEM0_ARCHITECTURAL_PARITY.md Phase 1.  Algorithm + sigmoid
+    * normalization adapted from mem0ai/mem0 (Apache-2.0).  See NOTICE.
+    *
+    * Tracks v48_ok across both CREATE and backfill — only allows the
+    * schema_version bump below if BOTH succeed.  Without this, a
+    * transient CREATE failure would leave the DB advertised as v48 with
+    * no FTS5 table; subsequent boots would skip the migration block,
+    * prepare_statements would fail on stmt_memory_fact_search_bm25 prep,
+    * and the daemon would refuse to start with no operator-visible
+    * recovery path. */
+   bool v48_ok = (current_version >= 48); /* already on v48 → nothing to do, OK */
+   if (current_version >= 1 && current_version < 48) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5("
+                        "   fact_stems,"
+                        "   tokenize='unicode61 remove_diacritics 2',"
+                        "   content=''"
+                        ")",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v48 migration (memory_facts_fts CREATE) failed: %s — "
+                    "leaving schema_version at %d so next boot retries",
+                    errmsg ? errmsg : "unknown", current_version);
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: created memory_facts_fts virtual table (v48)");
+
+         /* Backfill from existing memory_facts.  Stemming runs in C —
+          * SQL triggers can't call libstemmer.  Wrap the inserts in a
+          * single transaction so the backfill is atomic across thousands
+          * of rows. */
+         (void)memory_stem_init();
+         int backfill_count = 0;
+         int backfill_errors = 0;
+         sqlite3_stmt *select_stmt = NULL;
+         sqlite3_stmt *insert_stmt = NULL;
+         int prep_rc = sqlite3_prepare_v2(s_db.db, "SELECT id, fact_text FROM memory_facts", -1,
+                                          &select_stmt, NULL);
+         if (prep_rc == SQLITE_OK) {
+            prep_rc = sqlite3_prepare_v2(
+                s_db.db, "INSERT INTO memory_facts_fts(rowid, fact_stems) VALUES (?, ?)", -1,
+                &insert_stmt, NULL);
+         }
+         int commit_rc = SQLITE_DONE;
+         if (prep_rc == SQLITE_OK) {
+            (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+            while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+               int64_t fid = sqlite3_column_int64(select_stmt, 0);
+               const unsigned char *txt = sqlite3_column_text(select_stmt, 1);
+               char stems[MEMORY_FACT_STEMS_MAX];
+               int n_stems = memory_stem_string((const char *)txt, stems, sizeof(stems));
+               sqlite3_reset(insert_stmt);
+               sqlite3_bind_int64(insert_stmt, 1, fid);
+               sqlite3_bind_text(insert_stmt, 2, stems, -1, SQLITE_TRANSIENT);
+               if (sqlite3_step(insert_stmt) != SQLITE_DONE) {
+                  backfill_errors++;
+               } else if (n_stems > 0) {
+                  backfill_count++;
+               }
+            }
+            commit_rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+         }
+         if (select_stmt)
+            sqlite3_finalize(select_stmt);
+         if (insert_stmt)
+            sqlite3_finalize(insert_stmt);
+         /* Promote log level when partial-failure occurred so operators
+          * see it. */
+         if (backfill_errors > 0) {
+            OLOG_WARNING("auth_db: v48 BM25 backfill PARTIAL: %d indexed, %d failed — "
+                         "some facts will not surface via BM25 keyword search until next "
+                         "fact_create writes a new memory_facts_fts row or a manual rebuild",
+                         backfill_count, backfill_errors);
+         } else {
+            OLOG_INFO("auth_db: v48 BM25 backfill complete: %d facts indexed", backfill_count);
+         }
+         /* Mark v48 successful only when prep, commit, and statement
+          * preparation all came through cleanly.  Partial backfill (some
+          * errors but commit succeeded) still advances the version —
+          * those rows just won't surface until a manual rebuild; not
+          * worth blocking the entire migration. */
+         if (prep_rc == SQLITE_OK && commit_rc == SQLITE_OK) {
+            v48_ok = true;
+         } else {
+            OLOG_ERROR("auth_db: v48 migration COMMIT or statement prep failed — "
+                       "leaving schema_version at %d so next boot retries",
+                       current_version);
+         }
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2379,9 +2493,18 @@ static int create_schema(const char *db_path) {
       OLOG_INFO("auth_db: created schema v%d", AUTH_DB_SCHEMA_VERSION);
    }
 
-   /* Only update schema_version if we actually migrated or created fresh.
+   /* Only update schema_version if we actually migrated or created fresh,
+    * AND every per-version migration step that gates a bump succeeded.
+    * `v48_ok` is the tracking flag for the v48 (FTS5 / BM25) migration —
+    * extend the conjunction below as future migrations add their own
+    * success gates.  Without this, a transient CREATE / backfill failure
+    * would leave the DB advertised as v48 with no FTS5 table, and the
+    * next boot's prepare_statements pass would fail (hard) on the BM25
+    * statement prep, with no operator-visible recovery path.
+    *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   if (current_version < AUTH_DB_SCHEMA_VERSION) {
+   const bool ready_to_bump = v48_ok;
+   if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
          OLOG_WARNING("auth_db: failed to clear schema_version: %s", errmsg ? errmsg : "unknown");
@@ -2399,6 +2522,10 @@ static int create_schema(const char *db_path) {
       }
    } else if (current_version > AUTH_DB_SCHEMA_VERSION) {
       OLOG_WARNING("auth_db: database is newer (v%d) than code (v%d) — not downgrading",
+                   current_version, AUTH_DB_SCHEMA_VERSION);
+   } else if (current_version < AUTH_DB_SCHEMA_VERSION && !ready_to_bump) {
+      OLOG_WARNING("auth_db: schema_version held at v%d (target v%d) — one or more migration "
+                   "steps failed; daemon will retry on next boot",
                    current_version, AUTH_DB_SCHEMA_VERSION);
    }
 
@@ -2973,6 +3100,90 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_search failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
+   }
+
+   /* v48: BM25 keyword search via FTS5.  Bind order: 1=MATCH expression
+    * (space-separated pre-stemmed tokens, OR-combined), 2=user_id,
+    * 3=max_facts.  Returns rows ordered by BM25 score (raw negative;
+    * caller flips sign + sigmoid-normalizes via memory_bm25_normalize).
+    * Score column appears as col 10 — populate_fact_from_row reads
+    * cols 0-9 by index so the extra col is ignored on the fact-fill
+    * side; the caller pulls the score with sqlite3_column_double(.,10). */
+   /* v48 BM25 prep statements are SOFT failures: if the FTS5 table is
+    * missing (DB held at v47 because the v48 migration failed) these
+    * preps fail.  Leave the pointers NULL and let memory_db_fact_search_bm25's
+    * NULL-check fall through to the keyword-only legacy path.  Hard-
+    * failing the whole daemon on a config-gated experimental feature
+    * would be too strong — Phase 1 BM25 is opt-in via bm25_enabled. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
+       "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, "
+       "bm25(memory_facts_fts) AS score "
+       "FROM memory_facts_fts "
+       "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
+       "WHERE memory_facts_fts MATCH ? "
+       "  AND mf.user_id = ? "
+       "  AND mf.superseded_by IS NULL "
+       "ORDER BY score ASC LIMIT ?",
+       -1, &s_db.stmt_memory_fact_search_bm25, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_fact_search_bm25 failed (FTS5 table missing?): %s — "
+                   "BM25 path will be inactive until v48 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_fact_search_bm25 = NULL;
+   }
+
+   /* v48 with `since_ts` filter — same as above but with `AND mf.created_at >= ?`
+    * appended.  Used by focus-injection adapters and any time-windowed
+    * memory.search query.  Without this, those callers would silently fall
+    * back to the legacy multi-LIKE path and the BM25 A/B bench would be
+    * dishonest for the windowed-query subset. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
+       "mf.last_accessed, mf.access_count, mf.superseded_by, mf.category, "
+       "bm25(memory_facts_fts) AS score "
+       "FROM memory_facts_fts "
+       "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
+       "WHERE memory_facts_fts MATCH ? "
+       "  AND mf.user_id = ? "
+       "  AND mf.superseded_by IS NULL "
+       "  AND mf.created_at >= ? "
+       "ORDER BY score ASC LIMIT ?",
+       -1, &s_db.stmt_memory_fact_search_bm25_since, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_fact_search_bm25_since failed: %s — "
+                   "windowed BM25 inactive until v48 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_fact_search_bm25_since = NULL;
+   }
+
+   /* v48: FTS5 maintenance — insert/delete are app-driven (no SQL trigger
+    * because stemming runs in C).  Update is implemented as delete + insert
+    * by the caller; fact_text is immutable post-create in practice (changes
+    * go through supersede), but the helper exists for defensive sync.
+    * Same soft-failure policy as the search statement above. */
+   rc = sqlite3_prepare_v2(s_db.db, "INSERT INTO memory_facts_fts(rowid, fact_stems) VALUES (?, ?)",
+                           -1, &s_db.stmt_memory_facts_fts_insert, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_facts_fts_insert failed: %s — "
+                   "FTS5 sync inactive until v48 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_facts_fts_insert = NULL;
+   }
+   /* Contentless FTS5 requires the 'delete' command rather than DELETE FROM
+    * (which would leave the index out of sync because there's no content
+    * column to read the prior value from). */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT INTO memory_facts_fts(memory_facts_fts, rowid, fact_stems) "
+                           "VALUES('delete', ?, ?)",
+                           -1, &s_db.stmt_memory_facts_fts_delete, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare memory_facts_fts_delete failed: %s — "
+                   "FTS5 sync inactive until v48 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_memory_facts_fts_delete = NULL;
    }
 
    /* Category-filtered keyword search (v34).  Pre-filters fact-ID set so hybrid
@@ -4457,6 +4668,14 @@ static void finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_list);
    if (s_db.stmt_memory_fact_search)
       sqlite3_finalize(s_db.stmt_memory_fact_search);
+   if (s_db.stmt_memory_fact_search_bm25)
+      sqlite3_finalize(s_db.stmt_memory_fact_search_bm25);
+   if (s_db.stmt_memory_fact_search_bm25_since)
+      sqlite3_finalize(s_db.stmt_memory_fact_search_bm25_since);
+   if (s_db.stmt_memory_facts_fts_insert)
+      sqlite3_finalize(s_db.stmt_memory_facts_fts_insert);
+   if (s_db.stmt_memory_facts_fts_delete)
+      sqlite3_finalize(s_db.stmt_memory_facts_fts_delete);
    if (s_db.stmt_memory_fact_update_access)
       sqlite3_finalize(s_db.stmt_memory_fact_update_access);
    if (s_db.stmt_memory_fact_update_confidence)

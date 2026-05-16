@@ -197,6 +197,61 @@ int memory_db_fact_search(int user_id,
                           int *count_out);
 
 /**
+ * @brief BM25-ranked keyword search via FTS5 (v48).
+ *
+ * Stems @p query with Porter2, builds an FTS5 MATCH expression
+ * (`"stem1" OR "stem2" ...`), runs the search, and sigmoid-normalizes
+ * each row's raw BM25 score into [0, 1] using a query-length-adaptive
+ * curve.  See `memory_bm25_get_params` for the curve.
+ *
+ * Behavior:
+ *   - Empty / NULL query → returns SUCCESS with *count_out=0.
+ *   - DB not yet migrated to v48 (statement NULL) → returns SUCCESS
+ *     with *count_out=0 (caller should fall back to the LIKE path).
+ *   - FTS5 not populated for some rows → those rows are absent from
+ *     the result set; the caller's hybrid pipeline still surfaces them
+ *     via the vector channel if their embeddings match.
+ *
+ * Scoring + normalization are adapted from Mem0 (Apache-2.0).  See
+ * NOTICE.
+ *
+ * @param user_id    User to scope results to.
+ * @param query      Free-form natural language query.
+ * @param out_facts  Output: facts ordered by BM25 score (best first).
+ * @param out_scores Output: sigmoid-normalized BM25 scores in [0, 1]
+ *                   parallel to @p out_facts.
+ * @param max_facts  Capacity of @p out_facts / @p out_scores.
+ * @param count_out  Output: number of facts written.
+ * @return MEMORY_DB_SUCCESS on success, MEMORY_DB_FAILURE on bad args.
+ */
+int memory_db_fact_search_bm25(int user_id,
+                               const char *query,
+                               memory_fact_t *out_facts,
+                               float *out_scores,
+                               int max_facts,
+                               int *count_out);
+
+/**
+ * @brief BM25 search restricted to facts created on/after @p since_ts.
+ *
+ * Same behavior as memory_db_fact_search_bm25 but adds
+ * `AND mf.created_at >= since_ts` to the SQL.  Used by focus-injection
+ * adapters and time-windowed memory tool actions so windowed queries
+ * use BM25 too rather than falling back to the legacy LIKE path.
+ *
+ * @param since_ts Unix epoch seconds.  0 → no time filter (equivalent
+ *                 to calling memory_db_fact_search_bm25).
+ * @return MEMORY_DB_SUCCESS on success, MEMORY_DB_FAILURE on bad args.
+ */
+int memory_db_fact_search_bm25_since(int user_id,
+                                     const char *query,
+                                     time_t since_ts,
+                                     memory_fact_t *out_facts,
+                                     float *out_scores,
+                                     int max_facts,
+                                     int *count_out);
+
+/**
  * @brief Update fact access time, count, and reinforcement boost
  *
  * Called when a fact is retrieved for context injection.

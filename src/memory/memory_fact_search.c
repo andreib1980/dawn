@@ -168,11 +168,46 @@ int memory_fact_search_hybrid(int user_id,
    char tokens[MAX_SEARCH_TOKENS][64];
    int token_count = tokenize_query(query, tokens, MAX_SEARCH_TOKENS);
 
-   /* 2. Keyword search. */
+   /* 2. Keyword search.
+    *
+    * Two paths, gated by `[memory] bm25_enabled`:
+    *   - On (Phase 1 of the Mem0 parity program): one FTS5 MATCH call,
+    *     BM25-ranked, sigmoid-normalized to [0, 1].  No fan-out per
+    *     token, no LIKE pattern building, no match-count integer step.
+    *   - Off (legacy): tokenize → multi-LIKE → per-token result merge,
+    *     scoring by token-coverage match count.
+    *
+    * Both paths feed the same `hybrid_search` downstream — we keep its
+    * int*+token_count signature by mapping BM25 [0, 1] floats onto the
+    * (match_count / token_count) shape (multiply by 100, fix
+    * token_count=100).  kw_score downstream comes out identical to the
+    * normalized BM25 value. */
    memory_fact_t kw_facts[HYBRID_FETCH_LIMIT];
    int kw_scores[HYBRID_FETCH_LIMIT];
    int kw_count = 0;
-   if (token_count <= 1) {
+   int kw_score_denom = (token_count > 0) ? token_count : 1;
+
+   if (g_config.memory.bm25_enabled) {
+      /* BM25 path — single FTS5 MATCH replaces the legacy tokenize →
+       * multi-LIKE fan-out → match-count merge.  Time-windowed callers
+       * dispatch to the `_since` variant (since_ts > 0) so focus-adapter
+       * recent windows also get BM25 ranking instead of silently falling
+       * back to LIKE. */
+      float bm25_scores[HYBRID_FETCH_LIMIT];
+      memory_db_fact_search_bm25_since(user_id, query, since_ts, kw_facts, bm25_scores, work_cap,
+                                       &kw_count);
+      /* Map [0,1] BM25 score → (int, denom=100) so hybrid_search's kw
+       * normalization (`match/denom`) emits the same float. */
+      kw_score_denom = 100;
+      for (int i = 0; i < kw_count; i++) {
+         int s = (int)(bm25_scores[i] * 100.0f + 0.5f);
+         if (s < 1)
+            s = 1;
+         if (s > 100)
+            s = 100;
+         kw_scores[i] = s;
+      }
+   } else if (token_count <= 1) {
       /* Single-token (or zero — `query` was non-empty but contained
        * only delimiters): single SQL call mirrors the existing path. */
       if (since_ts > 0)
@@ -199,12 +234,10 @@ int memory_fact_search_hybrid(int user_id,
       int hybrid_count;
       if (g_config.memory.rrf_enabled) {
          hybrid_count = memory_embeddings_rrf_search(user_id, query, kw_ids, kw_scores, kw_count,
-                                                     (token_count > 0) ? token_count : 1, hybrid,
-                                                     work_cap);
+                                                     kw_score_denom, hybrid, work_cap);
       } else {
          hybrid_count = memory_embeddings_hybrid_search(user_id, query, kw_ids, kw_scores, kw_count,
-                                                        (token_count > 0) ? token_count : 1, hybrid,
-                                                        work_cap);
+                                                        kw_score_denom, hybrid, work_cap);
       }
       if (hybrid_count > 0) {
          int produced = 0;

@@ -27,17 +27,27 @@
 #include "memory/memory_db.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "memory/memory_bm25.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_similarity.h"
+#include "memory/memory_stem.h"
 
 /* Forward declarations for helpers used across sections */
 static void populate_entity_from_row(sqlite3_stmt *stmt, memory_entity_t *entity);
+/* v48 FTS5 maintenance helpers — caller must hold AUTH_DB_LOCK.  Defined
+ * together below in the v48 BM25 section.  Both variants accept PRE-
+ * STEMMED input so the stemmer mutex stays a leaf lock and doesn't
+ * compose with auth_db's lock.  Callers must stem outside the auth_db
+ * critical section. */
+static int fts5_insert_fact_stems_locked(int64_t fact_id, const char *fact_stems);
+static int fts5_delete_fact_stems_locked(int64_t fact_id, const char *fact_stems);
 
 /* Lightweight FK existence check.  Returns 1 if a row with the given id exists
  * in the specified table, 0 otherwise, or -1 if the prepare itself failed.
@@ -264,6 +274,15 @@ int memory_db_fact_create_at(int user_id,
    /* Compute normalized hash for deduplication */
    uint32_t normalized_hash = memory_normalize_and_hash(fact_text);
 
+   /* v48: pre-stem fact_text OUTSIDE the auth_db lock so the stemmer's
+    * mutex stays a leaf lock (per ARCHITECTURE.md §"Mutex Lock Ordering
+    * Hierarchy"; auth_db must remain leaf for SQLite writes).  Doing this
+    * before AUTH_DB_LOCK_OR_FAIL trades a few microseconds of redundant
+    * computation (no leak — discarded if INSERT fails) for cleaner lock
+    * hierarchy and reduced lock hold time. */
+   char fact_stems[MEMORY_FACT_STEMS_MAX];
+   (void)memory_stem_string(fact_text, fact_stems, sizeof(fact_stems));
+
    AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_create;
@@ -287,6 +306,15 @@ int memory_db_fact_create_at(int user_id,
    }
 
    int64_t id = sqlite3_last_insert_rowid(s_db.db);
+
+   /* v48: keep memory_facts_fts in sync so BM25 search can find this
+    * fact.  Failure logged inside the helper but not propagated — search
+    * works from the JOIN against memory_facts; a missing FTS5 row just
+    * means this fact won't surface for keyword-rank queries until next
+    * recompute.  Stems were computed pre-lock; pass them through to keep
+    * the stemmer mutex out of the auth_db critical section. */
+   (void)fts5_insert_fact_stems_locked(id, fact_stems);
+
    AUTH_DB_UNLOCK();
 
    if (id_out)
@@ -474,6 +502,222 @@ int memory_db_fact_list(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+/* v48: FTS5 maintenance helpers.  Called from fact_create / fact_delete
+ * to keep memory_facts_fts in sync.  No SQL trigger because stemming
+ * runs in C (libstemmer cannot be invoked from SQL).
+ *
+ * Both variants take PRE-STEMMED input.  Stemming MUST run outside the
+ * auth_db lock to keep the stemmer mutex a leaf lock — see
+ * ARCHITECTURE.md §"Mutex Lock Ordering Hierarchy".  Callers compute
+ * stems via memory_stem_string() before AUTH_DB_LOCK_OR_FAIL().
+ *
+ * Caller must already hold AUTH_DB_LOCK.  Returns 0 on success, non-zero
+ * on FTS5 failure (logged at warning — search degrades gracefully when
+ * an entry is missing or stale, so a failure here is not fatal). */
+static int fts5_insert_fact_stems_locked(int64_t fact_id, const char *fact_stems) {
+   if (fact_id <= 0 || !fact_stems)
+      return 1;
+   sqlite3_stmt *stmt = s_db.stmt_memory_facts_fts_insert;
+   if (!stmt)
+      return 1; /* migration not yet run on this DB */
+   sqlite3_reset(stmt);
+   sqlite3_bind_int64(stmt, 1, fact_id);
+   sqlite3_bind_text(stmt, 2, fact_stems, -1, SQLITE_TRANSIENT);
+   int rc = sqlite3_step(stmt);
+   sqlite3_reset(stmt);
+   if (rc != SQLITE_DONE) {
+      OLOG_WARNING("memory_db: FTS5 insert fact_id=%lld failed: %s", (long long)fact_id,
+                   sqlite3_errmsg(s_db.db));
+      return 1;
+   }
+   return 0;
+}
+
+/* Contentless FTS5 'delete' command requires the rowid AND the original
+ * indexed content so FTS5 can decrement its token postings.  Caller must
+ * already hold AUTH_DB_LOCK.  Caller must provide pre-stemmed content
+ * (typically obtained by calling memory_stem_string on the live fact_text
+ * BEFORE taking the lock — same stems the original insert used). */
+static int fts5_delete_fact_stems_locked(int64_t fact_id, const char *fact_stems) {
+   if (fact_id <= 0 || !fact_stems)
+      return 1;
+   sqlite3_stmt *del = s_db.stmt_memory_facts_fts_delete;
+   if (!del)
+      return 1; /* migration not yet run */
+   sqlite3_reset(del);
+   sqlite3_bind_int64(del, 1, fact_id);
+   sqlite3_bind_text(del, 2, fact_stems, -1, SQLITE_TRANSIENT);
+   int rc = sqlite3_step(del);
+   sqlite3_reset(del);
+   if (rc != SQLITE_DONE) {
+      OLOG_WARNING("memory_db: FTS5 delete fact_id=%lld failed: %s", (long long)fact_id,
+                   sqlite3_errmsg(s_db.db));
+      return 1;
+   }
+   return 0;
+}
+
+/* Compatibility wrapper used by paths that hold fact_text rather than
+ * stems.  Stems are computed OUTSIDE the auth_db lock to preserve the
+ * leaf-lock invariant — but this helper is for code-organisation when
+ * the caller does the stemming inline.  ONLY callable when AUTH_DB_LOCK
+ * is NOT held by the caller. */
+
+/* Build an FTS5 MATCH expression from a stemmed query string.
+ *
+ * Input: space-separated stems from memory_stem_string.
+ * Output: `"stem1" OR "stem2" OR "stem3"` — bare quoted tokens joined
+ *         with OR so FTS5 ranks by how many tokens hit (BM25 sums).
+ *
+ * Each token is double-quoted to defang any FTS5 special chars that
+ * survive stemming (defensive — unicode61 tokenizer should already
+ * have stripped them at index time, but a search-side typo or
+ * pre-stemmed garbage shouldn't crash MATCH parsing).  Returns count of
+ * tokens emitted.  out is NUL-terminated even on overflow.
+ */
+static int build_fts5_match_expr(const char *stemmed, char *out, size_t out_sz) {
+   if (!out || out_sz == 0)
+      return 0;
+   out[0] = '\0';
+   if (!stemmed || !stemmed[0])
+      return 0;
+   /* Working copy for strtok_r since we can't mutate the input. */
+   char buf[1024];
+   size_t in_len = strlen(stemmed);
+   if (in_len >= sizeof(buf))
+      in_len = sizeof(buf) - 1;
+   memcpy(buf, stemmed, in_len);
+   buf[in_len] = '\0';
+
+   size_t off = 0;
+   int count = 0;
+   char *saveptr = NULL;
+   char *tok = strtok_r(buf, " ", &saveptr);
+   while (tok != NULL) {
+      size_t tlen = strlen(tok);
+      if (tlen >= 1) {
+         /* Need 4 + tlen for ` OR "x"` or 2 + tlen for `"x"` plus NUL. */
+         size_t need = (count > 0 ? 4 : 0) + tlen + 2 + 1;
+         if (off + need >= out_sz)
+            break;
+         if (count > 0) {
+            memcpy(out + off, " OR ", 4);
+            off += 4;
+         }
+         out[off++] = '"';
+         /* Strip embedded double-quotes from tokens — they'd break FTS5
+          * phrase parsing.  Standard tokenization removes these, but the
+          * defensive copy makes the path safe against future tokenizer
+          * changes. */
+         for (size_t i = 0; i < tlen; i++) {
+            if (tok[i] != '"') {
+               out[off++] = tok[i];
+            }
+         }
+         out[off++] = '"';
+         count++;
+      }
+      tok = strtok_r(NULL, " ", &saveptr);
+   }
+   out[off] = '\0';
+   return count;
+}
+
+/* v48: BM25-ranked fact search via FTS5.
+ *
+ * Pipeline: query → memory_stem_string (lowercase + Porter2 stem) →
+ *           build_fts5_match_expr (quoted OR-tokens) → FTS5 MATCH →
+ *           sigmoid-normalize raw BM25 score per row.
+ *
+ * `out_scores[i]` ends up in [0, 1] from memory_bm25_normalize using
+ * the (midpoint, steepness) row picked for `count_out` query terms.
+ *
+ * On migration-incomplete DBs (stmt_memory_fact_search_bm25 NULL), or
+ * empty queries / zero stems, returns SUCCESS with *count_out=0 so the
+ * caller can fall back to the legacy LIKE path. */
+int memory_db_fact_search_bm25(int user_id,
+                               const char *query,
+                               memory_fact_t *out_facts,
+                               float *out_scores,
+                               int max_facts,
+                               int *count_out) {
+   return memory_db_fact_search_bm25_since(user_id, query, /*since_ts*/ 0, out_facts, out_scores,
+                                           max_facts, count_out);
+}
+
+int memory_db_fact_search_bm25_since(int user_id,
+                                     const char *query,
+                                     time_t since_ts,
+                                     memory_fact_t *out_facts,
+                                     float *out_scores,
+                                     int max_facts,
+                                     int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!query || !out_facts || !out_scores || max_facts <= 0)
+      return MEMORY_DB_FAILURE;
+
+   /* 1. Stem the query and count terms for sigmoid param selection.
+    * Sized to MEMORY_FACT_STEMS_MAX so query and fact-side stem buffers
+    * use the same constant; in practice queries are much shorter than
+    * facts. */
+   char stems[MEMORY_FACT_STEMS_MAX];
+   int n_terms = memory_stem_string(query, stems, sizeof(stems));
+   if (n_terms <= 0)
+      return MEMORY_DB_SUCCESS; /* nothing to search; not an error */
+
+   /* 2. Build the FTS5 MATCH expression. */
+   char match_expr[2048];
+   int n_emitted = build_fts5_match_expr(stems, match_expr, sizeof(match_expr));
+   if (n_emitted <= 0)
+      return MEMORY_DB_SUCCESS;
+   (void)n_terms; /* kept for diagnostics; n_emitted is the authoritative count */
+
+   /* 3. Pick sigmoid parameters once for the whole result set.  Use
+    * n_emitted (the actual count of OR-tokens FTS5 ranks against), not
+    * n_terms (pre-truncation stem count) — they diverge only when
+    * build_fts5_match_expr hits its buffer cap, but the MATCH-side
+    * count is the one the BM25 score reflects. */
+   float midpoint = 0.0f;
+   float steepness = 0.0f;
+   memory_bm25_get_params(n_emitted, &midpoint, &steepness);
+
+   AUTH_DB_LOCK_OR_FAIL();
+   const bool windowed = (since_ts > 0);
+   sqlite3_stmt *stmt = windowed ? s_db.stmt_memory_fact_search_bm25_since
+                                 : s_db.stmt_memory_fact_search_bm25;
+   if (!stmt) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_SUCCESS; /* migration not yet run */
+   }
+   sqlite3_reset(stmt);
+   sqlite3_bind_text(stmt, 1, match_expr, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int(stmt, 2, user_id);
+   if (windowed) {
+      sqlite3_bind_int64(stmt, 3, (int64_t)since_ts);
+      sqlite3_bind_int(stmt, 4, max_facts);
+   } else {
+      sqlite3_bind_int(stmt, 3, max_facts);
+   }
+
+   int count = 0;
+   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
+      populate_fact_from_row(stmt, &out_facts[count]);
+      /* Column 10 carries bm25() — negative-for-relevant per FTS5
+       * convention.  Flip sign so memory_bm25_normalize sees the
+       * "larger is better" convention it (and Mem0) expect. */
+      double raw = sqlite3_column_double(stmt, 10);
+      out_scores[count] = memory_bm25_normalize((float)(-raw), midpoint, steepness);
+      count++;
+   }
+   sqlite3_reset(stmt);
+   AUTH_DB_UNLOCK();
+
+   if (count_out)
+      *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_fact_search(int user_id,
                           const char *keywords,
                           memory_fact_t *out_facts,
@@ -590,7 +834,54 @@ int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id) {
 }
 
 int memory_db_fact_delete(int64_t fact_id, int user_id) {
+   /* Step 1: look up the fact under the auth_db lock so we know the
+    * owner + can pull the live fact_text for FTS5 maintenance.  Released
+    * BEFORE stemming so the stemmer mutex stays a leaf lock per the
+    * ARCHITECTURE.md acquire-order invariant. */
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   sqlite3_stmt *get = s_db.stmt_memory_fact_get;
+   sqlite3_reset(get);
+   sqlite3_bind_int64(get, 1, fact_id);
+   int owner = 0;
+   char text_buf[MEMORY_FACT_TEXT_MAX];
+   text_buf[0] = '\0';
+   bool found = false;
+   if (sqlite3_step(get) == SQLITE_ROW) {
+      owner = sqlite3_column_int(get, 1);
+      const unsigned char *t = sqlite3_column_text(get, 2);
+      if (t) {
+         size_t n = strlen((const char *)t);
+         if (n >= sizeof(text_buf))
+            n = sizeof(text_buf) - 1;
+         memcpy(text_buf, t, n);
+         text_buf[n] = '\0';
+      }
+      found = true;
+   }
+   sqlite3_reset(get);
+   AUTH_DB_UNLOCK();
+
+   /* SECURITY: verify ownership before any side effects — the legacy
+    * DELETE statement filters by user_id at the END, which would leak
+    * an unconditional FTS5 deindex of any rowid to any authenticated
+    * user (CWE-639).  Don't distinguish "wrong user" from "doesn't
+    * exist" — same response a legitimate not-found request would get. */
+   if (!found || owner != user_id) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+
+   /* Step 2: stem outside any lock so the stemmer mutex doesn't compose
+    * with auth_db.  Same stems the original insert used because fact_text
+    * is immutable post-create. */
+   char fact_stems[MEMORY_FACT_STEMS_MAX];
+   (void)memory_stem_string(text_buf, fact_stems, sizeof(fact_stems));
+
+   /* Step 3: re-take the lock and run the FTS5 delete + facts DELETE
+    * atomically (within the same critical section). */
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+
+   (void)fts5_delete_fact_stems_locked(fact_id, fact_stems);
 
    sqlite3_stmt *stmt = s_db.stmt_memory_fact_delete;
    sqlite3_reset(stmt);
@@ -687,6 +978,22 @@ int memory_db_fact_find_by_hash(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+/* TODO Phase 1 follow-up (v48 FTS5 orphan cleanup on bulk-delete paths):
+ * memory_db_fact_prune_superseded / memory_db_fact_prune_stale /
+ * memory_db_facts_delete_by_patterns currently leave the corresponding
+ * memory_facts_fts rows in place when they DELETE from memory_facts.  The
+ * orphans don't surface in user-visible search results — the BM25 search
+ * JOIN's `memory_facts mf ON mf.id = memory_facts_fts.rowid` filter
+ * excludes them — but they consume token-posting storage and skew the
+ * global IDF in the contentless FTS5 table over time.  Fix shape:
+ * before each bulk DELETE, SELECT victim id+fact_text under the lock,
+ * release lock and stem outside, re-acquire and call
+ * fts5_delete_fact_stems_locked per victim, then run the bulk DELETE.
+ * Deferred because (a) Phase 1's leader-comparable bench doesn't
+ * exercise prune paths, (b) the dev's instance doesn't prune on a
+ * schedule, (c) IDF bias is sub-noise at realistic prune cadences (~1-5%
+ * orphan ratio).  Address in Phase 1.5 alongside the M-1 (global FTS5
+ * IDF) documentation pass. */
 int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out) {
    if (count_out)
       *count_out = 0;

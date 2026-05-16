@@ -100,6 +100,13 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_maint.c
     ${SRC_ROOT}/src/auth/auth_db_audit.c
     ${SRC_ROOT}/src/auth/auth_db_rate_limit.c
+    # v48: auth_db_core.c calls memory_stem_init() during the v48
+    # FTS5 backfill migration; targets linking the full auth chain need
+    # the stemmer wrapper too.  memory_bm25.c is included for symmetry —
+    # any future call from auth_db_core into the BM25 helpers links
+    # cleanly without revisiting this list.
+    ${SRC_ROOT}/src/memory/memory_stem.c
+    ${SRC_ROOT}/src/memory/memory_bm25.c
     ${SRC_ROOT}/src/core/path_utils.c)
 
 # CUDA libraries — required by Whisper-backed hardware tests.
@@ -168,14 +175,20 @@ dawn_add_unit_test(test_temporal_relations
    SOURCES test_temporal_relations.c test_temporal_relations_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
-   LIBS    dawn_common unity sqlite3 pthread m
+           # v48: memory_db.c calls memory_bm25_* + memory_stem_* helpers
+           # in the FTS5 sync path (fact_create / fact_delete) + search.
+           ${SRC_ROOT}/src/memory/memory_bm25.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_relation_supersede
    SOURCES test_relation_supersede.c test_relation_supersede_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
-   LIBS    dawn_common unity sqlite3 pthread m
+           ${SRC_ROOT}/src/memory/memory_bm25.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 # Entity-merge alias surface (v43).  Links the full auth_db chain so the v43
@@ -187,6 +200,7 @@ dawn_add_unit_test(test_memory_db_alias
            ${SRC_ROOT}/src/memory/memory_db_alias.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
+           # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
            # WARNING: keep config_defaults.c a leaf module — it is linked
            # into this test target so test setUp can call config_set_defaults
            # to seed g_config with real runtime values (otherwise the
@@ -198,7 +212,7 @@ dawn_add_unit_test(test_memory_db_alias
            # surface change.
            ${SRC_ROOT}/src/config/config_defaults.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 # Document extract has conditional MuPDF / libzip+libxml2 linking, so the
@@ -418,7 +432,9 @@ dawn_add_unit_test(test_memory_provenance
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
-   LIBS    dawn_common unity sqlite3 pthread m
+           ${SRC_ROOT}/src/memory/memory_bm25.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_summarize_missing
@@ -433,7 +449,9 @@ dawn_add_unit_test(test_memory_db_admin
            # memory_db.c linked so memory_db_undo_extraction_attempt is
            # exercised directly (transient-failure rollback path).
            ${SRC_ROOT}/src/memory/memory_db.c
-   LIBS    dawn_common unity sqlite3 pthread m
+           ${SRC_ROOT}/src/memory/memory_bm25.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_source_dedup
@@ -446,6 +464,18 @@ dawn_add_unit_test(test_memory_score_floor
    SOURCES test_memory_score_floor.c
            ${SRC_ROOT}/src/memory/memory_score_floor.c
    LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_memory_bm25
+   SOURCES test_memory_bm25.c
+           ${SRC_ROOT}/src/memory/memory_bm25.c
+   LIBS    unity m
+   LABEL   ci)
+
+dawn_add_unit_test(test_memory_stem
+   SOURCES test_memory_stem.c
+           ${SRC_ROOT}/src/memory/memory_stem.c
+   LIBS    dawn_common unity stemmer pthread
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_predicate_dedup
@@ -532,13 +562,13 @@ dawn_add_unit_test(test_calendar_db
    SOURCES test_calendar_db.c
            ${SRC_ROOT}/src/tools/calendar_db.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_auth_db
    SOURCES test_auth_db.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_tool_registry
@@ -571,7 +601,7 @@ dawn_add_unit_test(test_email_db
    SOURCES test_email_db.c test_email_db_stub.c
            ${SRC_ROOT}/src/tools/email_db.c
            ${AUTH_DB_SOURCES}
-   LIBS    dawn_common unity sqlite3 pthread m
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 # =============================================================================
@@ -657,6 +687,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
            ${SRC_ROOT}/src/memory/memory_source_dedup.c
            ${SRC_ROOT}/src/memory/memory_score_floor.c
            ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
@@ -689,7 +720,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/tools/toml.c
    INCLUDES /usr/local/include/onnxruntime
-   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto
+   LIBS    dawn_common sqlite3 pthread m onnxruntime ssl crypto stemmer
            ${CURL_LIBRARIES} ${JSONC_LIBRARIES})
 
 dawn_add_unit_test(bench_contradiction
@@ -725,5 +756,5 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
-   LIBS    dawn_common pthread m
+   LIBS    dawn_common pthread m stemmer
            ${JSONC_LIBRARIES})

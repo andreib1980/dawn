@@ -323,6 +323,12 @@ void config_set_defaults(dawn_config_t *config) {
     * verbose format.  Cuts ~30-50% of memory_text bytes by stripping per-fact
     * metadata + demoting source excerpts to a single global block. */
    config->memory.memory_text_minimal = false;
+   /* BM25 keyword retrieval (FTS5 + Porter2).  Off-by-default while we
+    * bench-validate against the legacy LIKE + multi-token match-count
+    * path.  Flip in dawn.toml ([memory] bm25_enabled = true) once the
+    * Mem0 parity Phase 1 gate ships and we want the new path on by
+    * default for every user.  See docs/MEM0_ARCHITECTURAL_PARITY.md. */
+   config->memory.bm25_enabled = false;
    config->memory.category_threshold = 0.25f;
    /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
     * entity_grounding_bonus 0.4 sits between the 0.30 search floor and

@@ -1,0 +1,77 @@
+D.A.W.N. (Digital Assistant for Workflow Neural-inference)
+Copyright (C) 2024-2026 Kris Kersey and The OASIS Project contributors
+
+This product is licensed under the GNU General Public License, version 3
+or later (GPLv3+).  See the LICENSE file for the full license text.
+
+================================================================================
+Third-party attributions
+================================================================================
+
+This product incorporates ideas, algorithms, and prompt text adapted from
+the following Apache-2.0-licensed project:
+
+--------------------------------------------------------------------------------
+Mem0 (mem0ai/mem0)
+--------------------------------------------------------------------------------
+
+  Copyright (c) 2023 Taranjeet Singh
+  Licensed under the Apache License, Version 2.0
+  https://github.com/mem0ai/mem0
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Components of D.A.W.N.'s memory subsystem are derived from or directly inspired
+by Mem0's published implementation.  Specific borrowings are called out in
+per-file `Adapted from mem0ai/mem0` comments at the point of use.  The
+high-level adaptations are summarized here:
+
+  1. BM25 keyword scoring with sigmoid normalization and query-length-adaptive
+     parameters.  The (midpoint, steepness) parameter table and the logistic
+     normalization formula are ported from
+         mem0/utils/scoring.py::get_bm25_params
+         mem0/utils/scoring.py::normalize_bm25
+     into C as memory_bm25_get_params() / memory_bm25_normalize().
+
+  2. Extraction prompt specificity rules — proper-noun preservation, numerical
+     precision, qualifier preservation, no-echo, no-meta-extraction, and
+     "casual topics are still extractable" framing.  Adapted verbatim or
+     near-verbatim from
+         mem0/configs/prompts.py::ADDITIVE_EXTRACTION_PROMPT
+     into D.A.W.N.'s MEMORY_EXTRACTION_PROMPT_TEMPLATE (in
+     src/memory/memory_extraction.c).
+
+  3. Spread-attenuated entity boost formula
+         boost = similarity * 0.5 * 1 / (1 + 0.001 * (n - 1)^2)
+     ported from Mem0's entity-grounding logic into
+         src/memory/memory_graph_retrieval.c.
+
+  4. The architectural pattern of an additive (semantic + keyword + entity)
+     scoring composition with an adaptive max-possible divisor (see
+         mem0/utils/scoring.py::score_and_rank
+     ).  D.A.W.N.'s composition retains semantic-dominant weighting (0.6:0.4)
+     rather than Mem0's equal weighting; see docs/MEM0_ARCHITECTURAL_PARITY.md
+     for the rationale.
+
+Changes from upstream Mem0:
+
+  - All adapted Python is reimplemented in C against D.A.W.N.'s SQLite-backed
+    storage layer; no Mem0 Python code is shipped or executed at runtime.
+  - Lemmatization uses Snowball Porter2 (libstemmer) rather than spaCy.
+  - Extraction prompt preserves D.A.W.N.'s atomic-with-composite-exception
+    fact-shape philosophy and entity-graph contract; Mem0's "contextually
+    rich, not atomic" guidance is deliberately not adopted.
+  - Output composition includes facts + preferences + summaries + entity-graph
+    block, configurable via dawn.toml.  Mem0's facts-only collapse is one
+    optional mode (memory_text_minimal), not the default.
+  - Memory linking (linked_memory_ids) is not adopted; cross-fact connectivity
+    is provided by D.A.W.N.'s entity-graph subsystem.
+
+The full Apache 2.0 license text governing the original Mem0 source is
+reproduced in upstream Mem0 at https://github.com/mem0ai/mem0/blob/main/LICENSE.
+
+================================================================================
+
+D.A.W.N. also bundles or links against numerous third-party libraries (curl,
+SQLite, libwebsockets, json-c, OpenSSL, libsodium, whisper.cpp, Piper,
+ONNX Runtime, etc.).  See DEPENDENCIES.md for the complete list and each
+library's license.

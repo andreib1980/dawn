@@ -109,6 +109,13 @@ int memory_embeddings_embed_and_store_entity(int64_t entity_id, int user_id, con
    return 1;
 }
 
+int memory_embeddings_embed_and_store_summary(int user_id, int64_t summary_id, const char *text) {
+   (void)user_id;
+   (void)summary_id;
+   (void)text;
+   return 1;
+}
+
 void memory_embeddings_invalidate_cache(void) {
 }
 void memory_embeddings_invalidate_entity_cache(void) {

@@ -659,6 +659,8 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_score_floor.c
     src/memory/memory_graph_retrieval.c
     src/memory/memory_predicate_dedup.c
+    src/memory/memory_bm25.c
+    src/memory/memory_stem.c
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c
@@ -752,6 +754,7 @@ target_link_libraries(dawn
                       ${SAMPLERATE_LIBRARIES}
                       OpenSSL::SSL
                       OpenSSL::Crypto
+                      stemmer
                       m)
 
 # Link uuid for Plex client identifier generation

@@ -482,6 +482,18 @@
                                   # filtered. Drop to 0.10-0.20 if over-filtering,
                                   # push higher if weak fabrications persist.
                                   # Range: 0.0-1.0.
+# bm25_enabled = false            # BM25 keyword retrieval (FTS5 + Porter2 stemming).
+                                  # When on, the keyword channel of memory.search
+                                  # uses SQLite FTS5 with bm25() ranking + Porter2
+                                  # stems, instead of the legacy SQL LIKE +
+                                  # multi-token match-count path. Catches plurals
+                                  # + verb tenses ("memories"→"memori",
+                                  # "attending"→"attend") and ranks rare-term
+                                  # matches above common-term matches. Algorithm
+                                  # + sigmoid params adapted from Mem0
+                                  # (Apache-2.0; see NOTICE). Off-by-default for
+                                  # A/B; flip to true after bench validation.
+                                  # Phase 1 of the Mem0 parity program.
 # backfill_on_startup = true      # Generate missing embeddings on startup
                                   # Env: DAWN_MEMORY_EMBEDDINGS_BACKFILL_ON_STARTUP
 # model_id = "bge-small-en-v1.5-int8"

@@ -1235,6 +1235,10 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                               "recompute_on_model_change",
                                               "recompute_batch_size",
                                               "recompute_batch_sleep_ms",
+                                              "temporal_filter_enabled",
+                                              "rrf_enabled",
+                                              "memory_text_minimal",
+                                              "bm25_enabled",
                                               NULL };
       warn_unknown_keys(embeddings, "memory.embeddings", emb_keys);
 
@@ -1247,6 +1251,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_BOOL(embeddings, "temporal_filter_enabled", config->temporal_filter_enabled);
       PARSE_BOOL(embeddings, "rrf_enabled", config->rrf_enabled);
       PARSE_BOOL(embeddings, "memory_text_minimal", config->memory_text_minimal);
+      PARSE_BOOL(embeddings, "bm25_enabled", config->bm25_enabled);
       PARSE_DOUBLE(embeddings, "category_threshold", config->category_threshold);
       PARSE_DOUBLE(embeddings, "search_score_floor", config->search_score_floor);
       PARSE_BOOL(embeddings, "backfill_on_startup", config->embedding_backfill_on_startup);
