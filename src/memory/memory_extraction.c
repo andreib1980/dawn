@@ -51,6 +51,14 @@
 
 /* =============================================================================
  * Extraction Prompt Template
+ *
+ * Adapted from mem0ai/mem0 (Apache-2.0).  See NOTICE and DEPENDENCIES.md.
+ * The "SPECIFICITY RULES" block below ports verbatim phrasing from Mem0's
+ * `_get_extraction_prompt` for proper-noun preservation, numerical
+ * precision, qualifier preservation, no-echo, and casual-topics rules
+ * (Phase 3 of the Mem0 Architectural Parity plan).  DAWN diverges from
+ * Mem0 in keeping the atomic-with-composite philosophy + paired JSON
+ * schema; see docs/MEM0_ARCHITECTURAL_PARITY.md for the rationale.
  * ============================================================================= */
 
 const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
@@ -177,6 +185,32 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "    2) \"Caroline went to the gym on 2023-05-19\"\n"
     "  BAD:  \"Caroline had a busy morning\"  (collapses two answerable "
     "facts into one vague summary)\n\n"
+    "SPECIFICITY RULES — adapted from Mem0 (Apache-2.0):\n"
+    "- PROPER-NOUN PRESERVATION.  If the user names a specific thing, "
+    "KEEP the proper noun in fact_text — do not generalize.\n"
+    "    KEEP: \"Osteria Francescana\"  NOT: \"a new restaurant\"\n"
+    "    KEEP: \"Ferrari 488 GTB\"      NOT: \"a sports car\"\n"
+    "    KEEP: \"aerial yoga\"          NOT: \"a workout class\"\n"
+    "    KEEP: \"Becoming Nicole\"      NOT: \"a memoir\"\n"
+    "- NUMERICAL PRECISION.  Concrete numbers stay concrete.  Do NOT "
+    "round to softer or vaguer counts.\n"
+    "    KEEP: \"416 pages\"            NOT: \"about 400 pages\"\n"
+    "    KEEP: \"$37,500\"              NOT: \"around forty thousand\"\n"
+    "    KEEP: \"3 miles\"              NOT: \"a few miles\"\n"
+    "  Exception: if the user themselves used a hedging word "
+    "(\"approximately 50 people came\"), preserve their phrasing verbatim.\n"
+    "- QUALIFIER PRESERVATION.  Keep modifiers that change meaning.\n"
+    "    KEEP: \"assistant manager\"    NOT: \"manager\"     (\"promoted to "
+    "assistant manager\" is a different fact from \"promoted to manager\")\n"
+    "    KEEP: \"senior engineer\"      NOT: \"engineer\"\n"
+    "    KEEP: \"former roommate\"      NOT: \"roommate\"    (former / "
+    "current changes the relation's validity)\n"
+    "- CASUAL TOPICS ARE STILL EXTRACTABLE.  Pets, hobbies, childhood "
+    "memories, favorite foods, weekend plans, and similar everyday "
+    "details are NOT chitchat — they are durable facts about the user "
+    "and should be extracted with the same specificity as professional "
+    "or biographical facts.  \"I have a cat named Whiskers who is 14\" "
+    "is a fact, not small-talk.\n\n"
     "RELATION TYPES — TWO-TIER VOCABULARY:\n"
     "- STANDARD TYPES (prefer these when applicable; grounded in Schema.org Person "
     "properties and ConceptNet commonsense relations):\n"
@@ -224,6 +258,12 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "durable state — what the user IS, HAS, LIKES, BELIEVES, KNOWS, OWNS, "
     "or has DONE in their life — even when the conversation surfaces it via "
     "a question.\n"
+    "  WRONG: \"Melanie asked the assistant for camping tips\"\n"
+    "  RIGHT: \"Melanie went camping on 2023-06-17 in the mountains with "
+    "her family\" (the durable fact behind the question)\n"
+    "  WRONG: \"Caroline requested a list of LGBTQ activist groups\"\n"
+    "  RIGHT: \"Caroline joined 'Connected LGBTQ Activists' on 2023-07-18\" "
+    "(the durable fact she shared during the exchange)\n"
     "- High confidence (0.8-1.0) for explicit statements, lower for inferences\n"
     "- List corrections if new information contradicts existing profile\n\n"
     "ENTITIES:\n"
