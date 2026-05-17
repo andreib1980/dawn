@@ -318,23 +318,28 @@ void config_set_defaults(dawn_config_t *config) {
     * LoCoMo-blind (parser doesn't fire on cat-2 "what date" shape) but no
     * regression observed; complements (does not replace) soft temporal_weight. */
    config->memory.temporal_filter_enabled = true;
-   /* RRF retrieval — off-by-default for A/B against the weighted-sum composite.
-    * Phase-1 bench showed -3.7pp regression vs composite scorer over DAWN's
-    * pre-BM25 keyword path.  Re-test trigger: post Phase 1 Mem0 parity now
-    * that BM25 + lemmatization landed (channels more balanced).  Keep flag
-    * for the re-evaluation; formally retire if still regressive. */
+   /* RRF retrieval — formally dead-letter (May 17, 2026).  Original 2026-05-15
+    * bench showed -3.7pp regression vs composite scorer.  Re-tested post Phase 1
+    * BM25 + Phase 3 specificity rules (Phase 4A of Mem0 parity program): still
+    * -0.58pp regressive.  Flag kept off-by-default; code stays behind the flag
+    * for operator override but is no longer "experimental, may re-enable" —
+    * the parallel-channel RRF design does not compose with DAWN's entity-graph
+    * backbone.  See docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 4A outcome. */
    config->memory.rrf_enabled = false;
    /* Minimal memory_text format — graduated to default-on (May 2026) after
-    * +0.98pp leader-comparable validation on n=1525.  Cuts ~30-50% of
-    * memory_text bytes by stripping per-fact metadata + demoting source
-    * excerpts to a single global block. */
+    * +0.98pp leader-comparable validation on n=1525.  Re-confirmed post
+    * Phase 3 specificity (Phase 4B of Mem0 parity): -0.71pp without minimal.
+    * Cuts ~30-50% of memory_text bytes by stripping per-fact metadata +
+    * demoting source excerpts to a single global block. */
    config->memory.memory_text_minimal = true;
-   /* BM25 keyword retrieval (FTS5 + Porter2).  Off-by-default while we
-    * bench-validate against the legacy LIKE + multi-token match-count
-    * path.  Flip in dawn.toml ([memory] bm25_enabled = true) once the
-    * Mem0 parity Phase 1 gate ships and we want the new path on by
-    * default for every user.  See docs/MEM0_ARCHITECTURAL_PARITY.md. */
-   config->memory.bm25_enabled = false;
+   /* BM25 keyword retrieval (FTS5 + Porter2).  Graduated to default-on
+    * (May 17, 2026) after Phase 1 Mem0 parity bench validation: +2.74pp
+    * leader-comparable on fresh LoCoMo n=1536 (BM25 OFF 0.7057 → ON 0.7331),
+    * plus stable burn-in on the dev's live deployment.  Operator override
+    * via [memory.embeddings] bm25_enabled = false to revert to the legacy
+    * LIKE + multi-token match-count path.  See NOTICE for Mem0 attribution
+    * and docs/MEM0_ARCHITECTURAL_PARITY.md §Phase 1 outcome. */
+   config->memory.bm25_enabled = true;
    config->memory.category_threshold = 0.25f;
    /* Graph-retrieval Phase 2.b — entity-graph candidate source.  Default-on;
     * entity_grounding_bonus 0.4 sits between the 0.30 search floor and
