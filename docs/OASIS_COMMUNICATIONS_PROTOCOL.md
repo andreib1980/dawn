@@ -29,7 +29,7 @@ The OASIS Communications Protocol defines a consistent message format for commun
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `device` | Yes | Target device/capability (e.g., "viewing", "weather", "smartthings") |
+| `device` | Yes | Target device/capability (e.g., "viewing", "weather", "homeassistant") |
 | `action` | Yes | Action to perform (e.g., "look", "get", "on", "off") |
 | `value` | No | Action parameter (string, meaning depends on device/action) |
 | `request_id` | No* | Unique identifier for correlating response. *Required if response needed |
@@ -712,7 +712,7 @@ Response with structured data:
 
 ```json
 {
-  "device": "smartthings",
+  "device": "homeassistant",
   "action": "completed",
   "request_id": "dawn_worker2_8",
   "status": "error",

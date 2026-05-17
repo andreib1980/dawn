@@ -275,14 +275,8 @@ body.user-is-admin .admin-only {
 }
 
 /* Feature-flag visibility (compile-time tool availability) */
-#smartthings-section {
-   display: none !important;
-}
 #homeassistant-section {
    display: none !important;
-}
-body.user-is-admin.feature-smartthings #smartthings-section {
-   display: block !important;
 }
 body.user-is-admin.feature-homeassistant #homeassistant-section {
    display: block !important;

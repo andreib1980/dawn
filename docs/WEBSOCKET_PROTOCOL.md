@@ -736,64 +736,6 @@ Response: `music_queue_response`
 
 ---
 
-### SmartThings Integration
-
-#### `smartthings_status`
-Get SmartThings connection status.
-```json
-{"type": "smartthings_status"}
-```
-Response: `smartthings_status_response`
-
-#### `smartthings_get_auth_url`
-Get OAuth authorization URL. **Admin only.**
-```json
-{
-   "type": "smartthings_get_auth_url",
-   "payload": {
-      "redirect_uri": "https://dawn.local:3000/smartthings/callback"
-   }
-}
-```
-Response: `smartthings_auth_url_response`
-
-#### `smartthings_exchange_code`
-Exchange OAuth authorization code for tokens. **Admin only.**
-```json
-{
-   "type": "smartthings_exchange_code",
-   "payload": {
-      "code": "auth_code_here",
-      "redirect_uri": "https://dawn.local:3000/smartthings/callback",
-      "state": "csrf_token"
-   }
-}
-```
-Response: `smartthings_exchange_response`
-
-#### `smartthings_disconnect`
-Disconnect SmartThings (clear tokens). **Admin only.**
-```json
-{"type": "smartthings_disconnect"}
-```
-Response: `smartthings_disconnect_response`
-
-#### `smartthings_list_devices`
-List all SmartThings devices. **Admin only.**
-```json
-{"type": "smartthings_list_devices"}
-```
-Response: `smartthings_devices_response`
-
-#### `smartthings_refresh_devices`
-Force refresh the device list from SmartThings API. **Admin only.**
-```json
-{"type": "smartthings_refresh_devices"}
-```
-Response: `smartthings_devices_response`
-
----
-
 ### Scheduler
 
 #### `scheduler_action`
@@ -1294,12 +1236,6 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `search_memory` | `search_memory_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
 | `delete_all_memories` | `delete_all_memories_response` |
-| `smartthings_status` | `smartthings_status_response` |
-| `smartthings_get_auth_url` | `smartthings_auth_url_response` |
-| `smartthings_exchange_code` | `smartthings_exchange_response` |
-| `smartthings_disconnect` | `smartthings_disconnect_response` |
-| `smartthings_list_devices` | `smartthings_devices_response` |
-| `smartthings_refresh_devices` | `smartthings_devices_response` |
 | `music_subscribe` | `music_state` |
 | `music_control` | `music_state` |
 | `music_search` | `music_search_response` |

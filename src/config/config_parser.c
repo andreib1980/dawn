@@ -1675,17 +1675,6 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          PARSE_STRING(home_assistant, "token", secrets->home_assistant_token);
       }
 
-      /* Parse [secrets.smartthings] sub-section for authentication
-       * Supports two modes:
-       * 1. PAT mode: access_token only (simpler, recommended)
-       * 2. OAuth2 mode: client_id + client_secret */
-      toml_table_t *smartthings = toml_table_in(secrets_section, "smartthings");
-      if (smartthings) {
-         PARSE_STRING(smartthings, "access_token", secrets->smartthings_access_token);
-         PARSE_STRING(smartthings, "client_id", secrets->smartthings_client_id);
-         PARSE_STRING(smartthings, "client_secret", secrets->smartthings_client_secret);
-      }
-
       /* Parse [secrets.google] sub-section for OAuth 2.0
        * Used for Google Calendar and Gmail integration */
       toml_table_t *google = toml_table_in(secrets_section, "google");

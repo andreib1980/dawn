@@ -84,9 +84,6 @@
 #include "tools/music_tool.h"
 #endif
 #include "tools/search_summarizer.h"
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-#include "tools/smartthings_service.h"
-#endif
 #include "tools/tfidf_summarizer.h"
 #include "tools/tool_registry.h"
 #include "tools/tools_init.h"
@@ -2116,16 +2113,6 @@ int main(int argc, char *argv[]) {
       OLOG_INFO("Chunking disabled via config");
    }
 
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-   /* SmartThings service initialization */
-   st_error_t st_err = smartthings_init();
-   if (st_err == ST_OK) {
-      OLOG_INFO("SmartThings service initialized");
-   } else if (st_err != ST_ERR_NOT_CONFIGURED) {
-      OLOG_WARNING("SmartThings init failed: %s", smartthings_error_str(st_err));
-   }
-#endif
-
    /* MQTT Setup - conditionally enabled via config */
    if (g_config.mqtt.enabled) {
       OLOG_INFO("Init mosquitto.");
@@ -3892,11 +3879,6 @@ server_shutdown:
    mosquitto_disconnect(mosq);
    mosquitto_loop_stop(mosq, false);
    mosquitto_lib_cleanup();
-
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-   // Cleanup SmartThings service
-   smartthings_cleanup();
-#endif
 
    // Note: WebUI conversation histories are persisted to auth.db during the session.
    // LOCAL/DAP session histories are not persisted (in-memory only).

@@ -241,8 +241,8 @@ void llm_tools_init(void);
 /**
  * @brief Refresh tool availability based on current config
  *
- * Call when capabilities change at runtime (e.g., SmartThings authenticates,
- * search endpoint configured, etc.) to update which tools are enabled.
+ * Call when capabilities change at runtime (e.g., a tool's auth status
+ * changes, search endpoint configured, etc.) to update which tools are enabled.
  */
 void llm_tools_refresh(void);
 

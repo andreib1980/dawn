@@ -45,9 +45,6 @@
 #ifdef DAWN_ENABLE_URL_TOOL
 #include "tools/url_tool.h"
 #endif
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-#include "tools/smartthings_tool.h"
-#endif
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
 #include "tools/homeassistant_tool.h"
 #endif
@@ -155,11 +152,6 @@ int tools_register_all(void) {
    }
 #endif
 
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-   if (smartthings_tool_register() != 0) {
-      OLOG_WARNING("Failed to register smartthings tool");
-   }
-#endif
 
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
    if (homeassistant_tool_register() != 0) {

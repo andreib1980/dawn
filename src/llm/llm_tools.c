@@ -700,12 +700,6 @@ void llm_tools_refresh(void) {
          t->enabled = hud_available;
       }
 
-      /* SmartThings requires authentication */
-      if (strcmp(t->name, "smartthings") == 0) {
-         t->enabled = (secrets->smartthings_access_token[0] != '\0' ||
-                       secrets->smartthings_client_id[0] != '\0');
-      }
-
       /* Search requires configured endpoint */
       if (strcmp(t->name, "search") == 0) {
          t->enabled = (g_config.search.endpoint[0] != '\0');

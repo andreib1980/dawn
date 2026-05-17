@@ -38,5 +38,5 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 - **Fuzzy matching**: "Turn on the living room light" works even if the HA entity name differs slightly.
 - **Area-aware**: satellite user mapping injects `HomeAssistant_Area=[X]` into LLM system prompt.
-- **Feature guard**: `DAWN_ENABLE_HOMEASSISTANT_TOOL` CMake option; mutually exclusive with SmartThings.
+- **Feature guard**: `DAWN_ENABLE_HOMEASSISTANT_TOOL` CMake option. (DAWN's standalone SmartThings tool was removed in May 2026 — its upstream OAuth flow was permanently broken by an AWS WAF rule. Install Home Assistant via `docs/HOMEASSISTANT_SETUP.md` and use HA's own SmartThings integration if you need SmartThings device coverage.)
 - **Entity cache**: avoids per-request API calls; refreshed on configurable interval.

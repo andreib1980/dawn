@@ -97,7 +97,7 @@ dawn-admin ip unblock --all
 
 ### Which tools can be scheduled?
 
-Tools with `TOOL_CAP_SCHEDULABLE`: `weather`, `calendar`, `search`, `email`, `url_fetch`, `smartthings`, `homeassistant`, `volume`, `music`
+Tools with `TOOL_CAP_SCHEDULABLE`: `weather`, `calendar`, `search`, `email`, `url_fetch`, `homeassistant`, `volume`, `music`
 
 ### Where does TTS play when a scheduled event fires?
 

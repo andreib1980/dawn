@@ -688,12 +688,6 @@ const char *tool_registry_get_secret(const char *tool_name, const char *secret_n
       return secrets->claude_api_key[0] ? secrets->claude_api_key : NULL;
    } else if (strcmp(secret_name, "gemini_api_key") == 0) {
       return secrets->gemini_api_key[0] ? secrets->gemini_api_key : NULL;
-   } else if (strcmp(secret_name, "smartthings_access_token") == 0) {
-      return secrets->smartthings_access_token[0] ? secrets->smartthings_access_token : NULL;
-   } else if (strcmp(secret_name, "smartthings_client_id") == 0) {
-      return secrets->smartthings_client_id[0] ? secrets->smartthings_client_id : NULL;
-   } else if (strcmp(secret_name, "smartthings_client_secret") == 0) {
-      return secrets->smartthings_client_secret[0] ? secrets->smartthings_client_secret : NULL;
    } else if (strcmp(secret_name, "mqtt_username") == 0) {
       return secrets->mqtt_username[0] ? secrets->mqtt_username : NULL;
    } else if (strcmp(secret_name, "mqtt_password") == 0) {

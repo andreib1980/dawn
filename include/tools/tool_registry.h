@@ -146,7 +146,7 @@ typedef struct {
  * Registry validates TOOL_CAP_SECRETS matches declarations.
  */
 typedef struct {
-   const char *secret_name; /**< Key in secrets.toml (e.g., "smartthings_access_token") */
+   const char *secret_name; /**< Key in secrets.toml (e.g., "openai_api_key") */
    bool required;           /**< Fail init if missing? */
 } tool_secret_requirement_t;
 

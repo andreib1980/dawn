@@ -55,19 +55,6 @@
       if (secretsContent) {
          Config.renderSecretsFields(secretsContent);
       }
-
-      // SmartThings elements
-      settingsElements.stStatusIndicator = document.getElementById('st-status-indicator');
-      settingsElements.stStatusText =
-         settingsElements.stStatusIndicator?.querySelector('.st-status-text');
-      settingsElements.stDevicesCountRow = document.getElementById('st-devices-count-row');
-      settingsElements.stDevicesCount = document.getElementById('st-devices-count');
-      settingsElements.stConnectBtn = document.getElementById('st-connect-btn');
-      settingsElements.stRefreshBtn = document.getElementById('st-refresh-btn');
-      settingsElements.stDisconnectBtn = document.getElementById('st-disconnect-btn');
-      settingsElements.stDevicesList = document.getElementById('st-devices-list');
-      settingsElements.stDevicesContainer = document.getElementById('st-devices-container');
-      settingsElements.stNotConfigured = document.getElementById('st-not-configured');
    }
 
    /* =============================================================================
@@ -99,9 +86,6 @@
       // Request users list for admin settings (default voice user dropdown)
       if (typeof DawnState !== 'undefined' && DawnState.authState && DawnState.authState.isAdmin) {
          Config.requestUsersList();
-      }
-      if (typeof DawnSmartThings !== 'undefined') {
-         DawnSmartThings.requestStatus();
       }
       if (typeof DawnHomeAssistant !== 'undefined') {
          DawnHomeAssistant.requestStatus();
@@ -542,37 +526,6 @@
       // LLM quick controls event listeners
       Llm.initLlmControls();
 
-      // SmartThings initialization
-      if (typeof DawnSmartThings !== 'undefined') {
-         DawnSmartThings.setElements({
-            stStatusIndicator: settingsElements.stStatusIndicator,
-            stStatusText: settingsElements.stStatusText,
-            stNotConfigured: settingsElements.stNotConfigured,
-            stConnectBtn: settingsElements.stConnectBtn,
-            stRefreshBtn: settingsElements.stRefreshBtn,
-            stDisconnectBtn: settingsElements.stDisconnectBtn,
-            stDevicesCountRow: settingsElements.stDevicesCountRow,
-            stDevicesCount: settingsElements.stDevicesCount,
-            stDevicesList: settingsElements.stDevicesList,
-            stDevicesContainer: settingsElements.stDevicesContainer,
-         });
-         DawnSmartThings.setConfirmModal(Modals.showConfirmModal);
-         DawnSmartThings.setCallbacks({
-            getAuthState: callbacks.getAuthState,
-         });
-
-         // SmartThings button listeners
-         if (settingsElements.stConnectBtn) {
-            settingsElements.stConnectBtn.addEventListener('click', DawnSmartThings.startOAuth);
-         }
-         if (settingsElements.stRefreshBtn) {
-            settingsElements.stRefreshBtn.addEventListener('click', DawnSmartThings.refreshDevices);
-         }
-         if (settingsElements.stDisconnectBtn) {
-            settingsElements.stDisconnectBtn.addEventListener('click', DawnSmartThings.disconnect);
-         }
-      }
-
       // Home Assistant initialization
       if (typeof DawnHomeAssistant !== 'undefined') {
          DawnHomeAssistant.setElements({
@@ -660,24 +613,6 @@
       });
    }
 
-   /**
-    * Get SmartThings elements (for external modules)
-    */
-   function getSmartThingsElements() {
-      return {
-         stStatusIndicator: settingsElements.stStatusIndicator,
-         stStatusText: settingsElements.stStatusText,
-         stNotConfigured: settingsElements.stNotConfigured,
-         stConnectBtn: settingsElements.stConnectBtn,
-         stRefreshBtn: settingsElements.stRefreshBtn,
-         stDisconnectBtn: settingsElements.stDisconnectBtn,
-         stDevicesCountRow: settingsElements.stDevicesCountRow,
-         stDevicesCount: settingsElements.stDevicesCount,
-         stDevicesList: settingsElements.stDevicesList,
-         stDevicesContainer: settingsElements.stDevicesContainer,
-      };
-   }
-
    /* =============================================================================
     * Export - Maintain backward compatibility with window.DawnSettings API
     * ============================================================================= */
@@ -733,8 +668,5 @@
       // Unsaved indicators
       updateSaveButtonState: updateSaveButtonState,
       clearUnsavedIndicators: clearUnsavedIndicators,
-
-      // SmartThings elements
-      getSmartThingsElements: getSmartThingsElements,
    };
 })();

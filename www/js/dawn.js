@@ -252,9 +252,6 @@
                }
                break;
             case 'server_features':
-               if (msg.payload.smartthings) {
-                  document.body.classList.add('feature-smartthings');
-               }
                if (msg.payload.home_assistant) {
                   document.body.classList.add('feature-homeassistant');
                }
@@ -305,31 +302,6 @@
                break;
             case 'set_session_llm_response':
                DawnSettings.handleSetSessionLlmResponse(msg.payload);
-               break;
-            case 'smartthings_status_response':
-               if (typeof DawnSmartThings !== 'undefined') {
-                  DawnSmartThings.handleStatusResponse(msg.payload);
-               }
-               break;
-            case 'smartthings_auth_url_response':
-               if (typeof DawnSmartThings !== 'undefined') {
-                  DawnSmartThings.handleAuthUrlResponse(msg.payload);
-               }
-               break;
-            case 'smartthings_exchange_code_response':
-               if (typeof DawnSmartThings !== 'undefined') {
-                  DawnSmartThings.handleExchangeCodeResponse(msg.payload);
-               }
-               break;
-            case 'smartthings_disconnect_response':
-               if (typeof DawnSmartThings !== 'undefined') {
-                  DawnSmartThings.handleDisconnectResponse(msg.payload);
-               }
-               break;
-            case 'smartthings_devices_response':
-               if (typeof DawnSmartThings !== 'undefined') {
-                  DawnSmartThings.handleDevicesResponse(msg.payload);
-               }
                break;
             case 'ha_status_response':
                if (typeof DawnHomeAssistant !== 'undefined') {

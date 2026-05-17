@@ -23,7 +23,6 @@
  * This module handles:
  * - Static file serving from www/ directory
  * - Authentication API endpoints (/api/auth/*)
- * - OAuth callbacks (SmartThings)
  * - Health check endpoint
  */
 
@@ -1387,59 +1386,6 @@ int callback_http(struct lws *wsi,
             return LWS_CLOSE_CONNECTION; /* Close connection */
          }
 #endif /* ENABLE_AUTH */
-
-         /* SmartThings OAuth callback - extract code and state from URL */
-         if (strncmp(path, "/smartthings/callback", 21) == 0) {
-            /* Generate inline HTML that extracts params and posts to opener */
-            static const char oauth_callback_html[] =
-                "<!DOCTYPE html><html><head><title>SmartThings Auth</title></head>"
-                "<body><script>"
-                "const params = new URLSearchParams(window.location.search);"
-                "const code = params.get('code');"
-                "const state = params.get('state');"
-                "const error = params.get('error');"
-                "if (window.opener) {"
-                "  window.opener.postMessage({"
-                "    type: 'smartthings_oauth_callback',"
-                "    code: code,"
-                "    state: state,"
-                "    error: error"
-                "  }, window.location.origin);"
-                "  setTimeout(function() { window.close(); }, 500);"
-                "} else {"
-                "  document.body.innerHTML = '<p>Authorization ' + "
-                "    (code ? 'successful' : 'failed') + '. You can close this window.</p>';"
-                "}"
-                "</script><p>Processing authorization...</p></body></html>";
-
-            unsigned char buffer[LWS_PRE + 1024];
-            unsigned char *start = &buffer[LWS_PRE];
-            unsigned char *p = start;
-            unsigned char *end = &buffer[sizeof(buffer) - 1];
-
-            if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end))
-               return LWS_CLOSE_CONNECTION;
-            if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
-                                             (unsigned char *)"text/html", 9, &p, end))
-               return LWS_CLOSE_CONNECTION;
-            if (lws_add_http_header_content_length(wsi, sizeof(oauth_callback_html) - 1, &p, end))
-               return LWS_CLOSE_CONNECTION;
-            if (webui_add_security_headers(wsi, &p, end))
-               return LWS_CLOSE_CONNECTION;
-            if (lws_finalize_http_header(wsi, &p, end))
-               return LWS_CLOSE_CONNECTION;
-
-            n = lws_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
-            if (n < 0)
-               return LWS_CLOSE_CONNECTION;
-
-            n = lws_write(wsi, (unsigned char *)oauth_callback_html,
-                          sizeof(oauth_callback_html) - 1, LWS_WRITE_HTTP);
-            if (n < 0)
-               return LWS_CLOSE_CONNECTION;
-
-            return LWS_CLOSE_CONNECTION; /* Close connection after response */
-         }
 
          /* Health check endpoint - returns JSON status */
          if (strcmp(path, "/health") == 0) {

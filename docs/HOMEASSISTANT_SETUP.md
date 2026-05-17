@@ -12,6 +12,8 @@
 
 DAWN integrates with Home Assistant via REST API and WebSocket for smart home control (lights, climate, locks, covers, media players, scenes, scripts, automations). This document covers installing HA Core in a Python venv directly on the Jetson — no Docker, no Supervisor, no Wyoming, no HAOS.
 
+> **If you previously used DAWN's SmartThings integration**: SmartThings was removed in May 2026 (its native OAuth integration with DAWN was permanently broken upstream by an AWS WAF rule). **The replacement is Home Assistant, which has a SmartThings integration of its own** — install HA via this guide, add the SmartThings integration in HA, and DAWN's `homeassistant` tool covers the same use cases (lights, switches, sensors, scenes, automations) through HA as the broker. The HA integration is more capable (covers Zigbee/Z-Wave/Matter/Bluetooth/Wi-Fi devices, not just cloud-routed SmartThings) and runs entirely locally with no cloud dependency on DAWN's side.
+
 ### Why Bare Metal
 
 | Constraint | Docker | Bare Metal |
@@ -146,8 +148,9 @@ frontend:
 person:
 sun:
 
-# Required for cloud-based integrations (SmartThings, Nabu Casa, etc.).
-# SmartThings can be added as an HA integration for smart home control.
+# Required for cloud-based integrations (Nabu Casa, SmartThings, etc.).
+# Add SmartThings via HA's Settings → Devices & Services → Add Integration
+# to bring SmartThings devices into DAWN through Home Assistant.
 cloud:
 
 logger:

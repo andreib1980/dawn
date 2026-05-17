@@ -96,7 +96,7 @@
    }
 }
 
-/* Token status dot (reuses SmartThings pattern) */
+/* Token status dot */
 .oauth-status-dot {
    display: inline-block;
    width: 8px;

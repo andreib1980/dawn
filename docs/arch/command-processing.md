@@ -110,7 +110,7 @@ static const tool_metadata_t my_tool_metadata = {
 │ deviceCallbackArray: │       │ Publish to topic:    │       │ Wait for MQTT   │
 │ - weather → get_wea  │       │ - "hud" → helmet     │       │ response via    │
 │ - music → play_music │       │ - "helmet" → helmet  │       │ command_router  │
-│ - search → web_sear  │       │ - "smartthings"      │       │                 │
+│ - search → web_sear  │       │ - "homeassistant"    │       │                 │
 │ - date → get_date    │       │                      │       │                 │
 └──────────────────────┘       └──────────────────────┘       └─────────────────┘
 ```
@@ -126,7 +126,7 @@ Commands are defined via the **modular tool_registry** system:
 
 2. **Legacy Device Callbacks** (`mosquitto_comms.c`)
    - `deviceCallbackArray[]` maps device types to C functions
-   - Core system devices: weather, music, search, smartthings, etc.
+   - Core system devices: weather, music, search, homeassistant, etc.
 
 ## Native Tools vs Legacy `<command>` Tags
 

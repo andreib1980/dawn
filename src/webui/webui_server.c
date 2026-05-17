@@ -72,9 +72,6 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "state_machine.h"
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-#include "tools/smartthings_service.h"
-#endif
 #include "tts/tts_preprocessing.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -1087,13 +1084,7 @@ static void send_config_impl(struct lws *wsi) {
 
 /* Compile-time constant: feature flags sent to all clients on connect */
 static const char s_server_features_json[] = "{\"type\":\"server_features\",\"payload\":{"
-                                             "\"smartthings\":"
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-                                             "true"
-#else
-                                             "false"
-#endif
-                                             ",\"home_assistant\":"
+                                             "\"home_assistant\":"
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
                                              "true"
 #else
@@ -2083,7 +2074,7 @@ static void handle_get_metrics(ws_connection_t *conn) {
 /* History handlers moved to webui_history.c */
 
 /* =============================================================================
- * Smart Home Message Dispatch (SmartThings / Home Assistant)
+ * Smart Home Message Dispatch (Home Assistant)
  *
  * Extracted into a helper to avoid fragile #ifdef interleaving in the main
  * else-if message handler chain.  Returns true if the message was handled.
@@ -2091,247 +2082,6 @@ static void handle_get_metrics(ws_connection_t *conn) {
 static bool handle_smart_home_message(ws_connection_t *conn,
                                       const char *type,
                                       struct json_object *payload) {
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-   if (strcmp(type, "smartthings_status") == 0) {
-      /* Get SmartThings connection status */
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type",
-                             json_object_new_string("smartthings_status_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      json_object_object_add(resp_payload, "configured",
-                             json_object_new_boolean(smartthings_is_configured()));
-      json_object_object_add(resp_payload, "authenticated",
-                             json_object_new_boolean(smartthings_is_authenticated()));
-
-      if (smartthings_is_configured()) {
-         st_status_t status;
-         smartthings_get_status(&status);
-         json_object_object_add(resp_payload, "has_tokens",
-                                json_object_new_boolean(status.has_tokens));
-         json_object_object_add(resp_payload, "tokens_valid",
-                                json_object_new_boolean(status.tokens_valid));
-         json_object_object_add(resp_payload, "token_expiry",
-                                json_object_new_int64(status.token_expiry));
-         json_object_object_add(resp_payload, "devices_count",
-                                json_object_new_int(status.devices_count));
-         json_object_object_add(resp_payload, "auth_mode",
-                                json_object_new_string(
-                                    smartthings_auth_mode_str(status.auth_mode)));
-      }
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return true;
-   }
-   if (strcmp(type, "smartthings_get_auth_url") == 0) {
-      if (!conn_require_admin(conn))
-         return true;
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type",
-                             json_object_new_string("smartthings_auth_url_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      if (!smartthings_is_configured()) {
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string(
-                                    "SmartThings client credentials not configured"));
-      } else {
-         char redirect_uri[256];
-         struct json_object *redirect_obj = NULL;
-         if (json_object_object_get_ex(payload, "redirect_uri", &redirect_obj) &&
-             json_object_is_type(redirect_obj, json_type_string)) {
-            strncpy(redirect_uri, json_object_get_string(redirect_obj), sizeof(redirect_uri) - 1);
-            redirect_uri[sizeof(redirect_uri) - 1] = '\0';
-         } else {
-            const dawn_config_t *cfg = config_get();
-            snprintf(redirect_uri, sizeof(redirect_uri), "%s://localhost:%d/smartthings/callback",
-                     cfg->webui.https ? "https" : "http", cfg->webui.port);
-         }
-
-         char auth_url[1024];
-         st_error_t err = smartthings_get_auth_url(redirect_uri, auth_url, sizeof(auth_url));
-         if (err == ST_OK) {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-            json_object_object_add(resp_payload, "auth_url", json_object_new_string(auth_url));
-            json_object_object_add(resp_payload, "redirect_uri",
-                                   json_object_new_string(redirect_uri));
-         } else {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            json_object_object_add(resp_payload, "error",
-                                   json_object_new_string(smartthings_error_str(err)));
-         }
-      }
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return true;
-   }
-   if (strcmp(type, "smartthings_exchange_code") == 0) {
-      if (!conn_require_admin(conn))
-         return true;
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type",
-                             json_object_new_string("smartthings_exchange_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      struct json_object *code_obj, *redirect_obj, *state_obj;
-      if (payload && json_object_object_get_ex(payload, "code", &code_obj) &&
-          json_object_object_get_ex(payload, "redirect_uri", &redirect_obj)) {
-         const char *code = json_object_get_string(code_obj);
-         const char *redirect_uri = json_object_get_string(redirect_obj);
-         const char *state = NULL;
-         if (json_object_object_get_ex(payload, "state", &state_obj)) {
-            state = json_object_get_string(state_obj);
-         }
-
-         st_error_t err = smartthings_exchange_code(code, redirect_uri, state);
-         if (err == ST_OK) {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-            OLOG_INFO("WebUI: SmartThings OAuth authorization successful");
-         } else {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            json_object_object_add(resp_payload, "error",
-                                   json_object_new_string(smartthings_error_str(err)));
-            OLOG_WARNING("WebUI: SmartThings OAuth failed: %s", smartthings_error_str(err));
-         }
-      } else {
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Missing code or redirect_uri"));
-      }
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return true;
-   }
-   if (strcmp(type, "smartthings_disconnect") == 0) {
-      if (!conn_require_admin(conn))
-         return true;
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type",
-                             json_object_new_string("smartthings_disconnect_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      smartthings_disconnect();
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      OLOG_INFO("WebUI: SmartThings disconnected");
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return true;
-   }
-   if (strcmp(type, "smartthings_list_devices") == 0) {
-      if (!conn_require_admin(conn))
-         return true;
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type",
-                             json_object_new_string("smartthings_devices_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      if (!smartthings_is_authenticated()) {
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error", json_object_new_string("Not authenticated"));
-      } else {
-         const st_device_list_t *devices;
-         st_error_t err = smartthings_list_devices(&devices);
-         if (err == ST_OK) {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-            json_object_object_add(resp_payload, "count", json_object_new_int(devices->count));
-
-            struct json_object *devices_arr = json_object_new_array();
-            for (int i = 0; i < devices->count; i++) {
-               const st_device_t *dev = &devices->devices[i];
-               struct json_object *dev_obj = json_object_new_object();
-               json_object_object_add(dev_obj, "id", json_object_new_string(dev->id));
-               json_object_object_add(dev_obj, "name", json_object_new_string(dev->name));
-               json_object_object_add(dev_obj, "label", json_object_new_string(dev->label));
-               json_object_object_add(dev_obj, "room", json_object_new_string(dev->room));
-
-               struct json_object *caps = json_object_new_array();
-               for (int j = 0; j < 15; j++) {
-                  st_capability_t cap = (st_capability_t)(1 << j);
-                  if (dev->capabilities & cap) {
-                     json_object_array_add(caps,
-                                           json_object_new_string(smartthings_capability_str(cap)));
-                  }
-               }
-               json_object_object_add(dev_obj, "capabilities", caps);
-
-               json_object_array_add(devices_arr, dev_obj);
-            }
-            json_object_object_add(resp_payload, "devices", devices_arr);
-         } else {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            json_object_object_add(resp_payload, "error",
-                                   json_object_new_string(smartthings_error_str(err)));
-         }
-      }
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return true;
-   }
-   if (strcmp(type, "smartthings_refresh_devices") == 0) {
-      if (!conn_require_admin(conn))
-         return true;
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type",
-                             json_object_new_string("smartthings_devices_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      if (!smartthings_is_authenticated()) {
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error", json_object_new_string("Not authenticated"));
-      } else {
-         const st_device_list_t *devices;
-         st_error_t err = smartthings_refresh_devices(&devices);
-         if (err == ST_OK) {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-            json_object_object_add(resp_payload, "count", json_object_new_int(devices->count));
-
-            struct json_object *devices_arr = json_object_new_array();
-            for (int i = 0; i < devices->count; i++) {
-               const st_device_t *dev = &devices->devices[i];
-               struct json_object *dev_obj = json_object_new_object();
-               json_object_object_add(dev_obj, "id", json_object_new_string(dev->id));
-               json_object_object_add(dev_obj, "name", json_object_new_string(dev->name));
-               json_object_object_add(dev_obj, "label", json_object_new_string(dev->label));
-               json_object_object_add(dev_obj, "room", json_object_new_string(dev->room));
-
-               struct json_object *caps = json_object_new_array();
-               for (int j = 0; j < 15; j++) {
-                  st_capability_t cap = (st_capability_t)(1 << j);
-                  if (dev->capabilities & cap) {
-                     json_object_array_add(caps,
-                                           json_object_new_string(smartthings_capability_str(cap)));
-                  }
-               }
-               json_object_object_add(dev_obj, "capabilities", caps);
-
-               json_object_array_add(devices_arr, dev_obj);
-            }
-            json_object_object_add(resp_payload, "devices", devices_arr);
-         } else {
-            json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-            json_object_object_add(resp_payload, "error",
-                                   json_object_new_string(smartthings_error_str(err)));
-         }
-      }
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return true;
-   }
-#endif /* DAWN_ENABLE_SMARTTHINGS_TOOL */
-
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
    if (strcmp(type, "ha_status") == 0) {
       handle_ha_status(conn);
@@ -3124,7 +2874,7 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
                    conn->use_opus ? "yes" : "no");
       }
    } else if (handle_smart_home_message(conn, type, payload)) {
-      /* Handled by smart home dispatch (SmartThings / Home Assistant) */
+      /* Handled by smart home dispatch (Home Assistant) */
    } else if (strcmp(type, "get_tools_config") == 0) {
       handle_get_tools_config(conn);
    } else if (strcmp(type, "set_tools_config") == 0) {
@@ -3626,8 +3376,7 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (conn->is_satellite && payload) {
          handle_satellite_volume_state(conn, payload);
       }
-   } else if (strncmp(type, "smartthings_", sizeof("smartthings_") - 1) == 0 ||
-              strncmp(type, "ha_", sizeof("ha_") - 1) == 0) {
+   } else if (strncmp(type, "ha_", sizeof("ha_") - 1) == 0) {
       OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", type);
    } else {
       OLOG_WARNING("WebUI: Unknown message type: %s", type);

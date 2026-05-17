@@ -36,9 +36,6 @@
 #include "logging.h"
 #include "mosquitto_comms.h"
 #include "text_to_command_nuevo.h"
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-#include "tools/smartthings_service.h"
-#endif
 #include "tools/tool_registry.h"
 #include "ui/metrics.h"
 
@@ -223,8 +220,8 @@ int is_vision_enabled_for_current_llm(void) {
 /**
  * @brief Invalidates cached system instructions, forcing rebuild on next call
  *
- * Call this when capabilities change at runtime (e.g., SmartThings
- * authenticates, devices are loaded, etc.) so the next call to
+ * Call this when capabilities change at runtime (e.g., a tool's auth
+ * status changes, devices are loaded, etc.) so the next call to
  * get_system_instructions() rebuilds the prompt with updated capabilities.
  */
 void invalidate_system_instructions(void) {
@@ -512,31 +509,6 @@ static int build_system_instructions_to_buffer(const char *mode,
       len += cmd_copy;
       buffer[len] = '\0';
    }
-
-#ifdef DAWN_ENABLE_SMARTTHINGS_TOOL
-   /* Special case: SmartThings device list if authenticated */
-   if (smartthings_is_authenticated()) {
-      const st_device_list_t *devices = NULL;
-      if (smartthings_list_devices(&devices) == ST_OK && devices && devices->count > 0) {
-         len += snprintf(buffer + len, remaining - len, "Available SmartThings devices (%d):\n",
-                         devices->count);
-         for (int i = 0; i < devices->count && i < 30; i++) {
-            const st_device_t *dev = &devices->devices[i];
-            len += snprintf(buffer + len, remaining - len, "  - %s",
-                            dev->label[0] ? dev->label : dev->name);
-            if (dev->room[0]) {
-               len += snprintf(buffer + len, remaining - len, " (%s)", dev->room);
-            }
-            len += snprintf(buffer + len, remaining - len, "\n");
-         }
-         if (devices->count > 30) {
-            len += snprintf(buffer + len, remaining - len, "  - ... and %d more devices\n",
-                            devices->count - 30);
-         }
-         len += snprintf(buffer + len, remaining - len, "\n");
-      }
-   }
-#endif
 
    return len;
 }
