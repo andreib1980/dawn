@@ -8,8 +8,10 @@ This document tracks all third-party dependencies used by the DAWN project.
 |---------|---------|---------|--------|-------------|
 | marked.js | 15.0.12 | MIT | [GitHub](https://github.com/markedjs/marked) | Markdown parser |
 | DOMPurify | 3.3.1 | Apache 2.0 / MPL 2.0 | [GitHub](https://github.com/cure53/DOMPurify) | XSS sanitizer |
+| Chart.js | 4.4.1 | MIT | [GitHub](https://github.com/chartjs/Chart.js) | Charts in the visual-render tool (loaded into a sandboxed iframe) |
+| qrcode-generator | 2.0.4 | MIT | [GitHub](https://github.com/kazuhikoarase/qrcode-generator) | QR code generation for satellite pairing in the admin UI |
 
-**Local copies**: `www/js/marked.min.js`, `www/js/purify.min.js`
+**Local copies**: `www/js/marked.min.js`, `www/js/purify.min.js`, `www/js/vendor/chart.umd.js`, `www/js/vendor/qrcode-generator-v2.0.4.js`
 
 ## WebUI (Fonts)
 

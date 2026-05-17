@@ -445,6 +445,10 @@
                if (typeof DawnSatellites !== 'undefined')
                   DawnSatellites.handleDeleteResponse(msg.payload);
                break;
+            case 'satellite_registration_key_response':
+               if (typeof DawnSatellites !== 'undefined')
+                  DawnSatellites.handleRegistrationKeyResponse(msg.payload);
+               break;
             case 'get_my_settings_response':
                DawnMySettings.handleGetResponse(msg.payload);
                break;
@@ -1667,6 +1671,7 @@
       DawnUsers.init();
       DawnSatellites.setCallbacks({
          showConfirmModal: DawnSettings.showConfirmModal,
+         trapFocus: DawnSettings.trapFocus,
       });
       DawnMySettings.setCallbacks({
          showConfirmModal: DawnSettings.showConfirmModal,

@@ -452,6 +452,104 @@
             </div>
          </div>
 
+         <!-- Satellite Pairing Modal (admin only — opened from Satellite Management).
+              Surfaces the satellite_registration_key + server URL as a scannable QR
+              code so an Android client can pair without manual typing.  Server emits
+              the key over the existing authenticated WS; client builds the
+              dawn://provision URI locally and renders the QR via the vendored
+              qrcode-generator library. -->
+         <div
+            id="satellite-pair-modal"
+            class="modal-overlay hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="satellite-pair-title"
+         >
+            <div class="modal-content satellite-pair-modal">
+               <div class="modal-header">
+                  <h3 id="satellite-pair-title">Pair new satellite</h3>
+               </div>
+               <div id="satellite-pair-body" class="satellite-pair-body">
+                  <p class="satellite-pair-intro">
+                     Scan with the DAWN Android app to pair this device.
+                  </p>
+                  <div id="satellite-pair-qr-wrap" class="satellite-pair-qr-wrap">
+                     <div
+                        id="satellite-pair-qr"
+                        class="satellite-pair-qr"
+                        role="img"
+                        aria-label="Satellite pairing QR code — use the Copy URI button below if you can't scan."
+                     ></div>
+                  </div>
+                  <div id="satellite-pair-empty" class="satellite-pair-empty hidden">
+                     <p>
+                        No registration key is configured on this server. Generate one with
+                        <code>./generate_ssl_cert.sh --gen-key</code> and set
+                        <code>satellite_registration_key</code> in your secrets file, then restart
+                        the daemon.
+                     </p>
+                  </div>
+                  <div class="satellite-pair-form">
+                     <label class="satellite-pair-label" for="satellite-pair-server">
+                        Server URL
+                     </label>
+                     <input
+                        type="text"
+                        id="satellite-pair-server"
+                        class="satellite-pair-input"
+                        spellcheck="false"
+                        autocomplete="off"
+                     />
+                     <p
+                        id="satellite-pair-ws-warning"
+                        class="satellite-pair-warning hidden"
+                        role="alert"
+                     >
+                        ⚠ This server is using TLS. Use <code>wss://</code> for a secure pairing
+                        link.
+                     </p>
+                     <label class="satellite-pair-label" for="satellite-pair-key">
+                        Registration key
+                     </label>
+                     <div class="dawn-secret-field">
+                        <input
+                           type="password"
+                           id="satellite-pair-key"
+                           class="dawn-secret-field-input"
+                           readonly
+                           autocomplete="off"
+                        />
+                        <button
+                           type="button"
+                           id="satellite-pair-key-reveal"
+                           class="dawn-secret-field-reveal"
+                           aria-pressed="false"
+                           aria-label="Show registration key"
+                        >
+                           Show
+                        </button>
+                     </div>
+                  </div>
+                  <div class="satellite-pair-actions">
+                     <button id="satellite-pair-copy" class="btn btn-primary">
+                        Copy pairing URI
+                     </button>
+                     <span
+                        id="satellite-pair-copy-status"
+                        class="satellite-pair-copy-status"
+                        aria-live="polite"
+                     ></span>
+                     <button id="satellite-pair-close" class="btn btn-secondary">Close</button>
+                  </div>
+                  <p class="satellite-pair-disclaimer">
+                     Anyone with this QR can register a satellite on your DAWN. Don't share it or
+                     take screenshots in front of others. Cross-device clipboard sync (Universal
+                     Clipboard, KDE Connect, etc.) may keep the URI on your other devices.
+                  </p>
+               </div>
+            </div>
+         </div>
+
          <!-- Memory Source Modal (v40 provenance) -->
          <div
             id="memory-source-modal"
@@ -1554,12 +1652,15 @@ Format rules:
                      <span class="section-toggle">&#9660;</span>
                   </h3>
                   <div class="section-content">
-                     <div id="satellite-list" class="satellite-list" aria-live="polite"></div>
-                     <div class="satellite-management-actions">
+                     <div class="satellite-management-actions satellite-management-header">
+                        <button id="pair-satellite-btn" class="btn btn-primary">
+                           Pair new satellite
+                        </button>
                         <button id="refresh-satellites-btn" class="btn btn-secondary">
                            Refresh
                         </button>
                      </div>
+                     <div id="satellite-list" class="satellite-list" aria-live="polite"></div>
                   </div>
                </div>
 
@@ -2658,9 +2759,12 @@ token = "eyJ..."</pre
          </div>
       </div>
 
-      <!-- Third-party libraries -->
+      <!-- Third-party libraries.  All four are defer-loaded; defer scripts
+           execute in document order, so qrcode-generator MUST stay above the
+           DAWN modules that reference it (admin/satellites.js). -->
       <script defer src="/js/marked.min.js"></script>
       <script defer src="/js/purify.min.js"></script>
+      <script defer src="/js/vendor/qrcode-generator-v2.0.4.js"></script>
 
       <!-- DAWN modules -->
       <script defer src="/js/dawn-events.js"></script>

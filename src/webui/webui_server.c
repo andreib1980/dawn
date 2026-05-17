@@ -2915,6 +2915,8 @@ static void handle_json_message(ws_connection_t *conn, const char *data, size_t 
       if (payload) {
          handle_delete_satellite(conn, payload);
       }
+   } else if (strcmp(type, "get_satellite_registration_key") == 0) {
+      handle_get_satellite_registration_key(conn);
    }
    /* Personal settings (authenticated users) */
    else if (strcmp(type, "get_my_settings") == 0) {

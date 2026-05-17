@@ -1117,6 +1117,18 @@ void handle_update_satellite(ws_connection_t *conn, struct json_object *payload)
  */
 void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload);
 
+/**
+ * @brief Return the satellite registration key to the admin client (admin only)
+ *
+ * Surfaces secrets->satellite_registration_key for QR-code pairing in the
+ * WebUI. Rate-limited per source IP (5 fetches/min, 30/hour) and audit-logged
+ * via the auth event log. The key value itself never appears in any log line.
+ *
+ * @param conn Authenticated WebSocket connection; admin privilege is enforced
+ *             internally via conn_require_admin().
+ */
+void handle_get_satellite_registration_key(ws_connection_t *conn);
+
 /* =============================================================================
  * Satellite Handler Functions (defined in webui_satellite.c)
  * ============================================================================= */
