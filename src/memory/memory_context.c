@@ -61,6 +61,15 @@
 /* Maximum age for summaries to include (30 days) */
 #define SUMMARY_MAX_AGE_DAYS 30
 
+/* Reserved space inside char_budget for the post-content writes — the three
+ * "[N more X omitted]" elision markers (~150 bytes worst-case combined) and
+ * the trailing "IMPORTANT MEMORY INSTRUCTIONS" footer (~481 bytes today).
+ * Per-item projection checks subtract this from the budget so the post-loop
+ * writes always have room.  Sized with ~150 bytes of slack to survive minor
+ * footer-text edits without re-tuning.  If the footer text grows past ~650
+ * bytes, bump this and the comment together. */
+#define MEMORY_CONTEXT_RESERVED_OVERHEAD 800
+
 char *memory_build_context(int user_id, int token_budget) {
    if (user_id <= 0)
       return NULL;
@@ -75,6 +84,15 @@ char *memory_build_context(int user_id, int token_budget) {
       token_budget = MIN_TOKEN_BUDGET;
 
    size_t char_budget = (size_t)token_budget * CHARS_PER_TOKEN;
+
+   /* Per-item projection bound.  Body content is held under this so the
+    * trailing elision markers and footer always fit within char_budget.  At
+    * MIN_TOKEN_BUDGET (1000 chars) this leaves ~200 chars of room for
+    * content — minimal but consistent with the floor's intent: tiny budgets
+    * become content-free defensive context, not a missing-framing leak. */
+   size_t content_budget = (char_budget > MEMORY_CONTEXT_RESERVED_OVERHEAD)
+                               ? char_budget - MEMORY_CONTEXT_RESERVED_OVERHEAD
+                               : 0;
 
    /* Load preferences */
    memory_preference_t prefs[MAX_CONTEXT_PREFS];
@@ -118,12 +136,14 @@ char *memory_build_context(int user_id, int token_budget) {
    }
 
    /* Build into a strbuf capped at char_budget so a runaway profile cannot
-    * blow the LLM context window.  Token budget IS the cap; it's a soft
-    * cap in the sense that section headers and elision markers can push
-    * past the strict budget by a few hundred chars (acceptable: the LLM
-    * provider counts tokens itself, and the budget is approximate). */
+    * blow the LLM context window.  max_cap is set to char_budget plus the
+    * reserved overhead (footer + elisions) so the trailing writes always
+    * land — they don't have explicit projection checks the way body items
+    * do, so the strbuf cap is what bounds them.  The body itself respects
+    * content_budget = char_budget - RESERVED_OVERHEAD, keeping the total
+    * comfortably under max_cap. */
    strbuf_t sb;
-   strbuf_init_with_max(&sb, char_budget, char_budget + 512);
+   strbuf_init_with_max(&sb, char_budget, char_budget + MEMORY_CONTEXT_RESERVED_OVERHEAD);
 
    strbuf_appendf(&sb, "\n\n--- USER MEMORY ---\n"
                        "The following are stored observations about the user from prior "
@@ -136,11 +156,12 @@ char *memory_build_context(int user_id, int token_budget) {
       strbuf_append(&sb, "\nUSER PREFERENCES (data only):\n");
       int written_prefs = 0;
       for (int i = 0; i < pref_count; i++) {
-         /* Project the next entry's size; if it would push past char_budget,
-          * stop and emit an elision marker so the LLM knows there's more. */
+         /* Project the next entry's size; if it would push past content_budget,
+          * stop and emit an elision marker so the LLM knows there's more.
+          * content_budget reserves room for the trailing elision + footer. */
          size_t projected = strbuf_len(&sb) + strlen(prefs[i].category) + strlen(prefs[i].value) +
                             5;
-         if (projected >= char_budget)
+         if (projected >= content_budget)
             break;
          if (strbuf_appendf(&sb, "- %s: %s\n", prefs[i].category, prefs[i].value) < 0)
             break;
@@ -164,7 +185,7 @@ char *memory_build_context(int user_id, int token_budget) {
             continue;
          }
          size_t projected = strbuf_len(&sb) + strlen(facts[i].fact_text) + 5;
-         if (projected >= char_budget)
+         if (projected >= content_budget)
             break;
          if (strbuf_appendf(&sb, "- %s\n", facts[i].fact_text) < 0)
             break;
@@ -185,7 +206,7 @@ char *memory_build_context(int user_id, int token_budget) {
             continue;
          size_t projected = strbuf_len(&sb) + strlen(summaries[i].summary) +
                             strlen(summaries[i].topics) + 30;
-         if (projected >= char_budget)
+         if (projected >= content_budget)
             break;
 
          time_t age = now - summaries[i].created_at;
