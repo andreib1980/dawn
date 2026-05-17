@@ -254,16 +254,41 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "REJECT phrasings like \"User asked about X\", \"User inquired about Y\", "
     "\"User requested Z from the assistant\", \"User wanted to know about W\", "
     "\"User looked up V\" — these describe a single transient interaction, "
-    "not a fact about the user that persists past this session.  KEEP "
-    "durable state — what the user IS, HAS, LIKES, BELIEVES, KNOWS, OWNS, "
-    "or has DONE in their life — even when the conversation surfaces it via "
-    "a question.\n"
+    "not a fact about the user that persists past this session.  **This "
+    "rule applies regardless of which subject form is used.**  Substituting "
+    "the user's real name (e.g., \"Kris inquired about...\", \"Caroline "
+    "requested...\") does NOT make the fact durable — the interaction-event "
+    "shape is what's being rejected, not the literal token \"User\".  If "
+    "you find yourself writing \"$NAME asked / inquired / requested / "
+    "wanted to know / looked up\", refactor to the underlying durable "
+    "assertion or drop the fact.  KEEP durable state — what the user IS, "
+    "HAS, LIKES, BELIEVES, KNOWS, OWNS, or has DONE in their life — even "
+    "when the conversation surfaces it via a question.\n"
     "  WRONG: \"Melanie asked the assistant for camping tips\"\n"
     "  RIGHT: \"Melanie went camping on 2023-06-17 in the mountains with "
     "her family\" (the durable fact behind the question)\n"
     "  WRONG: \"Caroline requested a list of LGBTQ activist groups\"\n"
     "  RIGHT: \"Caroline joined 'Connected LGBTQ Activists' on 2023-07-18\" "
     "(the durable fact she shared during the exchange)\n"
+    "- INTERACTION-ONLY CONVERSATIONS (test sessions, smart-home checks, "
+    "timer/alarm/scheduler tests, command rehearsals, voice-control "
+    "experiments) often have NO durable world-state to extract but DO "
+    "reveal durable USER PREFERENCES, BEHAVIORAL PATTERNS, and SYSTEM USAGE "
+    "STYLES.  Extract those as the durable fact instead of recording the "
+    "interaction event verbatim.\n"
+    "  WRONG: \"User requested to set multiple timers and alarms\"\n"
+    "  RIGHT: \"Kris prefers direct action without preliminary confirmation "
+    "questions when setting timers and alarms\" (the durable preference the "
+    "interaction reveals)\n"
+    "  WRONG: \"User asked the assistant to turn on the living room light\"\n"
+    "  RIGHT: \"Kris controls living-room smart-home devices by voice\" (the "
+    "durable usage pattern; only emit if it's NEW info not already in the "
+    "profile)\n"
+    "  WRONG: \"User tested the scheduler's cancel-alarms feature\"\n"
+    "  RIGHT: \"Kris stress-tests new DAWN features systematically before "
+    "production use\" (durable behavioral pattern)\n"
+    "  If the conversation is purely an interaction with no extractable "
+    "preference or pattern, return empty facts[] — better than a meta-fact.\n"
     "- High confidence (0.8-1.0) for explicit statements, lower for inferences\n"
     "- List corrections if new information contradicts existing profile\n\n"
     "ENTITIES:\n"
@@ -283,7 +308,23 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "\"Caroline gave a school talk on 2023-05-19 (\\\"last Friday\\\")\".  Do NOT "
     "invert this order or drop the resolved date — downstream retrieval scores on "
     "fact_text content, and a leading specific date is the difference between a "
-    "useful fact and a vague one.\n\n"
+    "useful fact and a vague one.\n"
+    "- INSTANTANEOUS EVENTS — calendar appointments, weather observations, "
+    "single-moment readings, point-in-time decisions — do NOT have a "
+    "duration and MUST NOT emit valid_from / valid_to.  A zero-duration "
+    "range (valid_from == valid_to) is invalid and will be dropped, so "
+    "the relation loses its time link entirely.  Instead: omit both time "
+    "fields from the relation, and put the date inside fact_text where "
+    "it's preserved and retrievable.\n"
+    "  WRONG (zero-duration range): emit relation (User, attending, "
+    "Dentist appointment) with valid_from=2026-04-12 valid_to=2026-04-12\n"
+    "  RIGHT (omit time, embed in fact_text): emit relation (User, "
+    "attending, Dentist appointment) with no valid_from/valid_to, and "
+    "fact_text \"Kris has a dentist appointment on 2026-04-12 at 9:00 AM\"\n"
+    "  Time bounds are for DURATIONS (\"worked at Google 2018-2022\", "
+    "\"lived in Boston 2015-2020\", \"member of club 2019-present\"), not "
+    "single moments.  If you're tempted to emit valid_from == valid_to, "
+    "the event is instantaneous — drop the bounds and rely on fact_text.\n\n"
     "OUTPUT:\n"
     "- Generate a concise title (under 40 characters) that captures the main topic(s)\n"
     "- Title should be human-friendly, not a sentence — more like a label\n"
@@ -933,6 +974,10 @@ static void process_extraction_response(int user_id,
           * attribute relations to — either the newly-created row or the
           * matched-existing row for paraphrase merges. */
          int64_t fact_id = 0;
+         /* Diagnostic: track which branch assigned fact_id so the
+          * defensive-check probe below can distinguish paraphrase-merge
+          * vs fresh-create as the leak source for the "vanished" race. */
+         const char *fact_id_origin = "unset";
          bool gate_used_embedding = false;
          if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available()) {
             float vec[MAX_EMBEDDING_DIMS];
@@ -966,6 +1011,7 @@ static void process_extraction_response(int user_id,
                             "score=%.3f: %s",
                             (long long)matched_id, (double)score, text);
                   fact_id = matched_id;
+                  fact_id_origin = "paraphrase_match";
                } else {
                   /* No paraphrase — create new fact + store precomputed vector. */
                   memory_db_fact_create_at(user_id, text, confidence, source, category, prov,
@@ -973,6 +1019,7 @@ static void process_extraction_response(int user_id,
                   OLOG_INFO("memory_extraction: stored fact [%s]: %s", category, text);
                   if (fact_id > 0) {
                      memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
+                     fact_id_origin = "paraphrase_create";
                   }
                }
             }
@@ -993,12 +1040,15 @@ static void process_extraction_response(int user_id,
                if (fact_id > 0 && memory_embeddings_available()) {
                   memory_embeddings_embed_and_store(user_id, fact_id, text);
                }
+               if (fact_id > 0)
+                  fact_id_origin = "like_create";
             } else {
                float new_conf = similar[0].confidence + 0.1f;
                if (new_conf > 1.0f)
                   new_conf = 1.0f;
                memory_db_fact_update_confidence(similar[0].id, user_id, new_conf);
                fact_id = similar[0].id;
+               fact_id_origin = "like_match";
             }
          }
 
@@ -1162,13 +1212,24 @@ static void process_extraction_response(int user_id,
                 * as the previous loop's defensive check — handles the FK-
                 * violation race from Bundle 1's diagnostic (paraphrase-merge
                 * branch may have matched a row that gets superseded mid-
-                * extraction by a concurrent worker). */
+                * extraction by a concurrent worker).
+                *
+                * Phase 3.1 diagnostic: log fact_id_origin (paraphrase_match /
+                * paraphrase_create / like_match / like_create / unset) and
+                * fact_text so the analysis script can post-correlate against
+                * the live DB (existence + superseded_by) at log-parse time.
+                * Origin tag narrows the leak source: if every vanish is
+                * paraphrase_match the stale-embedding-cache hypothesis is
+                * supported; if creates also vanish, look at fact_supersede /
+                * relation_supersede cascading in the same extraction. */
                int64_t rel_fact_id = fact_id;
                memory_fact_t fact_check;
                if (memory_db_fact_get(rel_fact_id, user_id, &fact_check) != MEMORY_DB_SUCCESS) {
                   OLOG_WARNING("memory_extraction: fact_id=%lld vanished before relation "
-                               "supersede (subj=%s pred=%s obj=%s) — storing with NULL fact link",
-                               (long long)fact_id, r_subj, canon_pred, r_obj);
+                               "supersede (subj=%s pred=%s obj=%s) — storing with NULL fact link "
+                               "[diag origin=%s conv=%lld fact_text='%.80s']",
+                               (long long)fact_id, r_subj, canon_pred, r_obj, fact_id_origin,
+                               prov ? (long long)prov->conv_id : -1L, text);
                   rel_fact_id = 0;
                }
 
