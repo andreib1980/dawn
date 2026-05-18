@@ -169,8 +169,8 @@ int memory_graph_extract_seed_entities(int user_id,
        * the class canonical so a 1-hop expansion sees the full
        * equivalence class's relations.  Phase 2's memory_db_relation_
        * fact_ids_for_entity walks by entity_id directly; without this
-       * step a query that uses an alias canonical name (e.g., "Kris"
-       * when "Kristopher Kersey" is the canonical) would miss relations
+       * step a query that uses an alias canonical name (e.g., "Jon"
+       * when "Jonathan Smith" is the canonical) would miss relations
        * stored against the canonical. */
       /* Skip — Phase 1 entity-merge keeps relations on whichever entity
        * the resolver chose at extraction time, and the alias_link

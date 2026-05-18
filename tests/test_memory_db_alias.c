@@ -710,17 +710,17 @@ static void test_consider_auto_merge_rejected(void) {
 }
 
 /* Phase 2 substring rescue — forward direction: inbound is the short form
- * ("kris"), existing canonical is the long form ("kristopher kersey").
- * Stage 2's per-token LIKE search finds "kristopher kersey" as a hit for
- * token "kris" (it contains "kris" as a char-substring), but jaccard("kris",
- * "kristopher kersey") = 0 because they share no whole-word tokens — below
+ * ("jon"), existing canonical is the long form ("jonathan smith").
+ * Stage 2's per-token LIKE search finds "jonathan smith" as a hit for
+ * token "jon" (it contains "jon" as a char-substring), but jaccard("jon",
+ * "jonathan smith") = 0 because they share no whole-word tokens — below
  * the 0.30 floor.  The forward substring rescue admits the candidate so the
  * pair reaches Stage 6 scoring.  Without enough other signals it lands as
  * REJECTED, but `eval.target_entity_id` is set, confirming the cascade
  * found and scored it (vs NO_CANDIDATES if rescue didn't fire). */
 static void test_consider_auto_merge_substring_rescue_forward(void) {
-   int64_t long_form = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t long_form = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jon", "person");
 
    memory_alias_evaluate_t eval;
    int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
@@ -735,22 +735,22 @@ static void test_consider_auto_merge_substring_rescue_forward(void) {
 }
 
 /* Phase 2 substring rescue — reverse direction: existing canonical is the
- * short form ("kris"), inbound is the long form ("kristopher kersey").
- * Stage 2's per-token LIKE search tokenises inbound into ["kristopher",
- * "kersey"] and finds NEITHER inside "kris" — so the forward pass produces
- * an empty candidate pool.  Stage 2b reverse-substring sweep finds "kris"
- * because its canonical_name is a char-substring of "kristopher kersey".
+ * short form ("jon"), inbound is the long form ("jonathan smith").
+ * Stage 2's per-token LIKE search tokenises inbound into ["jonathan",
+ * "smith"] and finds NEITHER inside "jon" — so the forward pass produces
+ * an empty candidate pool.  Stage 2b reverse-substring sweep finds "jon"
+ * because its canonical_name is a char-substring of "jonathan smith".
  * Without Stage 2b, this case is NO_CANDIDATES (the gap that lets short-
  * form duplicates survive when the long form arrives later). */
 static void test_consider_auto_merge_substring_rescue_reverse(void) {
-   int64_t short_form = insert_entity_typed(g_test_user_id, "Kris", "person");
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t short_form = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
 
    memory_alias_evaluate_t eval;
    int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    /* Without Stage 2b this would be NO_CANDIDATES; reverse rescue admits
-    * "kris" so the cascade scores the pair and surfaces the target. */
+    * "jon" so the cascade scores the pair and surfaces the target. */
    TEST_ASSERT_EQUAL_INT64(short_form, eval.target_entity_id);
    TEST_ASSERT_TRUE(eval.evidence.name_substring_bonus_applied);
    TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_REJECTED, eval.outcome);
@@ -758,7 +758,7 @@ static void test_consider_auto_merge_substring_rescue_reverse(void) {
 
 /* Phase 2 substring rescue + supporting signals: short ↔ long variant with
  * shared user-self + works_at exclusive relation crosses the review band.
- * Models the dev's real "Kris" ↔ "Kristopher Kersey" cluster where the
+ * Models the dev's real "Jon" ↔ "Jonathan Smith" cluster where the
  * Phase 2 gate should propose the merge for operator review.
  *
  * Composite breakdown (Stage 4 cosine stubbed to 0):
@@ -773,15 +773,15 @@ static void test_consider_auto_merge_substring_rescue_reverse(void) {
  *                              = 0.60 — still below review (0.70).
  * Add contact overlap to push over: 0.60 + 0.10 = 0.70 → PROPOSED. */
 static void test_consider_auto_merge_substring_rescue_into_review(void) {
-   int64_t self = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t self = insert_entity_typed(g_test_user_id, "Jon", "person");
    mark_entity_user_self(self);
    int64_t company = insert_entity_typed(g_test_user_id, "Netsurion", "org");
    insert_open_relation(g_test_user_id, self, "works_at", company, NULL);
-   insert_contact(g_test_user_id, self, "email", "kris.kersey@gmail.com");
+   insert_contact(g_test_user_id, self, "email", "jon.smith@gmail.com");
 
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    insert_open_relation(g_test_user_id, inbound, "works_at", company, NULL);
-   insert_contact(g_test_user_id, inbound, "email", "kris.kersey@gmail.com");
+   insert_contact(g_test_user_id, inbound, "email", "jon.smith@gmail.com");
 
    memory_alias_evaluate_t eval;
    int rc = memory_db_entity_consider_auto_merge(g_test_user_id, inbound, &eval);
@@ -802,8 +802,8 @@ static void test_consider_auto_merge_substring_rescue_into_review(void) {
 /* Phase 2 propose-all-in-band: cascade returns ALL Stage-6-scored
  * candidates above review_threshold (not just the winner) so an inbound
  * with multiple legitimate matches gets a separate proposal row for each.
- * Models the dev's real case where "Kristopher Kersey" matches both "Kris"
- * (same person) AND "Shelley Kersey" (related entity via shared "kersey"
+ * Models the dev's real case where "Jonathan Smith" matches both "Jon"
+ * (same person) AND "Dawn Smith" (related entity via shared "smith"
  * token); the prior winner-only path silently dropped the secondary
  * candidate.  False positives are an operator-click away from rejection
  * in the WebUI Suggested-Merges panel — the cost asymmetry favors recall
@@ -813,13 +813,13 @@ static void test_consider_auto_merge_proposes_multiple_in_band(void) {
     * (0.50 in config defaults).  Build them with non-overlapping signals
     * so the cascade has to score each independently.
     *
-    * Candidate A (the user-self winner): "Kris" with shared works_at +
+    * Candidate A (the user-self winner): "Jon" with shared works_at +
     * shared email + user_self bonus → composite ≈ 0.30*0 (jaccard) +
     * 0.30*0 (cosine stubbed) + 0.25*1 (works_at) + 0.10*1 (email) +
     * 0.05*1 (type_match) + 0.10 (substring) + 0.20 (user_self) = 0.70.
     *
-    * Candidate B (the secondary token match): "Some Other Kersey" person
-    * sharing the "kersey" token → name_jaccard 0.5, no relations/contacts,
+    * Candidate B (the secondary token match): "Some Other Smith" person
+    * sharing the "smith" token → name_jaccard 0.5, no relations/contacts,
     * type_match, no user_self.  Composite = 0.30*0.5 + 0 + 0.05 (type) =
     * 0.20.  Below 0.50 — won't propose.  Damn, need more signal.
     *
@@ -836,14 +836,14 @@ static void test_consider_auto_merge_proposes_multiple_in_band(void) {
     * both cross. */
    int64_t employer = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
 
-   int64_t target_a = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t target_a = insert_entity_typed(g_test_user_id, "Jon", "person");
    int64_t target_b = insert_entity_typed(g_test_user_id, "Kerseyfab", "person");
    insert_open_relation(g_test_user_id, target_a, "works_at", employer, NULL);
    insert_open_relation(g_test_user_id, target_b, "works_at", employer, NULL);
    insert_contact(g_test_user_id, target_a, "email", "shared@example.com");
    insert_contact(g_test_user_id, target_b, "email", "shared@example.com");
 
-   int64_t inbound = insert_entity_typed(g_test_user_id, "Kris Kerseyfab", "person");
+   int64_t inbound = insert_entity_typed(g_test_user_id, "Jon Kerseyfab", "person");
    insert_open_relation(g_test_user_id, inbound, "works_at", employer, NULL);
    insert_contact(g_test_user_id, inbound, "email", "shared@example.com");
 
@@ -1071,14 +1071,14 @@ static void test_auto_promote_user_self_at_extraction_time(void) {
    /* Operator set their real_name BEFORE any matching entity existed.
     * Later, extraction creates the entity.  maybe_auto_promote_user_self
     * fires inline and flips is_user_self=1. */
-   set_user_real_name(g_test_user_id, "Kristopher Kersey");
+   set_user_real_name(g_test_user_id, "Jonathan Smith");
 
-   int64_t fresh = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t fresh = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    TEST_ASSERT_FALSE(entity_is_user_self(fresh));
 
    bool promoted = false;
-   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh,
-                                                          "kristopher kersey", &promoted);
+   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh, "jonathan smith",
+                                                          &promoted);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_TRUE(promoted);
    TEST_ASSERT_TRUE(entity_is_user_self(fresh));
@@ -1088,8 +1088,8 @@ static void test_auto_promote_user_self_by_real_name_sweep(void) {
    /* Pre-existing canonical matches real_name.  Operator now sets
     * real_name via Settings → the by-real-name sweep finds and promotes
     * the canonical without needing any extraction to fire. */
-   int64_t existing = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   set_user_real_name(g_test_user_id, "Kristopher Kersey");
+   int64_t existing = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   set_user_real_name(g_test_user_id, "Jonathan Smith");
 
    bool promoted = false;
    int rc = memory_db_entity_auto_promote_user_self_by_real_name(g_test_user_id, &promoted);
@@ -1101,15 +1101,15 @@ static void test_auto_promote_user_self_by_real_name_sweep(void) {
 static void test_auto_promote_no_op_when_user_self_exists(void) {
    /* Idempotency: a user_self anchor already exists.  Neither helper
     * should touch is_user_self on any other row. */
-   int64_t already_self = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t already_self = insert_entity_typed(g_test_user_id, "Jon", "person");
    mark_entity_user_self(already_self);
-   set_user_real_name(g_test_user_id, "Kristopher Kersey");
+   set_user_real_name(g_test_user_id, "Jonathan Smith");
 
-   int64_t fresh = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t fresh = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    bool promoted = false;
 
-   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh,
-                                                          "kristopher kersey", &promoted);
+   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh, "jonathan smith",
+                                                          &promoted);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_FALSE(promoted);
    TEST_ASSERT_FALSE(entity_is_user_self(fresh));
@@ -1125,11 +1125,11 @@ static void test_auto_promote_no_op_when_real_name_unset(void) {
    /* Operator never configured real_name — both helpers should silently
     * succeed without promoting anything.  This is the cold-start case
     * (account exists, identity not yet entered). */
-   int64_t fresh = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
+   int64_t fresh = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
 
    bool promoted = true;
-   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh,
-                                                          "kristopher kersey", &promoted);
+   int rc = memory_db_entity_maybe_auto_promote_user_self(g_test_user_id, fresh, "jonathan smith",
+                                                          &promoted);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_FALSE(promoted);
    TEST_ASSERT_FALSE(entity_is_user_self(fresh));
@@ -1144,14 +1144,14 @@ static void test_auto_promote_matches_identity_alias(void) {
    /* Canonical doesn't match real_name directly but DOES match one of
     * the operator's configured identity aliases.  The sweep should still
     * find and promote it.  Models the dev's real config: real_name =
-    * "Kristopher Kersey" with alias "Kris" on a corpus where only "Kris"
+    * "Jonathan Smith" with alias "Jon" on a corpus where only "Jon"
     * was ever extracted as a canonical. */
-   int64_t existing = insert_entity_typed(g_test_user_id, "Kris", "person");
+   int64_t existing = insert_entity_typed(g_test_user_id, "Jon", "person");
 
    auth_user_identity_t id;
    memset(&id, 0, sizeof(id));
-   strncpy(id.real_name, "Kristopher Kersey", AUTH_REAL_NAME_MAX - 1);
-   strncpy(id.identity_aliases, "Kris\nKristopher", AUTH_IDENTITY_ALIASES_MAX - 1);
+   strncpy(id.real_name, "Jonathan Smith", AUTH_REAL_NAME_MAX - 1);
+   strncpy(id.identity_aliases, "Jon\nKristopher", AUTH_IDENTITY_ALIASES_MAX - 1);
    auth_db_set_user_identity(g_test_user_id, &id);
 
    bool promoted = false;
@@ -1797,11 +1797,11 @@ static void test_entity_get_by_name_solo_canonical_no_aliases(void) {
 
 static void test_entity_list_for_admin_aggregates_class_mention_count(void) {
    /* Admin canonical-list should display the SUMMED mention_count.
-    * Reproduces the Step 4 motivator: "Kris Kersey (mention_count=50)"
-    * soft-aliased into "Kristopher Kersey (mention_count=3)" should
+    * Reproduces the Step 4 motivator: "Jon Smith (mention_count=50)"
+    * soft-aliased into "Jonathan Smith (mention_count=3)" should
     * read as 53 in the admin output, not 3. */
-   int64_t canonical = insert_entity_typed(g_test_user_id, "Kristopher Kersey", "person");
-   int64_t alias = insert_entity_typed(g_test_user_id, "Kris Kersey", "person");
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon Smith", "person");
    set_entity_stats(canonical, 3, 1000, 1000);
    set_entity_stats(alias, 50, 500, 2000);
    int64_t link_id = 0;
@@ -2534,7 +2534,7 @@ static void test_resolve_for_self_user_allow_list_bonus_fires_for_realistic_user
  * exercises (2) without the username path firing.
  *
  * Negative sibling — alias "smithfabrications" + unrelated candidate
- * "shelley" (not a substring of any alias) — bonus must NOT fire.
+ * "dawn" (not a substring of any alias) — bonus must NOT fire.
  */
 static void test_user_self_bonus_fires_via_alias_substring(void) {
    /* Set identity_aliases without any token that overlaps the candidate's
@@ -2574,8 +2574,8 @@ static void test_user_self_bonus_no_alias_match_no_bonus(void) {
    strncpy(id.identity_aliases, "smithfabrications\nteam-lead", sizeof(id.identity_aliases) - 1);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_identity(g_test_user_id, &id));
 
-   /* "shelley" — no overlap with any alias or with username "jon". */
-   int64_t shelley_ent = insert_entity_typed(g_test_user_id, "shelley", "person");
+   /* "dawn" — no overlap with any alias or with username "jon". */
+   int64_t shelley_ent = insert_entity_typed(g_test_user_id, "dawn", "person");
    (void)shelley_ent;
 
    const char *synth_canonical = "jonathan smith smithfabrications team-lead";
@@ -2585,7 +2585,7 @@ static void test_user_self_bonus_no_alias_match_no_bonus(void) {
                                                     &res);
    /* Either no resolution (all candidates dropped) or resolution to a
     * different candidate without the bonus.  Pin the negative directly:
-    * if shelley scored, its bonus must not have fired. */
+    * if dawn scored, its bonus must not have fired. */
    if (rc == MEMORY_DB_SUCCESS && res.resolved_id == shelley_ent) {
       TEST_ASSERT_FALSE(res.evidence.user_self_bonus_applied);
    }

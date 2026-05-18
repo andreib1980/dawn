@@ -195,7 +195,7 @@ static int stage2_candidates(int user_id,
       }
       if (overlap < MEMORY_ALIAS_NAME_JACCARD_FLOOR) {
          /* Substring rescue (Phase 2): short ↔ long name variants like
-          * "kris" ⊂ "kristopher kersey" or "shelley" ⊂ "shelley kersey"
+          * "jon" ⊂ "jonathan smith" or "dawn" ⊂ "dawn smith"
           * have Jaccard ≈ 0 (no shared whole-word tokens) and would be
           * dropped here before Stage 4's embedding match can fire.  Admit
           * them as candidates when one canonical is a character-level
@@ -227,12 +227,12 @@ static int stage2_candidates(int user_id,
 
 /* Stage 2b: reverse-substring candidate generator.  Finds entities whose
  * canonical_name is a char-level substring of @p canonical_name (e.g.,
- * existing "kris" entity when inbound is "kristopher kersey").  The forward
+ * existing "jon" entity when inbound is "jonathan smith").  The forward
  * stage2_candidates() pathway tokenises the inbound and runs LIKE '%token%'
  * for each, which only finds entities containing one of the inbound's
  * tokens.  That misses the short-form-already-exists, long-form-arrives-
- * later case entirely — the existing "Kris" row never contains "kristopher"
- * or "kersey".  This helper closes the gap.
+ * later case entirely — the existing "Jon" row never contains "jonathan"
+ * or "smith".  This helper closes the gap.
  *
  * Idempotent against pre-added seen_ids.  Appends to @p out up to @p max.
  * Skips alias rows (canonical_id IS NULL filter) so the resolver stays on
@@ -557,8 +557,8 @@ int memory_alias_internal_cascade(int user_id,
    stage2_candidates(user_id, canonical_name, inbound_id, use_synth_self, cands,
                      MEMORY_ALIAS_STAGE2_MAX_CANDIDATES, &cand_count);
    /* Stage 2b: reverse-substring sweep — finds short-form canonicals
-    * (existing "kris") when the inbound is a long form ("kristopher
-    * kersey") whose tokens don't appear in any shorter canonical's name.
+    * (existing "jon") when the inbound is a long form ("jonathan
+    * smith") whose tokens don't appear in any shorter canonical's name.
     * Skipped in synth_self mode: that path uses directional Jaccard
     * specifically tuned for the verbose synthetic seed and the "user"
     * allow-list already covers the short-form case for user-self. */

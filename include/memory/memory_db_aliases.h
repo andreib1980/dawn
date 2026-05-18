@@ -584,8 +584,8 @@ int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id);
  * Compares canonical forms (memory_make_canonical_name applied to both
  * sides) so casing / whitespace variations don't miss the match.
  *
- * Identity_aliases (newline-separated) are also tried — `Kris` vs
- * `Kristopher Kersey` works if either is the canonical and the other is
+ * Identity_aliases (newline-separated) are also tried — `Jon` vs
+ * `Jonathan Smith` works if either is the canonical and the other is
  * a configured alias.
  *
  * @param user_id          User ID

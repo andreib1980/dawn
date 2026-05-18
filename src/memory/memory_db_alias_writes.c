@@ -382,8 +382,8 @@ int memory_db_entity_consider_auto_merge(int user_id,
 
    /* No auto-merge: propose EVERY candidate above review_threshold, not
     * just the winner.  The previous "best-match-wins" semantics hid
-    * secondary legitimate matches — e.g. "Kristopher Kersey" matches both
-    * "Kris" (same person) AND "Shelley Kersey" (related entity); the
+    * secondary legitimate matches — e.g. "Jonathan Smith" matches both
+    * "Jon" (same person) AND "Dawn Smith" (related entity); the
     * winner-only path picked one and silently discarded the other.  False-
     * positive cost is one click to reject in the Suggested-Merges UI, so
     * we trade precision for recall here.  Stage-1 short-circuit ALREADY
@@ -1064,7 +1064,7 @@ int memory_db_entity_list_for_admin(int user_id,
 
    /* Pass 1 — canonicals (canonical_id IS NULL), equivalence-class
     * mention_count DESC.  Before this aggregation a soft-merged operator
-    * who linked "Kris Kersey (50)" → "Kristopher Kersey (3)" saw the
+    * who linked "Jon Smith (50)" → "Jonathan Smith (3)" saw the
     * canonical display "3 mentions" while the class total was 53; the
     * canonical-only display masked the actual merge state.  Subquery
     * sums mention_count across {self + aliases pointing at self}, and
