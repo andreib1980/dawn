@@ -579,3 +579,75 @@ int memory_db_summary_search_semantic(int user_id,
       *count_out = 0;
    return MEMORY_DB_SUCCESS;
 }
+
+/* Extended variants: same contract as the non-_ex helpers above but with a
+ * caller-supplied (query_emb, query_norm) pair the stub ignores.  Delegating
+ * to the non-_ex stubs keeps mock semantics consistent. */
+int memory_embeddings_hybrid_search_ex(int user_id,
+                                       const char *query,
+                                       const float *query_emb,
+                                       float query_norm,
+                                       const int64_t *keyword_facts,
+                                       const int *keyword_scores,
+                                       int keyword_count,
+                                       int token_count,
+                                       embedding_search_result_t *out_results,
+                                       int max_results) {
+   (void)query_emb;
+   (void)query_norm;
+   return memory_embeddings_hybrid_search(user_id, query, keyword_facts, keyword_scores,
+                                          keyword_count, token_count, out_results, max_results);
+}
+
+int memory_embeddings_rrf_search_ex(int user_id,
+                                    const char *query,
+                                    const float *query_emb,
+                                    float query_norm,
+                                    const int64_t *keyword_facts,
+                                    const int *keyword_scores,
+                                    int keyword_count,
+                                    int token_count,
+                                    embedding_search_result_t *out_results,
+                                    int max_results) {
+   (void)query_emb;
+   (void)query_norm;
+   return memory_embeddings_rrf_search(user_id, query, keyword_facts, keyword_scores, keyword_count,
+                                       token_count, out_results, max_results);
+}
+
+/* Tokenizer stub — split on whitespace, lowercase, drop tokens shorter than
+ * min_len.  No stemming.  Enough for test_memory_fact_search's multi-token
+ * scoring path, where the test expects "alpha bravo charlie" to decompose
+ * into 3 distinct tokens so the dedup-and-score logic can be exercised. */
+int memory_stem_tokenize_padded(const char *keywords,
+                                char tokens[][64],
+                                int max_tokens,
+                                int min_len) {
+   if (!keywords || !tokens || max_tokens <= 0)
+      return 0;
+   int out = 0;
+   const char *p = keywords;
+   while (*p && out < max_tokens) {
+      while (*p == ' ' || *p == '\t' || *p == '\n')
+         p++;
+      if (!*p)
+         break;
+      const char *start = p;
+      while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+         p++;
+      size_t len = (size_t)(p - start);
+      if ((int)len < min_len)
+         continue;
+      if (len > 63)
+         len = 63;
+      for (size_t i = 0; i < len; i++) {
+         char c = start[i];
+         if (c >= 'A' && c <= 'Z')
+            c = (char)(c - 'A' + 'a');
+         tokens[out][i] = c;
+      }
+      tokens[out][len] = '\0';
+      out++;
+   }
+   return out;
+}

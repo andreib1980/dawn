@@ -1029,8 +1029,12 @@ int memory_db_facts_delete_by_patterns(int user_id,
     * the JOIN guard would see deleted-fact stems reattributed (rowids can
     * be reused).  Closing the symptom at write time keeps the invariant
     * local to this writer rather than spread across every reader. */
+   /* fact_stems is NOT a column on memory_facts — it lives only on the FTS5
+    * virtual table memory_facts_fts.  Read fact_text and recompute stems in C
+    * the same way the writers do (memory_db_fact_create line 134, single-row
+    * delete line 764). */
    sql_n = snprintf(sql, sizeof(sql),
-                    "SELECT id, fact_stems FROM memory_facts WHERE user_id = ? AND %s", where_buf);
+                    "SELECT id, fact_text FROM memory_facts WHERE user_id = ? AND %s", where_buf);
    if (sql_n < 0 || sql_n >= (int)sizeof(sql)) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
@@ -1048,8 +1052,10 @@ int memory_db_facts_delete_by_patterns(int user_id,
    sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
    while (sqlite3_step(victim_stmt) == SQLITE_ROW) {
       int64_t fid = sqlite3_column_int64(victim_stmt, 0);
-      const unsigned char *stems = sqlite3_column_text(victim_stmt, 1);
-      (void)fts5_delete_fact_stems_locked(fid, stems ? (const char *)stems : "");
+      const unsigned char *text = sqlite3_column_text(victim_stmt, 1);
+      char stems_buf[MEMORY_FACT_STEMS_MAX];
+      (void)memory_stem_string(text ? (const char *)text : "", stems_buf, sizeof(stems_buf));
+      (void)fts5_delete_fact_stems_locked(fid, stems_buf);
    }
    sqlite3_finalize(victim_stmt);
 

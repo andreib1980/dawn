@@ -78,3 +78,21 @@ int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    sqlite3_finalize(stmt);
    return AUTH_DB_SUCCESS;
 }
+
+/* Summary-search semantic compare; reachable from memory_db_summaries.c via
+ * memory_db_summary_search_semantic.  This test does not exercise that path,
+ * so a no-op returning 0.0f matches the surrounding stubbing style and
+ * causes any accidental summary-search call to produce zero-similarity
+ * results (graceful degradation, not a crash). */
+float memory_embeddings_cosine_with_norms(const float *a,
+                                          const float *b,
+                                          int dims,
+                                          float norm_a,
+                                          float norm_b) {
+   (void)a;
+   (void)b;
+   (void)dims;
+   (void)norm_a;
+   (void)norm_b;
+   return 0.0f;
+}
