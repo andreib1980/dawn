@@ -14,6 +14,27 @@ DAWN runs on platforms from a Jetson Orin to a Raspberry Pi 5 and supports multi
 
 ---
 
+## Part of The OASIS Project
+
+DAWN is one of seven components in **[The OASIS Project](https://github.com/The-OASIS-Project)** — an open-source effort to build a real, working Iron Man suit ecosystem. Each component is its own repo and works independently, but together they form a fully integrated system. DAWN is the brain; the others are the body.
+
+DAWN itself is the closest thing to a real **JARVIS or FRIDAY** that exists today. A natural-voice assistant that listens, reasons across conversations, calls tools, controls the rest of the suit, and remembers you across sessions — your routines, the people you care about, the things you ask for again and again. 20+ built-in tools (calendar, email, smart home, music, search, memory, vision, more). Multi-room satellites put her in every room of the house. Cloud LLM or fully local; you pick.
+
+The sibling components:
+
+| Component | Role | Repo |
+|---|---|---|
+| **MIRAGE** | Heads-up display — dual micro-displays, switchable HUD screens, live video | [mirage](https://github.com/The-OASIS-Project/mirage) |
+| **STAT** | Telemetry daemon — battery, power, system metrics, fault detection | [stat](https://github.com/The-OASIS-Project/stat) |
+| **ECHO** | Cellular daemon — routes phone calls and SMS into DAWN (SIM7600G-H modem) | [echo](https://github.com/The-OASIS-Project/echo) |
+| **AURA** | Helmet sensors — IMU, GPS, air quality, temperature, servo faceplate (ESP32-S3, FreeRTOS) | [aura](https://github.com/The-OASIS-Project/aura) |
+| **SPARK** | Hand firmware — gesture detection, repulsor LED animations, wireless | [spark](https://github.com/The-OASIS-Project/spark) |
+| **BEACON** | 3D-printable parts library — enclosures, mounts, chassis | [beacon](https://github.com/The-OASIS-Project/beacon) |
+
+Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you want it to.
+
+---
+
 ## See DAWN in Action
 
 <!-- TODO: Demo video or animated GIF showing a voice interaction (wake word → question → spoken response) -->
