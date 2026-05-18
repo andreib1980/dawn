@@ -595,10 +595,12 @@ if(ENABLE_WEBUI)
     endif()
 endif()
 
-# Conditionally add session/worker pool (needed for multi-client support)
+# Conditionally add session manager, LLM call orchestration, prompt
+# composition, worker pool, and related multi-client support sources.
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
+        src/core/session_manager_llm.c
         src/core/prompt_compose.c
         src/core/session_dedup.c
         src/core/worker_pool.c
