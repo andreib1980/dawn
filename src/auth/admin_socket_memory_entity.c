@@ -28,6 +28,7 @@
  */
 
 #define _GNU_SOURCE
+#define ADMIN_SOCKET_INTERNAL_ALLOWED
 
 #include <stdint.h>
 #include <stdio.h>

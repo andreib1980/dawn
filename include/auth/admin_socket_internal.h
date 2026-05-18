@@ -25,6 +25,11 @@
 #ifndef DAWN_AUTH_ADMIN_SOCKET_INTERNAL_H
 #define DAWN_AUTH_ADMIN_SOCKET_INTERNAL_H
 
+/* Security guard — only admin_socket modules should include this. */
+#ifndef ADMIN_SOCKET_INTERNAL_ALLOWED
+#error "admin_socket_internal.h is an internal header - include auth/admin_socket.h instead"
+#endif
+
 #include <stdint.h>
 
 #include "auth/admin_socket.h"
@@ -47,6 +52,14 @@ int handle_memory_entity_aliases(int client_fd, const char *payload, uint16_t pa
 int handle_memory_entity_history(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_entity_list(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_entity_link_user_self(int client_fd, const char *payload, uint16_t payload_len);
+
+/* Memory-maintenance handlers (admin_socket_memory.c).  Dispatched from
+ * handle_client() in admin_socket.c against ADMIN_MSG_MEMORY_* opcodes. */
+int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_cleanup_meta_facts(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_summarize_missing(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
 
 #ifdef __cplusplus
 }

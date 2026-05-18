@@ -402,6 +402,12 @@ typedef struct __attribute__((packed)) {
 #define ADMIN_REEXTRACT_BACKUP_PATH_MAX 200
 #define ADMIN_REEXTRACT_USERNAME_MAX 32
 
+/* ADMIN_MSG_MEMORY_CLEANUP_META_FACTS flags (byte 0 of payload). */
+#define ADMIN_MEM_CLEANUP_FLAG_DRY_RUN 0x01
+
+/* ADMIN_MSG_MEMORY_SUMMARIZE_MISSING flags (byte 0 of payload). */
+#define ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN 0x01
+
 /*
  * =============================================================================
  * MEMORY_ENTITY_* payload (v43; shared by all six entity subcommands)

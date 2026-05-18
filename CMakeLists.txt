@@ -693,6 +693,7 @@ list(APPEND DAWN_SOURCES
 if(ENABLE_AUTH)
     list(APPEND DAWN_SOURCES
         src/auth/admin_socket.c
+        src/auth/admin_socket_memory.c
         src/auth/admin_socket_memory_entity.c
         src/auth/auth_db_user.c
         src/auth/auth_db_settings.c
