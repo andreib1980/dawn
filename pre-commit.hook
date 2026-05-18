@@ -7,6 +7,9 @@
 #  2. Build + test (conditional on staged source/build files)
 #     - Skipped on docs-only / config-only / web-only commits
 #     - Mirrors what the CI runs locally so a green commit ≈ green CI
+#  3. Optional local extension: if ./pre-commit.local.hook exists and is
+#     executable, it runs after phases 1+2 succeed.  Use for per-developer
+#     checks that shouldn't live in the public repo.  Gitignored.
 #
 # Install: ./install-git-hooks.sh
 # Bypass:  git commit --no-verify
@@ -21,6 +24,23 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Optional local-only pre-commit extension.  If ./pre-commit.local.hook
+# exists and is executable, it runs after the tracked phases succeed.
+# The local hook is gitignored (*.local.hook).  Failure (non-zero exit)
+# blocks the commit just like any other phase.
+run_local_extension() {
+   if [ -x "./pre-commit.local.hook" ]; then
+      ./pre-commit.local.hook
+      local rc=$?
+      if [ "$rc" -ne 0 ]; then
+         echo ""
+         echo -e "${RED}Local pre-commit extension failed (exit $rc).${NC}"
+         echo -e "${YELLOW}Bypass: git commit --no-verify${NC}"
+         exit "$rc"
+      fi
+   fi
+}
 
 # -----------------------------------------------------------------------------
 # Phase 1 — formatting
@@ -63,6 +83,7 @@ fi
 
 if [ "$SHOULD_TEST" -eq 0 ]; then
    echo -e "${GREEN}Pre-commit: format OK; no source/build files staged, skipping test suite.${NC}"
+   run_local_extension
    exit 0
 fi
 
@@ -79,6 +100,7 @@ done
 if [ -z "$BUILD_DIR" ]; then
    echo -e "${YELLOW}Pre-commit: format OK; no build directory found, skipping test suite.${NC}"
    echo -e "${YELLOW}  Bootstrap with: cmake --preset debug${NC}"
+   run_local_extension
    exit 0
 fi
 
@@ -120,4 +142,5 @@ else
    echo -e "${GREEN}Pre-commit: test suite passed.${NC}"
 fi
 
+run_local_extension
 exit 0

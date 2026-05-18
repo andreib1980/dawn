@@ -57,3 +57,8 @@ llm_testing/scripts/archive/
 # Local planning/tracking docs (not for git)
 docs/TODO.md
 .cleanup-state.md
+
+# Local-only git hook extensions.  Chained from pre-commit.hook /
+# pre-push.hook if present and executable.  For per-developer policies that
+# shouldn't live in the public repo.
+*.local.hook
