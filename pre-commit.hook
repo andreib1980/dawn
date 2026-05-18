@@ -1,10 +1,15 @@
 #!/bin/bash
 #
-# Pre-commit hook to ensure code is formatted
-# - C/C++ files: checked with clang-format (required)
-# - JS/CSS/HTML files: checked with prettier (optional)
+# Pre-commit hook
+#  1. Formatting check (always; fast)
+#     - C/C++ files: clang-format
+#     - JS/CSS/HTML files: prettier (if available)
+#  2. Build + test (conditional on staged source/build files)
+#     - Skipped on docs-only / config-only / web-only commits
+#     - Mirrors what the CI runs locally so a green commit ≈ green CI
 #
-# Install: cp pre-commit.hook .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Install: ./install-git-hooks.sh
+# Bypass:  git commit --no-verify
 #
 
 # Change to repository root
@@ -14,31 +19,105 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Check if format_code.sh exists
+# -----------------------------------------------------------------------------
+# Phase 1 — formatting
+# -----------------------------------------------------------------------------
+
 if [ ! -f "./format_code.sh" ]; then
    echo -e "${RED}ERROR: format_code.sh not found!${NC}"
    exit 1
 fi
 
-echo -e "${YELLOW}Checking formatting of changed files...${NC}"
-
-# Delegate entirely to format_code.sh --changed --check
-# This checks both C/C++ (clang-format) and JS/CSS/HTML (prettier, if available)
+echo -e "${BLUE}Pre-commit: checking formatting of staged files…${NC}"
 ./format_code.sh --changed --check
 FORMAT_RESULT=$?
 
-echo ""
 if [ $FORMAT_RESULT -ne 0 ]; then
-   echo -e "${RED}Formatting check failed!${NC}"
-   echo -e "${YELLOW}Run './format_code.sh --changed' to format changed files.${NC}"
-   echo -e "${YELLOW}Then stage the changes and commit again.${NC}"
    echo ""
-   echo -e "${YELLOW}Or to bypass this check (not recommended):${NC}"
-   echo -e "  git commit --no-verify"
+   echo -e "${RED}Formatting check failed.${NC}"
+   echo -e "${YELLOW}Fix with: ./format_code.sh --changed${NC}"
+   echo -e "${YELLOW}Then re-stage and commit again.${NC}"
+   echo -e "${YELLOW}Bypass:   git commit --no-verify${NC}"
    exit 1
 fi
 
-echo -e "${GREEN}All formatting checks passed!${NC}"
+# -----------------------------------------------------------------------------
+# Phase 2 — build + test (conditional)
+# -----------------------------------------------------------------------------
+# Only run the CI test suite when the staged changes can actually affect it.
+# Source code, headers, the test suite itself, and the build configuration
+# trigger it.  Pure docs / config / web-only commits skip the test phase so
+# fast-iteration cycles stay fast.
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+SHOULD_TEST=0
+if [ -n "$STAGED" ]; then
+   if echo "$STAGED" | grep -qE '^(src|include|common|tests|benchmarks|cmake)/|(^|/)CMakeLists\.txt$|\.cmake$'; then
+      SHOULD_TEST=1
+   fi
+fi
+
+if [ "$SHOULD_TEST" -eq 0 ]; then
+   echo -e "${GREEN}Pre-commit: format OK; no source/build files staged, skipping test suite.${NC}"
+   exit 0
+fi
+
+# Locate an existing build directory.  Prefer build-debug (the developer's
+# daily driver per CLAUDE.md); fall back to build-ci or other variants.
+BUILD_DIR=""
+for d in build-debug build-ci build-full build; do
+   if [ -f "$d/CMakeCache.txt" ]; then
+      BUILD_DIR="$d"
+      break
+   fi
+done
+
+if [ -z "$BUILD_DIR" ]; then
+   echo -e "${YELLOW}Pre-commit: format OK; no build directory found, skipping test suite.${NC}"
+   echo -e "${YELLOW}  Bootstrap with: cmake --preset debug${NC}"
+   exit 0
+fi
+
+BUILD_LOG=$(mktemp -t dawn-precommit-build.XXXXXX.log)
+TEST_LOG=$(mktemp -t dawn-precommit-test.XXXXXX.log)
+trap 'rm -f "$BUILD_LOG" "$TEST_LOG"' EXIT
+
+echo -e "${BLUE}Pre-commit: building tests-ci in $BUILD_DIR…${NC}"
+if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
+   echo ""
+   echo -e "${RED}Test build FAILED.  Last 30 lines:${NC}"
+   tail -30 "$BUILD_LOG"
+   PRESERVED=$(mktemp -t dawn-precommit-build-failed.XXXXXX.log)
+   cp "$BUILD_LOG" "$PRESERVED"
+   echo ""
+   echo -e "${YELLOW}Full log preserved at: $PRESERVED${NC}"
+   echo -e "${YELLOW}Bypass:                git commit --no-verify${NC}"
+   exit 1
+fi
+
+echo -e "${BLUE}Pre-commit: running CI test suite…${NC}"
+if ! ctest --test-dir "$BUILD_DIR" --output-on-failure --no-tests=error -L ci > "$TEST_LOG" 2>&1; then
+   echo ""
+   echo -e "${RED}Test suite FAILED.  Failing cases:${NC}"
+   grep -E "FAIL:|\*\*\*Failed|tests failed" "$TEST_LOG" | head -20
+   PRESERVED=$(mktemp -t dawn-precommit-test-failed.XXXXXX.log)
+   cp "$TEST_LOG" "$PRESERVED"
+   echo ""
+   echo -e "${YELLOW}Reproduce: ctest --test-dir $BUILD_DIR --output-on-failure -L ci${NC}"
+   echo -e "${YELLOW}Full log:  $PRESERVED${NC}"
+   echo -e "${YELLOW}Bypass:    git commit --no-verify${NC}"
+   exit 1
+fi
+
+PASS_LINE=$(grep -E "tests passed" "$TEST_LOG" | tail -1)
+if [ -n "$PASS_LINE" ]; then
+   echo -e "${GREEN}Pre-commit: $PASS_LINE${NC}"
+else
+   echo -e "${GREEN}Pre-commit: test suite passed.${NC}"
+fi
+
 exit 0

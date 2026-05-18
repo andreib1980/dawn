@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Script to install git pre-commit hooks for code formatting
+# Script to install git hooks (pre-commit + pre-push).
 #
 
 # Color output
@@ -17,46 +17,88 @@ if [ ! -d ".git" ]; then
    exit 1
 fi
 
-# Check if format_code.sh exists
+# Check if format_code.sh exists (required by the pre-commit hook)
 if [ ! -f "./format_code.sh" ]; then
    echo -e "${RED}ERROR: format_code.sh not found!${NC}"
    exit 1
 fi
 
-echo -e "${BLUE}Git Pre-commit Hook Installer${NC}"
-echo -e "${BLUE}=============================${NC}"
+# Check hook source files
+if [ ! -f "./pre-commit.hook" ]; then
+   echo -e "${RED}ERROR: pre-commit.hook not found!${NC}"
+   exit 1
+fi
+if [ ! -f "./pre-push.hook" ]; then
+   echo -e "${RED}ERROR: pre-push.hook not found!${NC}"
+   exit 1
+fi
+
+echo -e "${BLUE}Git Hooks Installer${NC}"
+echo -e "${BLUE}===================${NC}"
 echo ""
-echo "This will install a pre-commit hook that:"
-echo "  - Checks if changed/staged C/C++ code is properly formatted"
-echo "  - Rejects commits if code needs formatting"
-echo "  - Requires you to run ./format_code.sh before committing"
+echo "Available hooks:"
+echo ""
+echo -e "  ${BLUE}pre-commit${NC} — checks formatting of changed C/C++/JS/CSS/HTML files;"
+echo -e "              rejects commits if code needs formatting."
+echo ""
+echo -e "  ${BLUE}pre-push${NC}   — builds tests-ci and runs the CI test suite;"
+echo -e "              rejects pushes if any test fails."
 echo ""
 echo "Choose an option:"
 echo ""
-echo -e "  ${GREEN}1)${NC} Install pre-commit hook"
-echo -e "  ${RED}2)${NC} Remove existing hook"
-echo -e "  ${RED}3)${NC} Cancel"
+echo -e "  ${GREEN}1)${NC} Install both hooks (recommended)"
+echo -e "  ${GREEN}2)${NC} Install pre-commit only"
+echo -e "  ${GREEN}3)${NC} Install pre-push only"
+echo -e "  ${RED}4)${NC} Remove all hooks"
+echo -e "  ${YELLOW}5)${NC} Cancel"
 echo ""
-read -p "Enter choice [1-3]: " choice
+read -p "Enter choice [1-5]: " choice
+
+install_pre_commit() {
+   cp pre-commit.hook .git/hooks/pre-commit
+   chmod +x .git/hooks/pre-commit
+   echo -e "${GREEN}✓ pre-commit installed${NC}"
+}
+
+install_pre_push() {
+   cp pre-push.hook .git/hooks/pre-push
+   chmod +x .git/hooks/pre-push
+   echo -e "${GREEN}✓ pre-push installed${NC}"
+}
+
+remove_hook() {
+   local name="$1"
+   if [ -f ".git/hooks/$name" ]; then
+      rm ".git/hooks/$name"
+      echo -e "${GREEN}✓ $name removed${NC}"
+   else
+      echo -e "${YELLOW}no $name hook found${NC}"
+   fi
+}
 
 case $choice in
    1)
-      cp pre-commit.hook .git/hooks/pre-commit
-      chmod +x .git/hooks/pre-commit
-      echo -e "${GREEN}✓ Pre-commit hook installed!${NC}"
+      install_pre_commit
+      install_pre_push
       echo ""
-      echo -e "${YELLOW}To commit, your code must be formatted first.${NC}"
-      echo -e "Run: ${BLUE}./format_code.sh${NC}"
+      echo -e "${YELLOW}Reminders:${NC}"
+      echo -e "  - Run ${BLUE}./format_code.sh --changed${NC} before committing if formatting fails."
+      echo -e "  - The pre-push hook needs a working build directory (build-debug/ or build-ci/)."
       ;;
    2)
-      if [ -f ".git/hooks/pre-commit" ]; then
-         rm .git/hooks/pre-commit
-         echo -e "${GREEN}✓ Pre-commit hook removed.${NC}"
-      else
-         echo -e "${YELLOW}No pre-commit hook found.${NC}"
-      fi
+      install_pre_commit
       ;;
    3)
+      install_pre_push
+      echo ""
+      echo -e "${YELLOW}Note:${NC} the pre-push hook requires a working build directory."
+      echo -e "      Bootstrap with: ${BLUE}cmake --preset debug${NC}"
+      ;;
+   4)
+      remove_hook pre-commit
+      remove_hook pre-push
+      ;;
+   5)
       echo "Cancelled."
       exit 0
       ;;
@@ -67,5 +109,5 @@ case $choice in
 esac
 
 echo ""
-echo -e "${BLUE}Note:${NC} You can bypass the hook with: ${YELLOW}git commit --no-verify${NC}"
+echo -e "${BLUE}Bypass:${NC} ${YELLOW}git commit --no-verify${NC} / ${YELLOW}git push --no-verify${NC}"
 echo ""
