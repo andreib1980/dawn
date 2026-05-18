@@ -645,6 +645,8 @@ list(APPEND DAWN_SOURCES
 # Database core + memory subsystem (always compiled — memory works in all modes)
 list(APPEND DAWN_SOURCES
     src/auth/auth_db_core.c
+    src/auth/auth_db_schema.c
+    src/auth/auth_db_statements.c
     src/memory/memory_db.c
     src/memory/memory_db_facts.c
     src/memory/memory_db_summaries.c

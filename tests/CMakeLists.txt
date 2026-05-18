@@ -91,6 +91,8 @@ endfunction()
 # prepared-statement layer rather than stubbing it.
 set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
+    ${SRC_ROOT}/src/auth/auth_db_schema.c
+    ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
     ${SRC_ROOT}/src/auth/auth_db_conv.c

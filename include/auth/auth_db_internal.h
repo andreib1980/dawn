@@ -39,6 +39,7 @@
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <time.h>
 
 #include "auth/auth_db.h"
@@ -320,10 +321,24 @@ typedef struct {
    sqlite3_stmt *stmt_oauth_list_accounts;
 } auth_db_state_t;
 
-/* Ensure last_stmt_end covers all statement fields (catches reorder bugs) */
-_Static_assert(offsetof(auth_db_state_t, stmt_conv_set_title_locked) >
+/* Ensure last_stmt_end covers all statement fields (catches reorder bugs).
+ * Both invariants protect the memset region in auth_db_finalize_statements():
+ *   1. stmt_oauth_list_accounts (the named upper bound) must come after
+ *      stmt_create_user (the named lower bound) — else last - first
+ *      underflows size_t and memset clears far too much.
+ *   2. stmt_oauth_list_accounts must be the actual last field in
+ *      auth_db_state_t — else a struct append silently leaks the new
+ *      statement pointer (memset skips it, and the finalize chain
+ *      forgets to call sqlite3_finalize on it).
+ * If you append a new sqlite3_stmt* field, also update both the named
+ * upper bound here AND the matching last_stmt_end in
+ * auth_db_finalize_statements(). */
+_Static_assert(offsetof(auth_db_state_t, stmt_oauth_list_accounts) >
                    offsetof(auth_db_state_t, stmt_create_user),
-               "last_stmt_end must be after first_stmt_offset");
+               "stmt_oauth_list_accounts must be after stmt_create_user");
+_Static_assert(sizeof(auth_db_state_t) ==
+                   offsetof(auth_db_state_t, stmt_oauth_list_accounts) + sizeof(sqlite3_stmt *),
+               "stmt_oauth_list_accounts must be the last field — update memset bounds");
 
 /* =============================================================================
  * Shared State (defined in auth_db_core.c)
@@ -417,5 +432,46 @@ int auth_db_internal_verify_permissions(const char *path);
  * @return AUTH_DB_SUCCESS if OK, AUTH_DB_FAILURE on error
  */
 int auth_db_internal_create_parent_dir(const char *path);
+
+/* =============================================================================
+ * Schema + Statement Lifecycle (defined in sibling modules)
+ *
+ * These are called only from auth_db_init() / auth_db_shutdown() in
+ * auth_db_core.c.  They live in their own .c files purely to keep
+ * individual files under the size limits in CLAUDE.md.
+ * ============================================================================= */
+
+/**
+ * @brief Create or migrate the schema to AUTH_DB_SCHEMA_VERSION.
+ *
+ * Runs SCHEMA_SQL for fresh installs and walks the per-version migration
+ * ladder for existing databases.  Defined in auth_db_schema.c.
+ *
+ * @param db_path Database file path (used for diagnostic logging only).
+ * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on any error.
+ */
+int auth_db_create_schema(const char *db_path);
+
+/**
+ * @brief Prepare every cached sqlite3_stmt* in s_db.
+ *
+ * Defined in auth_db_statements.c.  Called after auth_db_create_schema().
+ * On any prepare failure returns AUTH_DB_FAILURE without rolling back
+ * partial preparations — auth_db_shutdown() cleans up via
+ * auth_db_finalize_statements().
+ *
+ * @return AUTH_DB_SUCCESS on success, AUTH_DB_FAILURE on first prepare error.
+ */
+int auth_db_prepare_statements(void);
+
+/**
+ * @brief Finalize every cached sqlite3_stmt* in s_db.
+ *
+ * Defined in auth_db_statements.c.  Tolerates partially-prepared state so
+ * it is safe to call from auth_db_shutdown() after a
+ * auth_db_prepare_statements() failure.  Zeros the statement pointers via
+ * memset on the contiguous statement region of s_db.
+ */
+void auth_db_finalize_statements(void);
 
 #endif /* AUTH_DB_INTERNAL_H */

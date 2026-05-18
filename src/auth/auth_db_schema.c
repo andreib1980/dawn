@@ -1,0 +1,2515 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s). Contributions include any modifications,
+ * enhancements, or additions to the project. These contributions become
+ * part of the project and are adopted by the project author(s).
+ *
+ * Authentication Database Schema and Migration Module
+ *
+ * Owns the SCHEMA_SQL constant (the base schema for fresh installs) and
+ * the per-version migration ladder (create_schema + helpers).  Split out
+ * from auth_db_core.c to keep individual files under the size limits in
+ * CLAUDE.md.  Cross-module entry points are declared in auth_db_internal.h.
+ *
+ * SECURITY: All database operations use prepared statements.
+ * NEVER use sqlite3_exec() or sqlite3_mprintf() with user input.
+ * See: CWE-89, OWASP SQL Injection Prevention Cheat Sheet
+ */
+
+#define AUTH_DB_INTERNAL_ALLOWED
+#include <errno.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "auth/auth_db_internal.h"
+#include "logging.h"
+#include "memory/memory_stem.h"
+
+/* =============================================================================
+ * Schema SQL
+ * ============================================================================= */
+
+/* Base schema for fresh installs.  Must match AUTH_DB_SCHEMA_VERSION.
+ *
+ * IMPORTANT: When adding a new column or table via migration, also add it here
+ * so that fresh installs get the complete schema.  All statements use
+ * IF NOT EXISTS / ADD COLUMN guards for idempotency with the migration path. */
+static const char *SCHEMA_SQL =
+    /* Schema version tracking */
+    "CREATE TABLE IF NOT EXISTS schema_version ("
+    "   version INTEGER PRIMARY KEY"
+    ");"
+
+    /* System-wide key/value metadata (v41).  Used to track daemon-level state
+     * that spans all users — e.g., embedding_model_id for recompute detection. */
+    "CREATE TABLE IF NOT EXISTS system_metadata ("
+    "   key   TEXT PRIMARY KEY,"
+    "   value TEXT NOT NULL"
+    ");"
+
+    /* Users table (categories_backfilled_at added in v34 — gates lazy fact-category backfill;
+     * embeddings_model_id added in v41 — per-user gate for embedding recomputation;
+     * v44: real_name / preferred_address / identity_aliases — user-identity fields
+     * surfaced in WebUI Settings, injected into the LLM system prompt, and used
+     * by the entity-merge link-user-self synthetic-seed scoring path).  All
+     * three v44 columns are nullable TEXT — existing rows migrate to NULL. */
+    "CREATE TABLE IF NOT EXISTS users ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   username TEXT UNIQUE NOT NULL,"
+    "   password_hash TEXT NOT NULL,"
+    "   is_admin INTEGER DEFAULT 0,"
+    "   created_at INTEGER NOT NULL,"
+    "   last_login INTEGER,"
+    "   failed_attempts INTEGER DEFAULT 0,"
+    "   lockout_until INTEGER DEFAULT 0,"
+    "   categories_backfilled_at INTEGER DEFAULT 0,"
+    "   embeddings_model_id TEXT DEFAULT NULL,"
+    "   real_name TEXT DEFAULT NULL,"
+    "   preferred_address TEXT DEFAULT NULL,"
+    "   identity_aliases TEXT DEFAULT NULL"
+    ");"
+
+    /* Sessions table */
+    "CREATE TABLE IF NOT EXISTS sessions ("
+    "   token TEXT PRIMARY KEY,"
+    "   user_id INTEGER NOT NULL,"
+    "   created_at INTEGER NOT NULL,"
+    "   last_activity INTEGER NOT NULL,"
+    "   expires_at INTEGER,"
+    "   ip_address TEXT,"
+    "   user_agent TEXT,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_activity);"
+    /* idx_sessions_expires created by v10 migration after expires_at column is added */
+
+    /* Login attempts for rate limiting */
+    "CREATE TABLE IF NOT EXISTS login_attempts ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   ip_address TEXT NOT NULL,"
+    "   username TEXT,"
+    "   timestamp INTEGER NOT NULL,"
+    "   success INTEGER DEFAULT 0"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_attempts_ip ON login_attempts(ip_address, timestamp);"
+
+    /* Audit log */
+    "CREATE TABLE IF NOT EXISTS auth_log ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   timestamp INTEGER NOT NULL,"
+    "   event TEXT NOT NULL,"
+    "   username TEXT,"
+    "   ip_address TEXT,"
+    "   details TEXT"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_log_timestamp ON auth_log(timestamp);"
+
+    /* Per-user settings (added in schema v2, persona_mode added in v3) */
+    "CREATE TABLE IF NOT EXISTS user_settings ("
+    "   user_id INTEGER PRIMARY KEY,"
+    "   persona_description TEXT,"
+    "   persona_mode TEXT DEFAULT 'append',"
+    "   location TEXT,"
+    "   timezone TEXT DEFAULT 'UTC',"
+    "   units TEXT DEFAULT 'metric',"
+    "   tts_voice_model TEXT,"
+    "   tts_length_scale REAL DEFAULT 1.0,"
+    "   theme TEXT DEFAULT 'cyan',"
+    "   updated_at INTEGER NOT NULL,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+
+    /* Conversations table (added in schema v4, context columns in v5, continuation in v7,
+     * LLM settings in v11, extraction tracking in v15, privacy in v16, origin in v17) */
+    "CREATE TABLE IF NOT EXISTS conversations ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   user_id INTEGER NOT NULL,"
+    "   title TEXT NOT NULL DEFAULT 'New Conversation',"
+    "   created_at INTEGER NOT NULL,"
+    "   updated_at INTEGER NOT NULL,"
+    "   message_count INTEGER DEFAULT 0,"
+    "   is_archived INTEGER DEFAULT 0,"
+    "   context_tokens INTEGER DEFAULT 0,"
+    "   context_max INTEGER DEFAULT 0,"
+    "   continued_from INTEGER DEFAULT NULL,"
+    "   compaction_summary TEXT DEFAULT NULL,"
+    "   llm_type TEXT DEFAULT NULL,"
+    "   cloud_provider TEXT DEFAULT NULL,"
+    "   model TEXT DEFAULT NULL,"
+    "   tools_mode TEXT DEFAULT NULL,"
+    "   thinking_mode TEXT DEFAULT NULL,"
+    "   reasoning_effort TEXT DEFAULT NULL,"
+    "   last_extracted_msg_count INTEGER DEFAULT 0,"
+    "   last_extracted_msg_id    INTEGER NOT NULL DEFAULT 0,"
+    "   extraction_attempts INTEGER DEFAULT 0,"
+    "   extraction_last_attempt_at INTEGER DEFAULT 0,"
+    "   is_private INTEGER DEFAULT 0,"
+    "   title_locked INTEGER DEFAULT 0,"
+    "   origin TEXT DEFAULT 'webui',"
+    /* anchor_date (v42): logical "now" timestamp in epoch seconds.  Production
+     * writes time(NULL) at insert; bench overrides per-session.  The 0 default
+     * is the ANCHOR_DATE_NONE sentinel — extraction omits the prompt anchor
+     * line when this is 0.  KEEP DEFAULT AS A LITERAL CONSTANT (not strftime
+     * or CURRENT_TIMESTAMP): SQLite's fast ALTER TABLE ADD COLUMN path requires
+     * a literal default, otherwise migration becomes a full table rewrite. */
+    "   anchor_date INTEGER NOT NULL DEFAULT 0,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);"
+    "CREATE INDEX IF NOT EXISTS idx_conversations_search ON conversations(user_id, title);"
+    /* Note: idx_conversations_continued is created during migration or post-init
+     * to handle both new databases and upgrades from v6 */
+
+    /* Messages table (added in schema v4) */
+    "CREATE TABLE IF NOT EXISTS messages ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   conversation_id INTEGER NOT NULL,"
+    "   role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),"
+    "   content TEXT NOT NULL,"
+    "   created_at INTEGER NOT NULL,"
+    "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id ASC);"
+
+    /* Session metrics table (added in schema v8) */
+    "CREATE TABLE IF NOT EXISTS session_metrics ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   session_id INTEGER NOT NULL,"
+    "   user_id INTEGER,"
+    "   session_type TEXT NOT NULL,"
+    "   started_at INTEGER NOT NULL,"
+    "   ended_at INTEGER,"
+    "   queries_total INTEGER DEFAULT 0,"
+    "   queries_cloud INTEGER DEFAULT 0,"
+    "   queries_local INTEGER DEFAULT 0,"
+    "   errors_count INTEGER DEFAULT 0,"
+    "   fallbacks_count INTEGER DEFAULT 0,"
+    "   avg_asr_ms REAL,"
+    "   avg_llm_ttft_ms REAL,"
+    "   avg_llm_total_ms REAL,"
+    "   avg_tts_ms REAL,"
+    "   avg_pipeline_ms REAL,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_session_metrics_user ON session_metrics(user_id, started_at "
+    "DESC);"
+    "CREATE INDEX IF NOT EXISTS idx_session_metrics_time ON session_metrics(started_at DESC);"
+
+    /* Per-provider token usage breakdown (added in schema v8) */
+    "CREATE TABLE IF NOT EXISTS session_metrics_providers ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   session_metrics_id INTEGER NOT NULL,"
+    "   provider TEXT NOT NULL,"
+    "   tokens_input INTEGER DEFAULT 0,"
+    "   tokens_output INTEGER DEFAULT 0,"
+    "   tokens_cached INTEGER DEFAULT 0,"
+    "   queries INTEGER DEFAULT 0,"
+    "   FOREIGN KEY (session_metrics_id) REFERENCES session_metrics(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_metrics_providers_session ON "
+    "session_metrics_providers(session_metrics_id);"
+
+    /* Images table — filesystem-backed metadata (v30, migrated from BLOB in v12-v29) */
+    "CREATE TABLE IF NOT EXISTS images ("
+    "   id TEXT PRIMARY KEY,"
+    "   user_id INTEGER NOT NULL,"
+    "   source INTEGER NOT NULL DEFAULT 0,"
+    "   retention_policy INTEGER NOT NULL DEFAULT 0,"
+    "   mime_type TEXT NOT NULL,"
+    "   size INTEGER NOT NULL,"
+    "   filename TEXT NOT NULL,"
+    "   created_at INTEGER NOT NULL,"
+    "   last_accessed INTEGER,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
+
+    /* Satellite mappings table (added in schema v20) */
+    "CREATE TABLE IF NOT EXISTS satellite_mappings ("
+    "   uuid TEXT PRIMARY KEY,"
+    "   name TEXT NOT NULL DEFAULT '',"
+    "   location TEXT NOT NULL DEFAULT '',"
+    "   ha_area TEXT DEFAULT '',"
+    "   user_id INTEGER DEFAULT NULL,"
+    "   tier INTEGER DEFAULT 1,"
+    "   last_seen INTEGER DEFAULT 0,"
+    "   created_at INTEGER NOT NULL,"
+    "   enabled INTEGER DEFAULT 1,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_satellite_user ON satellite_mappings(user_id);"
+
+    /* Memory system tables (v14, columns extended in v15/v19) */
+    "CREATE TABLE IF NOT EXISTS memory_facts ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   user_id INTEGER NOT NULL,"
+    "   fact_text TEXT NOT NULL,"
+    "   confidence REAL DEFAULT 1.0,"
+    "   source TEXT DEFAULT 'inferred',"
+    "   category TEXT NOT NULL DEFAULT 'general',"
+    "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "   last_accessed INTEGER,"
+    "   access_count INTEGER DEFAULT 0,"
+    "   superseded_by INTEGER,"
+    "   normalized_hash INTEGER DEFAULT 0,"
+    "   embedding BLOB DEFAULT NULL,"
+    "   embedding_norm REAL DEFAULT NULL,"
+    "   source_conversation_id INTEGER DEFAULT NULL,"
+    "   source_msg_id_start    INTEGER DEFAULT NULL,"
+    "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    /* v47: subject_entity_id — hard FK from fact to its subject entity.
+     * NULLABLE during the migration window (existing rows backfill from
+     * linked relations; re-extraction under the new prompt populates the
+     * rest).  Tightens to NOT NULL in a follow-up migration once backfill
+     * completes.  See PHASE_0_EXTRACTION_PROMPT_DRAFT.md. */
+    "   subject_entity_id      INTEGER DEFAULT NULL,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
+    "   FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_memory_facts_user ON memory_facts(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_facts_confidence ON "
+    "memory_facts(user_id, confidence DESC);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(user_id, normalized_hash);"
+    /* idx_memory_facts_subject: created by the v47 post-migration index block
+     * on existing DBs (column doesn't exist until ALTER TABLE runs). */
+    /* idx_memory_facts_user_category is created by the v34 migration block (runs
+     * after ALTER TABLE adds the column).  Keeping it here would fail on an
+     * existing pre-v34 DB because CREATE TABLE IF NOT EXISTS is a no-op for
+     * the already-existing table, so the column isn't added until migrations run. */
+
+    /* v48: FTS5 BM25 keyword index.  Contentless — application is responsible
+     * for keeping rowid in sync with memory_facts.id and writing
+     * pre-stemmed text into fact_stems.  See memory_db.c::fts5_insert_fact_stems_locked /
+     * fts5_delete_fact_stems_locked and the v48 migration block for the
+     * backfill path.  Tokenizer: unicode61 with diacritic folding so
+     * "café" matches "cafe".
+     *
+     * NOTE: this is a SINGLE global FTS5 index across all users.  The
+     * BM25 search statement joins to memory_facts and filters by
+     * user_id, so users only see their own rows — but bm25() computes
+     * its IDF over the GLOBAL token frequency.  At DAWN's threat-model
+     * scale (small trusted user set on a Jetson) the residual side-
+     * channel is negligible; if user counts grow significantly, consider
+     * per-user FTS5 tables to isolate IDF.  See docs/MEM0_ARCHITECTURAL_PARITY.md. */
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5("
+    "   fact_stems,"
+    "   tokenize='unicode61 remove_diacritics 2',"
+    "   content=''"
+    ");"
+
+    "CREATE TABLE IF NOT EXISTS memory_preferences ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   user_id INTEGER NOT NULL,"
+    "   category TEXT NOT NULL,"
+    "   value TEXT NOT NULL,"
+    "   confidence REAL DEFAULT 0.5,"
+    "   source TEXT DEFAULT 'inferred',"
+    "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "   reinforcement_count INTEGER DEFAULT 1,"
+    "   source_conversation_id INTEGER DEFAULT NULL,"
+    "   source_msg_id_start    INTEGER DEFAULT NULL,"
+    "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
+    "   UNIQUE(user_id, category)"
+    ");"
+
+    "CREATE TABLE IF NOT EXISTS memory_summaries ("
+    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "   user_id INTEGER NOT NULL,"
+    "   session_id TEXT NOT NULL,"
+    "   summary TEXT NOT NULL,"
+    "   topics TEXT,"
+    "   sentiment TEXT,"
+    "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "   message_count INTEGER,"
+    "   duration_seconds INTEGER,"
+    "   consolidated INTEGER DEFAULT 0,"
+    "   source_conversation_id INTEGER DEFAULT NULL,"
+    "   source_msg_id_start    INTEGER DEFAULT NULL,"
+    "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    /* embedding (v45): packed float32 vector for semantic summary search.
+     * NULL until embed-at-create fires (or recompute worker backfills on
+     * model swap).  The summary adapter (memory_focus_adapters.c) hybrids
+     * keyword + cosine when this is populated; NULL rows fall back to
+     * keyword-only matching. */
+    "   embedding BLOB DEFAULT NULL,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_memory_summaries_user ON "
+    "memory_summaries(user_id, created_at DESC);"
+
+    /* Entity/relation tables (v19).  canonical_id + is_user_self added in v43
+     * for the entity-merge / user-identity-dedup workstream:
+     *   canonical_id  — NULL = self is canonical; non-NULL = soft alias of that
+     *                   row's id.  Read paths use COALESCE(canonical_id, id) +
+     *                   the partial index idx_memory_entities_canonical to
+     *                   enumerate aliases without a JOIN per row.
+     *   is_user_self  — exactly one row per user_id may have this = 1 (the
+     *                   seeded user-identity entity).  Enforced by the partial
+     *                   UNIQUE index idx_memory_entities_user_self below.
+     * Both DEFAULT clauses are literal constants so SQLite takes the O(1)
+     * metadata-only ALTER path on existing DBs. */
+    "CREATE TABLE IF NOT EXISTS memory_entities ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  name TEXT NOT NULL,"
+    "  entity_type TEXT NOT NULL,"
+    "  canonical_name TEXT NOT NULL,"
+    "  embedding BLOB DEFAULT NULL,"
+    "  embedding_norm REAL DEFAULT NULL,"
+    "  photo_id TEXT DEFAULT NULL,"
+    "  first_seen INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "  last_seen INTEGER,"
+    "  mention_count INTEGER DEFAULT 1,"
+    "  canonical_id INTEGER DEFAULT NULL REFERENCES memory_entities(id) ON DELETE SET NULL,"
+    "  is_user_self INTEGER NOT NULL DEFAULT 0,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "  UNIQUE(user_id, canonical_name)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_memory_entities_user ON memory_entities(user_id);"
+    /* idx_memory_entities_canonical (partial, canonical_id IS NOT NULL) and
+     * idx_memory_entities_user_self (partial UNIQUE, is_user_self = 1) are
+     * created by the v43 post-migration index block — same reason as the v33
+     * pattern: on an existing pre-v43 DB the columns don't exist until the
+     * ALTER fires, so the indexes can't live in SCHEMA_SQL. */
+
+    /* memory_relations: valid_from/valid_to added in v33.  source_* added in v40.
+     * NULL = open-ended (no bound).  "currently true" predicate:
+     * valid_to IS NULL OR valid_to > now() */
+    "CREATE TABLE IF NOT EXISTS memory_relations ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  subject_entity_id INTEGER NOT NULL,"
+    "  relation TEXT NOT NULL,"
+    "  object_entity_id INTEGER,"
+    "  object_value TEXT,"
+    "  fact_id INTEGER,"
+    "  confidence REAL DEFAULT 0.8,"
+    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+    "  valid_from INTEGER DEFAULT NULL,"
+    "  valid_to INTEGER DEFAULT NULL,"
+    "  source_conversation_id INTEGER DEFAULT NULL,"
+    "  source_msg_id_start    INTEGER DEFAULT NULL,"
+    "  source_msg_id_end      INTEGER DEFAULT NULL,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "  FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
+    "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
+    "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE SET NULL,"
+    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject ON "
+    "memory_relations(subject_entity_id);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_relations_object ON memory_relations(object_entity_id);"
+    "CREATE INDEX IF NOT EXISTS idx_memory_relations_user ON memory_relations(user_id);"
+    /* idx_memory_relations_user_validity + idx_memory_relations_subject_open are
+     * created by the v33 migration block (same reason — runs after the
+     * valid_from/valid_to ALTER so the columns exist). */
+
+    /* Entity-alias audit log (v43) — append-only history of soft/hard merges.
+     * Not consulted on hot read paths (those use canonical_id JOIN); this
+     * table answers "why was X linked to Y, and when?" for the WebUI Graph tab
+     * and dawn-admin memory entity history.  source_entity_id is SET NULL on
+     * hard-merge so the row survives the source-row deletion; the preserved
+     * source_canonical_name keeps the audit row self-describing. */
+    "CREATE TABLE IF NOT EXISTS memory_entity_aliases ("
+    "  id                    INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id               INTEGER NOT NULL,"
+    "  source_entity_id      INTEGER,"
+    "  target_entity_id      INTEGER NOT NULL,"
+    "  source_canonical_name TEXT NOT NULL,"
+    "  target_canonical_name TEXT NOT NULL,"
+    "  link_kind             TEXT NOT NULL,"
+    "  reason                TEXT NOT NULL,"
+    "  composite_score       REAL,"
+    "  evidence_json         TEXT,"
+    "  linked_at             INTEGER NOT NULL,"
+    "  consolidated_at       INTEGER,"
+    "  unlinked_at           INTEGER,"
+    "  unlink_reason         TEXT,"
+    "  FOREIGN KEY (user_id)          REFERENCES users(id)            ON DELETE CASCADE,"
+    "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id)  ON DELETE SET NULL,"
+    "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id)  ON DELETE SET NULL"
+    ");"
+    /* idx_memory_entity_aliases_user_target is created by the v43 post-migration
+     * index block so it is established for both fresh installs and upgrades. */
+
+    /* Mid-confidence merge proposal queue (v43) — review band staging for the
+     * auto-merge gate (Phase 2).  Approving a proposal writes the soft link
+     * via the regular alias path; rejecting just stamps resolved_at.  Cleared
+     * by reextract along with memory_entity_aliases — both are derived state. */
+    "CREATE TABLE IF NOT EXISTS memory_entity_merge_proposals ("
+    "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id          INTEGER NOT NULL,"
+    "  source_entity_id INTEGER NOT NULL,"
+    "  target_entity_id INTEGER NOT NULL,"
+    "  composite_score  REAL NOT NULL,"
+    "  evidence_json    TEXT NOT NULL,"
+    "  proposed_at      INTEGER NOT NULL,"
+    "  resolved_at      INTEGER,"
+    "  resolution       TEXT,"
+    "  FOREIGN KEY (user_id)          REFERENCES users(id)            ON DELETE CASCADE,"
+    "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id)  ON DELETE CASCADE,"
+    "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id)  ON DELETE CASCADE"
+    ");"
+    /* idx_merge_proposals_pending is created by the v43 post-migration index
+     * block. */
+
+    /* Scheduler events (v18) */
+    "CREATE TABLE IF NOT EXISTS scheduled_events ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  event_type TEXT NOT NULL DEFAULT 'timer',"
+    "  status TEXT NOT NULL DEFAULT 'pending',"
+    "  name TEXT NOT NULL,"
+    "  message TEXT,"
+    "  fire_at INTEGER NOT NULL,"
+    "  created_at INTEGER NOT NULL,"
+    "  duration_sec INTEGER DEFAULT 0,"
+    "  snoozed_until INTEGER DEFAULT 0,"
+    "  recurrence TEXT DEFAULT 'once',"
+    "  recurrence_days TEXT,"
+    "  original_time TEXT,"
+    "  source_uuid TEXT,"
+    "  source_location TEXT,"
+    "  source_client_type INTEGER DEFAULT 0,"
+    "  announce_all INTEGER DEFAULT 0,"
+    "  tool_name TEXT,"
+    "  tool_action TEXT,"
+    "  tool_value TEXT,"
+    "  fired_at INTEGER DEFAULT 0,"
+    "  snooze_count INTEGER DEFAULT 0,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_sched_status_fire ON scheduled_events(status, fire_at);"
+    "CREATE INDEX IF NOT EXISTS idx_sched_user ON scheduled_events(user_id, status);"
+    "CREATE INDEX IF NOT EXISTS idx_sched_user_name ON scheduled_events(user_id, status, name);"
+    "CREATE INDEX IF NOT EXISTS idx_sched_source ON scheduled_events(source_uuid);"
+
+    /* Missed scheduler notifications (v32) — queued when a ringing event has no
+     * connected clients for the target user; replayed on reconnect. */
+    "CREATE TABLE IF NOT EXISTS missed_notifications ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  event_id INTEGER NOT NULL,"
+    "  event_type TEXT NOT NULL,"
+    "  status TEXT NOT NULL,"
+    "  name TEXT NOT NULL,"
+    "  message TEXT,"
+    "  fire_at INTEGER NOT NULL,"
+    "  conversation_id INTEGER DEFAULT 0,"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_missed_notif_user "
+    "  ON missed_notifications(user_id, created_at);"
+
+    /* Documents and chunks for RAG search (v22) */
+    "CREATE TABLE IF NOT EXISTS documents ("
+    "  id INTEGER PRIMARY KEY,"
+    "  user_id INTEGER,"
+    "  filename TEXT NOT NULL,"
+    "  filepath TEXT NOT NULL,"
+    "  filetype TEXT NOT NULL,"
+    "  file_hash TEXT NOT NULL,"
+    "  num_chunks INTEGER NOT NULL,"
+    "  is_global INTEGER DEFAULT 0,"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    /* document_chunks.created_at added in v35 — used by temporal-query scoring to
+     * boost chunks whose origin date is near the user's referenced point in time
+     * (e.g., "what did we discuss in summer 2021"). 0 = unknown (no boost). */
+    "CREATE TABLE IF NOT EXISTS document_chunks ("
+    "  id INTEGER PRIMARY KEY,"
+    "  document_id INTEGER NOT NULL,"
+    "  chunk_index INTEGER NOT NULL,"
+    "  text TEXT NOT NULL,"
+    "  embedding BLOB NOT NULL,"
+    "  embedding_norm REAL NOT NULL,"
+    "  created_at INTEGER NOT NULL DEFAULT 0,"
+    "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
+    "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash);"
+
+    /* Calendar tables (v23, read_only from v24, oauth from v25) */
+    "CREATE TABLE IF NOT EXISTS calendar_accounts ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  name TEXT NOT NULL,"
+    "  caldav_url TEXT NOT NULL,"
+    "  username TEXT NOT NULL,"
+    "  encrypted_password BLOB NOT NULL,"
+    "  auth_type TEXT DEFAULT 'basic',"
+    "  principal_url TEXT DEFAULT '',"
+    "  calendar_home_url TEXT DEFAULT '',"
+    "  enabled INTEGER DEFAULT 1,"
+    "  read_only INTEGER DEFAULT 0,"
+    "  last_sync INTEGER DEFAULT 0,"
+    "  sync_interval_sec INTEGER DEFAULT 900,"
+    "  created_at INTEGER NOT NULL,"
+    "  oauth_account_key TEXT DEFAULT '',"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_cal_acct_user ON calendar_accounts(user_id);"
+
+    "CREATE TABLE IF NOT EXISTS calendar_calendars ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  account_id INTEGER NOT NULL,"
+    "  caldav_path TEXT NOT NULL,"
+    "  display_name TEXT DEFAULT '',"
+    "  color TEXT DEFAULT '',"
+    "  is_active INTEGER DEFAULT 1,"
+    "  ctag TEXT DEFAULT '',"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY(account_id) REFERENCES calendar_accounts(id) ON DELETE CASCADE"
+    ");"
+
+    "CREATE TABLE IF NOT EXISTS calendar_events ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  calendar_id INTEGER NOT NULL,"
+    "  uid TEXT NOT NULL,"
+    "  etag TEXT DEFAULT '',"
+    "  summary TEXT DEFAULT '',"
+    "  description TEXT DEFAULT '',"
+    "  location TEXT DEFAULT '',"
+    "  dtstart INTEGER DEFAULT 0,"
+    "  dtend INTEGER DEFAULT 0,"
+    "  duration_sec INTEGER DEFAULT 0,"
+    "  all_day INTEGER DEFAULT 0,"
+    "  dtstart_date TEXT DEFAULT '',"
+    "  dtend_date TEXT DEFAULT '',"
+    "  rrule TEXT DEFAULT '',"
+    "  raw_ical TEXT,"
+    "  last_synced INTEGER DEFAULT 0,"
+    "  FOREIGN KEY(calendar_id) REFERENCES calendar_calendars(id) ON DELETE CASCADE"
+    ");"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cal_events_uid ON calendar_events(calendar_id, uid);"
+
+    "CREATE TABLE IF NOT EXISTS calendar_occurrences ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  event_id INTEGER NOT NULL,"
+    "  dtstart INTEGER DEFAULT 0,"
+    "  dtend INTEGER DEFAULT 0,"
+    "  all_day INTEGER DEFAULT 0,"
+    "  dtstart_date TEXT DEFAULT '',"
+    "  dtend_date TEXT DEFAULT '',"
+    "  summary TEXT DEFAULT '',"
+    "  location TEXT DEFAULT '',"
+    "  is_override INTEGER DEFAULT 0,"
+    "  is_cancelled INTEGER DEFAULT 0,"
+    "  recurrence_id TEXT DEFAULT '',"
+    "  FOREIGN KEY(event_id) REFERENCES calendar_events(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_cal_occ_event ON calendar_occurrences(event_id);"
+    "CREATE INDEX IF NOT EXISTS idx_cal_occ_time ON calendar_occurrences(dtstart, dtend);"
+    "CREATE INDEX IF NOT EXISTS idx_cal_occ_date ON calendar_occurrences(dtstart_date);"
+
+    /* OAuth token storage (v25) */
+    "CREATE TABLE IF NOT EXISTS oauth_tokens ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  provider TEXT NOT NULL,"
+    "  account_key TEXT NOT NULL,"
+    "  encrypted_data BLOB NOT NULL,"
+    "  encrypted_data_len INTEGER NOT NULL,"
+    "  scopes TEXT DEFAULT '',"
+    "  created_at INTEGER NOT NULL,"
+    "  updated_at INTEGER NOT NULL,"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "  UNIQUE(user_id, provider, account_key)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_oauth_user_provider ON oauth_tokens(user_id, provider);"
+
+    /* Contacts (v26) */
+    "CREATE TABLE IF NOT EXISTS contacts ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  entity_id INTEGER NOT NULL,"
+    "  field_type TEXT NOT NULL,"
+    "  value TEXT NOT NULL,"
+    "  label TEXT DEFAULT '',"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "  FOREIGN KEY(entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_contacts_entity ON contacts(entity_id);"
+    "CREATE INDEX IF NOT EXISTS idx_contacts_user_type ON contacts(user_id, field_type);"
+
+    /* Email accounts (v26) */
+    "CREATE TABLE IF NOT EXISTS email_accounts ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  name TEXT NOT NULL,"
+    "  imap_server TEXT NOT NULL,"
+    "  imap_port INTEGER DEFAULT 993,"
+    "  imap_ssl INTEGER DEFAULT 1,"
+    "  smtp_server TEXT NOT NULL,"
+    "  smtp_port INTEGER DEFAULT 465,"
+    "  smtp_ssl INTEGER DEFAULT 1,"
+    "  username TEXT NOT NULL,"
+    "  display_name TEXT DEFAULT '',"
+    "  encrypted_password BLOB,"
+    "  encrypted_password_len INTEGER DEFAULT 0,"
+    "  auth_type TEXT DEFAULT 'app_password',"
+    "  oauth_account_key TEXT DEFAULT '',"
+    "  enabled INTEGER DEFAULT 1,"
+    "  read_only INTEGER DEFAULT 0,"
+    "  max_recent INTEGER DEFAULT 10,"
+    "  max_body_chars INTEGER DEFAULT 4000,"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_email_acct_user ON email_accounts(user_id);"
+
+    /* Phone call and SMS logs (v29) */
+    "CREATE TABLE IF NOT EXISTS phone_call_log ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  direction INTEGER NOT NULL,"
+    "  number TEXT NOT NULL,"
+    "  contact_name TEXT DEFAULT '',"
+    "  duration_sec INTEGER DEFAULT 0,"
+    "  timestamp INTEGER NOT NULL,"
+    "  status INTEGER NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_phone_call_user_ts "
+    "  ON phone_call_log(user_id, timestamp DESC);"
+    "CREATE TABLE IF NOT EXISTS phone_sms_log ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  direction INTEGER NOT NULL,"
+    "  number TEXT NOT NULL,"
+    "  contact_name TEXT DEFAULT '',"
+    "  body TEXT NOT NULL,"
+    "  timestamp INTEGER NOT NULL,"
+    "  read INTEGER DEFAULT 0,"
+    "  image_id TEXT DEFAULT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_phone_sms_user_ts "
+    "  ON phone_sms_log(user_id, timestamp DESC);"
+    "CREATE INDEX IF NOT EXISTS idx_phone_sms_unread "
+    "  ON phone_sms_log(user_id, read) WHERE read = 0;";
+
+/* =============================================================================
+ * Schema Version and Migration
+ * ============================================================================= */
+
+static int get_current_schema_version(void) {
+   sqlite3_stmt *stmt = NULL;
+   int version = 0;
+
+   int rc = sqlite3_prepare_v2(s_db.db, "SELECT version FROM schema_version LIMIT 1", -1, &stmt,
+                               NULL);
+   if (rc == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+         version = sqlite3_column_int(stmt, 0);
+      }
+      sqlite3_finalize(stmt);
+   }
+   return version;
+}
+
+int auth_db_create_schema(const char *db_path) {
+   char *errmsg = NULL;
+
+   /* Check current schema version (0 if fresh install) */
+   int current_version = get_current_schema_version();
+
+   /* Execute schema SQL - all tables use IF NOT EXISTS for idempotency */
+   int rc = sqlite3_exec(s_db.db, SCHEMA_SQL, NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: schema creation failed: %s", errmsg ? errmsg : "unknown");
+      sqlite3_free(errmsg);
+      return AUTH_DB_FAILURE;
+   }
+
+   /* v3 migration: add persona_mode column to user_settings if missing
+    * This handles upgrades from v1 or v2 where the table may exist without this column */
+   if (current_version >= 1 && current_version < 3) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE user_settings ADD COLUMN persona_mode TEXT DEFAULT 'append'",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         /* Column might already exist or table might not exist yet - not fatal */
+         OLOG_INFO("auth_db: v3 migration note: %s (may be normal)", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added persona_mode column to user_settings");
+      }
+   }
+
+   /* v5 migration: add context_tokens and context_max columns to conversations
+    * Only runs if conversations table already exists (v4+) without these columns */
+   if (current_version >= 1 && current_version < 5) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE conversations ADD COLUMN context_tokens INTEGER DEFAULT 0",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v5 migration note (context_tokens): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE conversations ADD COLUMN context_max INTEGER DEFAULT 0", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v5 migration note (context_max): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added context columns to conversations");
+      }
+   }
+
+   /* v6 migration: update messages table CHECK constraint to include 'tool' role
+    * SQLite doesn't support ALTER TABLE to modify constraints, so we recreate the table */
+   if (current_version >= 4 && current_version < 6) {
+      OLOG_INFO("auth_db: migrating messages table to support 'tool' role");
+      const char *migration_sql =
+          "BEGIN TRANSACTION;"
+          "CREATE TABLE messages_new ("
+          "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "   conversation_id INTEGER NOT NULL,"
+          "   role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),"
+          "   content TEXT NOT NULL,"
+          "   created_at INTEGER NOT NULL,"
+          "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+          ");"
+          "INSERT INTO messages_new SELECT * FROM messages;"
+          "DROP TABLE messages;"
+          "ALTER TABLE messages_new RENAME TO messages;"
+          "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id "
+          "ASC);"
+          "COMMIT;";
+
+      rc = sqlite3_exec(s_db.db, migration_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v6 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+         /* Rollback on failure */
+         sqlite3_exec(s_db.db, "ROLLBACK;", NULL, NULL, NULL);
+      } else {
+         OLOG_INFO("auth_db: migrated messages table to v6 (added 'tool' role)");
+      }
+   }
+
+   /* v7 migration: add continued_from and compaction_summary columns to conversations
+    * These support conversation continuation when context compaction occurs */
+   if (current_version >= 4 && current_version < 7) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE conversations ADD COLUMN continued_from INTEGER DEFAULT NULL "
+                        "REFERENCES conversations(id) ON DELETE SET NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v7 migration note (continued_from): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE conversations ADD COLUMN compaction_summary TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v7 migration note (compaction_summary): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      /* Add index for finding child conversations */
+      rc = sqlite3_exec(
+          s_db.db,
+          "CREATE INDEX IF NOT EXISTS idx_conversations_continued ON conversations(continued_from)",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v7 migration note (index): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added continuation columns to conversations (v7)");
+      }
+   }
+
+   /* v8 migration: session_metrics table
+    * The table is created by SCHEMA_SQL with IF NOT EXISTS, so no explicit
+    * migration is needed. Just log the upgrade for existing databases. */
+   if (current_version >= 1 && current_version < 8) {
+      OLOG_INFO("auth_db: added session_metrics table (v8)");
+   }
+
+   /* v9 migration: add theme column to user_settings */
+   if (current_version >= 1 && current_version < 9) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE user_settings ADD COLUMN theme TEXT DEFAULT 'cyan'",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v9 migration note (theme): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added theme column to user_settings");
+      }
+   }
+
+   /* v10 migration: add expires_at column to sessions for "Remember Me" feature
+    * Existing sessions get expires_at = last_activity + 24 hours */
+   if (current_version >= 1 && current_version < 10) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE sessions ADD COLUMN expires_at INTEGER", NULL, NULL,
+                        &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v10 migration note (expires_at): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         /* Set default expires_at for existing sessions (last_activity + 24h) */
+         char update_sql[128];
+         snprintf(update_sql, sizeof(update_sql),
+                  "UPDATE sessions SET expires_at = last_activity + %d WHERE expires_at IS NULL",
+                  AUTH_SESSION_TIMEOUT_SEC);
+         rc = sqlite3_exec(s_db.db, update_sql, NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_WARNING("auth_db: v10 migration (set defaults): %s", errmsg ? errmsg : "ok");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+         }
+         OLOG_INFO("auth_db: added expires_at column to sessions (v10)");
+      }
+      /* Create index for efficient cleanup queries */
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v10 migration (index): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+   }
+
+   /* v11 migration: add per-conversation LLM settings columns */
+   if (current_version >= 4 && current_version < 11) {
+      const char *cols[] = {
+         "ALTER TABLE conversations ADD COLUMN llm_type TEXT DEFAULT NULL",
+         "ALTER TABLE conversations ADD COLUMN cloud_provider TEXT DEFAULT NULL",
+         "ALTER TABLE conversations ADD COLUMN model TEXT DEFAULT NULL",
+         "ALTER TABLE conversations ADD COLUMN tools_mode TEXT DEFAULT NULL",
+         "ALTER TABLE conversations ADD COLUMN thinking_mode TEXT DEFAULT NULL"
+      };
+      for (int i = 0; i < 5; i++) {
+         rc = sqlite3_exec(s_db.db, cols[i], NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_INFO("auth_db: v11 migration note: %s", errmsg ? errmsg : "ok");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+         }
+      }
+      OLOG_INFO("auth_db: added LLM settings columns to conversations (v11)");
+   }
+
+   /* v12 migration: images table for vision uploads (now superseded by v13) */
+   if (current_version >= 1 && current_version < 12) {
+      OLOG_INFO("auth_db: added images table for vision uploads (v12)");
+   }
+
+   /* v13 migration: add data BLOB column to images table
+    * Since v12 images table didn't have the data column, we need to recreate it.
+    * Drop existing table (likely empty) and let SCHEMA_SQL recreate with data column. */
+   if (current_version == 12) {
+      rc = sqlite3_exec(s_db.db, "DROP TABLE IF EXISTS images", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v13 migration - failed to drop images: %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      /* Recreate with data column (from SCHEMA_SQL) */
+      const char *images_sql =
+          "CREATE TABLE IF NOT EXISTS images ("
+          "   id TEXT PRIMARY KEY,"
+          "   user_id INTEGER NOT NULL,"
+          "   mime_type TEXT NOT NULL,"
+          "   size INTEGER NOT NULL,"
+          "   data BLOB NOT NULL,"
+          "   created_at INTEGER NOT NULL,"
+          "   last_accessed INTEGER,"
+          "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
+          "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);";
+      rc = sqlite3_exec(s_db.db, images_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v13 migration - failed to create images: %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: migrated images table to include BLOB storage (v13)");
+   }
+
+   /* v14 migration: add memory system tables
+    * Creates memory_facts, memory_preferences, and memory_summaries tables */
+   if (current_version >= 1 && current_version < 14) {
+      const char *memory_sql =
+          /* memory_facts table */
+          "CREATE TABLE IF NOT EXISTS memory_facts ("
+          "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "   user_id INTEGER NOT NULL,"
+          "   fact_text TEXT NOT NULL,"
+          "   confidence REAL DEFAULT 1.0,"
+          "   source TEXT DEFAULT 'inferred',"
+          "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          "   last_accessed INTEGER,"
+          "   access_count INTEGER DEFAULT 0,"
+          "   superseded_by INTEGER,"
+          "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+          "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_memory_facts_user ON memory_facts(user_id);"
+          "CREATE INDEX IF NOT EXISTS idx_memory_facts_confidence ON "
+          "memory_facts(user_id, confidence DESC);"
+
+          /* memory_preferences table */
+          "CREATE TABLE IF NOT EXISTS memory_preferences ("
+          "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "   user_id INTEGER NOT NULL,"
+          "   category TEXT NOT NULL,"
+          "   value TEXT NOT NULL,"
+          "   confidence REAL DEFAULT 0.5,"
+          "   source TEXT DEFAULT 'inferred',"
+          "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          "   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          "   reinforcement_count INTEGER DEFAULT 1,"
+          "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+          "   UNIQUE(user_id, category)"
+          ");"
+
+          /* memory_summaries table */
+          "CREATE TABLE IF NOT EXISTS memory_summaries ("
+          "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "   user_id INTEGER NOT NULL,"
+          "   session_id TEXT NOT NULL,"
+          "   summary TEXT NOT NULL,"
+          "   topics TEXT,"
+          "   sentiment TEXT,"
+          "   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          "   message_count INTEGER,"
+          "   duration_seconds INTEGER,"
+          "   consolidated INTEGER DEFAULT 0,"
+          "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_memory_summaries_user ON "
+          "memory_summaries(user_id, created_at DESC);";
+
+      rc = sqlite3_exec(s_db.db, memory_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v14 migration - failed to create memory tables: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added memory system tables (v14)");
+   }
+
+   /* v15 migration: add deduplication and extraction tracking
+    * - normalized_hash for fast duplicate detection in memory_facts
+    * - last_extracted_msg_count for incremental extraction in conversations */
+   if (current_version >= 1 && current_version < 15) {
+      const char *v15_sql =
+          "ALTER TABLE memory_facts ADD COLUMN normalized_hash INTEGER DEFAULT 0;"
+          "CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(user_id, "
+          "normalized_hash);"
+          "ALTER TABLE conversations ADD COLUMN last_extracted_msg_count INTEGER DEFAULT 0;";
+
+      rc = sqlite3_exec(s_db.db, v15_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v15 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added deduplication and extraction tracking (v15)");
+   }
+
+   /* v16 migration: add is_private flag to conversations for privacy mode */
+   if (current_version >= 1 && current_version < 16) {
+      const char *v16_sql = "ALTER TABLE conversations ADD COLUMN is_private INTEGER DEFAULT 0;";
+
+      rc = sqlite3_exec(s_db.db, v16_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v16 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added conversation privacy flag (v16)");
+   }
+
+   /* v17 migration: add origin column to conversations for voice/webui distinction */
+   if (current_version >= 1 && current_version < 17) {
+      const char *v17_sql = "ALTER TABLE conversations ADD COLUMN origin TEXT DEFAULT 'webui';";
+
+      rc = sqlite3_exec(s_db.db, v17_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v17 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added conversation origin column (v17)");
+   }
+
+   /* v18 migration: scheduler events table */
+   if (current_version >= 1 && current_version < 18) {
+      const char *v18_sql = "CREATE TABLE IF NOT EXISTS scheduled_events ("
+                            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "  user_id INTEGER NOT NULL,"
+                            "  event_type TEXT NOT NULL DEFAULT 'timer',"
+                            "  status TEXT NOT NULL DEFAULT 'pending',"
+                            "  name TEXT NOT NULL,"
+                            "  message TEXT,"
+                            "  fire_at INTEGER NOT NULL,"
+                            "  created_at INTEGER NOT NULL,"
+                            "  duration_sec INTEGER DEFAULT 0,"
+                            "  snoozed_until INTEGER DEFAULT 0,"
+                            "  recurrence TEXT DEFAULT 'once',"
+                            "  recurrence_days TEXT,"
+                            "  original_time TEXT,"
+                            "  source_uuid TEXT,"
+                            "  source_location TEXT,"
+                            "  announce_all INTEGER DEFAULT 0,"
+                            "  tool_name TEXT,"
+                            "  tool_action TEXT,"
+                            "  tool_value TEXT,"
+                            "  fired_at INTEGER DEFAULT 0,"
+                            "  snooze_count INTEGER DEFAULT 0,"
+                            "  FOREIGN KEY (user_id) REFERENCES users(id)"
+                            ");"
+                            "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
+                            "  ON scheduled_events(status, fire_at);"
+                            "CREATE INDEX IF NOT EXISTS idx_sched_user "
+                            "  ON scheduled_events(user_id, status);"
+                            "CREATE INDEX IF NOT EXISTS idx_sched_user_name "
+                            "  ON scheduled_events(user_id, status, name);"
+                            "CREATE INDEX IF NOT EXISTS idx_sched_source "
+                            "  ON scheduled_events(source_uuid);";
+
+      rc = sqlite3_exec(s_db.db, v18_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v18 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added scheduled_events table (v18)");
+   }
+
+   /* v19 migration: semantic memory embeddings + entity/relation tables */
+   if (current_version >= 1 && current_version < 19) {
+      const char *v19_sql =
+          /* Add embedding columns to existing memory_facts table */
+          "ALTER TABLE memory_facts ADD COLUMN embedding BLOB DEFAULT NULL;"
+          "ALTER TABLE memory_facts ADD COLUMN embedding_norm REAL DEFAULT NULL;"
+
+          /* Entity table (populated in Phase S4, created now for schema stability) */
+          "CREATE TABLE IF NOT EXISTS memory_entities ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id INTEGER NOT NULL,"
+          "  name TEXT NOT NULL,"
+          "  entity_type TEXT NOT NULL,"
+          "  canonical_name TEXT NOT NULL,"
+          "  embedding BLOB DEFAULT NULL,"
+          "  embedding_norm REAL DEFAULT NULL,"
+          "  first_seen INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          "  last_seen INTEGER,"
+          "  mention_count INTEGER DEFAULT 1,"
+          "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+          "  UNIQUE(user_id, canonical_name)"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_memory_entities_user "
+          "  ON memory_entities(user_id);"
+
+          /* Relation triples (populated in Phase S4, created now) */
+          "CREATE TABLE IF NOT EXISTS memory_relations ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id INTEGER NOT NULL,"
+          "  subject_entity_id INTEGER NOT NULL,"
+          "  relation TEXT NOT NULL,"
+          "  object_entity_id INTEGER,"
+          "  object_value TEXT,"
+          "  fact_id INTEGER,"
+          "  confidence REAL DEFAULT 0.8,"
+          "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+          "  FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
+          "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
+          "  FOREIGN KEY (fact_id) REFERENCES memory_facts(id) ON DELETE SET NULL"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject "
+          "  ON memory_relations(subject_entity_id);"
+          "CREATE INDEX IF NOT EXISTS idx_memory_relations_object "
+          "  ON memory_relations(object_entity_id);"
+          "CREATE INDEX IF NOT EXISTS idx_memory_relations_user "
+          "  ON memory_relations(user_id);";
+
+      rc = sqlite3_exec(s_db.db, v19_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v19 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added embedding columns and entity/relation tables (v19)");
+   }
+
+   /* v20 migration: satellite_mappings table for persistent satellite-to-user mappings */
+   if (current_version >= 1 && current_version < 20) {
+      const char *v20_sql =
+          "CREATE TABLE IF NOT EXISTS satellite_mappings ("
+          "  uuid TEXT PRIMARY KEY,"
+          "  name TEXT NOT NULL DEFAULT '',"
+          "  location TEXT NOT NULL DEFAULT '',"
+          "  ha_area TEXT DEFAULT '',"
+          "  user_id INTEGER DEFAULT NULL,"
+          "  tier INTEGER DEFAULT 1,"
+          "  last_seen INTEGER DEFAULT 0,"
+          "  created_at INTEGER NOT NULL,"
+          "  enabled INTEGER DEFAULT 1,"
+          "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_satellite_user ON satellite_mappings(user_id);";
+
+      rc = sqlite3_exec(s_db.db, v20_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v20 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added satellite_mappings table (v20)");
+   }
+
+   /* v21 migration: fix satellite_mappings FK (DEFAULT 0 -> DEFAULT NULL, SET NULL) */
+   if (current_version >= 20 && current_version < 21) {
+      const char *v21_sql =
+          "BEGIN TRANSACTION;"
+          "CREATE TABLE IF NOT EXISTS satellite_mappings_new ("
+          "  uuid TEXT PRIMARY KEY,"
+          "  name TEXT NOT NULL DEFAULT '',"
+          "  location TEXT NOT NULL DEFAULT '',"
+          "  ha_area TEXT DEFAULT '',"
+          "  user_id INTEGER DEFAULT NULL,"
+          "  tier INTEGER DEFAULT 1,"
+          "  last_seen INTEGER DEFAULT 0,"
+          "  created_at INTEGER NOT NULL,"
+          "  enabled INTEGER DEFAULT 1,"
+          "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL"
+          ");"
+          "INSERT INTO satellite_mappings_new SELECT uuid, name, location, ha_area,"
+          "  CASE WHEN user_id = 0 THEN NULL ELSE user_id END,"
+          "  tier, last_seen, created_at, enabled FROM satellite_mappings;"
+          "DROP TABLE satellite_mappings;"
+          "ALTER TABLE satellite_mappings_new RENAME TO satellite_mappings;"
+          "CREATE INDEX IF NOT EXISTS idx_satellite_user ON satellite_mappings(user_id);"
+          "COMMIT;";
+
+      rc = sqlite3_exec(s_db.db, v21_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v21 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: fixed satellite_mappings FK constraints (v21)");
+   }
+
+   /* v22 migration: documents and document_chunks tables for RAG search */
+   if (current_version >= 1 && current_version < 22) {
+      const char *v22_sql =
+          "CREATE TABLE IF NOT EXISTS documents ("
+          "  id INTEGER PRIMARY KEY,"
+          "  user_id INTEGER,"
+          "  filename TEXT NOT NULL,"
+          "  filepath TEXT NOT NULL,"
+          "  filetype TEXT NOT NULL,"
+          "  file_hash TEXT NOT NULL,"
+          "  num_chunks INTEGER NOT NULL,"
+          "  is_global INTEGER DEFAULT 0,"
+          "  created_at INTEGER NOT NULL,"
+          "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "CREATE TABLE IF NOT EXISTS document_chunks ("
+          "  id INTEGER PRIMARY KEY,"
+          "  document_id INTEGER NOT NULL,"
+          "  chunk_index INTEGER NOT NULL,"
+          "  text TEXT NOT NULL,"
+          "  embedding BLOB NOT NULL,"
+          "  embedding_norm REAL NOT NULL,"
+          "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
+          "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);"
+          "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash);";
+
+      rc = sqlite3_exec(s_db.db, v22_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v22 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added documents and document_chunks tables (v22)");
+   }
+
+   /* v23 migration: calendar tables for CalDAV integration */
+   if (current_version >= 1 && current_version < 23) {
+      const char *v23_sql =
+          "CREATE TABLE IF NOT EXISTS calendar_accounts ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id INTEGER NOT NULL,"
+          "  name TEXT NOT NULL,"
+          "  caldav_url TEXT NOT NULL,"
+          "  username TEXT NOT NULL,"
+          "  encrypted_password BLOB NOT NULL,"
+          "  auth_type TEXT DEFAULT 'basic',"
+          "  principal_url TEXT DEFAULT '',"
+          "  calendar_home_url TEXT DEFAULT '',"
+          "  enabled INTEGER DEFAULT 1,"
+          "  read_only INTEGER DEFAULT 0,"
+          "  last_sync INTEGER DEFAULT 0,"
+          "  sync_interval_sec INTEGER DEFAULT 900,"
+          "  created_at INTEGER NOT NULL,"
+          "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "CREATE TABLE IF NOT EXISTS calendar_calendars ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  account_id INTEGER NOT NULL,"
+          "  caldav_path TEXT NOT NULL,"
+          "  display_name TEXT DEFAULT '',"
+          "  color TEXT DEFAULT '',"
+          "  is_active INTEGER DEFAULT 1,"
+          "  ctag TEXT DEFAULT '',"
+          "  created_at INTEGER NOT NULL,"
+          "  FOREIGN KEY(account_id) REFERENCES calendar_accounts(id) ON DELETE CASCADE"
+          ");"
+          "CREATE TABLE IF NOT EXISTS calendar_events ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  calendar_id INTEGER NOT NULL,"
+          "  uid TEXT NOT NULL,"
+          "  etag TEXT DEFAULT '',"
+          "  summary TEXT DEFAULT '',"
+          "  description TEXT DEFAULT '',"
+          "  location TEXT DEFAULT '',"
+          "  dtstart INTEGER DEFAULT 0,"
+          "  dtend INTEGER DEFAULT 0,"
+          "  duration_sec INTEGER DEFAULT 0,"
+          "  all_day INTEGER DEFAULT 0,"
+          "  dtstart_date TEXT DEFAULT '',"
+          "  dtend_date TEXT DEFAULT '',"
+          "  rrule TEXT DEFAULT '',"
+          "  raw_ical TEXT,"
+          "  last_synced INTEGER DEFAULT 0,"
+          "  FOREIGN KEY(calendar_id) REFERENCES calendar_calendars(id) ON DELETE CASCADE"
+          ");"
+          "CREATE UNIQUE INDEX IF NOT EXISTS idx_cal_events_uid "
+          "  ON calendar_events(calendar_id, uid);"
+          "CREATE TABLE IF NOT EXISTS calendar_occurrences ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  event_id INTEGER NOT NULL,"
+          "  dtstart INTEGER DEFAULT 0,"
+          "  dtend INTEGER DEFAULT 0,"
+          "  all_day INTEGER DEFAULT 0,"
+          "  dtstart_date TEXT DEFAULT '',"
+          "  dtend_date TEXT DEFAULT '',"
+          "  summary TEXT DEFAULT '',"
+          "  location TEXT DEFAULT '',"
+          "  is_override INTEGER DEFAULT 0,"
+          "  is_cancelled INTEGER DEFAULT 0,"
+          "  recurrence_id TEXT DEFAULT '',"
+          "  FOREIGN KEY(event_id) REFERENCES calendar_events(id) ON DELETE CASCADE"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_cal_occ_event ON calendar_occurrences(event_id);"
+          "CREATE INDEX IF NOT EXISTS idx_cal_occ_time ON calendar_occurrences(dtstart, dtend);"
+          "CREATE INDEX IF NOT EXISTS idx_cal_occ_date ON calendar_occurrences(dtstart_date);"
+          "CREATE INDEX IF NOT EXISTS idx_cal_acct_user ON calendar_accounts(user_id);";
+
+      rc = sqlite3_exec(s_db.db, v23_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v23 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added calendar tables (v23)");
+   }
+
+   /* v24 migration: add read_only flag to calendar_accounts */
+   if (current_version >= 23 && current_version < 24) {
+      const char *v24_sql = "ALTER TABLE calendar_accounts ADD COLUMN read_only INTEGER DEFAULT 0;";
+      rc = sqlite3_exec(s_db.db, v24_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v24 migration failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added calendar read_only column (v24)");
+   }
+
+   /* v25 migration: OAuth token storage + calendar account OAuth support */
+   if (current_version >= 1 && current_version < 25) {
+      const char *v25_sql = "CREATE TABLE IF NOT EXISTS oauth_tokens ("
+                            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "  user_id INTEGER NOT NULL,"
+                            "  provider TEXT NOT NULL,"
+                            "  account_key TEXT NOT NULL,"
+                            "  encrypted_data BLOB NOT NULL,"
+                            "  encrypted_data_len INTEGER NOT NULL,"
+                            "  scopes TEXT DEFAULT '',"
+                            "  created_at INTEGER NOT NULL,"
+                            "  updated_at INTEGER NOT NULL,"
+                            "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+                            "  UNIQUE(user_id, provider, account_key)"
+                            ");"
+                            "CREATE INDEX IF NOT EXISTS idx_oauth_user_provider "
+                            "  ON oauth_tokens(user_id, provider);";
+
+      rc = sqlite3_exec(s_db.db, v25_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v25 migration (oauth_tokens) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+
+      /* Add oauth_account_key column to calendar_accounts */
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE calendar_accounts ADD COLUMN oauth_account_key TEXT DEFAULT ''",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v25 migration note (oauth_account_key): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+
+      OLOG_INFO("auth_db: added oauth_tokens table and calendar OAuth support (v25)");
+   }
+
+   /* v26 migration: contacts table + email_accounts table */
+   if (current_version >= 1 && current_version < 26) {
+      const char *v26_sql =
+          "CREATE TABLE IF NOT EXISTS contacts ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id INTEGER NOT NULL,"
+          "  entity_id INTEGER NOT NULL,"
+          "  field_type TEXT NOT NULL,"
+          "  value TEXT NOT NULL,"
+          "  label TEXT DEFAULT '',"
+          "  created_at INTEGER NOT NULL,"
+          "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+          "  FOREIGN KEY(entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_contacts_entity ON contacts(entity_id);"
+          "CREATE INDEX IF NOT EXISTS idx_contacts_user_type ON contacts(user_id, field_type);"
+          "CREATE TABLE IF NOT EXISTS email_accounts ("
+          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id INTEGER NOT NULL,"
+          "  name TEXT NOT NULL,"
+          "  imap_server TEXT NOT NULL,"
+          "  imap_port INTEGER DEFAULT 993,"
+          "  imap_ssl INTEGER DEFAULT 1,"
+          "  smtp_server TEXT NOT NULL,"
+          "  smtp_port INTEGER DEFAULT 465,"
+          "  smtp_ssl INTEGER DEFAULT 1,"
+          "  username TEXT NOT NULL,"
+          "  display_name TEXT DEFAULT '',"
+          "  encrypted_password BLOB,"
+          "  encrypted_password_len INTEGER DEFAULT 0,"
+          "  auth_type TEXT DEFAULT 'app_password',"
+          "  oauth_account_key TEXT DEFAULT '',"
+          "  enabled INTEGER DEFAULT 1,"
+          "  read_only INTEGER DEFAULT 0,"
+          "  max_recent INTEGER DEFAULT 10,"
+          "  max_body_chars INTEGER DEFAULT 4000,"
+          "  created_at INTEGER NOT NULL,"
+          "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "CREATE INDEX IF NOT EXISTS idx_email_acct_user ON email_accounts(user_id);";
+
+      rc = sqlite3_exec(s_db.db, v26_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v26 migration (contacts + email_accounts) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+
+      OLOG_INFO("auth_db: added contacts and email_accounts tables (v26)");
+   }
+
+   /* v27 migration: add title_locked column to conversations for auto-title feature */
+   if (current_version >= 4 && current_version < 27) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE conversations ADD COLUMN title_locked INTEGER DEFAULT 0", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v27 migration note (title_locked): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added title_locked column to conversations (v27)");
+      }
+   }
+
+   /* v28 migration: add source_client_type to scheduled_events for notification routing */
+   if (current_version >= 18 && current_version < 28) {
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE scheduled_events ADD COLUMN source_client_type INTEGER DEFAULT 0",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_INFO("auth_db: v28 migration note (source_client_type): %s", errmsg ? errmsg : "ok");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added source_client_type to scheduled_events (v28)");
+      }
+   }
+
+   /* v29 migration: phone call and SMS log tables */
+   if (current_version >= 1 && current_version < 29) {
+      const char *v29_sql = "CREATE TABLE IF NOT EXISTS phone_call_log ("
+                            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "  user_id INTEGER NOT NULL,"
+                            "  direction INTEGER NOT NULL,"
+                            "  number TEXT NOT NULL,"
+                            "  contact_name TEXT DEFAULT '',"
+                            "  duration_sec INTEGER DEFAULT 0,"
+                            "  timestamp INTEGER NOT NULL,"
+                            "  status INTEGER NOT NULL"
+                            ");"
+                            "CREATE INDEX IF NOT EXISTS idx_phone_call_user_ts "
+                            "  ON phone_call_log(user_id, timestamp DESC);"
+                            "CREATE TABLE IF NOT EXISTS phone_sms_log ("
+                            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "  user_id INTEGER NOT NULL,"
+                            "  direction INTEGER NOT NULL,"
+                            "  number TEXT NOT NULL,"
+                            "  contact_name TEXT DEFAULT '',"
+                            "  body TEXT NOT NULL,"
+                            "  timestamp INTEGER NOT NULL,"
+                            "  read INTEGER DEFAULT 0"
+                            ");"
+                            "CREATE INDEX IF NOT EXISTS idx_phone_sms_user_ts "
+                            "  ON phone_sms_log(user_id, timestamp DESC);"
+                            "CREATE INDEX IF NOT EXISTS idx_phone_sms_unread "
+                            "  ON phone_sms_log(user_id, read) WHERE read = 0;";
+
+      rc = sqlite3_exec(s_db.db, v29_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v29 migration (phone tables) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added phone_call_log and phone_sms_log tables (v29)");
+      }
+   }
+
+   /* v30 migration: image store BLOB → filesystem + phone_sms_log image_id column
+    * Export image BLOBs to <data_dir>/images/ files, rebuild table without BLOB column.
+    * Also add image_id column to phone_sms_log for MMS attachment references. */
+   if (current_version >= 12 && current_version < 30) {
+      /* Derive images directory from db_path parent */
+      char images_dir[PATH_MAX];
+      char db_path_copy[PATH_MAX];
+      strncpy(db_path_copy, db_path, sizeof(db_path_copy) - 1);
+      db_path_copy[sizeof(db_path_copy) - 1] = '\0';
+      char *parent = dirname(db_path_copy);
+      snprintf(images_dir, sizeof(images_dir), "%s/images", parent);
+
+      /* Create images directory */
+      if (mkdir(images_dir, 0750) != 0 && errno != EEXIST) {
+         OLOG_ERROR("auth_db: v30 migration - failed to create %s: %s", images_dir,
+                    strerror(errno));
+         return AUTH_DB_FAILURE;
+      }
+
+      /* Export BLOBs to files */
+      sqlite3_stmt *export_stmt = NULL;
+      rc = sqlite3_prepare_v2(s_db.db,
+                              "SELECT id, mime_type, data FROM images WHERE data IS NOT NULL", -1,
+                              &export_stmt, NULL);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v30 migration - prepare export failed: %s", sqlite3_errmsg(s_db.db));
+         return AUTH_DB_FAILURE;
+      }
+
+      int exported = 0;
+      int export_failed = 0;
+      while (sqlite3_step(export_stmt) == SQLITE_ROW) {
+         const char *id = (const char *)sqlite3_column_text(export_stmt, 0);
+         const char *mime = (const char *)sqlite3_column_text(export_stmt, 1);
+         const void *blob = sqlite3_column_blob(export_stmt, 2);
+         int blob_size = sqlite3_column_bytes(export_stmt, 2);
+
+         if (!id || !blob || blob_size <= 0)
+            continue;
+
+         /* Determine file extension from MIME */
+         const char *ext = "bin";
+         if (mime) {
+            if (strcmp(mime, "image/jpeg") == 0)
+               ext = "jpg";
+            else if (strcmp(mime, "image/png") == 0)
+               ext = "png";
+            else if (strcmp(mime, "image/gif") == 0)
+               ext = "gif";
+            else if (strcmp(mime, "image/webp") == 0)
+               ext = "webp";
+         }
+
+         /* Write to tmp file, fsync, rename for atomicity */
+         char filepath[PATH_MAX + 32];
+         char tmppath[PATH_MAX + 32];
+         snprintf(filepath, sizeof(filepath), "%s/%s.%s", images_dir, id, ext);
+         snprintf(tmppath, sizeof(tmppath), "%s/.%s.%s.tmp", images_dir, id, ext);
+
+         int fd = open(tmppath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0640);
+         if (fd < 0) {
+            OLOG_WARNING("auth_db: v30 migration - failed to create %s: %s", tmppath,
+                         strerror(errno));
+            export_failed++;
+            continue;
+         }
+
+         const unsigned char *wp = (const unsigned char *)blob;
+         size_t remaining = (size_t)blob_size;
+         bool write_ok = true;
+         while (remaining > 0) {
+            ssize_t written = write(fd, wp, remaining);
+            if (written < 0) {
+               if (errno == EINTR)
+                  continue;
+               OLOG_WARNING("auth_db: v30 migration - write failed for %s: %s", id,
+                            strerror(errno));
+               write_ok = false;
+               break;
+            }
+            wp += written;
+            remaining -= (size_t)written;
+         }
+         if (!write_ok) {
+            close(fd);
+            unlink(tmppath);
+            export_failed++;
+            continue;
+         }
+
+         fsync(fd);
+         close(fd);
+
+         if (rename(tmppath, filepath) != 0) {
+            OLOG_WARNING("auth_db: v30 migration - rename failed for %s: %s", id, strerror(errno));
+            unlink(tmppath);
+            export_failed++;
+            continue;
+         }
+
+         exported++;
+      }
+      sqlite3_finalize(export_stmt);
+
+      if (export_failed > 0) {
+         OLOG_ERROR("auth_db: v30 migration - %d/%d images failed to export", export_failed,
+                    exported + export_failed);
+         return AUTH_DB_FAILURE;
+      }
+
+      /* Rebuild images table without BLOB column (transactional) */
+      const char *v30_images_sql =
+          "BEGIN TRANSACTION;"
+          "DROP TABLE IF EXISTS images_new;"
+          "CREATE TABLE images_new ("
+          "   id TEXT PRIMARY KEY,"
+          "   user_id INTEGER NOT NULL,"
+          "   source INTEGER NOT NULL DEFAULT 0,"
+          "   retention_policy INTEGER NOT NULL DEFAULT 0,"
+          "   mime_type TEXT NOT NULL,"
+          "   size INTEGER NOT NULL,"
+          "   filename TEXT NOT NULL,"
+          "   created_at INTEGER NOT NULL,"
+          "   last_accessed INTEGER,"
+          "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+          ");"
+          "INSERT INTO images_new (id, user_id, source, retention_policy, mime_type, size, "
+          "filename, created_at, last_accessed) "
+          "SELECT id, user_id, 0, 0, mime_type, size, "
+          "id || '.' || CASE mime_type "
+          "  WHEN 'image/jpeg' THEN 'jpg' "
+          "  WHEN 'image/png' THEN 'png' "
+          "  WHEN 'image/gif' THEN 'gif' "
+          "  WHEN 'image/webp' THEN 'webp' "
+          "  ELSE 'bin' END, "
+          "created_at, last_accessed FROM images;"
+          "DROP TABLE images;"
+          "ALTER TABLE images_new RENAME TO images;"
+          "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
+          "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
+          "CREATE INDEX IF NOT EXISTS idx_images_retention ON images(retention_policy);"
+          "COMMIT;";
+
+      rc = sqlite3_exec(s_db.db, v30_images_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v30 migration (images table rebuild) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         sqlite3_exec(s_db.db, "ROLLBACK;", NULL, NULL, NULL);
+         return AUTH_DB_FAILURE;
+      }
+
+      OLOG_INFO("auth_db: migrated %d images from BLOB to filesystem (v30)", exported);
+   }
+
+   /* v30 migration: add image_id to phone_sms_log (for MMS attachments) */
+   if (current_version >= 29 && current_version < 30) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE phone_sms_log ADD COLUMN image_id TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v30 migration (sms image_id) failed: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added image_id column to phone_sms_log (v30)");
+      }
+   }
+
+   /* v31 migration: add photo_id to memory_entities for contact photos */
+   if (current_version >= 19 && current_version < 31) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_entities ADD COLUMN photo_id TEXT DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v31 migration (entity photo_id) failed: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added photo_id column to memory_entities (v31)");
+      }
+   }
+
+   /* v32 migration: missed_notifications table for offline-user notification queue */
+   if (current_version >= 1 && current_version < 32) {
+      const char *v32_sql = "CREATE TABLE IF NOT EXISTS missed_notifications ("
+                            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "  user_id INTEGER NOT NULL,"
+                            "  event_id INTEGER NOT NULL,"
+                            "  event_type TEXT NOT NULL,"
+                            "  status TEXT NOT NULL,"
+                            "  name TEXT NOT NULL,"
+                            "  message TEXT,"
+                            "  fire_at INTEGER NOT NULL,"
+                            "  conversation_id INTEGER DEFAULT 0,"
+                            "  created_at INTEGER NOT NULL,"
+                            "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+                            ");"
+                            "CREATE INDEX IF NOT EXISTS idx_missed_notif_user "
+                            "  ON missed_notifications(user_id, created_at);";
+      rc = sqlite3_exec(s_db.db, v32_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v32 migration (missed_notifications) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: added missed_notifications table (v32)");
+   }
+
+   /* v33 migration: temporal validity columns on memory_relations.
+    * NULL = open-ended (no bound).  "currently true" predicate:
+    *   valid_to IS NULL OR valid_to > strftime('%s','now')
+    * Future relation-decay implementations should skip rows where valid_to is set
+    * and in the past — those are historical facts, not stale beliefs. */
+   if (current_version >= 19 && current_version < 33) {
+      const char *v33_sql = "ALTER TABLE memory_relations ADD COLUMN valid_from INTEGER "
+                            "  DEFAULT NULL;"
+                            "ALTER TABLE memory_relations ADD COLUMN valid_to INTEGER "
+                            "  DEFAULT NULL;"
+                            "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity "
+                            "  ON memory_relations(user_id, valid_to);"
+                            "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open "
+                            "  ON memory_relations(subject_entity_id, relation) "
+                            "  WHERE valid_to IS NULL;";
+      rc = sqlite3_exec(s_db.db, v33_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         /* Column may already exist if a previous migration partially ran — log and continue. */
+         OLOG_WARNING("auth_db: v33 migration (memory_relations validity) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added valid_from/valid_to to memory_relations (v33)");
+      }
+   }
+
+   /* v34 migration: fact category column + per-user backfill gate.
+    * categories_backfilled_at = 0 means embedding-centroid classification has not yet run
+    * for that user; memory_embeddings_start_backfill() picks it up on next session. */
+   if (current_version >= 1 && current_version < 34) {
+      const char *v34_sql = "ALTER TABLE memory_facts ADD COLUMN category TEXT NOT NULL "
+                            "  DEFAULT 'general';"
+                            "ALTER TABLE users ADD COLUMN categories_backfilled_at INTEGER "
+                            "  DEFAULT 0;"
+                            "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category "
+                            "  ON memory_facts(user_id, category);";
+      rc = sqlite3_exec(s_db.db, v34_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v34 migration (fact category) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added category column + backfill gate (v34)");
+      }
+   }
+
+   /* v35 migration: per-chunk created_at for temporal-query scoring.  0 = unknown
+    * (chunk gets no proximity boost).  Backfill from documents.created_at would
+    * be a follow-up — for v1, only chunks ingested after this migration get a
+    * timestamp; older chunks default to 0 and behave as before. */
+   if (current_version >= 22 && current_version < 35) {
+      const char *v35_sql = "ALTER TABLE document_chunks ADD COLUMN created_at INTEGER "
+                            "  NOT NULL DEFAULT 0;";
+      rc = sqlite3_exec(s_db.db, v35_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v35 migration (chunk created_at) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added created_at to document_chunks (v35)");
+      }
+   }
+
+   /* v36 migration: per-conversation reasoning_effort lock.  Without this column
+    * the locked-settings restore on page refresh forgets the user's chosen
+    * effort and the dropdown snaps back to the global default ("low").
+    *
+    * No lower bound on current_version: a DB at v10 will run the v11 block
+    * above (which adds the conversations LLM-lock columns) AND this v36 block
+    * in the same startup. `current_version` is captured once and not bumped
+    * between migration blocks, so a `>= 11` guard here would incorrectly skip
+    * the column add on v10-or-earlier DBs. ALTER TABLE errors (e.g. if the
+    * column already exists on a concurrent path) are logged and swallowed, so
+    * the migration is idempotent. */
+   if (current_version < 36) {
+      const char *v36_sql =
+          "ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT DEFAULT NULL;";
+      rc = sqlite3_exec(s_db.db, v36_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v36 migration (reasoning_effort) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: added reasoning_effort to conversations (v36)");
+      }
+   }
+
+   /* v37 migration: backfill document_chunks.created_at from parent document.
+    * Legacy chunks (ingested before v35 added created_at) have created_at = 0,
+    * which forfeits temporal-query scoring.  Inherit the parent document's
+    * created_at as a reasonable proxy.  Idempotent (WHERE created_at = 0).
+    * Lower bound >= 35: the created_at column only exists from v35 onward. */
+   if (current_version >= 35 && current_version < 37) {
+      const char *v37_sql = "UPDATE document_chunks SET created_at = "
+                            "(SELECT d.created_at FROM documents d "
+                            "WHERE d.id = document_chunks.document_id) "
+                            "WHERE created_at = 0;";
+      rc = sqlite3_exec(s_db.db, v37_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v37 migration (chunk created_at backfill): %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         int affected = sqlite3_changes(s_db.db);
+         OLOG_INFO("auth_db: backfilled created_at on %d document chunks (v37)", affected);
+      }
+   }
+
+   /* v38 migration: summary_nodes table for LCM Phase 4 (hierarchical summaries).
+    * Each compaction creates a node linking to its predecessor, enabling multi-resolution
+    * drill-down via the context_expand tool. */
+   if (current_version < 38) {
+      const char *v38_sql =
+          "CREATE TABLE IF NOT EXISTS summary_nodes ("
+          "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+          "conversation_id INTEGER NOT NULL, "
+          "prior_node_id INTEGER, "
+          "depth INTEGER NOT NULL DEFAULT 0, "
+          "msg_id_start INTEGER NOT NULL, "
+          "msg_id_end INTEGER NOT NULL, "
+          "level INTEGER NOT NULL DEFAULT 0, "
+          "summary_text TEXT NOT NULL, "
+          "token_count INTEGER, "
+          "created_at INTEGER, "
+          "FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE, "
+          "FOREIGN KEY (prior_node_id) REFERENCES summary_nodes(id) ON DELETE SET NULL)";
+      rc = sqlite3_exec(s_db.db, v38_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v38 migration (summary_nodes) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: created summary_nodes table (v38)");
+   }
+
+   /* v39 migration: extraction recovery tracking on conversations.
+    * extraction_attempts: incremented before each recovery trigger, reset on success.
+    *   Capped by config max_attempts to prevent poison-pill loops.
+    * extraction_last_attempt_at: unix timestamp of last recovery attempt (0 = never).
+    * The `>= 1` guard mirrors v3-v17 — fresh installs (current_version == 0) get
+    * the columns from SCHEMA_SQL and don't need the ALTER. */
+   if (current_version >= 1 && current_version < 39) {
+      const char *v39_attempts =
+          "ALTER TABLE conversations ADD COLUMN extraction_attempts INTEGER DEFAULT 0";
+      rc = sqlite3_exec(s_db.db, v39_attempts, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v39 migration (extraction_attempts) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      const char *v39_last =
+          "ALTER TABLE conversations ADD COLUMN extraction_last_attempt_at INTEGER DEFAULT 0";
+      rc = sqlite3_exec(s_db.db, v39_last, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v39 migration (extraction_last_attempt_at) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      OLOG_INFO("auth_db: added extraction recovery columns (v39)");
+   }
+
+   /* v40 migration: memory provenance + ID-based extraction cursor.
+    * source_conversation_id / source_msg_id_start / source_msg_id_end link
+    * each extracted item back to the message range that produced it.
+    * last_extracted_msg_id is the role-agnostic extraction cursor (replaces
+    * the count-based cursor on fresh paths going forward; count retained for
+    * back-compat one release cycle).
+    * Note: migrated DBs omit the FK clause — SQLite cannot add FKs retroactively.
+    * Fresh installs get the FK via SCHEMA_SQL. */
+   if (current_version >= 1 && current_version < 40) {
+      /* Wrap in a transaction so a crash mid-migration leaves the schema clean.
+       * Each ALTER is idempotent via duplicate-column check on re-run. */
+      rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v40 migration BEGIN failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         static const char *const v40_alters[] = {
+            "ALTER TABLE memory_facts       ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_facts       ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_facts       ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_relations   ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_relations   ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_relations   ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_summaries   ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_summaries   ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_summaries   ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_preferences ADD COLUMN source_conversation_id INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_preferences ADD COLUMN source_msg_id_start    INTEGER DEFAULT NULL",
+            "ALTER TABLE memory_preferences ADD COLUMN source_msg_id_end      INTEGER DEFAULT NULL",
+            "ALTER TABLE conversations      ADD COLUMN last_extracted_msg_id  INTEGER NOT NULL "
+            "DEFAULT 0",
+            NULL,
+         };
+         for (int ai = 0; v40_alters[ai]; ai++) {
+            char *v40_err = NULL;
+            int v40_rc = sqlite3_exec(s_db.db, v40_alters[ai], NULL, NULL, &v40_err);
+            if (v40_rc != SQLITE_OK && !(v40_err && strstr(v40_err, "duplicate column"))) {
+               OLOG_WARNING("auth_db: v40 migration ALTER failed: %s",
+                            v40_err ? v40_err : "unknown");
+            }
+            sqlite3_free(v40_err);
+         }
+         rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_WARNING("auth_db: v40 migration COMMIT failed: %s", errmsg ? errmsg : "unknown");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+         }
+         OLOG_INFO("auth_db: added memory provenance columns + last_extracted_msg_id (v40)");
+      }
+   }
+
+   /* v41 migration: system_metadata table + users.embeddings_model_id.
+    * system_metadata is a generic key/value store for daemon-level state.
+    * embeddings_model_id mirrors the categories_backfilled_at pattern — NULL
+    * means the user's embeddings pre-date the current model and need recomputing. */
+   if (current_version >= 1 && current_version < 41) {
+      rc = sqlite3_exec(s_db.db,
+                        "BEGIN IMMEDIATE;"
+                        "CREATE TABLE IF NOT EXISTS system_metadata ("
+                        "   key   TEXT PRIMARY KEY,"
+                        "   value TEXT NOT NULL"
+                        ");"
+                        "COMMIT;",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v41 migration (system_metadata) returned: %s",
+                      errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      } else {
+         OLOG_INFO("auth_db: created system_metadata table (v41)");
+      }
+
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE users ADD COLUMN embeddings_model_id TEXT DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v41 migration (embeddings_model_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+      OLOG_INFO("auth_db: added embeddings_model_id to users (v41)");
+   }
+
+   /* v42 migration: conversations.anchor_date for cat-2 temporal extraction.
+    * Holds the conversation's logical anchor timestamp (epoch seconds).  Production
+    * conv_db_create_* writers populate at insert with time(NULL); the bench harness
+    * passes session_X_date_time so LoCoMo's synthetic anchors flow through.  Read by
+    * memory_extraction.c when building the prompt so the LLM can resolve relative
+    * temporal phrases ("yesterday", "last month", "five years ago") against it.
+    *
+    * Default 0 (= ANCHOR_DATE_NONE) for legacy rows; the extraction prompt omits
+    * the anchor line when this is 0.  The literal-constant default is required for
+    * SQLite's O(1) metadata-only ALTER path — switching to strftime() or
+    * CURRENT_TIMESTAMP would silently regress this to a full-table rewrite under
+    * the auth_db lock at startup.  See atlas/dawn/memory/CAT2_TEMPORAL.md L1+L5. */
+   if (current_version >= 1 && current_version < 42) {
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE conversations ADD COLUMN anchor_date INTEGER NOT NULL DEFAULT 0",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v42 migration (anchor_date) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added anchor_date to conversations (v42)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v43 migration: entity-merge / user-identity-dedup workstream.
+    *   memory_entities.canonical_id  — soft alias self-FK (NULL = self is canonical).
+    *                                   ON DELETE SET NULL so dropping a canonical
+    *                                   demotes its aliases to canonical rather than
+    *                                   cascade-deleting them.
+    *   memory_entities.is_user_self  — exactly-one-per-user flag, enforced by the
+    *                                   partial UNIQUE index in the post-migration block.
+    *   memory_entity_aliases         — append-only audit log for soft/hard merges.
+    *   memory_entity_merge_proposals — review band staging for the Phase 2 auto-merge
+    *                                   gate.
+    * Both ALTER ADD COLUMNs use literal-constant defaults (NULL and 0) so SQLite
+    * takes the O(1) metadata-only path — no full-table rewrite under the auth_db
+    * lock at startup.  See docs/ENTITY_MERGE_DESIGN.md §3. */
+   if (current_version >= 1 && current_version < 43) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_entities ADD COLUMN canonical_id INTEGER DEFAULT NULL "
+                        "REFERENCES memory_entities(id) ON DELETE SET NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v43 migration (canonical_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added canonical_id to memory_entities (v43)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE memory_entities ADD COLUMN is_user_self INTEGER NOT NULL DEFAULT 0",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v43 migration (is_user_self) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added is_user_self to memory_entities (v43)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      const char *v43_tables_sql =
+          "CREATE TABLE IF NOT EXISTS memory_entity_aliases ("
+          "  id                    INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id               INTEGER NOT NULL,"
+          "  source_entity_id      INTEGER,"
+          "  target_entity_id      INTEGER NOT NULL,"
+          "  source_canonical_name TEXT NOT NULL,"
+          "  target_canonical_name TEXT NOT NULL,"
+          "  link_kind             TEXT NOT NULL,"
+          "  reason                TEXT NOT NULL,"
+          "  composite_score       REAL,"
+          "  evidence_json         TEXT,"
+          "  linked_at             INTEGER NOT NULL,"
+          "  consolidated_at       INTEGER,"
+          "  unlinked_at           INTEGER,"
+          "  unlink_reason         TEXT,"
+          "  FOREIGN KEY (user_id)          REFERENCES users(id)           ON DELETE CASCADE,"
+          "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
+          "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL"
+          ");"
+          "CREATE TABLE IF NOT EXISTS memory_entity_merge_proposals ("
+          "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "  user_id          INTEGER NOT NULL,"
+          "  source_entity_id INTEGER NOT NULL,"
+          "  target_entity_id INTEGER NOT NULL,"
+          "  composite_score  REAL NOT NULL,"
+          "  evidence_json    TEXT NOT NULL,"
+          "  proposed_at      INTEGER NOT NULL,"
+          "  resolved_at      INTEGER,"
+          "  resolution       TEXT,"
+          "  FOREIGN KEY (user_id)          REFERENCES users(id)           ON DELETE CASCADE,"
+          "  FOREIGN KEY (source_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
+          "  FOREIGN KEY (target_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE"
+          ");";
+
+      rc = sqlite3_exec(s_db.db, v43_tables_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v43 migration (alias tables) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+      OLOG_INFO("auth_db: created memory_entity_aliases + memory_entity_merge_proposals (v43)");
+   }
+
+   /* v44 migration: user-identity fields on the users table.
+    *   real_name         — required by the link-user-self synthetic-seed path
+    *                       (gate enforced in memory_alias_link_user_self_run).
+    *                       Surfaced in WebUI Settings → User → Real name.
+    *   preferred_address — optional; injected into the LLM system prompt as
+    *                       "They prefer to be addressed as ..." for personas.
+    *   identity_aliases  — optional newline-separated list of alternate names
+    *                       (nicknames, formal names, email handles).  Parsed
+    *                       at use-site (split on \n, strip whitespace, drop
+    *                       empties, dedupe case-insensitive).  Feeds both the
+    *                       system prompt and the synthetic-self resolver token
+    *                       set in Phase 1.5 Ckpt B.
+    * All three are nullable TEXT with DEFAULT NULL — literal-constant default
+    * → SQLite's O(1) metadata-only ALTER TABLE path so startup doesn't take a
+    * full-table rewrite under the auth_db lock. */
+   if (current_version >= 1 && current_version < 44) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE users ADD COLUMN real_name TEXT DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v44 migration (real_name) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added real_name to users (v44)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE users ADD COLUMN preferred_address TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v44 migration (preferred_address) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added preferred_address to users (v44)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE users ADD COLUMN identity_aliases TEXT DEFAULT NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v44 migration (identity_aliases) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added identity_aliases to users (v44)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v45: semantic search on memory_summaries.  Adds an `embedding BLOB`
+    * column on memory_summaries (NULL default — existing rows stay
+    * unembedded; the recompute worker backfills on next boot the same way
+    * it handles facts and entities after a model swap).
+    *
+    * Literal-constant default → SQLite's O(1) ALTER fast path, no row
+    * rewrite. */
+   if (current_version >= 1 && current_version < 45) {
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_summaries ADD COLUMN embedding BLOB DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v45 migration (memory_summaries.embedding) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added embedding column to memory_summaries (v45)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v46: force a recompute pass for every user so the v45-added summary
+    * embedding column gets backfilled.  The recompute worker's model_id
+    * gate only fires when the embedding *model* changes — adding a new
+    * embedding column doesn't change that, so without this nudge the
+    * historical summaries stay unembedded indefinitely and the semantic
+    * summary adapter only sees rows created after v45 ships.
+    *
+    * Side effect: every user's facts + entities also get re-embedded.
+    * Wasted work, but bounded (the dev's ~2k facts + 300 entities + 270
+    * summaries take ~10 seconds total against the local ONNX engine).
+    * Justified by avoiding the per-pass-metadata refactor that the
+    * recompute "all-three-or-redo-all" trade-off comment in
+    * src/memory/memory_embed_recompute.c references. */
+   if (current_version >= 1 && current_version < 46) {
+      rc = sqlite3_exec(s_db.db, "UPDATE users SET embeddings_model_id = NULL", NULL, NULL,
+                        &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v46 migration (reset embeddings_model_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: reset users.embeddings_model_id to trigger v45 summary "
+                   "embedding backfill (v46)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v47 migration: add memory_facts.subject_entity_id as a hard FK from each
+    * fact to the entity it's about.  Backfill from existing memory_relations
+    * rows where fact_id is set — that captures the ~17% of facts that already
+    * have a linked relation.  The remaining ~83% stay NULL until a re-extract
+    * under the new Phase 0 prompt populates them at insert time.  A follow-up
+    * migration tightens NOT NULL once backfill + re-extract complete.
+    *
+    * Phase 0 design: facts MUST carry an entity FK so graph traversal can
+    * go fact → entity directly without the relations table hop, AND so the
+    * Phase 2 entity-merge resolver's cascading effects automatically apply
+    * to facts the same way they apply to relations.  See
+    * docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md §"C-side changes required" #3.
+    *
+    * NULLABLE during the migration window — re-extract uses the new prompt
+    * which fills subject_entity_id at insert time via the existing entity
+    * resolver, so the column populates organically as users use the system.
+    *
+    * Literal-NULL default → SQLite O(1) ALTER fast path. */
+   if (current_version >= 1 && current_version < 47) {
+      rc = sqlite3_exec(
+          s_db.db, "ALTER TABLE memory_facts ADD COLUMN subject_entity_id INTEGER DEFAULT NULL",
+          NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_WARNING("auth_db: v47 migration (memory_facts.subject_entity_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: added subject_entity_id column to memory_facts (v47)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      /* Backfill from memory_relations.  For each fact that has at least one
+       * linked relation, copy the subject_entity_id of that relation onto the
+       * fact.  When a fact has multiple linked relations (typical), MIN() is
+       * a stable deterministic pick — the subject of the lowest-id linked
+       * relation, which is usually the primary relation emitted first by the
+       * extraction LLM.  Facts with no linked relations stay NULL and rely
+       * on re-extraction to populate. */
+      rc = sqlite3_exec(s_db.db,
+                        "UPDATE memory_facts "
+                        "   SET subject_entity_id = ("
+                        "     SELECT MIN(r.subject_entity_id) "
+                        "       FROM memory_relations r "
+                        "      WHERE r.fact_id = memory_facts.id "
+                        "        AND r.subject_entity_id IS NOT NULL"
+                        "   ) "
+                        " WHERE subject_entity_id IS NULL",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: v47 migration (backfill subject_entity_id) returned: %s",
+                      errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO(
+             "auth_db: backfilled memory_facts.subject_entity_id from linked relations (v47)");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v48 migration: BM25 keyword index via FTS5 virtual table.
+    * docs/MEM0_ARCHITECTURAL_PARITY.md Phase 1.  Algorithm + sigmoid
+    * normalization adapted from mem0ai/mem0 (Apache-2.0).  See NOTICE.
+    *
+    * Tracks v48_ok across both CREATE and backfill — only allows the
+    * schema_version bump below if BOTH succeed.  Without this, a
+    * transient CREATE failure would leave the DB advertised as v48 with
+    * no FTS5 table; subsequent boots would skip the migration block,
+    * prepare_statements would fail on stmt_memory_fact_search_bm25 prep,
+    * and the daemon would refuse to start with no operator-visible
+    * recovery path. */
+   /* v48 is OK without running the migration block in two cases:
+    * (a) DB is already at v48 or newer (nothing to do).
+    * (b) Fresh install (current_version == 0) — SCHEMA_SQL creates the
+    *     memory_facts_fts virtual table directly, so the migration block
+    *     (which only fires on >= 1 && < 48) is correctly skipped and
+    *     the schema_version bump still needs to proceed. */
+   bool v48_ok = (current_version >= 48) || (current_version == 0);
+   if (current_version >= 1 && current_version < 48) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5("
+                        "   fact_stems,"
+                        "   tokenize='unicode61 remove_diacritics 2',"
+                        "   content=''"
+                        ")",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v48 migration (memory_facts_fts CREATE) failed: %s — "
+                    "leaving schema_version at %d so next boot retries",
+                    errmsg ? errmsg : "unknown", current_version);
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: created memory_facts_fts virtual table (v48)");
+
+         /* Backfill from existing memory_facts.  Stemming runs in C —
+          * SQL triggers can't call libstemmer.  Wrap the inserts in a
+          * single transaction so the backfill is atomic across thousands
+          * of rows. */
+         (void)memory_stem_init();
+         int backfill_count = 0;
+         int backfill_errors = 0;
+         sqlite3_stmt *select_stmt = NULL;
+         sqlite3_stmt *insert_stmt = NULL;
+         int prep_rc = sqlite3_prepare_v2(s_db.db, "SELECT id, fact_text FROM memory_facts", -1,
+                                          &select_stmt, NULL);
+         if (prep_rc == SQLITE_OK) {
+            prep_rc = sqlite3_prepare_v2(
+                s_db.db, "INSERT INTO memory_facts_fts(rowid, fact_stems) VALUES (?, ?)", -1,
+                &insert_stmt, NULL);
+         }
+         int commit_rc = SQLITE_DONE;
+         if (prep_rc == SQLITE_OK) {
+            (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+            while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+               int64_t fid = sqlite3_column_int64(select_stmt, 0);
+               const unsigned char *txt = sqlite3_column_text(select_stmt, 1);
+               char stems[MEMORY_FACT_STEMS_MAX];
+               int n_stems = memory_stem_string((const char *)txt, stems, sizeof(stems));
+               sqlite3_reset(insert_stmt);
+               sqlite3_bind_int64(insert_stmt, 1, fid);
+               sqlite3_bind_text(insert_stmt, 2, stems, -1, SQLITE_TRANSIENT);
+               if (sqlite3_step(insert_stmt) != SQLITE_DONE) {
+                  backfill_errors++;
+               } else if (n_stems > 0) {
+                  backfill_count++;
+               }
+            }
+            commit_rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+         }
+         if (select_stmt)
+            sqlite3_finalize(select_stmt);
+         if (insert_stmt)
+            sqlite3_finalize(insert_stmt);
+         /* Promote log level when partial-failure occurred so operators
+          * see it. */
+         if (backfill_errors > 0) {
+            OLOG_WARNING("auth_db: v48 BM25 backfill PARTIAL: %d indexed, %d failed — "
+                         "some facts will not surface via BM25 keyword search until next "
+                         "fact_create writes a new memory_facts_fts row or a manual rebuild",
+                         backfill_count, backfill_errors);
+         } else {
+            OLOG_INFO("auth_db: v48 BM25 backfill complete: %d facts indexed", backfill_count);
+         }
+         /* Mark v48 successful only when prep, commit, and statement
+          * preparation all came through cleanly.  Partial backfill (some
+          * errors but commit succeeded) still advances the version —
+          * those rows just won't surface until a manual rebuild; not
+          * worth blocking the entire migration. */
+         if (prep_rc == SQLITE_OK && commit_rc == SQLITE_OK) {
+            v48_ok = true;
+         } else {
+            OLOG_ERROR("auth_db: v48 migration COMMIT or statement prep failed — "
+                       "leaving schema_version at %d so next boot retries",
+                       current_version);
+         }
+      }
+   }
+
+   /* Create indexes that depend on migration-added columns.
+    * Runs for both fresh installs and migrations — must come after all migrations. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_conversations_continued "
+                     "ON conversations(continued_from)",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create continuation index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_summary_nodes_conv "
+                     "ON summary_nodes(conversation_id)",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create summary_nodes index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v47 post-migration index: idx_memory_facts_subject supports the
+    * fact-to-entity reverse lookup that graph traversal will use ("give me
+    * every fact whose subject is entity X").  Created here because on an
+    * existing pre-v47 DB the column doesn't exist until the ALTER TABLE
+    * above runs — same pattern as v34's category index. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_subject "
+                     "ON memory_facts(user_id, subject_entity_id) "
+                     "WHERE subject_entity_id IS NOT NULL",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory_facts subject index: %s",
+                   errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_images_retention "
+                     "ON images(retention_policy)",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create retention index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* Indexes on migration-added columns (v33/v34/v43).  Must run here rather
+    * than in SCHEMA_SQL because on an existing pre-migration DB, CREATE TABLE
+    * IF NOT EXISTS is a no-op, so the new columns don't exist until migrations
+    * run.  Migrations also create these indexes but only fire on DBs with
+    * current_version >= 1 — fresh installs (version 0) skip all migrations
+    * and reach this block instead. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category "
+                     "ON memory_facts(user_id, category);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity "
+                     "ON memory_relations(user_id, valid_to);"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open "
+                     "ON memory_relations(subject_entity_id, relation) "
+                     "WHERE valid_to IS NULL",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory v33/v34 indexes: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v43 indexes.  idx_memory_entities_user_self is a partial UNIQUE index
+    * enforcing the one-self-per-user invariant — a second is_user_self=1 row
+    * for the same user_id will fail the constraint.  The two partial indexes
+    * on memory_entities both depend on v43 columns; the alias / proposal
+    * indexes depend on the v43 tables.  All five are CREATE IF NOT EXISTS so
+    * they're idempotent across fresh-install + migration paths.
+    *
+    * idx_contacts_field_lvalue (functional index on lower(value)) backs the
+    * contacts self-join inside compute_contact_field_overlap.  Without it,
+    * the alias scorer's inner contact-pair JOIN runs O(N²) over a user's
+    * contacts on every score_pair call (Phase 2 will fire that on every
+    * extraction).  With the index it's O(log N) per JOIN.  No schema
+    * version bump needed — index creation is purely an optimization that
+    * back-fills cleanly on the dev's existing DB at next boot. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_entities_canonical "
+                     "ON memory_entities(canonical_id) WHERE canonical_id IS NOT NULL;"
+                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entities_user_self "
+                     "ON memory_entities(user_id) WHERE is_user_self = 1;"
+                     "CREATE INDEX IF NOT EXISTS idx_memory_entity_aliases_user_target "
+                     "ON memory_entity_aliases(user_id, target_entity_id) "
+                     "WHERE unlinked_at IS NULL;"
+                     "CREATE INDEX IF NOT EXISTS idx_merge_proposals_pending "
+                     "ON memory_entity_merge_proposals(user_id, proposed_at) "
+                     "WHERE resolved_at IS NULL;"
+                     "CREATE INDEX IF NOT EXISTS idx_contacts_field_lvalue "
+                     "ON contacts(user_id, field_type, lower(value))",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory v43 indexes: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* Log migration if upgrading from an older version */
+   if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
+      OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
+                AUTH_DB_SCHEMA_VERSION);
+   } else if (current_version == 0) {
+      OLOG_INFO("auth_db: created schema v%d", AUTH_DB_SCHEMA_VERSION);
+   }
+
+   /* Only update schema_version if we actually migrated or created fresh,
+    * AND every per-version migration step that gates a bump succeeded.
+    * `v48_ok` is the tracking flag for the v48 (FTS5 / BM25) migration —
+    * extend the conjunction below as future migrations add their own
+    * success gates.  Without this, a transient CREATE / backfill failure
+    * would leave the DB advertised as v48 with no FTS5 table, and the
+    * next boot's prepare_statements pass would fail (hard) on the BM25
+    * statement prep, with no operator-visible recovery path.
+    *
+    * Never downgrade — prevents old code from corrupting a newer DB. */
+   const bool ready_to_bump = v48_ok;
+   if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
+      rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_WARNING("auth_db: failed to clear schema_version: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+      rc = sqlite3_exec(s_db.db,
+                        "INSERT INTO schema_version (version) VALUES (" STRINGIFY(
+                            AUTH_DB_SCHEMA_VERSION) ")",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: failed to set schema version: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+   } else if (current_version > AUTH_DB_SCHEMA_VERSION) {
+      OLOG_WARNING("auth_db: database is newer (v%d) than code (v%d) — not downgrading",
+                   current_version, AUTH_DB_SCHEMA_VERSION);
+   } else if (current_version < AUTH_DB_SCHEMA_VERSION && !ready_to_bump) {
+      OLOG_WARNING("auth_db: schema_version held at v%d (target v%d) — one or more migration "
+                   "steps failed; daemon will retry on next boot",
+                   current_version, AUTH_DB_SCHEMA_VERSION);
+   }
+
+   return AUTH_DB_SUCCESS;
+}
