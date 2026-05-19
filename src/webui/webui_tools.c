@@ -37,6 +37,10 @@
 #include "webui/webui_internal.h"
 
 void handle_get_tools_config(ws_connection_t *conn) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
    json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("get_tools_config_response"));
 

@@ -496,6 +496,23 @@ void webui_send_conversation_reset(struct session *session);
  */
 int webui_process_text_input(struct session *session, const char *text);
 
+/**
+ * @brief Process text input message with optional vision images.
+ *
+ * Like `webui_process_text_input` but accepts up to
+ * `WEBUI_MAX_VISION_IMAGES_CAP` base64-encoded images.  Pass NULL/0 for
+ * the vision arrays to behave as the plain text variant.  Defined in
+ * webui_text_processing.c.
+ *
+ * @return 0 on success, non-zero on error
+ */
+int webui_process_text_input_with_vision(struct session *session,
+                                         const char *text,
+                                         const char **vision_images,
+                                         const size_t *vision_image_sizes,
+                                         const char **vision_mimes,
+                                         int vision_image_count);
+
 /* =============================================================================
  * Real-Time Metrics for UI Visualization
  *

@@ -32,6 +32,11 @@
 
 #include "core/scheduler_db.h"
 
+/* Forward decl for scheduler_send_tts_to_session below; avoids pulling
+ * core/session_manager.h into every scheduler consumer. */
+struct session;
+typedef struct session session_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -101,6 +106,30 @@ int scheduler_dismiss(int64_t event_id);
  * @return SUCCESS or FAILURE if nothing to snooze
  */
 int scheduler_snooze(int64_t event_id, int snooze_minutes);
+
+/* =============================================================================
+ * Notification Broadcast Hooks
+ *
+ * Weak default-stubs live in scheduler.c so the scheduler builds without
+ * the WebUI.  Strong overrides live in src/webui/webui_broadcasts.c and
+ * fan out via the active-connection registry.  Called from scheduler
+ * fire/dismiss paths AND from the WebUI dispatcher when rebroadcasting
+ * after a no-op dismiss.
+ * ============================================================================= */
+
+void scheduler_broadcast_notification(const sched_event_t *event, const char *text);
+void scheduler_broadcast_briefing_notification(const sched_event_t *event,
+                                               const char *text,
+                                               int64_t conversation_id);
+int scheduler_route_tts_to_user(int user_id,
+                                const char *text,
+                                const char *skip_uuid,
+                                int skip_user_id);
+
+/* Weak/strong override sibling to scheduler_broadcast_*.  Strong definition
+ * lives in src/webui/webui_audio.c so TTS can play through an active WebUI
+ * session; the scheduler.c stub is the no-op default. */
+void scheduler_send_tts_to_session(session_t *session, const char *text);
 
 /* =============================================================================
  * Alarm Sound

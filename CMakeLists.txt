@@ -563,6 +563,12 @@ endif()
 if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/webui/webui_server.c
+        src/webui/webui_text_processing.c
+        src/webui/webui_vision_validate.c
+        src/webui/webui_auth_helpers.c
+        src/webui/webui_broadcasts.c
+        src/webui/webui_message_dispatch.c
+        src/webui/webui_send.c
         src/webui/build_focus_block.c
         src/webui/webui_http.c
         src/webui/webui_admin.c

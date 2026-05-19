@@ -325,27 +325,113 @@ extern pthread_mutex_t s_token_mutex;
 
 /* Discovery cache and allowed path prefixes are module-local in webui_config.c */
 
+/* Send-side pipeline (queue + send_*_impl + audio sends) moved to
+ * webui/webui_send.h.  Included below for backward compatibility with
+ * webui_*.c modules that include webui_internal.h. */
+
 /* =============================================================================
- * Response Queue Functions
+ * Active-connection registry (storage in webui_server.c)
+ *
+ * Exposed to sibling modules (webui_broadcasts.c) that iterate the
+ * registry under s_conn_registry_mutex to fan messages out to all active
+ * clients of a user.  Direct access is intentional — alternative would
+ * require an iterator-callback API for every broadcast shape.
  * ============================================================================= */
 
-/**
- * @brief Queue a response for delivery to WebSocket client
- *
- * Thread-safe. Wakes the LWS event loop via lws_cancel_service().
- *
- * @param resp Response to queue (copied, caller retains ownership)
- */
-void queue_response(ws_response_t *resp);
+#define MAX_ACTIVE_CONNECTIONS 64
+
+extern ws_connection_t *s_active_connections[MAX_ACTIVE_CONNECTIONS];
+extern pthread_mutex_t s_conn_registry_mutex;
 
 /**
- * @brief Free dynamically allocated members of a response
+ * @brief Deliver queued missed scheduler notifications to a connection.
  *
- * Called after response is sent. Frees strings/buffers based on type.
- *
- * @param resp Response to free
+ * Called after cookie-based auth completes at WebSocket open.  Reads up
+ * to MISSED_NOTIF_DELIVERY_BATCH queued notifications for the user and
+ * emits them as regular scheduler_notification messages with a "missed"
+ * flag.  Defined in webui_broadcasts.c.
  */
-void free_response(ws_response_t *resp);
+void deliver_missed_notifications(ws_connection_t *conn);
+
+/**
+ * @brief Silent-observe event listener registered with llm_silent_observe().
+ *
+ * Fans the observation out to the silent-observer's owning user (or all
+ * authenticated sessions for system-scoped events).  Defined in
+ * webui_broadcasts.c, registered in webui_server_init().
+ */
+void webui_broadcast_silent_observation(const char *category,
+                                        const char *note,
+                                        int user_id,
+                                        bool filter_match);
+
+/**
+ * @brief Central WebSocket JSON-message dispatcher.
+ *
+ * Parses one JSON message from the client, looks up the `type` field,
+ * and routes to the appropriate `handle_*` helper.  Defined in
+ * webui_message_dispatch.c; called from the LWS protocol callback in
+ * webui_server.c on every text-frame receive.
+ */
+void handle_json_message(ws_connection_t *conn, const char *data, size_t len);
+
+/**
+ * @brief Handle a `text` message — text input from the user with optional
+ * vision images.  Defined in webui_server.c; called from
+ * handle_json_message in webui_message_dispatch.c.
+ */
+void handle_text_message(ws_connection_t *conn,
+                         const char *text,
+                         size_t len,
+                         const char **vision_images,
+                         const size_t *vision_image_sizes,
+                         const char **vision_mimes,
+                         int vision_image_count);
+
+/**
+ * @brief Handle a `get_metrics` message — emit the current session-metrics
+ * snapshot to the client.  Defined in webui_server.c.
+ */
+void handle_get_metrics(ws_connection_t *conn);
+
+/**
+ * @brief Handle smart-home messages (Home Assistant family).
+ *
+ * Returns true if @p type matched a smart-home message and was
+ * dispatched, false otherwise — caller continues the else-if chain.
+ * Defined in webui_server.c.
+ */
+bool handle_smart_home_message(ws_connection_t *conn,
+                               const char *type,
+                               struct json_object *payload);
+
+/**
+ * @brief Queue init/state messages onto a freshly-authenticated connection.
+ *
+ * Defined in webui_send.c.  Called by the dispatcher in
+ * webui_message_dispatch.c on session_init / login.
+ */
+void queue_init_messages(ws_connection_t *conn, const char *token);
+
+/**
+ * @brief Validate base64-encoded image data (security-hardened).
+ *
+ * MIME whitelist + size cap + base64-charset + magic-byte check.  Defined
+ * in webui_vision_validate.c.
+ *
+ * INTERNAL TO THE WEBUI MODULE.  Callers MUST enforce an upstream byte cap
+ * on `base64_len` (the WebSocket receive cap is the established
+ * boundary).  Passing an unbounded `base64_len` up to
+ * `WEBUI_MAX_BASE64_SIZE` will allocate a multi-megabyte decode buffer
+ * even though only the 24-byte prefix is decoded here — the size check
+ * defends amplification against the *upstream* allocation, not this
+ * function's own.
+ *
+ * @return 0 on success, 1-5 on failure (see implementation for codes)
+ */
+int validate_image_data(const char *base64_data, size_t base64_len, const char *mime_type);
+
+/* free_response moved to webui/webui_send.h */
 
 /* =============================================================================
  * Token Mapping Functions
@@ -373,64 +459,9 @@ void unregister_tokens_for_session(uint32_t session_id);
  */
 session_t *lookup_session_by_token(const char *token);
 
-/* =============================================================================
- * WebSocket Send Helpers
- *
- * send_json_response() — safe from any context, routes through the response
- * queue ensuring one lws_write() per WRITEABLE callback.
- *
- * send_json_message() — LWS SERVICE THREAD ONLY, calls lws_write() directly.
- * Only safe from within process_one_response() or similar WRITEABLE-driven
- * code paths. For handler code, prefer send_json_response().
- * ============================================================================= */
-
-/**
- * @brief Send JSON text message to WebSocket client
- *
- * WARNING: LWS service thread only — do NOT call from worker/tool threads.
- * Use queue_response() with an appropriate WS_RESP_* type instead.
- *
- * @param wsi WebSocket instance
- * @param json JSON string to send
- * @return 0 on success, LWS_CLOSE_CONNECTION on error
- */
-int send_json_message(struct lws *wsi, const char *json);
-
-/**
- * @brief Send binary message with type byte prefix
- *
- * WARNING: LWS service thread only — do NOT call from worker/tool threads.
- *
- * @param wsi WebSocket instance
- * @param msg_type Message type (WS_BIN_* constant)
- * @param data Payload data (may be NULL if len=0)
- * @param len Payload length
- * @return 0 on success, LWS_CLOSE_CONNECTION on error
- */
-int send_binary_message(struct lws *wsi, uint8_t msg_type, const uint8_t *data, size_t len);
-
-/**
- * @brief Send state update to WebSocket client
- */
-void send_state_impl(struct lws *wsi, const char *state, const char *detail);
-
-/**
- * @brief Send state update with optional tools JSON
- */
-void send_state_impl_full(struct lws *wsi,
-                          const char *state,
-                          const char *detail,
-                          const char *tools_json);
-
-/**
- * @brief Send audio chunk to WebSocket client
- */
-void send_audio_impl(struct lws *wsi, const uint8_t *data, size_t len);
-
-/**
- * @brief Send audio end marker to WebSocket client
- */
-void send_audio_end_impl(struct lws *wsi, bool is_opus);
+/* WebSocket Send Helpers (send_json_message, send_binary_message,
+ * send_state_impl(_full), send_audio_impl, send_audio_end_impl) moved to
+ * webui/webui_send.h. */
 
 /* =============================================================================
  * Path Security Helpers
@@ -663,502 +694,6 @@ int dawn_build_prompt(int user_id,
  */
 char *webui_process_commands(const char *llm_response, session_t *session);
 
-/* =============================================================================
- * Admin Handler Functions (defined in webui_admin.c)
- * ============================================================================= */
-
-/**
- * @brief List all users (admin only)
- */
-void handle_list_users(ws_connection_t *conn);
-
-/**
- * @brief Create a new user (admin only)
- */
-void handle_create_user(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a user (admin only)
- */
-void handle_delete_user(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Change user password (admin for any user, or user for self)
- */
-void handle_change_password(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Unlock a locked user account (admin only)
- */
-void handle_unlock_user(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Conversation Context Restore (defined in webui_server.c)
- * ============================================================================= */
-
-/**
- * @brief Restore conversation context into a session from DB
- *
- * Clears session history, rebuilds with system prompt + compaction summary +
- * stored messages, and restores LLM config (type, provider, model, tools,
- * thinking).
- *
- * Used by both webui_conn_create_session (session expiry recovery) and
- * handle_load_conversation (sidebar click). Caller owns the conversation_t
- * and must call conv_free() after this returns.
- *
- * @param conn Connection with authenticated user
- * @param conv Conversation metadata (already fetched via conv_db_get)
- * @param conv_id Conversation ID
- * @param preloaded_msgs Optional pre-fetched message array (json_object array
- *        with "role" and "content" fields per element). If NULL, messages are
- *        fetched from the DB. Caller retains ownership; not freed by this function.
- * @return Number of messages restored, or LWS_CLOSE_CONNECTION on error
- */
-int webui_restore_conversation_context(ws_connection_t *conn,
-                                       const conversation_t *conv,
-                                       int64_t conv_id,
-                                       json_object *preloaded_msgs);
-
-/* =============================================================================
- * History Handler Functions (defined in webui_history.c)
- * ============================================================================= */
-
-/**
- * @brief List conversations for the current user
- */
-void handle_list_conversations(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Create a new conversation
- */
-void handle_new_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Clear session history for a fresh start
- */
-void handle_clear_session(ws_connection_t *conn);
-
-/**
- * @brief Continue a conversation (after context compaction)
- */
-void handle_continue_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Load a conversation and its messages
- */
-void handle_load_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a conversation
- */
-void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Rename a conversation
- */
-void handle_rename_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Set private mode for a conversation
- *
- * Private conversations are excluded from memory extraction.
- */
-void handle_set_private(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Export a conversation as a self-contained JSON document
- */
-void handle_export_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Search conversations by title or content
- */
-void handle_search_conversations(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Save a message to a conversation
- */
-void handle_save_message(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Update context usage for a conversation
- */
-void handle_update_context(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Lock LLM settings for a conversation
- *
- * Called when first message is sent. Stores the current LLM settings.
- */
-void handle_lock_conversation_llm(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Reassign a conversation to a different user (admin only)
- *
- * Used to reassign voice conversations to different users after they
- * have been saved from local/DAP sessions.
- */
-void handle_reassign_conversation(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Memory Handler Functions (defined in webui_memory.c)
- * ============================================================================= */
-
-/**
- * @brief Get memory statistics for the current user
- */
-void handle_get_memory_stats(ws_connection_t *conn);
-
-/**
- * @brief List memory facts for the current user (paginated)
- */
-void handle_list_memory_facts(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a memory fact
- */
-void handle_delete_memory_fact(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief List memory preferences for the current user (paginated)
- */
-void handle_list_memory_preferences(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a memory preference by category
- */
-void handle_delete_memory_preference(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief List memory summaries for the current user (paginated)
- */
-void handle_list_memory_summaries(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a memory summary
- */
-void handle_delete_memory_summary(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Search memory facts and summaries by keyword
- */
-void handle_search_memory(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief List memory entities with relations (paginated)
- */
-void handle_list_memory_entities(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a memory entity and its relations
- */
-void handle_delete_memory_entity(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Merge two memory entities (source absorbed into target)
- */
-void handle_merge_memory_entities(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Entity-merge alias surface (v43) — five WebSocket handlers per
- * docs/ENTITY_MERGE_DESIGN.md §14.
- * ============================================================================= */
-void handle_entity_aliases_request(ws_connection_t *conn, struct json_object *payload);
-void handle_entity_merge_proposal_list_request(ws_connection_t *conn, struct json_object *payload);
-void handle_entity_link_request(ws_connection_t *conn, struct json_object *payload);
-void handle_entity_unlink_request(ws_connection_t *conn, struct json_object *payload);
-void handle_entity_proposal_resolve_request(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete all memories for the current user
- */
-void handle_delete_all_memories(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Export all memories for the current user
- *
- * Supports "json" (DAWN lossless) and "text" (human-readable) formats.
- */
-void handle_export_memories(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Import memories from JSON or plain text
- *
- * Supports preview mode (commit=false) and deduplication.
- */
-void handle_import_memories(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Return verbatim source messages for a fact (v40 memory provenance)
- *
- * Returns the conversation messages that produced the fact during extraction.
- * Returns not_available if: fact is legacy (no provenance), private, or deleted.
- */
-void handle_get_memory_fact_source(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Document Library Handler Functions (defined in webui_doc_library.c)
- * ============================================================================= */
-void handle_doc_library_list(ws_connection_t *conn, struct json_object *payload);
-void handle_doc_library_delete(ws_connection_t *conn, struct json_object *payload);
-void handle_doc_library_index(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Calendar Handler Functions (defined in webui_calendar.c)
- * ============================================================================= */
-
-#ifdef DAWN_ENABLE_CALENDAR_TOOL
-void handle_calendar_list_accounts(ws_connection_t *conn);
-void handle_calendar_add_account(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_edit_account(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_remove_account(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_test_account(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_sync_account(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_list_calendars(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_toggle_calendar(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_toggle_read_only(ws_connection_t *conn, struct json_object *payload);
-void handle_calendar_set_enabled(ws_connection_t *conn, struct json_object *payload);
-#endif /* DAWN_ENABLE_CALENDAR_TOOL */
-
-/* =============================================================================
- * Config Handler Functions (defined in webui_config.c)
- * ============================================================================= */
-
-/**
- * @brief Get current configuration
- */
-void handle_get_config(ws_connection_t *conn);
-
-/**
- * @brief Set configuration values
- */
-void handle_set_config(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Set secrets (API keys, passwords)
- */
-void handle_set_secrets(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Get available audio devices
- */
-void handle_get_audio_devices(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief List available ASR and TTS models
- */
-void handle_list_models(ws_connection_t *conn);
-
-/**
- * @brief List available network interfaces
- */
-void handle_list_interfaces(ws_connection_t *conn);
-
-/**
- * @brief List available local LLM models (Ollama/llama.cpp)
- */
-void handle_list_llm_models(ws_connection_t *conn);
-
-/* =============================================================================
- * Session Handler Functions (defined in webui_session.c)
- * ============================================================================= */
-
-/**
- * @brief List current user's active sessions
- */
-void handle_list_my_sessions(ws_connection_t *conn);
-
-/**
- * @brief Revoke a session by token prefix
- */
-void handle_revoke_session(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Settings Handler Functions (defined in webui_settings.c)
- * ============================================================================= */
-
-/**
- * @brief Get current user's personal settings
- */
-void handle_get_my_settings(ws_connection_t *conn);
-
-/**
- * @brief Update current user's personal settings
- */
-void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Tools Handler Functions (defined in webui_tools.c)
- * ============================================================================= */
-
-/**
- * @brief Get tool configuration (enabled states)
- */
-void handle_get_tools_config(ws_connection_t *conn);
-
-/**
- * @brief Update tool enabled states
- */
-void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Audio Handler Functions (defined in webui_audio.c)
- * ============================================================================= */
-
-#ifdef ENABLE_WEBUI_AUDIO
-/**
- * @brief Handle binary WebSocket message (audio data)
- */
-void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t len);
-#endif
-
-/* =============================================================================
- * Music Handler Functions (defined in webui_music.c)
- * ============================================================================= */
-
-/**
- * @brief Handle music_subscribe message
- */
-void handle_music_subscribe(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Handle music_unsubscribe message
- */
-void handle_music_unsubscribe(ws_connection_t *conn);
-
-/**
- * @brief Handle music_control message
- */
-void handle_music_control(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Handle music_search message
- */
-void handle_music_search(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Handle music_library message
- */
-void handle_music_library(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Handle music_queue message
- */
-void handle_music_queue(ws_connection_t *conn, struct json_object *payload);
-
-/* =============================================================================
- * Home Assistant Handler Functions (defined in webui_homeassistant.c)
- * ============================================================================= */
-
-#ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
-/**
- * @brief Get Home Assistant connection status
- */
-void handle_ha_status(ws_connection_t *conn);
-
-/**
- * @brief Test Home Assistant connection
- */
-void handle_ha_test_connection(ws_connection_t *conn);
-
-/**
- * @brief List Home Assistant entities
- */
-void handle_ha_list_entities(ws_connection_t *conn);
-
-/**
- * @brief Force refresh Home Assistant entity cache
- */
-void handle_ha_refresh_entities(ws_connection_t *conn);
-#endif /* DAWN_ENABLE_HOMEASSISTANT_TOOL */
-
-/* =============================================================================
- * Satellite Connection Helpers (defined in webui_server.c)
- * ============================================================================= */
-
-/**
- * @brief Check if a satellite with the given UUID is currently connected
- *
- * Thread-safe. Scans the connection registry for an active satellite connection
- * whose session identity UUID matches.
- *
- * @param uuid Satellite UUID string (36 chars)
- * @return true if online, false if not found or offline
- */
-bool webui_is_satellite_online(const char *uuid);
-
-/**
- * @brief Force-disconnect a satellite by UUID
- *
- * Thread-safe. Finds the satellite connection and closes it with a policy
- * violation reason. Used when an admin disables a satellite.
- *
- * @param uuid Satellite UUID string (36 chars)
- */
-void webui_force_disconnect_satellite(const char *uuid);
-
-/* =============================================================================
- * Satellite Admin Handler Functions (defined in webui_admin_satellite.c)
- * ============================================================================= */
-
-/**
- * @brief List all satellite mappings with online status (admin only)
- */
-void handle_list_satellites(ws_connection_t *conn);
-
-/**
- * @brief Update satellite mapping (user, ha_area, enabled) (admin only)
- */
-void handle_update_satellite(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Delete a satellite mapping (admin only)
- */
-void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Return the satellite registration key to the admin client (admin only)
- *
- * Surfaces secrets->satellite_registration_key for QR-code pairing in the
- * WebUI. Rate-limited per source IP (5 fetches/min, 30/hour) and audit-logged
- * via the auth event log. The key value itself never appears in any log line.
- *
- * @param conn Authenticated WebSocket connection; admin privilege is enforced
- *             internally via conn_require_admin().
- */
-void handle_get_satellite_registration_key(ws_connection_t *conn);
-
-/* =============================================================================
- * Satellite Handler Functions (defined in webui_satellite.c)
- * ============================================================================= */
-
-/**
- * @brief Strip <command>...</command> and <end_of_turn> tags from text in-place
- *
- * Shared utility used by satellite worker and audio sentence callback.
- */
-void strip_command_tags(char *text);
-
-/**
- * @brief Handle satellite_register message
- */
-void handle_satellite_register(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Handle satellite_query message
- */
-void handle_satellite_query(ws_connection_t *conn, struct json_object *payload);
-
-/**
- * @brief Handle satellite_ping message
- */
-void handle_satellite_ping(ws_connection_t *conn);
-
-/**
- * @brief Handle volume_state message from satellite
- */
-void handle_satellite_volume_state(ws_connection_t *conn, struct json_object *payload);
 
 /* =============================================================================
  * Connection Iterator (defined in webui_server.c, used by webui_music.c)
@@ -1192,40 +727,18 @@ void webui_for_each_conn_by_user(int user_id,
  */
 int webui_collect_conns_by_user(int user_id, ws_connection_t **out, int max_out);
 
-/* =============================================================================
- * Audio Send Functions (defined in webui_server.c, used by webui_audio.c)
- * ============================================================================= */
-
-/**
- * @brief Queue audio data for WebSocket client
- *
- * @param session WebSocket session
- * @param data Audio data (Opus or PCM depending on client capability)
- * @param len Data length in bytes
- */
-void webui_send_audio(session_t *session, const uint8_t *data, size_t len);
-
-/**
- * @brief Queue end-of-audio marker for WebSocket client
- *
- * @param session WebSocket session
- */
-void webui_send_audio_end(session_t *session, bool is_opus);
-
-/**
- * @brief TTS sentence callback for LLM streaming
- *
- * Called for each complete sentence during LLM response streaming.
- * Generates TTS audio and sends immediately, enabling real-time playback.
- * Respects conn->tts_enabled flag (no audio if disabled).
- *
- * @param sentence Complete sentence text
- * @param userdata Session pointer (cast to session_t*)
- */
-void webui_sentence_audio_callback(const char *sentence, void *userdata);
+/* Audio send wrappers (webui_send_audio, webui_send_audio_end,
+ * webui_sentence_audio_callback) moved to webui/webui_send.h. */
 
 #ifdef __cplusplus
 }
 #endif
+
+/* Transitive includes for backward compatibility with the webui_*.c
+ * modules that only included webui_internal.h.  Newer code should
+ * include these directly where only the send-side or handler surface
+ * is needed. */
+#include "webui/webui_handlers.h"
+#include "webui/webui_send.h"
 
 #endif /* WEBUI_INTERNAL_H */

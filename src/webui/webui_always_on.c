@@ -585,6 +585,96 @@ void always_on_destroy(always_on_ctx_t *ctx) {
    always_on_release(ctx);
 }
 
+/* =============================================================================
+ * WebSocket Message Handlers
+ *
+ * Lifecycle for always-on voice mode dispatched from
+ * handle_json_message() in webui_message_dispatch.c when the client sends
+ * `always_on_enable` / `always_on_disable`.  Kept here next to the
+ * context lifecycle (always_on_create / always_on_destroy) so policy
+ * (per-user uniqueness, push-to-talk conflict, sample-rate validation)
+ * stays adjacent to the state machine it gates.
+ * ============================================================================= */
+
+/**
+ * Check if another connection for the same user already has always-on active.
+ * Must NOT hold s_conn_registry_mutex when calling conn_require_auth.
+ */
+static bool user_has_always_on(int auth_user_id) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *c = s_active_connections[i];
+      if (c && c->auth_user_id == auth_user_id && c->always_on) {
+         pthread_mutex_unlock(&s_conn_registry_mutex);
+         return true;
+      }
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   return false;
+}
+
+void handle_always_on_enable(void *conn_ptr, struct json_object *payload) {
+   ws_connection_t *conn = (ws_connection_t *)conn_ptr;
+   /* Reject if already enabled on this connection */
+   if (conn->always_on) {
+      send_always_on_state(conn->wsi, "listening"); /* Already active, re-confirm */
+      return;
+   }
+
+   /* Reject if push-to-talk audio is in progress */
+   if (conn->audio_buffer && conn->audio_buffer_len > 0) {
+      send_error_impl(conn->wsi, "PTT_ACTIVE",
+                      "Cannot enable always-on while push-to-talk recording is active");
+      return;
+   }
+
+   /* Enforce per-user limit (max 1 always-on session) */
+   if (user_has_always_on(conn->auth_user_id)) {
+      send_error_impl(conn->wsi, "ALREADY_ACTIVE",
+                      "Always-on is active in another tab for this user");
+      return;
+   }
+
+   /* Validate sample_rate from payload */
+   uint32_t sample_rate = 48000; /* Default if not specified */
+   if (payload) {
+      struct json_object *sr_obj;
+      if (json_object_object_get_ex(payload, "sample_rate", &sr_obj)) {
+         sample_rate = (uint32_t)json_object_get_int(sr_obj);
+      }
+   }
+
+   if (!always_on_valid_sample_rate(sample_rate)) {
+      OLOG_WARNING("WebUI: Invalid always-on sample rate %u", sample_rate);
+      send_error_impl(conn->wsi, "INVALID_SAMPLE_RATE", "Unsupported sample rate");
+      return;
+   }
+
+   /* Create always-on context */
+   conn->always_on = always_on_create(sample_rate, conn->wsi);
+   if (!conn->always_on) {
+      send_error_impl(conn->wsi, "INIT_FAILED", "Failed to initialize always-on mode");
+      return;
+   }
+
+   OLOG_INFO("WebUI: Always-on enabled for user %d (sample_rate=%u)", conn->auth_user_id,
+             sample_rate);
+   send_always_on_state(conn->wsi, "listening");
+}
+
+void handle_always_on_disable(void *conn_ptr) {
+   ws_connection_t *conn = (ws_connection_t *)conn_ptr;
+   if (!conn->always_on) {
+      send_always_on_state(conn->wsi, "disabled");
+      return;
+   }
+
+   OLOG_INFO("WebUI: Always-on disabled for user %d", conn->auth_user_id);
+   always_on_destroy(conn->always_on);
+   conn->always_on = NULL;
+   send_always_on_state(conn->wsi, "disabled");
+}
+
 void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
    if (!ctx || !atomic_load(&ctx->wake_result_ready)) {
       return;

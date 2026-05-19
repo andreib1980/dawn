@@ -46,6 +46,11 @@
 #include "asr/vad_silero.h"
 #include "audio/resampler.h"
 
+/* Forward decl — only used by handle_always_on_enable below.  Including
+ * <json-c/json.h> here would pull json-c into every TU that uses
+ * always_on, which most don't need. */
+struct json_object;
+
 /* Forward declarations */
 struct lws;
 typedef struct session session_t;
@@ -254,6 +259,28 @@ void always_on_processing_complete(always_on_ctx_t *ctx);
  * @param state_name State name string
  */
 void send_always_on_state(struct lws *wsi, const char *state_name);
+
+/**
+ * @brief Handle `always_on_enable` WebSocket message.
+ *
+ * Validates per-user uniqueness, push-to-talk conflict, sample-rate;
+ * allocates the always_on_ctx and emits the "listening" state to the
+ * client.  Called from handle_json_message in webui_message_dispatch.c.
+ *
+ * @param conn    ws_connection_t * (declared in webui_internal.h)
+ * @param payload The JSON payload object (may be NULL)
+ */
+void handle_always_on_enable(void *conn, struct json_object *payload);
+
+/**
+ * @brief Handle `always_on_disable` WebSocket message.
+ *
+ * Tears down the per-connection always_on_ctx and emits the "disabled"
+ * state to the client.
+ *
+ * @param conn ws_connection_t * (declared in webui_internal.h)
+ */
+void handle_always_on_disable(void *conn);
 
 #ifdef __cplusplus
 }
