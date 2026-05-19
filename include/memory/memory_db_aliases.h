@@ -623,6 +623,66 @@ int memory_db_entity_maybe_auto_promote_user_self(int user_id,
 int memory_db_entity_auto_promote_user_self_by_real_name(int user_id, bool *out_promoted);
 
 /**
+ * @brief Auto-alias a freshly-extracted abstract "user" entity to the
+ * existing user_self anchor.
+ *
+ * The extraction LLM commonly emits relations like `(User, married_to, X)`
+ * which materialise as a generic entity row with `canonical_name='user'`.
+ * That row has zero token overlap with the anchor's canonical (e.g.
+ * `kris kersey`), so the Phase 2 cascade can't surface it as a merge
+ * candidate.  This helper closes the gap: when a fresh `user` row appears
+ * AND a user_self anchor already exists, soft-link the row as an alias of
+ * the anchor.  Definitionally the same entity — highest-confidence merge
+ * in the system, bypasses the cascade and runs without operator review.
+ *
+ * Match criteria (after @ref memory_make_canonical_name normalization):
+ *   - exact equality with the literal "user" (single token)
+ *   - plural / phrasal forms ("users", "the user") deliberately not matched
+ *
+ * No-op when:
+ *   - no user_self anchor exists for the user (the
+ *     maybe_auto_promote_user_self path handles that side instead)
+ *   - @p canonical_name is not the literal "user"
+ *   - @p entity_id IS the user_self anchor itself (edge case where
+ *     real_name was set to "user")
+ *   - @p entity_id has dependents (alias_link's single-level invariant)
+ *
+ * Idempotent on benign races (e.g. row gone between check and link).
+ *
+ * @param user_id          User ID
+ * @param entity_id        The fresh entity being evaluated
+ * @param canonical_name   Pre-computed canonical (lowercased) form
+ * @param out_aliased      Optional: set true if the row was aliased
+ * @return MEMORY_DB_SUCCESS even when no-op; MEMORY_DB_FAILURE on real error
+ */
+int memory_db_entity_maybe_alias_user_to_self(int user_id,
+                                              int64_t entity_id,
+                                              const char *canonical_name,
+                                              bool *out_aliased);
+
+/**
+ * @brief Sweep for an already-existing abstract "user" canonical and alias
+ * it to the user_self anchor.
+ *
+ * Counterpart to @ref memory_db_entity_maybe_alias_user_to_self for the
+ * settings-save flow: after the operator sets `users.real_name` and
+ * @ref memory_db_entity_auto_promote_user_self_by_real_name promotes a
+ * matching row to the anchor, any pre-existing generic `user` canonical
+ * left behind from earlier extractions needs to be attached too.
+ *
+ * No-op when no user_self anchor exists or no canonical `user` row is
+ * found (extraction's maybe-alias path will pick it up on the next
+ * conversation).  Honours the same single-level alias invariant as the
+ * sibling — refuses if the would-be source has dependents.
+ *
+ * @param user_id        User ID
+ * @param out_aliased    Optional: set true if a row was aliased
+ * @return MEMORY_DB_SUCCESS regardless of outcome (caller treats no-op
+ *         as success); MEMORY_DB_FAILURE only on real DB errors
+ */
+int memory_db_entity_alias_existing_user_to_self(int user_id, bool *out_aliased);
+
+/**
  * @brief Resolve a pending merge proposal.
  *
  * On @p approved = true, runs both writes inside a single BEGIN IMMEDIATE

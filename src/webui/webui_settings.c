@@ -215,7 +215,28 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
     * publisher and each subsystem registers as a listener.  Don't add
     * a third direct call site here without doing that refactor first. */
    if (identity.real_name[0] != '\0') {
-      memory_db_entity_auto_promote_user_self_by_real_name(conn->auth_user_id, NULL);
+      /* Both helpers return MEMORY_DB_SUCCESS on all benign no-ops per
+       * their docstrings.  A FAILURE here is a real SQLite-level error
+       * worth logging; the settings save itself still proceeds either
+       * way (the identity write is already done above, and the user
+       * shouldn't lose their settings just because a sweep DB call
+       * tripped). */
+      int prom_rc = memory_db_entity_auto_promote_user_self_by_real_name(conn->auth_user_id, NULL);
+      if (prom_rc != MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("webui_settings: auto-promote-user-self-by-real-name DB error (user_id=%d "
+                      "rc=%d)",
+                      conn->auth_user_id, prom_rc);
+      }
+      /* Follow-up sweep: any pre-existing abstract "user" canonical left
+       * from earlier extractions (before the anchor existed) gets
+       * attached to the newly-promoted user_self.  Order matters —
+       * promote first so the anchor is in place before the sweep
+       * looks for it. */
+      int sweep_rc = memory_db_entity_alias_existing_user_to_self(conn->auth_user_id, NULL);
+      if (sweep_rc != MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("webui_settings: alias-existing-user-to-self DB error (user_id=%d rc=%d)",
+                      conn->auth_user_id, sweep_rc);
+      }
    }
 
    /* Save settings */

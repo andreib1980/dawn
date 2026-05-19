@@ -1162,6 +1162,133 @@ static void test_auto_promote_matches_identity_alias(void) {
 }
 
 /* ============================================================================
+ * Auto-alias abstract "user" → user_self
+ *
+ * The LLM emits relations like (User, married_to, X), which materialise
+ * as a generic entity row with canonical_name='user'.  The Phase 2
+ * cascade can't catch this because there's zero token overlap with the
+ * anchor's canonical (e.g. "kris kersey").  These tests pin the structural
+ * identity claim: when an anchor exists, the 'user' row is unconditionally
+ * soft-linked as an alias of the anchor — bypassing the cascade and
+ * running without operator review.
+ * ============================================================================ */
+
+static void test_maybe_alias_user_to_self_aliases_when_anchor_exists(void) {
+   /* Anchor exists for Jonathan Smith.  Extraction produces a fresh
+    * generic 'user' entity from a (User, X, Y) relation.  Helper should
+    * soft-link it to the anchor. */
+   int64_t anchor = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   mark_entity_user_self(anchor);
+
+   int64_t user_row = insert_entity_typed(g_test_user_id, "user", "person");
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(user_row));
+
+   bool aliased = false;
+   int rc = memory_db_entity_maybe_alias_user_to_self(g_test_user_id, user_row, "user", &aliased);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(aliased);
+   TEST_ASSERT_EQUAL_INT64(anchor, get_entity_canonical_id(user_row));
+   /* Anchor itself stays canonical. */
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(anchor));
+}
+
+static void test_maybe_alias_user_to_self_noop_when_no_anchor(void) {
+   /* No user_self anchor exists yet.  A generic 'user' row appearing
+    * here must NOT be linked anywhere — the maybe_auto_promote_user_self
+    * path is the one that handles the "anchor doesn't exist yet" side
+    * (and it would only promote a row that actually matches real_name,
+    * which 'user' isn't). */
+   int64_t user_row = insert_entity_typed(g_test_user_id, "user", "person");
+
+   bool aliased = true; /* deliberately non-zero so we catch a stale set */
+   int rc = memory_db_entity_maybe_alias_user_to_self(g_test_user_id, user_row, "user", &aliased);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(aliased);
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(user_row));
+}
+
+static void test_maybe_alias_user_to_self_refuses_self_link(void) {
+   /* Edge case: users.real_name = "user" (silly but legal), so the
+    * maybe_auto_promote path would have promoted this very row to the
+    * anchor.  Calling maybe_alias on the same row must NOT attempt to
+    * self-link — that would corrupt the anchor by setting its own
+    * canonical_id to itself. */
+   int64_t anchor = insert_entity_typed(g_test_user_id, "user", "person");
+   mark_entity_user_self(anchor);
+
+   bool aliased = true;
+   int rc = memory_db_entity_maybe_alias_user_to_self(g_test_user_id, anchor, "user", &aliased);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_FALSE(aliased);
+   TEST_ASSERT_EQUAL_INT64(0, get_entity_canonical_id(anchor));
+   TEST_ASSERT_TRUE(entity_is_user_self(anchor));
+}
+
+static void test_alias_existing_user_to_self_sweep(void) {
+   /* Operator flow: a generic 'user' row got extracted before the anchor
+    * existed (real_name not yet configured).  Operator now sets real_name
+    * via Settings → by_real_name sweep promotes a matching row to the
+    * anchor → the sibling sweep called immediately after attaches the
+    * pre-existing 'user' row. */
+   int64_t pre_existing = insert_entity_typed(g_test_user_id, "user", "person");
+   int64_t anchor = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   mark_entity_user_self(anchor);
+
+   bool aliased = false;
+   int rc = memory_db_entity_alias_existing_user_to_self(g_test_user_id, &aliased);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_TRUE(aliased);
+   TEST_ASSERT_EQUAL_INT64(anchor, get_entity_canonical_id(pre_existing));
+}
+
+static void test_maybe_alias_user_to_self_rejects_invalid_input(void) {
+   /* Pin the input-validation guards: NULL/empty canonical_name and
+    * non-positive ids return FAILURE rather than silently no-op'ing.
+    * Matches the test pattern for sibling alias helpers
+    * (test_alias_link_refuses_invalid_user). */
+   int64_t anchor = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   mark_entity_user_self(anchor);
+
+   bool aliased = true;
+   /* NULL canonical_name. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_entity_maybe_alias_user_to_self(
+                                                g_test_user_id, anchor + 1, NULL, &aliased));
+   TEST_ASSERT_FALSE(aliased);
+
+   /* Empty canonical_name. */
+   aliased = true;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_entity_maybe_alias_user_to_self(
+                                                g_test_user_id, anchor + 1, "", &aliased));
+   TEST_ASSERT_FALSE(aliased);
+
+   /* Non-positive user_id. */
+   aliased = true;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_entity_maybe_alias_user_to_self(
+                                                0, anchor + 1, "user", &aliased));
+   TEST_ASSERT_FALSE(aliased);
+
+   /* Non-positive entity_id. */
+   aliased = true;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_entity_maybe_alias_user_to_self(
+                                                g_test_user_id, 0, "user", &aliased));
+   TEST_ASSERT_FALSE(aliased);
+}
+
+static void test_alias_existing_user_to_self_rejects_invalid_user(void) {
+   /* Companion to the above for the sweep variant.  Only input it takes
+    * besides out_aliased is user_id. */
+   bool aliased = true;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE,
+                         memory_db_entity_alias_existing_user_to_self(0, &aliased));
+   TEST_ASSERT_FALSE(aliased);
+
+   aliased = true;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE,
+                         memory_db_entity_alias_existing_user_to_self(-1, &aliased));
+   TEST_ASSERT_FALSE(aliased);
+}
+
+/* ============================================================================
  * alias_link / alias_unlink
  * ============================================================================ */
 
@@ -3074,6 +3201,14 @@ int main(void) {
    RUN_TEST(test_auto_promote_no_op_when_user_self_exists);
    RUN_TEST(test_auto_promote_no_op_when_real_name_unset);
    RUN_TEST(test_auto_promote_matches_identity_alias);
+
+   /* Auto-alias abstract "user" → user_self */
+   RUN_TEST(test_maybe_alias_user_to_self_aliases_when_anchor_exists);
+   RUN_TEST(test_maybe_alias_user_to_self_noop_when_no_anchor);
+   RUN_TEST(test_maybe_alias_user_to_self_refuses_self_link);
+   RUN_TEST(test_alias_existing_user_to_self_sweep);
+   RUN_TEST(test_maybe_alias_user_to_self_rejects_invalid_input);
+   RUN_TEST(test_alias_existing_user_to_self_rejects_invalid_user);
 
    /* alias_link / alias_unlink */
    RUN_TEST(test_alias_link_writes_canonical_id_and_audit);

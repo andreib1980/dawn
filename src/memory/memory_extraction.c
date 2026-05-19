@@ -829,7 +829,19 @@ static void process_extraction_response(int user_id,
     * just to bail when the anchor is already set.  Seeding once at the
     * top + flipping to true on first successful promotion keeps the gate
     * cost at one lock acquisition per extraction in steady state instead
-    * of N per fresh-entity. */
+    * of N per fresh-entity.
+    *
+    * ORDERING INVARIANT: this flag is read by BOTH the maybe_auto_promote
+    * and maybe_alias_user_to_self blocks in the entities loop below.  The
+    * promote block writes the flag (true on success); the alias block
+    * gates on it being true.  Within ONE iteration the same entity can't
+    * be both promoted and aliased (canonical_name matches real_name OR
+    * literal "user", not both — except the silly real_name="user" edge
+    * case which maybe_alias's self-link refusal handles).  Across
+    * iterations the flag flip from a promote in iteration N makes the
+    * alias path eligible for any later 'user' entity in the same JSON
+    * payload.  Don't reorder the two helper blocks without preserving
+    * this invariant. */
    bool user_self_already_exists = false;
    {
       int64_t self_id_probe = 0;
@@ -903,12 +915,39 @@ static void process_extraction_response(int user_id,
          }
 
          /* Auto-promote to is_user_self=1 when canonical matches the
-          * user's real_name and no self-anchor exists yet. */
+          * user's real_name and no self-anchor exists yet.  Failures are
+          * non-fatal (extraction continues) but log them so real DB
+          * errors don't go unnoticed — the helper's docstring promises
+          * MEMORY_DB_SUCCESS on all benign no-ops, so any FAILURE here
+          * represents a genuine SQLite-level issue worth surfacing. */
          if (was_created && !user_self_already_exists) {
             bool promoted = false;
-            memory_db_entity_maybe_auto_promote_user_self(user_id, eid, canonical, &promoted);
+            int prom_rc = memory_db_entity_maybe_auto_promote_user_self(user_id, eid, canonical,
+                                                                        &promoted);
+            if (prom_rc != MEMORY_DB_SUCCESS) {
+               OLOG_WARNING("memory_extraction: auto-promote-user-self DB error for entity %ld "
+                            "(rc=%d)",
+                            (long)eid, prom_rc);
+            }
             if (promoted)
                user_self_already_exists = true;
+         }
+
+         /* Auto-alias the abstract "user" canonical to the existing
+          * user_self anchor.  The LLM commonly emits relations like
+          * (User, married_to, X) which materialise as a generic 'user'
+          * row that has no token overlap with the anchor's canonical
+          * (e.g. "kris kersey"), so the Phase 2 cascade can't catch it.
+          * Definitionally the same entity → unconditional soft-link,
+          * no review. No-op when no anchor exists; the maybe_auto_promote
+          * block above handles that side. */
+         if (was_created && user_self_already_exists) {
+            int alias_rc = memory_db_entity_maybe_alias_user_to_self(user_id, eid, canonical, NULL);
+            if (alias_rc != MEMORY_DB_SUCCESS) {
+               OLOG_WARNING("memory_extraction: alias-user-to-self DB error for entity %ld "
+                            "(rc=%d)",
+                            (long)eid, alias_rc);
+            }
          }
 
          /* Add to local map */

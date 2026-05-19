@@ -1457,6 +1457,116 @@ int memory_db_entity_auto_promote_user_self_by_real_name(int user_id, bool *out_
    return MEMORY_DB_SUCCESS;
 }
 
+/* The literal canonical form the LLM-emitted abstract "User" entity collapses
+ * to after memory_make_canonical_name (lowercased, whitespace-trimmed).
+ * Single source of truth so the maybe / sweep helpers stay in sync if the
+ * canonicalizer ever changes its rules.
+ *
+ * Intentionally .c-only (not exported in memory_db_aliases.h).  External
+ * consumers — including tests in test_memory_db_alias.c — exercise the
+ * literal through the public helpers; hardcoding "user" in those test
+ * call sites is the right shape since the tests are pinning that exact
+ * canonical form as the contract.  Promote to the header only if a
+ * non-test consumer in a different TU needs to assert against the
+ * literal directly. */
+#define MEMORY_ALIAS_ABSTRACT_USER_CANONICAL "user"
+
+int memory_db_entity_maybe_alias_user_to_self(int user_id,
+                                              int64_t entity_id,
+                                              const char *canonical_name,
+                                              bool *out_aliased) {
+   if (out_aliased)
+      *out_aliased = false;
+   if (user_id <= 0 || entity_id <= 0 || !canonical_name || !*canonical_name)
+      return MEMORY_DB_FAILURE;
+
+   /* Strict exact-match on the literal "user".  Multi-token ("the user") and
+    * plural ("users") forms are deliberately excluded — they're ambiguous as
+    * generic self-references and would invite false-positive aliasing. */
+   if (strcmp(canonical_name, MEMORY_ALIAS_ABSTRACT_USER_CANONICAL) != 0)
+      return MEMORY_DB_SUCCESS;
+
+   /* Must have a user_self anchor to alias TO.  The maybe-promote helper
+    * handles the "no anchor yet" side; calling both in the extraction loop
+    * gives full coverage without overlap. */
+   int64_t self_id = 0;
+   if (memory_alias_internal_find_user_self_id(user_id, &self_id) != MEMORY_DB_SUCCESS ||
+       self_id == 0)
+      return MEMORY_DB_SUCCESS;
+
+   /* Don't self-link.  The edge case here is users.real_name = "user" — the
+    * maybe-promote path would have promoted this very row to is_user_self,
+    * and the canonical match check above would let us through.  Refuse. */
+   if (entity_id == self_id)
+      return MEMORY_DB_SUCCESS;
+
+   /* Soft-link the fresh row → anchor.  alias_link enforces the single-level
+    * alias invariant (refuses if source has dependents), the
+    * source != target check, and ownership; we pass the structural-identity
+    * reason so the audit log distinguishes this path from cascade-driven
+    * auto-merges.  composite_score < 0 = omit (no scoring fired). */
+   int64_t link_id = 0;
+   int rc = memory_db_entity_alias_link(user_id, entity_id, self_id, "soft",
+                                        "auto-alias-user-to-self", -1.0f, NULL, &link_id);
+   if (rc == MEMORY_DB_NOT_FOUND) {
+      /* Benign race — row was deleted or already aliased between our check
+       * and the link.  Honour the docstring's no-op contract. */
+      return MEMORY_DB_SUCCESS;
+   }
+   if (rc != MEMORY_DB_SUCCESS)
+      return rc;
+
+   if (out_aliased)
+      *out_aliased = true;
+   OLOG_INFO("memory_db_alias: auto-aliased abstract 'user' entity %lld → user_self %lld "
+             "(user_id=%d)",
+             (long long)entity_id, (long long)self_id, user_id);
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_alias_existing_user_to_self(int user_id, bool *out_aliased) {
+   if (out_aliased)
+      *out_aliased = false;
+   if (user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   /* Anchor must exist; sweep is meaningless otherwise. */
+   int64_t self_id = 0;
+   if (memory_alias_internal_find_user_self_id(user_id, &self_id) != MEMORY_DB_SUCCESS ||
+       self_id == 0)
+      return MEMORY_DB_SUCCESS;
+
+   /* Look up a canonical (canonical_id IS NULL) row whose name is exactly
+    * "user".  Reuses the same lookup helper the by-real-name promote uses;
+    * exact-match SQL keeps this conservative — we don't want to sweep up
+    * "the user" or "users" by mistake. */
+   int64_t found_id = 0;
+   if (find_canonical_by_name(user_id, MEMORY_ALIAS_ABSTRACT_USER_CANONICAL, &found_id) !=
+           MEMORY_DB_SUCCESS ||
+       found_id == 0)
+      return MEMORY_DB_SUCCESS;
+
+   /* If the canonical 'user' row IS the anchor (real_name = "user" edge
+    * case), nothing to do. */
+   if (found_id == self_id)
+      return MEMORY_DB_SUCCESS;
+
+   int64_t link_id = 0;
+   int rc = memory_db_entity_alias_link(user_id, found_id, self_id, "soft",
+                                        "auto-alias-user-to-self", -1.0f, NULL, &link_id);
+   if (rc == MEMORY_DB_NOT_FOUND)
+      return MEMORY_DB_SUCCESS;
+   if (rc != MEMORY_DB_SUCCESS)
+      return rc;
+
+   if (out_aliased)
+      *out_aliased = true;
+   OLOG_INFO("memory_db_alias: swept pre-existing 'user' entity %lld → user_self %lld "
+             "(user_id=%d)",
+             (long long)found_id, (long long)self_id, user_id);
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_proposal_list_pending(int user_id,
                                     memory_alias_proposal_row_t *out,
                                     int max,
