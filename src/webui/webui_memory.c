@@ -339,7 +339,22 @@ static json_object *build_preferences_json_array(const memory_preference_t *pref
  * in the connection — leaks state across tabs.
  */
 #define ENTITIES_JSON_ALIAS_SUMMARY_MAX 512
-#define ENTITIES_JSON_RELATIONS_MAX 400
+/* Bulk relation pull cap.  At 2000, sizeof(memory_relation_t) ~= 176 →
+ * ~352 KB stack per call, comfortable on the LWS service thread's 8 MB
+ * pthread stack.  Bumped from 400 once a real user crossed it (1700+
+ * relations after a corpus consolidation).  Per-entity capping (filed in
+ * docs/TODO.md as a follow-up) is the right shape past ~5000 relations;
+ * keep this single-global cap as the cheap intermediate.
+ *
+ * Soft-linked to EXPORT_MAX_RELATIONS below — they happen to share a
+ * value today because both budgets scale with the user's total relation
+ * count.  NOT a hard contract: this gates an interactive hot path that
+ * fires per search keystroke, while EXPORT_MAX_RELATIONS gates a one-shot
+ * cold export.  They can legitimately diverge (e.g. lift the export cap
+ * higher when paging lands while leaving the live cap modest).  When
+ * bumping one, look at the other and decide on merit — don't reflexively
+ * keep them equal. */
+#define ENTITIES_JSON_RELATIONS_MAX 2000
 static json_object *build_entities_json_array(int user_id,
                                               const memory_entity_t *entities,
                                               int count) {
@@ -1021,7 +1036,13 @@ void handle_delete_all_memories(ws_connection_t *conn, struct json_object *paylo
 #define EXPORT_MAX_FACTS 500
 #define EXPORT_MAX_PREFS 200
 #define EXPORT_MAX_ENTITIES 200
-#define EXPORT_MAX_RELATIONS 400
+/* Soft-linked to ENTITIES_JSON_RELATIONS_MAX above (see comment there for
+ * the full rationale).  Same value today because both budgets scale with
+ * the user's total relation count.  Independent in principle: this caps
+ * a one-shot cold export, the other caps an interactive hot path.  Keep
+ * the cross-reference in mind when bumping either, but evaluate on merit
+ * — they're allowed to diverge. */
+#define EXPORT_MAX_RELATIONS 2000
 
 /**
  * @brief Export all memories for the current user

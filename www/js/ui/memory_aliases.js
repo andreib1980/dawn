@@ -224,10 +224,17 @@
          DawnToast.show('Proposal ' + verb, 'success');
       }
       /* Refresh the proposals panel and the entity list (approve creates a
-       * new alias). */
+       * new alias).  Approving also adds a row to the target entity's
+       * alias list — clear the per-entity cache so the next expand on
+       * that target re-fetches the fresh state.  Matches the bulk-clear
+       * pattern in handleUnlinkResponse above (we don't have the target
+       * id in the response, so clear all). */
       requestProposalList();
-      if (payload.resolution === 'approved' && ctx && typeof ctx.onEntitiesChanged === 'function') {
-         ctx.onEntitiesChanged();
+      if (payload.resolution === 'approved') {
+         for (const k of Object.keys(aliasesByEntity)) delete aliasesByEntity[k];
+         if (ctx && typeof ctx.onEntitiesChanged === 'function') {
+            ctx.onEntitiesChanged();
+         }
       }
    }
 

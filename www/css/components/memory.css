@@ -968,11 +968,10 @@
 .merge-proposal-pair {
    display: inline-flex;
    align-items: center;
+   flex-wrap: wrap;
    gap: 0.25rem;
    color: var(--text-primary);
-   overflow: hidden;
-   text-overflow: ellipsis;
-   white-space: nowrap;
+   word-break: break-word;
    min-width: 0;
 }
 
