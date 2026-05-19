@@ -32,6 +32,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/rate_limiter.h"
 #include "core/session_manager.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
@@ -46,23 +47,24 @@ atomic_int g_active_satellite_workers = 0;
 /* =============================================================================
  * Rate Limiting for Satellite Registration
  *
- * Prevents DoS attacks by limiting registration attempts per IP address.
- * Uses a simple hash table with IP-based tracking.
+ * Rides on the canonical core/rate_limiter primitive (same path as
+ * webui_http.c's csrf/login/service-token limiters): linear-scan slots
+ * with LRU eviction (no hash buckets, so no hash-collision bypass), IPv6
+ * /64 normalization, and fail-closed on truncation.
+ *
+ * Migrated from a per-file FNV-bucket reimplementation 2026-05-19 — see
+ * docs/TODO.md "Extract shared webui_rate_limit.{c,h}".
  * ============================================================================= */
 
-#define RATE_LIMIT_BUCKETS 64
-#define RATE_LIMIT_MAX_REGISTRATIONS 5
-#define RATE_LIMIT_WINDOW_SEC 60
+#define REG_RATE_LIMIT_SLOTS 64
+#define REG_RATE_LIMIT_MAX 5
+#define REG_RATE_LIMIT_WINDOW_SEC 60
 
-typedef struct {
-   uint32_t ip_hash;
-   char ip_str[46]; /* Store actual IP for collision detection (IPv6 max 45 + null) */
-   time_t window_start;
-   int count;
-} rate_limit_entry_t;
-
-static rate_limit_entry_t g_rate_limits[RATE_LIMIT_BUCKETS] = { 0 };
-static pthread_mutex_t g_rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+static rate_limit_entry_t s_reg_rate_entries[REG_RATE_LIMIT_SLOTS];
+static rate_limiter_t s_reg_rate_limiter = RATE_LIMITER_STATIC_INIT(s_reg_rate_entries,
+                                                                    REG_RATE_LIMIT_SLOTS,
+                                                                    REG_RATE_LIMIT_MAX,
+                                                                    REG_RATE_LIMIT_WINDOW_SEC);
 
 /**
  * Check if registration is rate-limited for given IP address.
@@ -72,42 +74,15 @@ static bool is_rate_limited(const char *client_ip) {
    if (!client_ip)
       return false;
 
-   /* Simple FNV-1a hash of IP string */
-   uint32_t hash = 2166136261u;
-   for (const char *p = client_ip; *p; p++) {
-      hash ^= (unsigned char)*p;
-      hash *= 16777619u;
-   }
+   /* /64 normalization for IPv6 prevents per-address bypass within a
+    * single network; IPv4 passes through unchanged. */
+   char normalized_ip[RATE_LIMIT_IP_SIZE];
+   rate_limiter_normalize_ip(client_ip, normalized_ip, sizeof(normalized_ip));
 
-   int bucket = hash % RATE_LIMIT_BUCKETS;
-   time_t now = time(NULL);
-
-   pthread_mutex_lock(&g_rate_limit_mutex);
-
-   rate_limit_entry_t *entry = &g_rate_limits[bucket];
-
-   /* Check if this is a different IP (hash collision + string mismatch) or window expired */
-   if (entry->ip_hash != hash || strcmp(entry->ip_str, client_ip) != 0 ||
-       (now - entry->window_start) >= RATE_LIMIT_WINDOW_SEC) {
-      /* Start new window */
-      entry->ip_hash = hash;
-      strncpy(entry->ip_str, client_ip, sizeof(entry->ip_str) - 1);
-      entry->ip_str[sizeof(entry->ip_str) - 1] = '\0';
-      entry->window_start = now;
-      entry->count = 1;
-      pthread_mutex_unlock(&g_rate_limit_mutex);
-      return false;
-   }
-
-   /* Same IP within window - check count */
-   if (++entry->count > RATE_LIMIT_MAX_REGISTRATIONS) {
-      pthread_mutex_unlock(&g_rate_limit_mutex);
-      OLOG_WARNING("Rate limit exceeded for IP %s (bucket %d): %d registrations in %lds", client_ip,
-                   bucket, entry->count, (long)(now - entry->window_start));
+   if (rate_limiter_check(&s_reg_rate_limiter, normalized_ip)) {
+      OLOG_WARNING("Rate limit exceeded for IP %s (normalized: %s)", client_ip, normalized_ip);
       return true;
    }
-
-   pthread_mutex_unlock(&g_rate_limit_mutex);
    return false;
 }
 

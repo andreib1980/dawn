@@ -103,6 +103,23 @@ void rate_limiter_init(rate_limiter_t *limiter,
  *
  * Uses multi-IP tracking with LRU eviction when slots are exhausted.
  *
+ * @note Fail-closed on IP-too-long: if @p ip would not fit within
+ *       RATE_LIMIT_IP_SIZE-1 bytes (i.e. silent truncation during the
+ *       internal strncpy), this function returns true (rate-limited).
+ *       Truncation would defeat the per-IP strcmp identity check — two
+ *       distinct IPs sharing a prefix would collide on the stored slot
+ *       and let an attacker evict a legitimate user's burned-budget
+ *       state.  Callers MUST ensure their captured client_ip is bounded;
+ *       in practice this is satisfied by @ref rate_limiter_normalize_ip
+ *       (IPv6 → /64) when paired with the standard 64-byte LWS peer-info
+ *       capture used in webui_http.c.
+ *
+ * @note Scaling: each check does an O(N) linear scan over slot_count
+ *       entries.  N=64 is fine for the existing callers (cold paths,
+ *       cache-line-friendly).  Past N≈256 the strcmp-per-slot cost starts
+ *       to matter — at that point bucketed lookup (hash + linear probing)
+ *       is the right migration, not larger linear-scan tables.
+ *
  * @param limiter Rate limiter instance
  * @param ip Client IP address (will be copied internally)
  * @return true if rate limited (reject request), false if allowed

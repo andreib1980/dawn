@@ -160,6 +160,50 @@ static void test_normalize_non_ip_passthrough(void) {
    TEST_ASSERT_EQUAL_STRING("not-an-ip", out);
 }
 
+static void test_truncated_ip_fail_closed(void) {
+   /* An IP that wouldn't fit in RATE_LIMIT_IP_SIZE-1 bytes must be denied
+    * outright, not silently truncated.  Prevents the prefix-collision
+    * bypass where two long IPs share a stored prefix. */
+   char too_long[RATE_LIMIT_IP_SIZE + 8];
+   memset(too_long, 'a', sizeof(too_long) - 1);
+   too_long[sizeof(too_long) - 1] = '\0';
+   TEST_ASSERT_TRUE(rate_limiter_check(&s_limiter, too_long));
+}
+
+static void test_stacked_limiters_independent(void) {
+   /* Codifies the dual-window contract used by webui_admin_satellite.c's
+    * key-fetch limiter: burning one limiter's budget must NOT side-effect
+    * the other, so the hour-window ceiling is preserved when an attacker
+    * trips the min-window first.  rate_limiter_check returns BEFORE the
+    * counter increment on denial, so denied requests on limiter A must
+    * leave limiter B untouched in BOTH count and last-access bookkeeping. */
+   rate_limit_entry_t a_entries[SLOT_COUNT];
+   rate_limit_entry_t b_entries[SLOT_COUNT];
+   memset(a_entries, 0, sizeof(a_entries));
+   memset(b_entries, 0, sizeof(b_entries));
+
+   rate_limiter_config_t config = {
+      .max_count = MAX_COUNT,
+      .window_sec = WINDOW_SEC,
+      .slot_count = SLOT_COUNT,
+   };
+   rate_limiter_t a, b;
+   rate_limiter_init(&a, a_entries, &config);
+   rate_limiter_init(&b, b_entries, &config);
+
+   /* Burn limiter A to its limit. */
+   for (int i = 0; i < MAX_COUNT; i++) {
+      TEST_ASSERT_FALSE(rate_limiter_check(&a, "10.0.0.1"));
+   }
+   TEST_ASSERT_TRUE(rate_limiter_check(&a, "10.0.0.1"));
+
+   /* Limiter B must still grant a full MAX_COUNT to the same IP. */
+   for (int i = 0; i < MAX_COUNT; i++) {
+      TEST_ASSERT_FALSE(rate_limiter_check(&b, "10.0.0.1"));
+   }
+   TEST_ASSERT_TRUE(rate_limiter_check(&b, "10.0.0.1"));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_first_request_allowed);
@@ -177,5 +221,7 @@ int main(void) {
    RUN_TEST(test_normalize_ipv6_same_prefix);
    RUN_TEST(test_normalize_null_ip);
    RUN_TEST(test_normalize_non_ip_passthrough);
+   RUN_TEST(test_truncated_ip_fail_closed);
+   RUN_TEST(test_stacked_limiters_independent);
    return UNITY_END();
 }

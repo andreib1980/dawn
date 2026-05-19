@@ -44,6 +44,16 @@ bool rate_limiter_check(rate_limiter_t *limiter, const char *ip) {
       return false;
    }
 
+   /* Fail-closed on truncation: if the input would not fit, the internal
+    * strncpy would store a prefix that collides with any other IP sharing
+    * that prefix, breaking the per-slot strcmp identity check and letting
+    * a colliding caller evict a legitimate burned-budget state.  Treat
+    * over-long inputs as rate-limited.  strnlen with a small bound avoids
+    * scanning an unterminated buffer. */
+   if (strnlen(ip, RATE_LIMIT_IP_SIZE) >= RATE_LIMIT_IP_SIZE) {
+      return true;
+   }
+
    pthread_mutex_lock(&limiter->mutex);
 
    time_t now = time(NULL);

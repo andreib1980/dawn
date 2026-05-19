@@ -24,14 +24,13 @@
  * Changes are DB-only and take effect on satellite's next reconnect.
  */
 
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/rate_limiter.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
 
@@ -283,14 +282,24 @@ void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload)
  * compromised admin session.
  * ============================================================================= */
 
-/* Bucket count 64 was chosen over the 16 used by the sibling rate-limiter in
- * webui_satellite.c specifically because this endpoint surfaces a credential:
- * FNV-1a collisions on IPv4/IPv6 strings let a colliding-IP attacker evict a
- * legitimate admin's burned-budget state.  64 buckets reduces collision
- * probability ~4x vs. 16 (birthday paradox); a future shared rate-limiter helper
- * should bias toward 256+ buckets and linear probing.  See TODO: extract shared
- * webui_rate_limit.{c,h} from this file + webui_satellite.c. */
-#define KEY_FETCH_RATE_BUCKETS 64
+/* Two stacked core/rate_limiter instances express the dual-window contract.
+ * Migrated from a per-file FNV-bucket reimplementation 2026-05-19 — see
+ * docs/TODO.md "Extract shared webui_rate_limit.{c,h}".  Linear-scan + LRU
+ * eviction in the underlying primitive eliminates the FNV-collision-bypass
+ * surface entirely; the truncation fail-closed contract lives in
+ * rate_limiter_check itself.
+ *
+ * IMPORTANT: these two limiters must be checked together via
+ * key_fetch_rate_check() to enforce the dual-window contract.  Direct
+ * rate_limiter_check on either alone bypasses one of the two windows. */
+/* Asymmetric slot counts: hour-window state is the higher-cardinality-attack
+ * surface (an attacker cycling >N distinct /64s within an hour can LRU-evict
+ * a legitimate admin's burned hour-budget).  Sizing hour at 256 raises the
+ * floor 4x with ~12 KB extra .bss; the min window's 60s natural rollover
+ * limits the same attack to one window per minute, so 64 slots remains
+ * adequate there. */
+#define KEY_FETCH_MIN_RATE_SLOTS 64
+#define KEY_FETCH_HOUR_RATE_SLOTS 256
 #define KEY_FETCH_PER_MIN_LIMIT 5
 #define KEY_FETCH_PER_HOUR_LIMIT 30
 #define KEY_FETCH_MIN_WINDOW_SEC 60
@@ -302,18 +311,23 @@ void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload)
  * propagated downstream to the Android pairing flow. */
 #define SATELLITE_REG_KEY_HEX_LEN 65
 
-typedef struct {
-   uint32_t ip_hash;
-   char ip_str[46]; /* IPv6 max 45 + NUL */
-   time_t min_window_start;
-   int min_count;
-   time_t hour_window_start;
-   int hour_count;
-} key_fetch_rate_entry_t;
+static rate_limit_entry_t s_keyfetch_min_entries[KEY_FETCH_MIN_RATE_SLOTS];
+static rate_limiter_t s_keyfetch_min_limiter = RATE_LIMITER_STATIC_INIT(s_keyfetch_min_entries,
+                                                                        KEY_FETCH_MIN_RATE_SLOTS,
+                                                                        KEY_FETCH_PER_MIN_LIMIT,
+                                                                        KEY_FETCH_MIN_WINDOW_SEC);
 
-static key_fetch_rate_entry_t g_key_fetch_rate[KEY_FETCH_RATE_BUCKETS];
-static pthread_mutex_t g_key_fetch_rate_mutex = PTHREAD_MUTEX_INITIALIZER;
+static rate_limit_entry_t s_keyfetch_hour_entries[KEY_FETCH_HOUR_RATE_SLOTS];
+static rate_limiter_t s_keyfetch_hour_limiter = RATE_LIMITER_STATIC_INIT(s_keyfetch_hour_entries,
+                                                                         KEY_FETCH_HOUR_RATE_SLOTS,
+                                                                         KEY_FETCH_PER_HOUR_LIMIT,
+                                                                         KEY_FETCH_HOUR_WINDOW_SEC);
 
+/* FNV-1a hash used ONLY for the session-token correlation hash at the
+ * `session_hash = fnv1a_hash_str(conn->auth_session_token)` call in
+ * handle_get_satellite_registration_key below.  Bucketing has moved to the
+ * shared core/rate_limiter primitive (linear-scan + LRU).  Do not reuse this
+ * for new rate-limit buckets. */
 static uint32_t fnv1a_hash_str(const char *s) {
    uint32_t h = 2166136261u;
    if (!s)
@@ -332,67 +346,52 @@ typedef enum {
    KEY_FETCH_RATE_OK = 0,
    KEY_FETCH_RATE_DENY_MIN,
    KEY_FETCH_RATE_DENY_HOUR,
-   KEY_FETCH_RATE_DENY_TRUNCATED, /* client_ip too long for our buffer — fail closed */
+   KEY_FETCH_RATE_DENY_TRUNCATED, /* client_ip too long for the underlying limiter — fail closed */
 } key_fetch_rate_result_t;
 
-/* Returns OK if the fetch is allowed (and increments counters), otherwise the
- * specific DENY_* reason.  On collision-with-different-IP, we conservatively
- * pre-burn the new entry to 1/1 instead of resetting to 0/0, so colliding IPs
- * cannot evict each other's budgets and gain a fresh allowance. */
+/* Returns OK if the fetch is allowed (and increments both window counters),
+ * otherwise the specific DENY_* reason.
+ *
+ * Check order is min-first / hour-second by design.  Denials don't increment
+ * the rejected limiter's counter (rate_limiter_check returns BEFORE the
+ * count++), so the order doesn't decide which counter "burns" — both paths
+ * preserve budgets equivalently on a denial.  What the order DOES decide:
+ *   (a) hot-path latency — min is the tighter window (5/60s vs 30/3600s) so
+ *       most denials trigger there; checking it first short-circuits the
+ *       second mutex acquire + scan.
+ *   (b) LRU tiebreak — rate_limiter_check updates last_access on every match
+ *       (allowed or denied), so a min-denied request would refresh the min
+ *       limiter's LRU position only.  Checking min first means the hour
+ *       limiter's LRU position only moves on requests that genuinely
+ *       progressed past min.
+ *
+ * Truncation fail-closed lives in rate_limiter_check itself; we surface it
+ * here as a distinct DENY_TRUNCATED reason for audit-log fidelity (the
+ * underlying primitive returns a plain bool).  We pre-probe the truncation
+ * case via strnlen so the audit log gets the dedicated reason instead of a
+ * generic min/hour denial. */
 static key_fetch_rate_result_t key_fetch_rate_check(const char *client_ip) {
    if (!client_ip || !client_ip[0])
       return KEY_FETCH_RATE_OK;
 
-   /* IPv6 with zone IDs (e.g. fe80::1%eth0) or X-Forwarded-For chains may exceed
-    * the per-bucket ip_str buffer.  Truncation would break the strcmp identity
-    * check and force a permanent reset → rate limiter defeated.  Fail closed. */
-   if (strnlen(client_ip, 64) >= sizeof(g_key_fetch_rate[0].ip_str))
+   /* IPv6 with zone IDs (e.g. fe80::1%eth0) or X-Forwarded-For chains may
+    * exceed the limiter's per-slot buffer.  rate_limiter_check would
+    * fail-closed and return true on either limiter; classify here as the
+    * dedicated TRUNCATED reason for audit-log fidelity. */
+   if (strnlen(client_ip, RATE_LIMIT_IP_SIZE) >= RATE_LIMIT_IP_SIZE)
       return KEY_FETCH_RATE_DENY_TRUNCATED;
 
-   uint32_t hash = fnv1a_hash_str(client_ip);
-   int bucket = hash % KEY_FETCH_RATE_BUCKETS;
-   time_t now = time(NULL);
-   key_fetch_rate_result_t result = KEY_FETCH_RATE_OK;
+   /* /64 normalization for IPv6 prevents per-address bypass within a single
+    * network; IPv4 passes through unchanged. */
+   char normalized_ip[RATE_LIMIT_IP_SIZE];
+   rate_limiter_normalize_ip(client_ip, normalized_ip, sizeof(normalized_ip));
 
-   pthread_mutex_lock(&g_key_fetch_rate_mutex);
-   key_fetch_rate_entry_t *e = &g_key_fetch_rate[bucket];
+   if (rate_limiter_check(&s_keyfetch_min_limiter, normalized_ip))
+      return KEY_FETCH_RATE_DENY_MIN;
+   if (rate_limiter_check(&s_keyfetch_hour_limiter, normalized_ip))
+      return KEY_FETCH_RATE_DENY_HOUR;
 
-   bool is_new = (e->ip_hash != hash || strcmp(e->ip_str, client_ip) != 0);
-   if (is_new) {
-      /* Fresh slot or collision-eviction.  Pre-burn this request as count=1 so
-       * the evicting IP can't gain a clean slate at the expense of the IP it
-       * evicted.  Conservative w/r/t the bypass attack, neutral w/r/t a genuine
-       * first arrival. */
-      e->ip_hash = hash;
-      strncpy(e->ip_str, client_ip, sizeof(e->ip_str) - 1);
-      e->ip_str[sizeof(e->ip_str) - 1] = '\0';
-      e->min_window_start = now;
-      e->min_count = 1;
-      e->hour_window_start = now;
-      e->hour_count = 1;
-   } else {
-      /* Roll windows forward if they've elapsed. */
-      if (now - e->min_window_start >= KEY_FETCH_MIN_WINDOW_SEC) {
-         e->min_window_start = now;
-         e->min_count = 0;
-      }
-      if (now - e->hour_window_start >= KEY_FETCH_HOUR_WINDOW_SEC) {
-         e->hour_window_start = now;
-         e->hour_count = 0;
-      }
-
-      if (e->min_count + 1 > KEY_FETCH_PER_MIN_LIMIT) {
-         result = KEY_FETCH_RATE_DENY_MIN;
-      } else if (e->hour_count + 1 > KEY_FETCH_PER_HOUR_LIMIT) {
-         result = KEY_FETCH_RATE_DENY_HOUR;
-      } else {
-         e->min_count++;
-         e->hour_count++;
-      }
-   }
-
-   pthread_mutex_unlock(&g_key_fetch_rate_mutex);
-   return result;
+   return KEY_FETCH_RATE_OK;
 }
 
 static const char *key_fetch_rate_reason(key_fetch_rate_result_t r) {
