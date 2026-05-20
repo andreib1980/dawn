@@ -641,28 +641,53 @@ int memory_db_relation_list_by_subject_at(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_relation_list_all_by_user(int user_id,
-                                        memory_relation_t *out,
-                                        int max,
-                                        int *count_out) {
+int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
+                                                         memory_relation_t *out,
+                                                         int64_t *subj_roots,
+                                                         int64_t *obj_roots,
+                                                         int max,
+                                                         int *count_out) {
    if (count_out)
       *count_out = 0;
-   if (!out || max <= 0)
+   if (!out || !subj_roots || !obj_roots || max <= 0)
       return MEMORY_DB_FAILURE;
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* Single query: all relations for this user, ordered by subject for grouping.
-    * valid_from/valid_to appended last (v33) to match populate_relation_from_row order. */
+   /* Single query: all relations for this user with canonical-root id
+    * resolved per side via COALESCE(canonical_id, id).  Object side reuses
+    * the existing `e` JOIN that resolves object_name; subject side gets
+    * its own JOIN aliased `s` (subject_entity_id is NOT NULL per schema,
+    * so the s row always exists for valid relations).
+    *
+    * subj_root / obj_root: 0 means orphaned (LEFT JOIN missed) — callers
+    * MUST filter via "root == specific_entity_id" rather than "root != 0"
+    * to avoid attributing orphaned-subject relations to any entity card.
+    *
+    * No ORDER BY — sorting on the computed subj_root materializes a temp
+    * B-tree (verified 2026-05-20 via EXPLAIN QUERY PLAN), and no caller
+    * depends on iteration order.  valid_from/valid_to appended last (v33)
+    * to match populate_relation_from_row column order.
+    *
+    * EXPLAIN QUERY PLAN (Jetson, 2026-05-20):
+    *   SEARCH r USING INDEX idx_memory_relations_user_validity (user_id=?)
+    *   SEARCH e USING INTEGER PRIMARY KEY (rowid=?)
+    *   SEARCH s USING INTEGER PRIMARY KEY (rowid=?)
+    * Three indexed seeks; no scans, no temp tables. */
    sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
-                               "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
-                               "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
-                               "FROM memory_relations r "
-                               "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
-                               "WHERE r.user_id = ? ORDER BY r.subject_entity_id LIMIT ?",
-                               -1, &stmt, NULL);
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
+       "       COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
+       "       COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+       "       COALESCE(s.canonical_id, s.id, 0) AS subj_root, "
+       "       COALESCE(e.canonical_id, e.id, 0) AS obj_root "
+       "FROM memory_relations r "
+       "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
+       "LEFT JOIN memory_entities s ON r.subject_entity_id = s.id "
+       "WHERE r.user_id = ? "
+       "LIMIT ?",
+       -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
@@ -674,6 +699,10 @@ int memory_db_relation_list_all_by_user(int user_id,
    int count = 0;
    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
       populate_relation_from_row(stmt, &out[count]);
+      /* Roots are appended after the columns populate_relation_from_row
+       * reads (it stops at valid_to / index 7).  Indices 8/9 are ours. */
+      subj_roots[count] = sqlite3_column_int64(stmt, 8);
+      obj_roots[count] = sqlite3_column_int64(stmt, 9);
       count++;
    }
 

@@ -788,3 +788,17 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/webui/build_focus_block.c
    LIBS    dawn_common pthread m stemmer
            ${JSONC_LIBRARIES})
+
+# =============================================================================
+# Drift tests — shell-script based (no compile target)
+# =============================================================================
+# Cross-source-language invariants that can't be enforced by C unit tests.
+# Architecture-reviewer flagged the swap-eligible entity-type list as a
+# drift risk on the entity-merge Path B + Path C ship — same predicate
+# expressed in both C (memory_db_alias_writes.c) and JS (memory_aliases.js).
+# The drift script extracts both lists, compares, and fails the build if
+# they diverge.
+add_test(NAME check_swap_eligible_types_mirror
+         COMMAND bash ${SRC_ROOT}/tests/check_swap_eligible_types_mirror.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_swap_eligible_types_mirror PROPERTIES LABELS "ci")

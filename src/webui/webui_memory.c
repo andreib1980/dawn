@@ -360,12 +360,31 @@ static json_object *build_entities_json_array(int user_id,
                                               int count) {
    memory_alias_summary_row_t alias_summary[ENTITIES_JSON_ALIAS_SUMMARY_MAX];
    int alias_summary_count = 0;
-   /* Initialize relations array unconditionally so subsequent indexed reads
-    * cannot hit uninitialized stack data on any future caller path that
-    * skips the SQL load. */
+   /* Initialize relations + per-row canonical-root arrays unconditionally
+    * so subsequent indexed reads cannot hit uninitialized stack data on
+    * any future caller path that skips the SQL load.  subj_roots[] and
+    * obj_roots[] are parallel to all_rels[] — entry i in each array
+    * describes the same relation.
+    *
+    * Stack-footprint guard: at the current 2000-row cap the combined
+    * locals weigh ~384 KB (352 KB for all_rels + 16 KB × 2 for the roots).
+    * Comfortable on the LWS service thread's 8 MB glibc default, but a
+    * future bump past 4000 rows should heap-allocate via the same calloc
+    * pattern handle_export_memories uses below.  Static-assert backstops
+    * a silent cap-bump from blowing the stack on a deep call chain. */
+   _Static_assert((sizeof(memory_relation_t) + sizeof(int64_t) * 2) *
+                          ENTITIES_JSON_RELATIONS_MAX <
+                      512 * 1024,
+                  "build_entities_json_array stack locals exceed 512 KB — heap-allocate "
+                  "via calloc (see handle_export_memories) before bumping the cap further");
    memory_relation_t all_rels[ENTITIES_JSON_RELATIONS_MAX];
+   int64_t subj_roots[ENTITIES_JSON_RELATIONS_MAX];
+   int64_t obj_roots[ENTITIES_JSON_RELATIONS_MAX];
    memset(all_rels, 0, sizeof(all_rels));
+   memset(subj_roots, 0, sizeof(subj_roots));
+   memset(obj_roots, 0, sizeof(obj_roots));
    int total_rels = 0;
+   int64_t user_self_id = 0;
 
    /* Skip both bulk queries when there are no entities to enrich — an
     * empty entity-search keystroke runs through this helper roughly every
@@ -374,8 +393,22 @@ static json_object *build_entities_json_array(int user_id,
    if (count > 0) {
       memory_db_entity_alias_summary(user_id, alias_summary, ENTITIES_JSON_ALIAS_SUMMARY_MAX,
                                      &alias_summary_count);
-      memory_db_relation_list_all_by_user(user_id, all_rels, ENTITIES_JSON_RELATIONS_MAX,
-                                          &total_rels);
+      memory_db_relation_list_with_canonical_roots_by_user(user_id, all_rels, subj_roots, obj_roots,
+                                                           ENTITIES_JSON_RELATIONS_MAX,
+                                                           &total_rels);
+      /* Single per-user lookup, consumed below to set is_user_self on the
+       * matching row's JSON.  Consumed by JS-side direction-preference
+       * guard in memory_aliases.js (never auto-suggest demoting the
+       * user_self anchor in manual-link confirm modals).  Failure
+       * leaves user_self_id = 0 which renders is_user_self=false on
+       * every entity — degraded but safe; log so a real DB error
+       * doesn't go silent. */
+      if (memory_db_entity_get_user_self_id(user_id, &user_self_id) != MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("entities_json: get_user_self_id failed for user %d — "
+                      "is_user_self defaults to false for all entities",
+                      user_id);
+         user_self_id = 0;
+      }
       /* Bulk relation pull is bounded by ENTITIES_JSON_RELATIONS_MAX —
        * a graph denser than that loses tail edges silently from rendered
        * cards.  Surface a warning so the operator knows to bump the cap
@@ -413,19 +446,37 @@ static json_object *build_entities_json_array(int user_id,
       json_object *entity_obj = json_object_new_object();
       json_object_object_add(entity_obj, "id", json_object_new_int64(entities[i].id));
       json_object_object_add(entity_obj, "name", json_object_new_string(entities[i].name));
+      /* Normalized form (lowercased, whitespace-collapsed).  Consumed by
+       * the JS-side shouldSwapForLongerCanonical in memory_aliases.js
+       * for the manual-link direction-preference heuristic — needs the
+       * canonical form so token-count and prefix-substring comparisons
+       * match the C-side rule in memory_db_alias_writes.c. */
+      json_object_object_add(entity_obj, "canonical_name",
+                             json_object_new_string(entities[i].canonical_name));
       json_object_object_add(entity_obj, "entity_type",
                              json_object_new_string(entities[i].entity_type));
       json_object_object_add(entity_obj, "mention_count",
                              json_object_new_int(entities[i].mention_count));
       json_object_object_add(entity_obj, "alias_count", json_object_new_int(alias_count));
+      json_object_object_add(entity_obj, "is_user_self",
+                             json_object_new_boolean(user_self_id != 0 &&
+                                                     entities[i].id == user_self_id));
       json_object_object_add(entity_obj, "first_seen",
                              json_object_new_int64(entities[i].first_seen));
       json_object_object_add(entity_obj, "last_seen", json_object_new_int64(entities[i].last_seen));
 
+      /* Equivalence-class-aware relation emit: subj_roots[]/obj_roots[]
+       * carry each relation's canonical-root entity id (resolved by SQL,
+       * Bundle 2 pattern).  Match on root == entities[i].id so relations
+       * attached to any alias in the class roll up under the canonical.
+       * Without this, a card shows only edges attached directly to the
+       * canonical row, while mention_count aggregates the full class —
+       * the "card says 48 mentions but only 2 relations" mismatch. */
       json_object *relations_array = json_object_new_array();
 
+      /* OUT: subject's canonical-root is this entity. */
       for (int r = 0; r < total_rels; r++) {
-         if (all_rels[r].subject_entity_id != entities[i].id)
+         if (subj_roots[r] != entities[i].id)
             continue;
          json_object *rel_obj = json_object_new_object();
          json_object_object_add(rel_obj, "relation", json_object_new_string(all_rels[r].relation));
@@ -439,12 +490,22 @@ static json_object *build_entities_json_array(int user_id,
          json_object_array_add(relations_array, rel_obj);
       }
 
+      /* IN: object's canonical-root is this entity AND subject's root
+       * is NOT (within-class relations would already have been emitted
+       * above; skipping prevents double-counting).  Display name + click
+       * target use subj_roots[r] — the canonical id — NOT the raw
+       * subject_entity_id.  entities[] is filtered to canonicals at the
+       * top of this function (alias-skip), so looking up by the raw
+       * alias id would silently miss and render a blank name; looking
+       * up by canonical id finds the right card. */
       for (int r = 0; r < total_rels; r++) {
-         if (all_rels[r].object_entity_id != entities[i].id)
+         if (obj_roots[r] != entities[i].id)
+            continue;
+         if (subj_roots[r] == entities[i].id)
             continue;
          const char *subj_name = "";
          for (int e = 0; e < count; e++) {
-            if (entities[e].id == all_rels[r].subject_entity_id) {
+            if (entities[e].id == subj_roots[r]) {
                subj_name = entities[e].name;
                break;
             }
@@ -452,8 +513,7 @@ static json_object *build_entities_json_array(int user_id,
          json_object *rel_obj = json_object_new_object();
          json_object_object_add(rel_obj, "relation", json_object_new_string(all_rels[r].relation));
          json_object_object_add(rel_obj, "object_name", json_object_new_string(subj_name));
-         json_object_object_add(rel_obj, "object_entity_id",
-                                json_object_new_int64(all_rels[r].subject_entity_id));
+         json_object_object_add(rel_obj, "object_entity_id", json_object_new_int64(subj_roots[r]));
          json_object_object_add(rel_obj, "direction", json_object_new_string("in"));
          json_object_object_add(rel_obj, "confidence",
                                 json_object_new_double(all_rels[r].confidence));
@@ -1169,11 +1229,20 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       memory_preference_t *prefs = calloc(EXPORT_MAX_PREFS, sizeof(memory_preference_t));
       memory_entity_t *entities = calloc(EXPORT_MAX_ENTITIES, sizeof(memory_entity_t));
       memory_relation_t *relations = calloc(EXPORT_MAX_RELATIONS, sizeof(memory_relation_t));
-      if (!facts || !prefs || !entities || !relations) {
+      /* Parallel arrays for canonical-root resolution — see build_entities_
+       * json_array above for the same pattern.  Without these, relations
+       * attached to alias rows would be silently dropped from the export
+       * under the canonical entity (the bug Bundle 2's aggregation pattern
+       * already solved for mention_count). */
+      int64_t *subj_roots = calloc(EXPORT_MAX_RELATIONS, sizeof(int64_t));
+      int64_t *obj_roots = calloc(EXPORT_MAX_RELATIONS, sizeof(int64_t));
+      if (!facts || !prefs || !entities || !relations || !subj_roots || !obj_roots) {
          free(facts);
          free(prefs);
          free(entities);
          free(relations);
+         free(subj_roots);
+         free(obj_roots);
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error",
                                 json_object_new_string("Memory allocation failed"));
@@ -1190,8 +1259,9 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       int entity_count = 0;
       memory_db_entity_list(conn->auth_user_id, entities, EXPORT_MAX_ENTITIES, 0, &entity_count);
       int relation_count = 0;
-      memory_db_relation_list_all_by_user(conn->auth_user_id, relations, EXPORT_MAX_RELATIONS,
-                                          &relation_count);
+      memory_db_relation_list_with_canonical_roots_by_user(conn->auth_user_id, relations,
+                                                           subj_roots, obj_roots,
+                                                           EXPORT_MAX_RELATIONS, &relation_count);
 
       /* Build export JSON */
       json_object *export_obj = json_object_new_object();
@@ -1233,10 +1303,13 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_object_add(e, "mention_count", json_object_new_int(entities[i].mention_count));
          json_object_object_add(e, "first_seen", json_object_new_int64(entities[i].first_seen));
 
-         /* Attach relations for this entity */
+         /* Attach relations for this entity.  Equivalence-class-aware:
+          * match subj_roots[r] against the canonical's id (not the raw
+          * subject_entity_id), so relations attached to alias rows roll
+          * up under the canonical in the export. */
          json_object *rels_arr = json_object_new_array();
          for (int r = 0; r < relation_count; r++) {
-            if (relations[r].subject_entity_id != entities[i].id)
+            if (subj_roots[r] != entities[i].id)
                continue;
             json_object *rel = json_object_new_object();
             json_object_object_add(rel, "relation", json_object_new_string(relations[r].relation));
@@ -1263,6 +1336,8 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       free(prefs);
       free(entities);
       free(relations);
+      free(subj_roots);
+      free(obj_roots);
    }
 
    /* Copy format before response is freed (format may point into payload JSON) */

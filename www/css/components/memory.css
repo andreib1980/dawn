@@ -716,12 +716,28 @@
    font-family: 'IBM Plex Mono', monospace;
    font-size: 0.75rem;
    color: var(--text-secondary);
+   /* `title` attribute on the element carries the per-card explanation —
+    * cursor: help signals the tooltip affordance to the operator. */
+   cursor: help;
 }
 
 /* Entity Relations */
 .entity-relations {
    margin-top: 0.4rem;
    padding-left: 0.25rem;
+}
+
+/* Section label above the relation list.  Disambiguates the list from the
+ * mention-count badge above ("260 mentions" vs "Relations") — the two are
+ * different signals and tooltips on each explain the distinction. */
+.entity-relations-label {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   text-transform: uppercase;
+   letter-spacing: 0.04em;
+   color: var(--text-tertiary, var(--text-secondary));
+   margin-bottom: 0.2rem;
+   cursor: help;
 }
 
 .entity-relation {

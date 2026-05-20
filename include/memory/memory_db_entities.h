@@ -317,21 +317,43 @@ int memory_db_relation_distinct_predicates(int user_id,
                                            int *count_out);
 
 /**
- * @brief Bulk-load all relations for a user in a single query
+ * @brief Bulk-load all relations for a user with canonical-root resolution
  *
- * Returns outgoing relations sorted by subject_entity_id. Used by WebUI
- * to avoid N+1 queries when loading entities with their relations.
+ * Single query that joins memory_relations against memory_entities on both
+ * subject and object sides, returning each relation along with its
+ * SUBJECT and OBJECT canonical-root entity ids (or 0 for object-as-literal
+ * where memory_relations.object_entity_id is NULL).  Canonical-root = the
+ * entity's `canonical_id` if set, else the entity's own `id` — i.e. the
+ * head of the row's equivalence class under the single-level alias
+ * invariant.  Bundle 2 (May 13) established that equivalence-class
+ * aggregation belongs in SQL; this is the read-side complement to the
+ * mention_count / first_seen / last_seen aggregation already done there.
  *
- * @param user_id User ID
- * @param out Output array of relations
- * @param max Maximum relations to return
- * @param count_out Output: number of relations
+ * Callers (build_entities_json_array, memory_export) use the resolved
+ * roots to attribute relations to the canonical entity for the class,
+ * not the row they happen to be attached to.  Without this, a relation
+ * like `(sugar hill, located_in, georgia)` attached to alias entity "sugar
+ * hill" would NOT surface on the canonical "sugar hill, georgia" card.
+ *
+ * Returned sorted by subject canonical-root for predictable iteration.
+ *
+ * Output arrays are PARALLEL — out[i], subj_roots[i], and obj_roots[i]
+ * all describe the same relation row.  All three must be sized >= @p max.
+ *
+ * @param user_id     User ID
+ * @param out         Output array of relations (size >= max)
+ * @param subj_roots  Output: subject canonical-root id for each rel
+ * @param obj_roots   Output: object canonical-root id, or 0 for literals
+ * @param max         Maximum relations to return
+ * @param count_out   Output: number of relations actually written
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_relation_list_all_by_user(int user_id,
-                                        memory_relation_t *out,
-                                        int max,
-                                        int *count_out);
+int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
+                                                         memory_relation_t *out,
+                                                         int64_t *subj_roots,
+                                                         int64_t *obj_roots,
+                                                         int max,
+                                                         int *count_out);
 
 /**
  * @brief List all entities for a user, ordered by mention count

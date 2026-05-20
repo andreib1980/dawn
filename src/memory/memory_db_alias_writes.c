@@ -154,7 +154,12 @@ static bool entity_tokens_are_prefix_of(const char *a, const char *b) {
  * Smith" is the canonical form of "Jon"; "Lassie the Collie" is the
  * canonical form of "Lassie").  `org` is excluded because acronyms (IBM,
  * NASA) are typically the canonical form in common usage; `thing` is
- * excluded because the heuristic doesn't generalize. */
+ * excluded because the heuristic doesn't generalize.
+ *
+ * MIRROR: the JS-side equivalent lives in www/js/ui/memory_aliases.js as
+ * `SWAP_ELIGIBLE_TYPES` (manual-link confirm-modal direction preference).
+ * If this list changes, update the JS set too.  Drift is caught by
+ * tests/check_swap_eligible_types_mirror.sh, wired into ctest -L ci. */
 static bool entity_type_prefers_longer_canonical(const char *entity_type) {
    if (!entity_type)
       return false;
@@ -2297,8 +2302,32 @@ int memory_alias_link_user_self_run(int user_id,
                result->rejected++;
             }
          } else if (ev.composite_score >= (float)g_config.memory.entity_merge_review_threshold) {
-            /* Queue for operator review via the WebUI Suggested-Merges panel. */
-            int prop_rc = memory_alias_internal_insert_merge_proposal(user_id, eid, self_id,
+            /* Queue for operator review via the WebUI Suggested-Merges panel.
+             *
+             * Direction preference: same rule the standard cascade's propose
+             * path uses (consider_auto_merge, search for `prop_src`).  If the
+             * candidate is the fuller person/pet/place form and the user_self
+             * anchor is currently a leaf, store the proposal pre-swapped so
+             * the operator sees the right direction.  Approving will then
+             * flip the alias direction accordingly.  Leaf-check inside the
+             * helper protects the common case where the anchor already has
+             * dependents — swap silently skips and the operator gets the
+             * un-swapped direction (correct: can't demote an established
+             * anchor without breaking the single-level alias invariant).
+             *
+             * Deliberately NOT applied to the AUTO branch above: AUTO with
+             * link-user-self reason is operator-directed direction (the
+             * `dawn-admin memory entity link-user-self` flow with the
+             * operator's chosen self_id as anchor) and silent flipping
+             * would override intent.  Propose-time defers to operator
+             * review, so a swap suggestion is honest. */
+            int64_t prop_src = eid;
+            int64_t prop_tgt = self_id;
+            if (should_swap_for_longer_canonical(user_id, &cand, self_id)) {
+               prop_src = self_id;
+               prop_tgt = eid;
+            }
+            int prop_rc = memory_alias_internal_insert_merge_proposal(user_id, prop_src, prop_tgt,
                                                                       ev.composite_score,
                                                                       /* evidence_json */ NULL,
                                                                       &proposal_id);

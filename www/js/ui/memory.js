@@ -868,12 +868,23 @@
          `</svg></button>` +
          `</div>` +
          `<div class="memory-item-meta">` +
-         `<span class="entity-mentions">${entity.mention_count || 0} mentions</span>` +
+         `<span class="entity-mentions" ` +
+         `title="Number of conversation references to this entity (aggregated across all soft aliases). ` +
+         `Bumped once per extraction that names the entity — independent of how many facts that ` +
+         `extraction produced.">` +
+         `${entity.mention_count || 0} mentions</span>` +
          (dateStr ? `<span class="memory-item-date">${dateStr}</span>` : '') +
          `</div>` +
          aliasSlotHtml +
          (relations.length > 0
-            ? `<div class="entity-relations">${relationsHtml}${hiddenHtml}${moreHtml}</div>`
+            ? `<div class="entity-relations">` +
+              `<div class="entity-relations-label" ` +
+              `title="Known facts and connections — each line is an edge in the entity graph ` +
+              `connecting this entity to another entity or a literal value. Aggregated across ` +
+              `all soft aliases.">` +
+              `Relations</div>` +
+              `${relationsHtml}${hiddenHtml}${moreHtml}` +
+              `</div>`
             : '') +
          `</div>`
       );

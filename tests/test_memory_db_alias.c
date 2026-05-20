@@ -1289,6 +1289,133 @@ static void test_alias_existing_user_to_self_rejects_invalid_user(void) {
 }
 
 /* ============================================================================
+ * Path B — link-user-self propose-time longer-canonical direction swap
+ *
+ * Mirrors the swap shipped 2026-05-12 in consider_auto_merge's propose loop.
+ * The link-user-self workflow's REVIEW-band proposal store now applies the
+ * same should_swap_for_longer_canonical guard so the operator sees the
+ * right direction in the Suggested-Merges panel.  AUTO branch deliberately
+ * does NOT swap (operator-directed direction shouldn't be silently flipped).
+ * ============================================================================ */
+
+static void test_link_user_self_propose_swaps_for_longer_canonical(void) {
+   /* Set up: real_name = "Jon" (short form) → user_self anchor is the
+    * short canonical AND a LEAF (no aliases pointing at it, no open
+    * exclusive relations as subject).  Longer person candidate
+    * "Jonathan Smith" gets evaluated by link_user_self_run's per-
+    * candidate scoring loop and lands in the REVIEW band after we drop
+    * the review threshold to 0.30 (substring bonus + type-match +
+    * user_self_bonus = ~0.35 composite, well below the default 0.50).
+    * The propose-site swap should fire and store the proposal with
+    * source=self (the anchor) and target=jonathan (the longer canonical). */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jon", AUTH_REAL_NAME_MAX - 1);
+   auth_db_set_user_identity(g_test_user_id, &id);
+
+   int64_t self = insert_entity_typed(g_test_user_id, "Jon", "person");
+   mark_entity_user_self(self);
+   /* No relations on self → leaf. */
+
+   int64_t jonathan = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+
+   /* Lower review threshold so the substring/type/user-self-bonus signal
+    * lands in REVIEW band.  Matches the override pattern in
+    * test_consider_auto_merge_substring_rescue_into_review. */
+   float saved_review = g_config.memory.entity_merge_review_threshold;
+   g_config.memory.entity_merge_review_threshold = 0.30f;
+
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ false, &result);
+
+   g_config.memory.entity_merge_review_threshold = saved_review;
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT(1, result.proposed);
+
+   /* Find the proposal row that touches jonathan and verify direction was
+    * swapped: stored as (source=self_id, target=jonathan_id) rather than
+    * the un-swapped default (source=jonathan_id, target=self_id). */
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT source_entity_id, target_entity_id "
+                      "FROM memory_entity_merge_proposals "
+                      "WHERE user_id=? AND resolved_at IS NULL "
+                      "  AND (source_entity_id=? OR target_entity_id=?) "
+                      "LIMIT 1",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, g_test_user_id);
+   sqlite3_bind_int64(stmt, 2, jonathan);
+   sqlite3_bind_int64(stmt, 3, jonathan);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(stmt));
+   int64_t src = sqlite3_column_int64(stmt, 0);
+   int64_t tgt = sqlite3_column_int64(stmt, 1);
+   sqlite3_finalize(stmt);
+
+   TEST_ASSERT_EQUAL_INT64(self, src);     /* anchor became the source */
+   TEST_ASSERT_EQUAL_INT64(jonathan, tgt); /* longer canonical became target */
+}
+
+static void test_link_user_self_propose_skips_swap_when_self_has_dependents(void) {
+   /* Negative companion to the above: when the user_self anchor already
+    * has an alias pointing at it (has dependents), the leaf-check inside
+    * should_swap_for_longer_canonical refuses, the swap silently skips,
+    * and the proposal is stored in the un-swapped default direction
+    * (source=candidate, target=self).  Pins that the leaf-guard fires
+    * and prevents demoting an established anchor. */
+   auth_user_identity_t id;
+   memset(&id, 0, sizeof(id));
+   strncpy(id.real_name, "Jon", AUTH_REAL_NAME_MAX - 1);
+   auth_db_set_user_identity(g_test_user_id, &id);
+
+   int64_t self = insert_entity_typed(g_test_user_id, "Jon", "person");
+   mark_entity_user_self(self);
+
+   /* Attach a pre-existing alias to make self NON-leaf.  Use a 'thing'
+    * row that wouldn't otherwise be considered by the cascade. */
+   int64_t pre_alias = insert_entity_typed(g_test_user_id, "Jon Profile Tag", "thing");
+   int64_t pre_link = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, pre_alias, self, "soft",
+                                                     "test-fixture", -1.0f, NULL, &pre_link));
+
+   int64_t jonathan = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+
+   float saved_review = g_config.memory.entity_merge_review_threshold;
+   g_config.memory.entity_merge_review_threshold = 0.30f;
+
+   memory_alias_link_user_self_result_t result;
+   memset(&result, 0, sizeof(result));
+   int rc = memory_alias_link_user_self_run(g_test_user_id, /* dry_run */ false, &result);
+
+   g_config.memory.entity_merge_review_threshold = saved_review;
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_GREATER_OR_EQUAL_INT(1, result.proposed);
+
+   /* Proposal stored un-swapped: source=jonathan, target=self. */
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT source_entity_id, target_entity_id "
+                      "FROM memory_entity_merge_proposals "
+                      "WHERE user_id=? AND resolved_at IS NULL "
+                      "  AND (source_entity_id=? OR target_entity_id=?) "
+                      "LIMIT 1",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, g_test_user_id);
+   sqlite3_bind_int64(stmt, 2, jonathan);
+   sqlite3_bind_int64(stmt, 3, jonathan);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(stmt));
+   int64_t src = sqlite3_column_int64(stmt, 0);
+   int64_t tgt = sqlite3_column_int64(stmt, 1);
+   sqlite3_finalize(stmt);
+
+   TEST_ASSERT_EQUAL_INT64(jonathan, src); /* candidate stayed as source */
+   TEST_ASSERT_EQUAL_INT64(self, tgt);     /* anchor stayed as target */
+}
+
+/* ============================================================================
  * alias_link / alias_unlink
  * ============================================================================ */
 
@@ -3152,6 +3279,101 @@ static void test_summary_list_window_asc_returns_oldest_first(void) {
 }
 
 /* ============================================================================
+ * Relation list with canonical-root resolution
+ *
+ * Verifies that memory_db_relation_list_with_canonical_roots_by_user
+ * returns each relation along with the SQL-resolved canonical-root for
+ * both subject and object sides.  Consumed by build_entities_json_array
+ * and memory_export to attribute relations to the canonical entity for
+ * the equivalence class, not the row they happen to be attached to.
+ * ============================================================================ */
+
+static void test_relation_list_with_canonical_roots_subject_resolves_to_canonical(void) {
+   /* Insert a canonical "Jonathan Smith" with an alias "Jon".  Attach a
+    * relation against the ALIAS row (subject_entity_id = alias).  Verify
+    * subj_roots[0] resolves to the canonical's id, not the alias row. */
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
+   /* Soft-link alias → canonical (sets memory_entities.canonical_id). */
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft",
+                                                     "test-fixture", -1.0f, NULL, &link_id));
+
+   /* Relation attached to the ALIAS row. */
+   insert_open_relation(g_test_user_id, alias, "works_at", 0, "Acme");
+
+   memory_relation_t out[8];
+   int64_t subj_roots[8] = { 0 };
+   int64_t obj_roots[8] = { 0 };
+   int count = 0;
+   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
+                                                                 obj_roots, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT64(alias, out[0].subject_entity_id); /* raw row pointer */
+   TEST_ASSERT_EQUAL_INT64(canonical, subj_roots[0]);        /* SQL-resolved root */
+   TEST_ASSERT_EQUAL_INT64(0, obj_roots[0]);                 /* literal object */
+}
+
+static void test_relation_list_with_canonical_roots_object_resolves_to_canonical(void) {
+   /* Mirror case: relation's OBJECT side is the alias.  obj_roots[0]
+    * should resolve to the canonical. */
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft",
+                                                     "test-fixture", -1.0f, NULL, &link_id));
+
+   int64_t other = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
+   /* (other, employs, alias) — object side points at the alias row. */
+   insert_open_relation(g_test_user_id, other, "employs", alias, NULL);
+
+   memory_relation_t out[8];
+   int64_t subj_roots[8] = { 0 };
+   int64_t obj_roots[8] = { 0 };
+   int count = 0;
+   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
+                                                                 obj_roots, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT64(other, subj_roots[0]);    /* canonical itself */
+   TEST_ASSERT_EQUAL_INT64(canonical, obj_roots[0]); /* alias resolved up */
+}
+
+static void test_relation_list_with_canonical_roots_literal_object_zero_root(void) {
+   /* Relation with no object_entity_id (literal object_value).  obj_roots
+    * must be 0 so callers know to skip "in" attribution. */
+   int64_t subj = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   insert_open_relation(g_test_user_id, subj, "favorite_color", 0, "blue");
+
+   memory_relation_t out[8];
+   int64_t subj_roots[8] = { 0 };
+   int64_t obj_roots[8] = { 0 };
+   int count = 0;
+   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
+                                                                 obj_roots, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT64(subj, subj_roots[0]);
+   TEST_ASSERT_EQUAL_INT64(0, obj_roots[0]);
+}
+
+static void test_relation_list_with_canonical_roots_rejects_null_arrays(void) {
+   /* The new function requires all three output arrays non-NULL. */
+   memory_relation_t out[1];
+   int64_t roots[1] = { 0 };
+   int count = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_with_canonical_roots_by_user(
+                                                g_test_user_id, NULL, roots, roots, 1, &count));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_with_canonical_roots_by_user(
+                                                g_test_user_id, out, NULL, roots, 1, &count));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_with_canonical_roots_by_user(
+                                                g_test_user_id, out, roots, NULL, 1, &count));
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -3209,6 +3431,16 @@ int main(void) {
    RUN_TEST(test_alias_existing_user_to_self_sweep);
    RUN_TEST(test_maybe_alias_user_to_self_rejects_invalid_input);
    RUN_TEST(test_alias_existing_user_to_self_rejects_invalid_user);
+
+   /* Path B — link-user-self propose-time longer-canonical swap */
+   RUN_TEST(test_link_user_self_propose_swaps_for_longer_canonical);
+   RUN_TEST(test_link_user_self_propose_skips_swap_when_self_has_dependents);
+
+   /* Relation list with SQL-resolved canonical roots */
+   RUN_TEST(test_relation_list_with_canonical_roots_subject_resolves_to_canonical);
+   RUN_TEST(test_relation_list_with_canonical_roots_object_resolves_to_canonical);
+   RUN_TEST(test_relation_list_with_canonical_roots_literal_object_zero_root);
+   RUN_TEST(test_relation_list_with_canonical_roots_rejects_null_arrays);
 
    /* alias_link / alias_unlink */
    RUN_TEST(test_alias_link_writes_canonical_id_and_audit);

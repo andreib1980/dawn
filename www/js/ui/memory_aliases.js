@@ -23,6 +23,89 @@
    /* Pending merge proposals for the current user (Suggested-Merges panel). */
    let proposals = [];
 
+   /* Entity types where the "fuller" name form is the natural canonical
+    * (manual-link direction-preference suggestion in handleMergeTargetClick).
+    *
+    * MIRROR: the C-side authoritative list lives in
+    * src/memory/memory_db_alias_writes.c::entity_type_prefers_longer_canonical.
+    * If THIS set changes, update the C function to match.  Drift is
+    * caught by tests/check_swap_eligible_types_mirror.sh, wired into
+    * ctest -L ci. */
+   const SWAP_ELIGIBLE_TYPES = new Set(['person', 'pet', 'place']);
+
+   /**
+    * Decide whether the manual-link two-click flow should pre-flip
+    * source/target before showing the confirm modal.
+    *
+    * Returns {swap: bool, reason: string|null}.  `reason` is set when
+    * `swap` is true and identifies which rule triggered, so the modal can
+    * show the right hint:
+    *   - "mandatory-source-has-deps": source-as-clicked already has
+    *     aliases pointing at it, so it can't be a valid soft-link source
+    *     (alias_link refuses).  Swap is the only way to express the
+    *     operator's intent; the leaf-target becomes the source.
+    *   - "longer-canonical": both sides are leaves and the source has
+    *     the fuller person/pet/place form (more tokens, or same-token-
+    *     count with target as a strict prefix-substring).
+    *
+    * This is a SUPERSET of the C-side should_swap_for_longer_canonical
+    * (memory_db_alias_writes.c).  The C cascade only handles inbound
+    * entities that are freshly created (always 0 deps), so it never
+    * needs the dep-asymmetry rule; the JS side meets entities at any
+    * state in their lifecycle and must reason about deps explicitly.
+    * The type-list MIRROR pin still applies — SWAP_ELIGIBLE_TYPES must
+    * match entity_type_prefers_longer_canonical in C (drift caught by
+    * tests/check_swap_eligible_types_mirror.sh).
+    *
+    * Never suggests demoting a user_self anchor — that requires moving
+    * the is_user_self flag in lockstep, which manual-link doesn't do.
+    * Filed as a follow-up "swap canonical" operation; until then, merges
+    * involving a user_self land in the operator-clicked direction (and
+    * fail server-side if the user_self has deps — operator sees the
+    * standard error toast). */
+   function shouldSwapForLongerCanonical(source, target) {
+      if (!source || !target) return { swap: false, reason: null };
+      if (!SWAP_ELIGIBLE_TYPES.has(source.entity_type)) return { swap: false, reason: null };
+      if (!SWAP_ELIGIBLE_TYPES.has(target.entity_type)) return { swap: false, reason: null };
+      if (source.is_user_self || target.is_user_self) return { swap: false, reason: null };
+
+      const sourceHasDeps = (source.alias_count || 0) > 0;
+      const targetHasDeps = (target.alias_count || 0) > 0;
+
+      /* If target has deps, the swap would put a deps-laden entity on
+       * the source side — alias_link's single-level-alias invariant
+       * forbids that.  Don't suggest a swap that would create an
+       * invalid link request, even if token count would otherwise
+       * prefer it. */
+      if (targetHasDeps) return { swap: false, reason: null };
+
+      /* Source-as-clicked has deps and target is a leaf → swap is the
+       * ONLY valid direction.  The operator's intent is "link these
+       * two"; the only legal way is leaf-as-source, so flip.  Token
+       * count doesn't matter — this rule outranks it because it's
+       * about validity, not preference. */
+      if (sourceHasDeps && !targetHasDeps) {
+         return { swap: true, reason: 'mandatory-source-has-deps' };
+      }
+
+      /* Both sides are leaves — token-count heuristic decides. */
+      const srcTokens = (source.canonical_name || '').trim().split(/\s+/).filter(Boolean).length;
+      const tgtTokens = (target.canonical_name || '').trim().split(/\s+/).filter(Boolean).length;
+      if (srcTokens > tgtTokens) return { swap: true, reason: 'longer-canonical' };
+      /* Same token count: also swap if target's canonical is a strict
+       * prefix-substring of source's (e.g. "Jon" vs "Jonathan"). */
+      if (
+         srcTokens === tgtTokens &&
+         source.canonical_name &&
+         target.canonical_name &&
+         source.canonical_name.startsWith(target.canonical_name) &&
+         source.canonical_name.length > target.canonical_name.length
+      ) {
+         return { swap: true, reason: 'longer-canonical' };
+      }
+      return { swap: false, reason: null };
+   }
+
    /* When the operator clicks the merge button on a canonical, the next
     * entity click becomes the target.  null = not in merge mode. */
    let mergeSourceId = null;
@@ -460,26 +543,58 @@
       const sid = mergeSourceId;
       cancelMergeMode();
 
+      /* Direction preference: see shouldSwapForLongerCanonical above for
+       * the full rule.  Operator can still cancel the modal and re-click
+       * the original direction if the suggestion is wrong. */
+      let linkSrc = sid;
+      let linkTgt = targetId;
+      let linkSrcEnt = source;
+      let linkTgtEnt = target;
+      let swappedHint = '';
+      const decision = shouldSwapForLongerCanonical(source, target);
+      if (decision.swap) {
+         linkSrc = targetId;
+         linkTgt = sid;
+         linkSrcEnt = target;
+         linkTgtEnt = source;
+         if (decision.reason === 'mandatory-source-has-deps') {
+            swappedHint =
+               ' Direction was flipped because "' +
+               source.name +
+               '" already has aliases attached — only the leaf entity can be a soft-link ' +
+               'source. Cancel if you intended a different operation (e.g. split "' +
+               source.name +
+               '" first via the alias panel).';
+         } else {
+            swappedHint =
+               ' Direction was flipped because "' +
+               linkTgtEnt.name +
+               '" is the more specific name — typically the better canonical. ' +
+               'Cancel and re-click the other way if you intend the original direction.';
+         }
+      }
+
       const showConfirm = ctx && ctx.callbacks ? ctx.callbacks.showConfirmModal : null;
       if (showConfirm) {
          showConfirm(
-            `Soft-link "${source.name}" → "${target.name}"?`,
+            `Soft-link "${linkSrcEnt.name}" → "${linkTgtEnt.name}"?`,
             () => {
                /* Phase 1 entity-merge: WebUI two-click defaults to soft alias. */
-               requestEntityLink(sid, targetId, 'webui-operator');
+               requestEntityLink(linkSrc, linkTgt, 'webui-operator');
             },
             {
                detail:
-                  `"${source.name}" will be marked as a soft alias of "${target.name}". ` +
+                  `"${linkSrcEnt.name}" will be marked as a soft alias of "${linkTgtEnt.name}". ` +
                   'Both rows are preserved and the link is reversible — you can split it ' +
                   'later from the alias panel. Use "dawn-admin memory entity consolidate" ' +
-                  'to make a soft link permanent.',
+                  'to make a soft link permanent.' +
+                  swappedHint,
                danger: false,
                okText: 'Soft-link',
             }
          );
       } else {
-         requestEntityLink(sid, targetId, 'webui-operator');
+         requestEntityLink(linkSrc, linkTgt, 'webui-operator');
       }
    }
 
