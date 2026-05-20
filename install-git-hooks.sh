@@ -83,7 +83,7 @@ case $choice in
       echo ""
       echo -e "${YELLOW}Reminders:${NC}"
       echo -e "  - Run ${BLUE}./format_code.sh --changed${NC} before committing if formatting fails."
-      echo -e "  - The pre-push hook needs a working build directory (build-debug/ or build-ci/)."
+      echo -e "  - The pre-push hook needs a working build directory (build-ci/ preferred, build-debug/ falls back)."
       ;;
    2)
       install_pre_commit
@@ -92,7 +92,7 @@ case $choice in
       install_pre_push
       echo ""
       echo -e "${YELLOW}Note:${NC} the pre-push hook requires a working build directory."
-      echo -e "      Bootstrap with: ${BLUE}cmake --preset debug${NC}"
+      echo -e "      Bootstrap with: ${BLUE}cmake --preset ci${NC} (matches CI; build-debug works as fallback)"
       ;;
    4)
       remove_hook pre-commit
