@@ -401,8 +401,9 @@ static const char *SCHEMA_SQL =
      * ALTER fires, so the indexes can't live in SCHEMA_SQL. */
 
     /* memory_relations: valid_from/valid_to added in v33.  source_* added in v40.
-     * NULL = open-ended (no bound).  "currently true" predicate:
-     * valid_to IS NULL OR valid_to > now() */
+     * mention_count added in v49 (re-witness counter; upsert via
+     * idx_memory_relations_unique_open bumps it).  NULL = open-ended (no bound).
+     * "currently true" predicate: valid_to IS NULL OR valid_to > now() */
     "CREATE TABLE IF NOT EXISTS memory_relations ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  user_id INTEGER NOT NULL,"
@@ -418,6 +419,7 @@ static const char *SCHEMA_SQL =
     "  source_conversation_id INTEGER DEFAULT NULL,"
     "  source_msg_id_start    INTEGER DEFAULT NULL,"
     "  source_msg_id_end      INTEGER DEFAULT NULL,"
+    "  mention_count          INTEGER NOT NULL DEFAULT 1,"
     "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
@@ -430,7 +432,9 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_memory_relations_user ON memory_relations(user_id);"
     /* idx_memory_relations_user_validity + idx_memory_relations_subject_open are
      * created by the v33 migration block (same reason — runs after the
-     * valid_from/valid_to ALTER so the columns exist). */
+     * valid_from/valid_to ALTER so the columns exist).
+     * idx_memory_relations_unique_open is created by the v49 migration block
+     * (and below in the fresh-install index pass). */
 
     /* Entity-alias audit log (v43) — append-only history of soft/hard merges.
      * Not consulted on hot read paths (those use canonical_id JOIN); this
@@ -2364,6 +2368,227 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v49 migration: deduplicate memory_relations + enforce partial UNIQUE on
+    * open edges.  Background: extraction's production write path
+    * (memory_db_relation_supersede Phase 3) was a plain INSERT, so the same
+    * (subject, predicate, object) edge accreted a new row on every re-witness.
+    * Live measurement on the dev's DB: 1335 rows in the Kris equivalence class,
+    * 1008 distinct tuples — 24% duplication, top offender (Kris, working_on, DAWN)
+    * × 49.  Facts dedup via paraphrase-merge, entities via UNIQUE+upsert;
+    * relations were the outlier.  This migration closes the gap.
+    *
+    * Strategy: ALTER outside transaction (SQLite ALTER-in-transaction limitation
+    * prior to 3.35), then in one BEGIN IMMEDIATE —
+    *   Step 1 — stamp winners: UPDATE the MIN(id) row of each open
+    *       duplicate group with mention_count = group size + confidence = MAX.
+    *   Step 2 — refresh winner provenance: row-valued UPDATE pulling
+    *       source_* / fact_id from the row with MAX(id) inside each group.
+    *       One SELECT subquery so all four columns come from the SAME source
+    *       row (architecture-review H1 fix).
+    *   Step 3 — DELETE non-winner duplicates via correlated EXISTS
+    *       (w.id < d.id).  EXISTS avoids the temp B-tree GROUP BY that
+    *       NOT IN (SELECT MIN(id) GROUP BY ...) would materialize; both forms
+    *       are mechanically equivalent, EXISTS scales linearly at 50k+ rows
+    *       (embedded-efficiency-reviewer MED-1 fix).
+    *   Step 4 — CREATE UNIQUE INDEX idx_memory_relations_unique_open
+    *       partial-scoped to valid_to IS NULL.  Future inserts upsert against
+    *       it via the stmt_memory_relation_create ON CONFLICT clause.
+    *
+    * Scope: WHERE valid_to IS NULL only.  Closed historical rows may
+    * legitimately repeat (married_to(A) → divorced → married_to(B) →
+    * divorced → married_to(A) is a real lifecycle).  Matches the v33
+    * idx_memory_relations_subject_open partial-index precedent.
+    *
+    * Ordering invariant: Steps 1/2/3/4 MUST stay in the same transaction.
+    * If an extraction worker fires between Step 3 (DELETE losers) and Step 4
+    * (CREATE UNIQUE INDEX), it could re-insert a duplicate before the index
+    * can reject it.  auth_db_init runs migrations BEFORE prepare_statements
+    * (and before any worker thread is spawned), so this is already safe,
+    * but the comment is load-bearing for any future refactor that splits
+    * migration phases.
+    *
+    * Index-dependency invariant: Steps 1, 2, and 3 all rely on the v33
+    * idx_memory_relations_subject_open partial index for performance.
+    * EXPLAIN QUERY PLAN against the schema picks it for the outer scan AND
+    * every correlated subquery.  Do NOT drop the v33 index inside this
+    * migration block — the drop is a separate version-bump follow-up once
+    * v49's unique-open index has soaked.
+    *
+    * Failure-mode cascade: if v49_sql fails and ROLLBACK fires, duplicates
+    * remain in the table.  v49_ok stays false → schema_version stays at 48.
+    * The fresh-install index pass below ALSO fails to create
+    * idx_memory_relations_unique_open (duplicates still violate the UNIQUE),
+    * logging OLOG_WARNING.  stmt_memory_relation_create prepare then fails
+    * (ON CONFLICT requires the index), so auth_db_prepare_statements returns
+    * AUTH_DB_FAILURE and the daemon aborts startup.  This is intentional —
+    * the daemon cannot run v49 logic without a deduplicated table.  Fix the
+    * underlying error (look earlier in the log for the OLOG_ERROR), restart,
+    * and the migration re-runs cleanly on next boot.
+    *
+    * SQLite version requirements: ON CONFLICT(cols) WHERE expr (upsert
+    * against partial UNIQUE) needs >= 3.24; the row-valued UPDATE in Step 2
+    * needs >= 3.15.  Jetson and CI Docker base ship 3.37+, well above. */
+   bool v49_ok = (current_version >= 49) || (current_version == 0);
+   if (current_version >= 1 && current_version < 49) {
+      /* ALTER outside transaction (SQLite limitation prior to 3.35; safe at
+       * any version since DEFAULT is a literal constant → O(1) fast path).
+       * Tolerate "duplicate column" if a previous boot ran the ALTER but
+       * crashed before the transaction below committed. */
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_relations "
+                        "ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 1",
+                        NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         bool benign = (errmsg && strstr(errmsg, "duplicate column"));
+         if (!benign) {
+            OLOG_ERROR("auth_db: v49 ALTER (mention_count column) failed: %s",
+                       errmsg ? errmsg : "unknown");
+            sqlite3_free(errmsg);
+            return AUTH_DB_FAILURE;
+         }
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      }
+
+      rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v49 BEGIN failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         return AUTH_DB_FAILURE;
+      }
+
+      /* Snapshot pre-state for the boot-log delta line. */
+      int pre_open_count = 0;
+      sqlite3_stmt *count_stmt = NULL;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "SELECT COUNT(*) FROM memory_relations WHERE valid_to IS NULL", -1,
+                             &count_stmt, NULL) == SQLITE_OK) {
+         if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+            pre_open_count = sqlite3_column_int(count_stmt, 0);
+         }
+         sqlite3_finalize(count_stmt);
+      }
+
+      /* Group key throughout: (user_id, subject_entity_id, relation,
+       * COALESCE(object_entity_id, 0), COALESCE(object_value, '')) WHERE valid_to IS NULL.
+       * COALESCE wrappers mirror the partial UNIQUE index expression so
+       * NULL-object-entity-id and NULL-object-value resolve consistently
+       * across grouping and conflict-target. */
+      const char *v49_sql =
+          /* Step 1: stamp winners.  MIN(id) row per group gets the count +
+           * MAX(confidence).  Groups of size 1 fall through harmlessly
+           * (mention_count stays at the ALTER default of 1). */
+          "UPDATE memory_relations AS w SET "
+          "  mention_count = ("
+          "    SELECT COUNT(*) FROM memory_relations d "
+          "     WHERE d.user_id = w.user_id "
+          "       AND d.subject_entity_id = w.subject_entity_id "
+          "       AND d.relation = w.relation "
+          "       AND COALESCE(d.object_entity_id, 0) = COALESCE(w.object_entity_id, 0) "
+          "       AND COALESCE(d.object_value, '') = COALESCE(w.object_value, '') "
+          "       AND d.valid_to IS NULL), "
+          "  confidence = ("
+          "    SELECT MAX(d.confidence) FROM memory_relations d "
+          "     WHERE d.user_id = w.user_id "
+          "       AND d.subject_entity_id = w.subject_entity_id "
+          "       AND d.relation = w.relation "
+          "       AND COALESCE(d.object_entity_id, 0) = COALESCE(w.object_entity_id, 0) "
+          "       AND COALESCE(d.object_value, '') = COALESCE(w.object_value, '') "
+          "       AND d.valid_to IS NULL) "
+          "WHERE w.valid_to IS NULL "
+          "  AND w.id = (SELECT MIN(d.id) FROM memory_relations d "
+          "               WHERE d.user_id = w.user_id "
+          "                 AND d.subject_entity_id = w.subject_entity_id "
+          "                 AND d.relation = w.relation "
+          "                 AND COALESCE(d.object_entity_id, 0) = COALESCE(w.object_entity_id, 0) "
+          "                 AND COALESCE(d.object_value, '') = COALESCE(w.object_value, '') "
+          "                 AND d.valid_to IS NULL);"
+          /* Step 2: refresh winner provenance to the latest witness as ONE
+           * row-valued subquery.  Four columns from the same source row — a
+           * tuple of separate scalar subqueries each pinned to MAX(id) would
+           * not guarantee row-level consistency.  Skip groups of size 1
+           * (mention_count = 1 means no dedup happened). */
+          "UPDATE memory_relations AS w "
+          "SET (source_conversation_id, source_msg_id_start, source_msg_id_end, fact_id) = ("
+          "    SELECT d.source_conversation_id, d.source_msg_id_start, d.source_msg_id_end, "
+          "           COALESCE(w.fact_id, d.fact_id) "
+          "    FROM memory_relations d "
+          "    WHERE d.user_id = w.user_id "
+          "      AND d.subject_entity_id = w.subject_entity_id "
+          "      AND d.relation = w.relation "
+          "      AND COALESCE(d.object_entity_id, 0) = COALESCE(w.object_entity_id, 0) "
+          "      AND COALESCE(d.object_value, '') = COALESCE(w.object_value, '') "
+          "      AND d.valid_to IS NULL "
+          "    ORDER BY d.id DESC LIMIT 1) "
+          "WHERE w.valid_to IS NULL AND w.mention_count > 1 "
+          "  AND w.id = (SELECT MIN(d.id) FROM memory_relations d "
+          "               WHERE d.user_id = w.user_id "
+          "                 AND d.subject_entity_id = w.subject_entity_id "
+          "                 AND d.relation = w.relation "
+          "                 AND COALESCE(d.object_entity_id, 0) = COALESCE(w.object_entity_id, 0) "
+          "                 AND COALESCE(d.object_value, '') = COALESCE(w.object_value, '') "
+          "                 AND d.valid_to IS NULL);"
+          /* Step 3: DELETE non-winner duplicates from open rows only.
+           * Closed historical rows untouched.  EXISTS with w.id < d.id finds
+           * any earlier-id row in the same group → current row is a loser
+           * iff such a row exists.  Reuses idx_memory_relations_subject_open
+           * for both outer scan and EXISTS probe; no temp B-tree GROUP BY.
+           * Equivalent to the simpler "id NOT IN (SELECT MIN(id) GROUP BY ...)"
+           * shape but scales linearly with open-row count instead of holding
+           * 50k+ tuples in scratch (embedded-efficiency-reviewer MED-1 fix). */
+          "DELETE FROM memory_relations AS d "
+          "WHERE d.valid_to IS NULL "
+          "  AND EXISTS ("
+          "    SELECT 1 FROM memory_relations w "
+          "     WHERE w.valid_to IS NULL "
+          "       AND w.user_id = d.user_id "
+          "       AND w.subject_entity_id = d.subject_entity_id "
+          "       AND w.relation = d.relation "
+          "       AND COALESCE(w.object_entity_id, 0) = COALESCE(d.object_entity_id, 0) "
+          "       AND COALESCE(w.object_value, '') = COALESCE(d.object_value, '') "
+          "       AND w.id < d.id);"
+          /* Step 4: enforce the invariant going forward.  Partial UNIQUE on
+           * open relations.  COALESCE wrappers must match the ON CONFLICT
+           * conflict-target in stmt_memory_relation_create exactly — SQLite
+           * matches partial-index upserts on expression equality. */
+          "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_relations_unique_open "
+          "ON memory_relations(user_id, subject_entity_id, relation, "
+          "                    COALESCE(object_entity_id, 0), "
+          "                    COALESCE(object_value, '')) "
+          "WHERE valid_to IS NULL;";
+
+      rc = sqlite3_exec(s_db.db, v49_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v49 migration (dedup + unique index) failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+         sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      } else {
+         int post_open_count = 0;
+         if (sqlite3_prepare_v2(s_db.db,
+                                "SELECT COUNT(*) FROM memory_relations WHERE valid_to IS NULL", -1,
+                                &count_stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+               post_open_count = sqlite3_column_int(count_stmt, 0);
+            }
+            sqlite3_finalize(count_stmt);
+         }
+         rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_ERROR("auth_db: v49 COMMIT failed: %s", errmsg ? errmsg : "unknown");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+            sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         } else {
+            OLOG_INFO("auth_db: v49 dedup: %d open relations -> %d winners "
+                      "(%d duplicates collapsed); added idx_memory_relations_unique_open",
+                      pre_open_count, post_open_count, pre_open_count - post_open_count);
+            v49_ok = true;
+         }
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2426,10 +2651,24 @@ int auth_db_create_schema(const char *db_path) {
                      "ON memory_relations(user_id, valid_to);"
                      "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open "
                      "ON memory_relations(subject_entity_id, relation) "
+                     "WHERE valid_to IS NULL;"
+                     /* v49: partial UNIQUE backing the upsert in
+                      * stmt_memory_relation_create.  CREATE IF NOT EXISTS so the
+                      * migration block above (which also creates it) and this
+                      * fresh-install pass don't fight.  Required for the
+                      * stmt_memory_relation_create prepare to succeed — without
+                      * the index, ON CONFLICT(... COALESCE(...)) WHERE valid_to
+                      * IS NULL has no matching uniqueness constraint to
+                      * resolve against. */
+                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_relations_unique_open "
+                     "ON memory_relations(user_id, subject_entity_id, relation, "
+                     "                    COALESCE(object_entity_id, 0), "
+                     "                    COALESCE(object_value, '')) "
                      "WHERE valid_to IS NULL",
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
-      OLOG_WARNING("auth_db: could not create memory v33/v34 indexes: %s", errmsg ? errmsg : "ok");
+      OLOG_WARNING("auth_db: could not create memory v33/v34/v49 indexes: %s",
+                   errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
@@ -2486,7 +2725,7 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok;
+   const bool ready_to_bump = v48_ok && v49_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

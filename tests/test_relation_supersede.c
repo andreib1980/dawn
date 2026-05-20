@@ -77,8 +77,23 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  confidence REAL DEFAULT 0.8,"
                          "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
                          "  valid_from INTEGER DEFAULT NULL,"
-                         "  valid_to INTEGER DEFAULT NULL"
-                         ");";
+                         "  valid_to INTEGER DEFAULT NULL,"
+                         /* v40 + v49 columns — mirror production so the upsert
+                          * prepared statement's 12 bind slots all have targets
+                          * and the partial UNIQUE index has rows to constrain. */
+                         "  source_conversation_id INTEGER DEFAULT NULL,"
+                         "  source_msg_id_start    INTEGER DEFAULT NULL,"
+                         "  source_msg_id_end      INTEGER DEFAULT NULL,"
+                         "  mention_count INTEGER NOT NULL DEFAULT 1"
+                         ");"
+                         /* v49 partial UNIQUE — MUST exist before stmt_memory_relation_create
+                          * prepare, otherwise the ON CONFLICT clause has no matching
+                          * uniqueness constraint to resolve against. */
+                         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_relations_unique_open "
+                         "ON memory_relations(user_id, subject_entity_id, relation, "
+                         "                    COALESCE(object_entity_id, 0), "
+                         "                    COALESCE(object_value, '')) "
+                         "WHERE valid_to IS NULL;";
 
 static void setup_db(void) {
    memset(&s_db, 0, sizeof(s_db));
@@ -97,12 +112,26 @@ static void setup_db(void) {
       exit(1);
    }
 
-   /* Prepare statements used by memory_db_relation_supersede() */
+   /* Prepare statements used by memory_db_relation_supersede().  Production
+    * v49 upsert: ON CONFLICT against idx_memory_relations_unique_open bumps
+    * mention_count on a re-witnessed open relation.  Mirrors production SQL
+    * in src/auth/auth_db_statements.c so the test exercises the same path. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
-                           "valid_from, valid_to) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?)",
+                           "valid_from, valid_to, "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?) "
+                           "ON CONFLICT(user_id, subject_entity_id, relation, "
+                           "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
+                           "WHERE valid_to IS NULL DO UPDATE SET "
+                           "  mention_count = mention_count + 1, "
+                           "  confidence = MAX(confidence, excluded.confidence), "
+                           "  source_conversation_id = excluded.source_conversation_id, "
+                           "  source_msg_id_start = excluded.source_msg_id_start, "
+                           "  source_msg_id_end = excluded.source_msg_id_end, "
+                           "  fact_id = COALESCE(fact_id, excluded.fact_id) "
+                           "RETURNING id, mention_count",
                            -1, &s_db.stmt_memory_relation_create, NULL);
    if (rc != SQLITE_OK) {
       fprintf(stderr, "prepare relation_create failed: %s\n", sqlite3_errmsg(s_db.db));
@@ -333,6 +362,272 @@ static void test_contradictory_pair_different_object(void) {
 }
 
 /* ============================================================================
+ * v49 dedup test helpers
+ * ============================================================================ */
+
+/* Look up the open row for (user, subject, relation, object_value) and
+ * return its mention_count.  Returns -1 if no row matches. */
+static int query_open_mention_count(int user_id,
+                                    int64_t subj,
+                                    const char *rel,
+                                    int64_t obj_id,
+                                    const char *obj_val) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT mention_count FROM memory_relations "
+                      "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
+                      "  AND COALESCE(object_entity_id, 0) = COALESCE(?, 0) "
+                      "  AND COALESCE(object_value, '') = COALESCE(?, '') "
+                      "  AND valid_to IS NULL",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, subj);
+   sqlite3_bind_text(stmt, 3, rel, -1, SQLITE_STATIC);
+   if (obj_id > 0)
+      sqlite3_bind_int64(stmt, 4, obj_id);
+   else
+      sqlite3_bind_null(stmt, 4);
+   if (obj_val)
+      sqlite3_bind_text(stmt, 5, obj_val, -1, SQLITE_STATIC);
+   else
+      sqlite3_bind_null(stmt, 5);
+   int result = -1;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      result = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   return result;
+}
+
+/* Count rows matching the open dedup group — useful for asserting the
+ * partial UNIQUE invariant ("only one open row per group"). */
+static int count_open_rows(int user_id,
+                           int64_t subj,
+                           const char *rel,
+                           int64_t obj_id,
+                           const char *obj_val) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT COUNT(*) FROM memory_relations "
+                      "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
+                      "  AND COALESCE(object_entity_id, 0) = COALESCE(?, 0) "
+                      "  AND COALESCE(object_value, '') = COALESCE(?, '') "
+                      "  AND valid_to IS NULL",
+                      -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, subj);
+   sqlite3_bind_text(stmt, 3, rel, -1, SQLITE_STATIC);
+   if (obj_id > 0)
+      sqlite3_bind_int64(stmt, 4, obj_id);
+   else
+      sqlite3_bind_null(stmt, 4);
+   if (obj_val)
+      sqlite3_bind_text(stmt, 5, obj_val, -1, SQLITE_STATIC);
+   else
+      sqlite3_bind_null(stmt, 5);
+   int count = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      count = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   return count;
+}
+
+/* Read the stored confidence, valid_from, source_conversation_id, and
+ * fact_id of the open winner row in a group.  Pointers may be NULL to skip
+ * the corresponding read. */
+static void query_open_winner_fields(int user_id,
+                                     int64_t subj,
+                                     const char *rel,
+                                     int64_t obj_id,
+                                     const char *obj_val,
+                                     double *conf_out,
+                                     int64_t *valid_from_out,
+                                     int64_t *src_conv_out,
+                                     int64_t *fact_id_out) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT confidence, COALESCE(valid_from, 0), COALESCE(source_conversation_id, 0), "
+       "       COALESCE(fact_id, 0) FROM memory_relations "
+       "WHERE user_id = ? AND subject_entity_id = ? AND relation = ? "
+       "  AND COALESCE(object_entity_id, 0) = COALESCE(?, 0) "
+       "  AND COALESCE(object_value, '') = COALESCE(?, '') "
+       "  AND valid_to IS NULL",
+       -1, &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, subj);
+   sqlite3_bind_text(stmt, 3, rel, -1, SQLITE_STATIC);
+   if (obj_id > 0)
+      sqlite3_bind_int64(stmt, 4, obj_id);
+   else
+      sqlite3_bind_null(stmt, 4);
+   if (obj_val)
+      sqlite3_bind_text(stmt, 5, obj_val, -1, SQLITE_STATIC);
+   else
+      sqlite3_bind_null(stmt, 5);
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      if (conf_out)
+         *conf_out = sqlite3_column_double(stmt, 0);
+      if (valid_from_out)
+         *valid_from_out = sqlite3_column_int64(stmt, 1);
+      if (src_conv_out)
+         *src_conv_out = sqlite3_column_int64(stmt, 2);
+      if (fact_id_out)
+         *fact_id_out = sqlite3_column_int64(stmt, 3);
+   }
+   sqlite3_finalize(stmt);
+}
+
+/* ============================================================================
+ * v49 dedup tests
+ * ============================================================================ */
+
+static void test_supersede_increments_mention_count(void) {
+   int user_id = 10;
+   int64_t dave = insert_entity(user_id, "dave", "person");
+   int64_t hiking = insert_entity(user_id, "hiking", "thing");
+
+   /* First insert: row inserted, mention_count starts at 1. */
+   int rc = memory_db_relation_supersede(user_id, dave, "enjoys", hiking, NULL, 0, 0.8f, 0, 0, NULL,
+                                         NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, query_open_mention_count(user_id, dave, "enjoys", hiking, NULL));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, dave, "enjoys", hiking, NULL));
+
+   /* Re-witness same edge: upsert path, mention_count bumps to 2, still one row. */
+   rc = memory_db_relation_supersede(user_id, dave, "enjoys", hiking, NULL, 0, 0.8f, 0, 0, NULL,
+                                     NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, query_open_mention_count(user_id, dave, "enjoys", hiking, NULL));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, dave, "enjoys", hiking, NULL));
+
+   /* Third witness — partial UNIQUE keeps row count at 1. */
+   rc = memory_db_relation_supersede(user_id, dave, "enjoys", hiking, NULL, 0, 0.8f, 0, 0, NULL,
+                                     NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(3, query_open_mention_count(user_id, dave, "enjoys", hiking, NULL));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, dave, "enjoys", hiking, NULL));
+}
+
+static void test_supersede_dedup_preserves_max_confidence(void) {
+   int user_id = 11;
+   int64_t eve = insert_entity(user_id, "eve", "person");
+   int64_t painting = insert_entity(user_id, "painting", "thing");
+
+   /* Lower-then-higher: stored confidence rises to the new high. */
+   memory_db_relation_supersede(user_id, eve, "enjoys", painting, NULL, 0, 0.7f, 0, 0, NULL, NULL);
+   memory_db_relation_supersede(user_id, eve, "enjoys", painting, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   double conf = 0;
+   query_open_winner_fields(user_id, eve, "enjoys", painting, NULL, &conf, NULL, NULL, NULL);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.9f, (float)conf);
+
+   /* Higher-then-lower: stored confidence stays at the high (no downgrade). */
+   int user_id2 = 12;
+   int64_t frank = insert_entity(user_id2, "frank", "person");
+   int64_t cooking = insert_entity(user_id2, "cooking", "thing");
+   memory_db_relation_supersede(user_id2, frank, "enjoys", cooking, NULL, 0, 0.9f, 0, 0, NULL,
+                                NULL);
+   memory_db_relation_supersede(user_id2, frank, "enjoys", cooking, NULL, 0, 0.7f, 0, 0, NULL,
+                                NULL);
+   conf = 0;
+   query_open_winner_fields(user_id2, frank, "enjoys", cooking, NULL, &conf, NULL, NULL, NULL);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.9f, (float)conf);
+}
+
+static void test_supersede_dedup_keeps_existing_valid_from(void) {
+   int user_id = 13;
+   int64_t gina = insert_entity(user_id, "gina", "person");
+   int64_t yoga = insert_entity(user_id, "yoga", "thing");
+
+   /* First insert with valid_from=1000.  Re-witness with valid_from=2000
+    * (latest-wins would overwrite; the upsert intentionally omits
+    * valid_from from UPDATE-SET so the original start-of-validity bound
+    * sticks). */
+   memory_db_relation_supersede(user_id, gina, "enjoys", yoga, NULL, 0, 0.8f, 1000, 0, NULL, NULL);
+   memory_db_relation_supersede(user_id, gina, "enjoys", yoga, NULL, 0, 0.8f, 2000, 0, NULL, NULL);
+
+   int64_t vf = 0;
+   query_open_winner_fields(user_id, gina, "enjoys", yoga, NULL, NULL, &vf, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT64(1000, vf);
+}
+
+static void test_supersede_dedup_takes_latest_provenance(void) {
+   int user_id = 14;
+   int64_t henry = insert_entity(user_id, "henry", "person");
+   int64_t pottery = insert_entity(user_id, "pottery", "thing");
+
+   memory_provenance_t prov_a = { .conv_id = 100, .msg_id_start = 1, .msg_id_end = 5 };
+   memory_provenance_t prov_b = { .conv_id = 200, .msg_id_start = 7, .msg_id_end = 9 };
+
+   memory_db_relation_supersede(user_id, henry, "enjoys", pottery, NULL, 0, 0.8f, 0, 0, &prov_a,
+                                NULL);
+   memory_db_relation_supersede(user_id, henry, "enjoys", pottery, NULL, 0, 0.8f, 0, 0, &prov_b,
+                                NULL);
+
+   int64_t src_conv = 0;
+   query_open_winner_fields(user_id, henry, "enjoys", pottery, NULL, NULL, NULL, &src_conv, NULL);
+   TEST_ASSERT_EQUAL_INT64(200, src_conv);
+}
+
+static void test_supersede_dedup_coalesces_fact_id(void) {
+   int user_id = 15;
+   int64_t iris = insert_entity(user_id, "iris", "person");
+   int64_t sailing = insert_entity(user_id, "sailing", "thing");
+
+   /* NULL → non-NULL: orphan adopts the new fact_id. */
+   memory_db_relation_supersede(user_id, iris, "enjoys", sailing, NULL, 0, 0.8f, 0, 0, NULL, NULL);
+   int64_t fact_a = insert_fact(user_id, "Iris loves sailing");
+   memory_db_relation_supersede(user_id, iris, "enjoys", sailing, NULL, fact_a, 0.8f, 0, 0, NULL,
+                                NULL);
+   int64_t stored = 0;
+   query_open_winner_fields(user_id, iris, "enjoys", sailing, NULL, NULL, NULL, NULL, &stored);
+   TEST_ASSERT_EQUAL_INT64(fact_a, stored);
+
+   /* Non-NULL → NULL: existing link preserved (COALESCE). */
+   int user_id2 = 16;
+   int64_t jake = insert_entity(user_id2, "jake", "person");
+   int64_t kayaking = insert_entity(user_id2, "kayaking", "thing");
+   int64_t fact_b = insert_fact(user_id2, "Jake enjoys kayaking");
+   memory_db_relation_supersede(user_id2, jake, "enjoys", kayaking, NULL, fact_b, 0.8f, 0, 0, NULL,
+                                NULL);
+   memory_db_relation_supersede(user_id2, jake, "enjoys", kayaking, NULL, 0, 0.8f, 0, 0, NULL,
+                                NULL);
+   stored = 0;
+   query_open_winner_fields(user_id2, jake, "enjoys", kayaking, NULL, NULL, NULL, NULL, &stored);
+   TEST_ASSERT_EQUAL_INT64(fact_b, stored);
+}
+
+static void test_supersede_to_different_object_starts_fresh_mention_count(void) {
+   int user_id = 17;
+   int64_t kate = insert_entity(user_id, "kate", "person");
+   int64_t boston = insert_entity(user_id, "boston", "place");
+   int64_t seattle = insert_entity(user_id, "seattle", "place");
+
+   /* Build up mention_count = 3 on (kate, lives_in, boston). */
+   memory_db_relation_supersede(user_id, kate, "lives_in", boston, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   memory_db_relation_supersede(user_id, kate, "lives_in", boston, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   memory_db_relation_supersede(user_id, kate, "lives_in", boston, NULL, 0, 0.9f, 0, 0, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(3, query_open_mention_count(user_id, kate, "lives_in", boston, NULL));
+
+   /* Supersede to a different object — exclusive-relation close path closes
+    * the boston row (valid_to set), then the upsert inserts a fresh open
+    * row for seattle with mention_count = 1.  Confirms that supersede
+    * semantically replaces — close-then-upsert is correct, not "increment
+    * the new object's count to 4". */
+   int64_t old_fact_id = 0;
+   int rc = memory_db_relation_supersede(user_id, kate, "lives_in", seattle, NULL, 0, 0.9f, 0, 0,
+                                         NULL, &old_fact_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+
+   /* boston row is now closed (valid_to set) — not visible via open query. */
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, kate, "lives_in", boston, NULL));
+   /* seattle row is fresh and open with mention_count = 1. */
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, kate, "lives_in", seattle, NULL));
+   TEST_ASSERT_EQUAL_INT(1, query_open_mention_count(user_id, kate, "lives_in", seattle, NULL));
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -345,5 +640,12 @@ int main(void) {
    RUN_TEST(test_same_object_idempotent);
    RUN_TEST(test_contradictory_pair);
    RUN_TEST(test_contradictory_pair_different_object);
+   /* v49 dedup tests */
+   RUN_TEST(test_supersede_increments_mention_count);
+   RUN_TEST(test_supersede_dedup_preserves_max_confidence);
+   RUN_TEST(test_supersede_dedup_keeps_existing_valid_from);
+   RUN_TEST(test_supersede_dedup_takes_latest_provenance);
+   RUN_TEST(test_supersede_dedup_coalesces_fact_id);
+   RUN_TEST(test_supersede_to_different_object_starts_fresh_mention_count);
    return UNITY_END();
 }

@@ -589,6 +589,17 @@ static int format_yyyymm(time_t ts, char *out, size_t outlen) {
    return SUCCESS;
 }
 
+/* TODO(v49-followup, cross-alias aggregation): when the deferred LLM-context
+ * "× N" emit work lands (see memory_callback.c TODO marker at the entity-
+ * recall site), this helper needs symmetric cross-alias aggregation matching
+ * www/js/ui/memory.js::aggregateRelationsForDisplay.  The partial UNIQUE
+ * invariant in idx_memory_relations_unique_open is scoped to literal
+ * entity_id, not canonical class — a canonical entity with N soft-aliased
+ * members can have N open (alias_i, relation, X) rows each with their own
+ * mention_count.  Per-row rendering here would show "Kris working_on DAWN ×3"
+ * once per alias instead of "Kris working_on DAWN ×N" rolled up.  Display-
+ * side (JS) already does the rollup; LLM-side needs to match before the
+ * mention_count gets injected into the prompt. */
 static int render_relation_text(const memory_entity_t *subj,
                                 const memory_relation_t *r,
                                 char *buf,

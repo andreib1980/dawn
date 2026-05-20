@@ -367,13 +367,14 @@ static json_object *build_entities_json_array(int user_id,
     * describes the same relation.
     *
     * Stack-footprint guard: at the current 2000-row cap the combined
-    * locals weigh ~384 KB (352 KB for all_rels + 16 KB × 2 for the roots).
-    * Comfortable on the LWS service thread's 8 MB glibc default, but a
-    * future bump past 4000 rows should heap-allocate via the same calloc
-    * pattern handle_export_memories uses below.  Static-assert backstops
-    * a silent cap-bump from blowing the stack on a deep call chain. */
-   _Static_assert((sizeof(memory_relation_t) + sizeof(int64_t) * 2) *
-                          ENTITIES_JSON_RELATIONS_MAX <
+    * locals weigh ~400 KB (368 KB for all_rels + 16 KB × 2 for the roots);
+    * post-v49 mention_count field bumped sizeof(memory_relation_t) from
+    * 176 → 184 bytes.  Comfortable on the LWS service thread's 8 MB glibc
+    * default, but a future bump past 4000 rows should heap-allocate via
+    * the same calloc pattern handle_export_memories uses below.
+    * Static-assert backstops a silent cap-bump from blowing the stack on
+    * a deep call chain. */
+   _Static_assert((sizeof(memory_relation_t) + sizeof(int64_t) * 2) * ENTITIES_JSON_RELATIONS_MAX <
                       512 * 1024,
                   "build_entities_json_array stack locals exceed 512 KB — heap-allocate "
                   "via calloc (see handle_export_memories) before bumping the cap further");
@@ -487,6 +488,11 @@ static json_object *build_entities_json_array(int user_id,
          json_object_object_add(rel_obj, "direction", json_object_new_string("out"));
          json_object_object_add(rel_obj, "confidence",
                                 json_object_new_double(all_rels[r].confidence));
+         /* v49: per-row re-witness count.  JS aggregates across alias rows
+          * within the same class (display-only — UNIQUE invariant is scoped
+          * to literal entity_id, so cross-alias dedup happens at render). */
+         json_object_object_add(rel_obj, "mention_count",
+                                json_object_new_int(all_rels[r].mention_count));
          json_object_array_add(relations_array, rel_obj);
       }
 
@@ -517,6 +523,8 @@ static json_object *build_entities_json_array(int user_id,
          json_object_object_add(rel_obj, "direction", json_object_new_string("in"));
          json_object_object_add(rel_obj, "confidence",
                                 json_object_new_double(all_rels[r].confidence));
+         json_object_object_add(rel_obj, "mention_count",
+                                json_object_new_int(all_rels[r].mention_count));
          json_object_array_add(relations_array, rel_obj);
       }
 
@@ -1317,6 +1325,8 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
                                    json_object_new_string(relations[r].object_name));
             json_object_object_add(rel, "confidence",
                                    json_object_new_double(relations[r].confidence));
+            json_object_object_add(rel, "mention_count",
+                                   json_object_new_int(relations[r].mention_count));
             json_object_array_add(rels_arr, rel);
          }
          json_object_object_add(e, "relations", rels_arr);

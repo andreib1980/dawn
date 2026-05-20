@@ -1248,14 +1248,51 @@ int auth_db_prepare_statements(void) {
    }
 
    /* Memory relation statements.  valid_from/valid_to appended last in all SELECTs
-    * (columns 6, 7) to preserve existing column indices in populate_relation_from_row.
-    * source_* columns (v40) appended at bind positions 10, 11, 12. */
+    * (columns 6, 7 in pre-v49 column order) to preserve existing column indices.
+    * mention_count appended at column 8 in v49.  source_* columns (v40) appended at
+    * bind positions 10, 11, 12.  Bind slots in INSERT unchanged at 12; mention_count
+    * uses the column default of 1 on insert and the UPDATE clause bumps it on conflict.
+    *
+    * On-conflict provenance policy is intentionally simpler than facts.
+    *
+    * Facts use memory_db_fact_provenance_extend() (four-way decision: same-conv
+    * widen / no-prov adopt / newer replace / older no-op) because a fact carries
+    * the source text snippets the LLM uses for grounded answering.
+    *
+    * Relations carry their text trail INDIRECTLY through fact_id (the linked
+    * fact's own provenance widens).  Latest-wins on the relation row itself
+    * keeps the relation pointing at the most recent witness; widening would
+    * duplicate fact-layer machinery on a row that's strictly more constrained
+    * (relations have no fact_text).  COALESCE(fact_id, excluded.fact_id) heals
+    * orphans without dropping existing links.  valid_from intentionally NOT in
+    * the UPDATE-SET — keeps the first observed start-of-validity bound, since
+    * latest-wins would silently overwrite a populated valid_from with NULL on
+    * re-witness (data loss).
+    *
+    * confidence = MAX(...): re-witness with a stronger source upgrades; doesn't
+    * downgrade.  Lower-confidence re-witness would be data loss in disguise.
+    *
+    * The conflict-target's COALESCE wrappers must match the partial UNIQUE
+    * index expression in auth_db_schema.c exactly — SQLite matches partial-index
+    * upserts on expression equality.  WHERE valid_to IS NULL scopes the
+    * dedup invariant to currently-open edges (closed historical rows may
+    * legitimately repeat: married_to(A) → divorced → re-married is a lifecycle). */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
                            "valid_from, valid_to, "
                            "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?)",
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?) "
+                           "ON CONFLICT(user_id, subject_entity_id, relation, "
+                           "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
+                           "WHERE valid_to IS NULL DO UPDATE SET "
+                           "  mention_count = mention_count + 1, "
+                           "  confidence = MAX(confidence, excluded.confidence), "
+                           "  source_conversation_id = excluded.source_conversation_id, "
+                           "  source_msg_id_start = excluded.source_msg_id_start, "
+                           "  source_msg_id_end = excluded.source_msg_id_end, "
+                           "  fact_id = COALESCE(fact_id, excluded.fact_id) "
+                           "RETURNING id, mention_count",
                            -1, &s_db.stmt_memory_relation_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare relation_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -1282,7 +1319,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
                            "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
-                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
+                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+                           "r.mention_count "
                            "FROM memory_relations r "
                            "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
                            "WHERE r.user_id = ? AND r.subject_entity_id = ? LIMIT ?",
@@ -1299,7 +1337,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
                            "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
-                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
+                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+                           "r.mention_count "
                            "FROM memory_relations r "
                            "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
                            "WHERE r.user_id = ? AND r.subject_entity_id = ? "
@@ -1316,7 +1355,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
                            "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
-                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0) "
+                           "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+                           "r.mention_count "
                            "FROM memory_relations r "
                            "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
                            "WHERE r.user_id = ? AND r.object_entity_id = ? LIMIT ?",

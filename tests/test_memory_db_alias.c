@@ -3373,6 +3373,42 @@ static void test_relation_list_with_canonical_roots_rejects_null_arrays(void) {
                                                 g_test_user_id, out, roots, NULL, 1, &count));
 }
 
+static void test_relation_list_class_aware_mention_count_surfaces(void) {
+   /* v49: per-row mention_count flows through the read path to memory_relation_t.
+    * Insert two relations against different alias members of a single
+    * equivalence class — each goes in at column-default mention_count=1.
+    * Both rows surface with class-canonical subj_roots resolution; JS-side
+    * aggregation will sum 1 + 1 = 2 for the "× N" display badge.  This test
+    * pins the per-row read; aggregation is JS-side and covered by manual UI
+    * inspection during verification. */
+   int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft",
+                                                     "test-fixture", -1.0f, NULL, &link_id));
+
+   /* Each insert hits a different subject_entity_id, so the partial UNIQUE
+    * doesn't fire — both rows persist with mention_count=1. */
+   insert_open_relation(g_test_user_id, canonical, "works_at", 0, "Acme Corp");
+   insert_open_relation(g_test_user_id, alias, "works_at", 0, "Acme Corp");
+
+   memory_relation_t out[8];
+   int64_t subj_roots[8] = { 0 };
+   int64_t obj_roots[8] = { 0 };
+   int count = 0;
+   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
+                                                                 obj_roots, 8, &count);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   /* Both rows roll up to the canonical via subj_roots. */
+   TEST_ASSERT_EQUAL_INT64(canonical, subj_roots[0]);
+   TEST_ASSERT_EQUAL_INT64(canonical, subj_roots[1]);
+   /* Per-row mention_count surfaces — JS will sum these for the badge. */
+   TEST_ASSERT_EQUAL_INT(1, out[0].mention_count);
+   TEST_ASSERT_EQUAL_INT(1, out[1].mention_count);
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -3441,6 +3477,7 @@ int main(void) {
    RUN_TEST(test_relation_list_with_canonical_roots_object_resolves_to_canonical);
    RUN_TEST(test_relation_list_with_canonical_roots_literal_object_zero_root);
    RUN_TEST(test_relation_list_with_canonical_roots_rejects_null_arrays);
+   RUN_TEST(test_relation_list_class_aware_mention_count_surfaces);
 
    /* alias_link / alias_unlink */
    RUN_TEST(test_alias_link_writes_canonical_id_and_audit);

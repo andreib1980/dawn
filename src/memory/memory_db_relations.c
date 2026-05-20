@@ -165,11 +165,20 @@ int memory_db_relation_create(int user_id,
    }
    memory_db_internal_bind_provenance(s_db.stmt_memory_relation_create, 10, prov);
 
+   /* v49 upsert: RETURNING id, mention_count.  First step yields SQLITE_ROW
+    * (whether INSERT or ON CONFLICT path); drain to SQLITE_DONE.  No need to
+    * consume the returned values here — observability of mention_count belongs
+    * at the supersede call site where extraction can log dedup-hits. */
    int rc = sqlite3_step(s_db.stmt_memory_relation_create);
+   bool ok = (rc == SQLITE_ROW || rc == SQLITE_DONE);
+   while (rc == SQLITE_ROW) {
+      rc = sqlite3_step(s_db.stmt_memory_relation_create);
+   }
+   ok = ok && (rc == SQLITE_DONE);
    sqlite3_reset(s_db.stmt_memory_relation_create);
    AUTH_DB_UNLOCK();
 
-   return (rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+   return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 /* Transactional close-and-create.  For exclusive relations (works_at, lives_in, ...)
@@ -366,7 +375,20 @@ int memory_db_relation_supersede(int user_id,
       sqlite3_bind_null(create_stmt, 9);
    }
    memory_db_internal_bind_provenance(create_stmt, 10, prov);
+   /* v49 upsert: RETURNING id, mention_count.  Consume the first row to learn
+    * the dedup outcome (mention_count > 1 means an existing row was bumped
+    * rather than a fresh row inserted), then drain to SQLITE_DONE.  Done
+    * before sqlite3_reset() so the column read remains valid. */
    rc = sqlite3_step(create_stmt);
+   int upsert_mention_count = 0;
+   int64_t upsert_id = 0;
+   if (rc == SQLITE_ROW) {
+      upsert_id = sqlite3_column_int64(create_stmt, 0);
+      upsert_mention_count = sqlite3_column_int(create_stmt, 1);
+      do {
+         rc = sqlite3_step(create_stmt);
+      } while (rc == SQLITE_ROW);
+   }
    sqlite3_reset(create_stmt);
    if (rc != SQLITE_DONE) {
       int xrc = sqlite3_extended_errcode(s_db.db);
@@ -424,12 +446,35 @@ int memory_db_relation_supersede(int user_id,
    }
 
    AUTH_DB_UNLOCK();
+
+   /* v49 dedup observability — log after the lock is released so the OLOG
+    * call doesn't widen the critical section.  mention_count > 1 means the
+    * upsert hit the ON CONFLICT path and bumped an existing row rather than
+    * inserting a fresh one.  DEBUG-level: at extraction time this can fire
+    * tens of times per conversation; aggregate visibility comes from the
+    * one-shot v49 migration delta log and ad-hoc `SELECT mention_count ...
+    * ORDER BY mention_count DESC` queries.  Also: object_value is user
+    * content, so promoting to INFO would surface it in operator logs at
+    * every re-witness.  Keep this gated to DEBUG. */
+   if (upsert_mention_count > 1) {
+      OLOG_DEBUG("memory_db: relation upserted (dedup hit) id=%lld user=%d subj=%lld rel='%s' "
+                 "obj_id=%lld obj_val='%s' mention_count=%d",
+                 (long long)upsert_id, user_id, (long long)subject_entity_id, relation,
+                 (long long)object_entity_id, object_value ? object_value : "(null)",
+                 upsert_mention_count);
+   }
    return MEMORY_DB_SUCCESS;
 }
 
-/* Reads SELECTs ordered: id, subject_entity_id, relation, object_entity_id,
- * object_name, confidence, valid_from, valid_to.  valid_* columns appended last
- * (cols 6, 7, v33).  COALESCE in SQL converts SQL NULL → 0 in C. */
+/* Reads SELECTs ordered:
+ *   0:id, 1:subject_entity_id, 2:relation, 3:object_entity_id,
+ *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count
+ *
+ * valid_* (cols 6, 7) appended in v33; mention_count (col 8) appended in v49.
+ * COALESCE in SQL converts SQL NULL → 0 in C for the validity columns.
+ *
+ * Must stay column-symmetric with populate_relation_outgoing_row() in
+ * memory_db_alias_writes.c — both helpers read the same column layout. */
 static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *rel) {
    rel->id = sqlite3_column_int64(stmt, 0);
    rel->subject_entity_id = sqlite3_column_int64(stmt, 1);
@@ -453,6 +498,8 @@ static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *re
    /* COALESCE in SQL means 0 if NULL — caller treats 0 as "open-ended". */
    rel->valid_from = sqlite3_column_int64(stmt, 6);
    rel->valid_to = sqlite3_column_int64(stmt, 7);
+
+   rel->mention_count = sqlite3_column_int(stmt, 8);
 }
 
 int memory_db_relation_list_by_subject(int user_id,
@@ -666,8 +713,9 @@ int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
     *
     * No ORDER BY — sorting on the computed subj_root materializes a temp
     * B-tree (verified 2026-05-20 via EXPLAIN QUERY PLAN), and no caller
-    * depends on iteration order.  valid_from/valid_to appended last (v33)
-    * to match populate_relation_from_row column order.
+    * depends on iteration order.  valid_from/valid_to appended in v33,
+    * mention_count appended in v49 — column order matches
+    * populate_relation_from_row.  Roots follow at indices 9/10.
     *
     * EXPLAIN QUERY PLAN (Jetson, 2026-05-20):
     *   SEARCH r USING INDEX idx_memory_relations_user_validity (user_id=?)
@@ -680,6 +728,7 @@ int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
        "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
        "       COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
        "       COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+       "       r.mention_count, "
        "       COALESCE(s.canonical_id, s.id, 0) AS subj_root, "
        "       COALESCE(e.canonical_id, e.id, 0) AS obj_root "
        "FROM memory_relations r "
@@ -700,9 +749,10 @@ int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
       populate_relation_from_row(stmt, &out[count]);
       /* Roots are appended after the columns populate_relation_from_row
-       * reads (it stops at valid_to / index 7).  Indices 8/9 are ours. */
-      subj_roots[count] = sqlite3_column_int64(stmt, 8);
-      obj_roots[count] = sqlite3_column_int64(stmt, 9);
+       * reads (it stops at mention_count / index 8 in v49).  Indices 9/10
+       * are ours. */
+      subj_roots[count] = sqlite3_column_int64(stmt, 9);
+      obj_roots[count] = sqlite3_column_int64(stmt, 10);
       count++;
    }
 

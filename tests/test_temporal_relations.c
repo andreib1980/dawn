@@ -97,18 +97,45 @@ static const char *DDL =
    "  confidence REAL DEFAULT 0.8,"
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  valid_from INTEGER DEFAULT NULL,"
-   "  valid_to INTEGER DEFAULT NULL"
-   ");";
+   "  valid_to INTEGER DEFAULT NULL,"
+   "  source_conversation_id INTEGER DEFAULT NULL,"
+   "  source_msg_id_start    INTEGER DEFAULT NULL,"
+   "  source_msg_id_end      INTEGER DEFAULT NULL,"
+   "  mention_count INTEGER NOT NULL DEFAULT 1"
+   ");"
+   /* v49 partial UNIQUE — required for the upsert ON CONFLICT clause to parse. */
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_relations_unique_open "
+   "ON memory_relations(user_id, subject_entity_id, relation, "
+   "                    COALESCE(object_entity_id, 0), "
+   "                    COALESCE(object_value, '')) "
+   "WHERE valid_to IS NULL;";
 /* clang-format on */
 
 static int prepare_statements(void) {
    int rc;
 
+   /* v49 upsert prep — mirrors production SQL in src/auth/auth_db_statements.c.
+    * Note: this test file's relation inserts use distinct object values (lines
+    * 245-247 create three lives_in rows with seattle/portland/denver as objects),
+    * so the partial UNIQUE never trips — pre-existing temporal-test behavior
+    * preserved.  Same-object re-witness would now bump mention_count instead
+    * of creating a second row; not tested here. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
-                           "valid_from, valid_to) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?)",
+                           "valid_from, valid_to, "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?) "
+                           "ON CONFLICT(user_id, subject_entity_id, relation, "
+                           "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
+                           "WHERE valid_to IS NULL DO UPDATE SET "
+                           "  mention_count = mention_count + 1, "
+                           "  confidence = MAX(confidence, excluded.confidence), "
+                           "  source_conversation_id = excluded.source_conversation_id, "
+                           "  source_msg_id_start = excluded.source_msg_id_start, "
+                           "  source_msg_id_end = excluded.source_msg_id_end, "
+                           "  fact_id = COALESCE(fact_id, excluded.fact_id) "
+                           "RETURNING id, mention_count",
                            -1, &s_db.stmt_memory_relation_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
@@ -234,11 +261,28 @@ static void test_supersede_idempotent_same_object(void) {
    /* Insert: Alice works_at Microsoft */
    memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    int prior = count_open_relations(10, "works_at");
+   TEST_ASSERT_EQUAL_INT(1, prior);
 
-   /* Re-insert same target */
+   /* Re-insert same target.  Pre-v49 behavior: the close_open Phase 1
+    * skipped same-object, then the plain INSERT created a duplicate row
+    * (open relation count went 1 → 2).  v49 behavior: the upsert collapses
+    * both into the same row via idx_memory_relations_unique_open, bumping
+    * mention_count from 1 to 2.  This is the genuinely idempotent
+    * semantics the test name promised — pre-v49 was misleadingly named. */
    int rc = memory_db_relation_supersede(1, 10, "works_at", 21, NULL, 0, 0.9f, 0, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL_INT(prior + 1, count_open_relations(10, "works_at"));
+   TEST_ASSERT_EQUAL_INT(prior, count_open_relations(10, "works_at"));
+
+   /* Confirm mention_count was bumped instead of a new row appearing. */
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT mention_count FROM memory_relations "
+                      "WHERE subject_entity_id = 10 AND relation = 'works_at' "
+                      "  AND object_entity_id = 21 AND valid_to IS NULL",
+                      -1, &stmt, NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(stmt));
+   TEST_ASSERT_EQUAL_INT(2, sqlite3_column_int(stmt, 0));
+   sqlite3_finalize(stmt);
 }
 
 static void test_non_exclusive_does_not_close(void) {

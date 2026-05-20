@@ -298,6 +298,11 @@ typedef struct {
     * "currently true" predicate: valid_to == 0 || valid_to > now() */
    int64_t valid_from;
    int64_t valid_to;
+   /* Re-witness counter (v49).  Bumped by the upsert in stmt_memory_relation_create
+    * when the same (user_id, subject_entity_id, relation, object) tuple is re-emitted
+    * while valid_to IS NULL.  >= 1.  See partial UNIQUE index
+    * idx_memory_relations_unique_open. */
+   int mention_count;
 } memory_relation_t;
 
 #ifdef __cplusplus

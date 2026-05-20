@@ -779,6 +779,21 @@
    font-style: italic;
 }
 
+/* v49 re-witness count badge — surfaces aggregated mention_count when an
+ * (relation, object) tuple has been observed more than once.  Muted color so
+ * it reads as metadata, not a click target; monospace + tabular numbers so
+ * counts align visually across rows.  No opacity stacked on --text-tertiary:
+ * the token alone gives ~5:1 contrast against --bg-panel (WCAG AA for normal
+ * text); adding opacity:0.7 pushes it below 4.5:1 at 11.2px. */
+.entity-relation-count {
+   color: var(--text-tertiary, var(--text-secondary));
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   font-variant-numeric: tabular-nums;
+   flex-shrink: 0;
+   white-space: nowrap;
+}
+
 /* Collapsed relations toggle */
 .entity-relations-more {
    color: var(--text-secondary);

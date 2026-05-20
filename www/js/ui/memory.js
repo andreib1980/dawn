@@ -804,7 +804,7 @@
    function renderEntityItem(entity) {
       const typeClass = ENTITY_TYPE_CLASSES[entity.entity_type] || 'entity-type-default';
       const dateStr = formatDate(entity.first_seen);
-      const relations = entity.relations || [];
+      const relations = aggregateRelationsForDisplay(entity.relations || []);
       const maxVisible = 3;
       const hasMore = relations.length > maxVisible;
       const visible = hasMore ? relations.slice(0, maxVisible) : relations;
@@ -890,6 +890,45 @@
       );
    }
 
+   /* v49 display-side aggregation: relations come from the server per-row
+    * with per-row mention_count (the partial-UNIQUE invariant in
+    * idx_memory_relations_unique_open is scoped to literal entity_id, not
+    * canonical class).  When an equivalence-class spans multiple alias rows
+    * (post-entity-merge), each alias row contributes its own (relation,
+    * object) row to entity.relations; sum the counts so the rendered "× N"
+    * badge reflects the class-wide observation count.
+    *
+    * Group key mirrors the SQL UNIQUE-index semantics: distinguish
+    * entity-linked relations (`e:${object_entity_id}`) from literal-value
+    * relations (`v:${object_name}`).  Without the prefix, an entity-linked
+    * relation pointing at id=5 (name "DAWN") would collapse with a literal
+    * relation `object_value="DAWN"` — semantically different edges. */
+   function aggregateRelationsForDisplay(relations) {
+      if (!Array.isArray(relations) || relations.length === 0) return relations || [];
+      const byKey = new Map();
+      const order = [];
+      for (const rel of relations) {
+         const objKey =
+            rel.object_entity_id && rel.object_entity_id > 0
+               ? `e:${rel.object_entity_id}`
+               : `v:${rel.object_name || ''}`;
+         const key = `${rel.direction || 'out'}|${rel.relation || ''}|${objKey}`;
+         const count = Math.max(1, rel.mention_count | 0);
+         if (byKey.has(key)) {
+            const existing = byKey.get(key);
+            existing.mention_count = (existing.mention_count | 0) + count;
+            if ((rel.confidence || 0) > (existing.confidence || 0)) {
+               existing.confidence = rel.confidence;
+            }
+         } else {
+            const copy = Object.assign({}, rel, { mention_count: count });
+            byKey.set(key, copy);
+            order.push(key);
+         }
+      }
+      return order.map((k) => byKey.get(k));
+   }
+
    function renderRelationLine(rel) {
       const isLinked = rel.object_entity_id && rel.object_entity_id > 0;
       const targetClass = isLinked ? 'entity-relation-target' : 'entity-relation-value';
@@ -902,11 +941,21 @@
 
       const arrow = rel.direction === 'in' ? '&larr;' : '&rarr;';
 
+      const count = rel.mention_count | 0;
+      /* aria-label mirrors title because title on a non-interactive span is
+       * unreliable in screen readers (most engines surface it only on hover
+       * focus, which never fires for non-focusable elements). */
+      const countHtml =
+         count > 1
+            ? ` <span class="entity-relation-count" aria-label="Observed ${count} times" title="Observed ${count} times">&times;&nbsp;${count}</span>`
+            : '';
+
       return (
          `<div class="entity-relation">` +
          `<span class="entity-relation-arrow">${arrow}</span>` +
          `<span class="entity-relation-verb">${escapeHtml(rel.relation)}</span> ` +
          `<span class="${targetClass}"${targetAttr}>${targetName}</span>` +
+         countHtml +
          `</div>`
       );
    }
