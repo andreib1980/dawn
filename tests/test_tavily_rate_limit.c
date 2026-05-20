@@ -32,13 +32,29 @@ dawn_config_t g_config = { 0 };
  * session_get_command_context/local from tavily_rate_limit_resolve_user_id(),
  * but this test doesn't exercise that helper — it tests the bucket logic
  * directly via tavily_rate_limit_check(user_id). The stubs satisfy the
- * linker without pulling in the full session manager. */
+ * linker without pulling in the full session manager.
+ *
+ * session_get_local() is a `static inline` in session_manager.h that calls
+ * json_object_new_array() + llm_get_default_config() inside a one-time-init
+ * block.  Including the header forces that inline into tavily_rate_limit.c's
+ * translation unit, so the test must also stub those two transitively-
+ * referenced symbols even though the inline's init path never runs in this
+ * test (resolve_user_id() isn't called).  Same shape as the session stubs:
+ * satisfy the linker, never executed. */
 struct session;
 struct session *session_get_command_context(void) {
    return NULL;
 }
 struct session *session_get_local(void) {
    return NULL;
+}
+struct json_object;
+struct json_object *json_object_new_array(void) {
+   return NULL;
+}
+struct session_llm_config;
+void llm_get_default_config(struct session_llm_config *cfg) {
+   (void)cfg;
 }
 
 void setUp(void) {

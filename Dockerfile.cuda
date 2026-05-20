@@ -156,6 +156,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgumbo1 libopenjp2-7 libjbig2dec0 libmujs1 libjpeg-turbo8 \
     libgomp1 \
     libical3 \
+    # BM25 Porter2 stemming runtime (v48)
+    libstemmer0d \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
