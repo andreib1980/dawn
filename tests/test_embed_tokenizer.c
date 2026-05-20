@@ -30,10 +30,17 @@
 #include "unity.h"
 
 /* Resolve vocab.txt regardless of the test's cwd (ctest invokes from build
- * dir; manual runs may use repo root). */
+ * dir; manual runs may use repo root).  CI doesn't ship the production
+ * models/embeddings/ tree (gitignored), so tests/fixtures/embeddings/vocab.txt
+ * is the tracked test-fixture copy and is the first candidate. */
 static const char *vocab_path(void) {
-   const char *candidates[] = { "models/embeddings/vocab.txt", "../models/embeddings/vocab.txt",
-                                "../../models/embeddings/vocab.txt", NULL };
+   const char *candidates[] = { "tests/fixtures/embeddings/vocab.txt",
+                                "../tests/fixtures/embeddings/vocab.txt",
+                                "../../tests/fixtures/embeddings/vocab.txt",
+                                "models/embeddings/vocab.txt",
+                                "../models/embeddings/vocab.txt",
+                                "../../models/embeddings/vocab.txt",
+                                NULL };
    for (int i = 0; candidates[i]; i++) {
       FILE *fp = fopen(candidates[i], "r");
       if (fp) {

@@ -26,11 +26,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Find an existing build directory.  Prefer build-debug (the developer's
-# daily driver per CLAUDE.md); fall back to build-ci (CI's choice) or other
-# variants the developer may have configured.
+# Find an existing build directory.  Prefer build-ci first — that's the
+# preset CI itself runs (ENABLE_WEBUI=OFF, no CUDA), and several test
+# targets are gated on -DENABLE_MULTI_CLIENT which only fires when WEBUI
+# is on.  Running the test suite against build-debug (the developer's
+# daily driver) hides those gate-induced failures; build-ci catches them.
+# build-debug stays as a fallback for developers who haven't bootstrapped
+# build-ci yet.
 BUILD_DIR=""
-for d in build-debug build-ci build-full build; do
+for d in build-ci build-debug build-full build; do
    if [ -f "$d/CMakeCache.txt" ]; then
       BUILD_DIR="$d"
       break
@@ -39,7 +43,7 @@ done
 
 if [ -z "$BUILD_DIR" ]; then
    echo -e "${YELLOW}Pre-push: no build directory found; skipping test check.${NC}"
-   echo -e "${YELLOW}  Bootstrap with: cmake --preset debug${NC}"
+   echo -e "${YELLOW}  Bootstrap with: cmake --preset ci${NC}"
    exit 0
 fi
 

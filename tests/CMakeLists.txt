@@ -376,6 +376,13 @@ dawn_add_unit_test(test_prompt_builder
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
            ${SRC_ROOT}/src/core/strbuf.c
+   # session_dedup primitives + build_focus_block's dispatch-session lookup
+   # are gated #ifdef ENABLE_MULTI_CLIENT in the daemon (the root CMakeLists
+   # sets it only when ENABLE_WEBUI=ON).  The ci preset turns WEBUI off but
+   # this test target needs the dedup primitives compiled in regardless —
+   # force the define here so the ci preset doesn't silently strip the dedup
+   # tests' subject under test.
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -397,6 +404,8 @@ dawn_add_unit_test(test_focus_probe
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
+   # See test_prompt_builder above — same ENABLE_MULTI_CLIENT requirement.
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common unity pthread m
    LABEL   ci)
 
@@ -791,6 +800,8 @@ dawn_add_unit_test(bench_focus_pipeline
            ${SRC_ROOT}/src/core/session_dedup.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/webui/build_focus_block.c
+   # See test_prompt_builder — same ENABLE_MULTI_CLIENT requirement.
+   DEFINES ENABLE_MULTI_CLIENT
    LIBS    dawn_common pthread m stemmer
            ${JSONC_LIBRARIES})
 
