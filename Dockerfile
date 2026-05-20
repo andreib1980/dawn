@@ -46,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmupdf-dev libfreetype-dev libharfbuzz-dev libzip-dev libxml2-dev \
     libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev libjpeg-dev \
     libical-dev \
+    # BM25 keyword retrieval — Porter2 stemming (v48)
+    libstemmer-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # --- ONNX Runtime (pre-built, arch-specific) ---
