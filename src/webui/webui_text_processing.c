@@ -43,6 +43,7 @@
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
+#include "core/text_input_dispatch.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "llm/llm_context.h"
@@ -309,6 +310,19 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
 
+/* Callback fired by core_text_input_dispatch after the user message is
+ * added to history + (optionally) persisted to conv_db, but before
+ * focus injection and the LLM call.  Preserves the WebUI's "transcript
+ * echoes immediately after the user types" UX while keeping the
+ * add/persist/focus/LLM sequence inside the Layer 2 helper. */
+static void webui_text_dispatch_on_user_msg(void *ctx, const char *text, bool persisted_to_db) {
+   session_t *session = (session_t *)ctx;
+   if (!session || !text) {
+      return;
+   }
+   webui_send_transcript_ex(session, "user", text, persisted_to_db);
+}
+
 static void text_worker_cleanup(text_work_t *work, session_t *session, char *text) {
    if (session) {
       session_release(session);
@@ -372,53 +386,27 @@ static void *text_worker_thread(void *arg) {
       webui_send_state_with_detail(session, "thinking", "Processing request...");
    }
 
-   /* Add user message to session history immediately (before LLM call can be cancelled).
-    * If images present, store in multi-part format so they persist across turns. */
-   if (work->vision_image_count > 0) {
-      session_add_message_with_images(session, "user", text,
-                                      (const char *const *)work->vision_images,
-                                      work->vision_image_count);
-   } else {
-      session_add_message(session, "user", text);
-   }
-
-   /* Persist user message to conversation DB immediately (server-side).
-    * This ensures the message is in the DB before any client-side load_conversation
-    * request arrives — fixes a race where session expiry triggers auto-create,
-    * the client reloads conversation from DB, but the new user message hasn't been
-    * persisted yet (normally saved via client round-trip save_message).
-    * When server_saved=true, the client skips its own save_message to avoid dupes. */
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
-   bool saved_to_db = false;
-   if (conn && conn->active_conversation_id > 0) {
-      int64_t msg_id = 0;
-      if (conv_db_add_message_ex(conn->active_conversation_id, conn->auth_user_id, "user", text,
-                                 &msg_id) == AUTH_DB_SUCCESS) {
-         saved_to_db = true;
-         session_stamp_last_message_id(session, "user", msg_id);
-      }
-   }
-
-   /* Echo user input as transcript (with server_saved flag to prevent duplicate DB save) */
-   webui_send_transcript_ex(session, "user", text, saved_to_db);
-
-   /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
-    * worker thread (text_worker_thread is spawned via pthread_create
-    * from webui_process_text_input_with_vision — NEVER on the lws
-    * service thread).  Returns SUCCESS even on focus failure; LLM
-    * dispatch never blocked. */
-   session_dispatch_user_turn(session, text);
-
-   /* Check if TTS is enabled for this connection */
    bool tts_enabled = conn && conn->tts_enabled;
 
-   /* Call LLM with session's conversation history (message already added above)
-    * Pass vision data if present - LLM will include in request
-    * TTS callback is NULL when disabled, causing simple text streaming */
-   char *response = session_llm_call_with_tts_vision_no_add(
+   /* Dispatch the turn through the provider-agnostic Layer 2 helper:
+    * add user msg → persist to conv_db → transcript echo (via callback)
+    * → focus injection → LLM call.  Vision buffers are owned by `work`
+    * and freed below after the LLM call returns. */
+   text_input_dispatch_opts_t dispatch_opts = {
+      .conversation_id = (conn && conn->active_conversation_id > 0) ? conn->active_conversation_id
+                                                                    : 0,
+      .auth_user_id = conn ? conn->auth_user_id : 0,
+      .sentence_cb = tts_enabled ? webui_sentence_audio_callback : NULL,
+      .sentence_userdata = tts_enabled ? session : NULL,
+      .on_user_msg_added = webui_text_dispatch_on_user_msg,
+      .user_msg_added_ctx = session,
+   };
+
+   char *response = core_text_input_dispatch(
        session, text, (const char **)work->vision_images, work->vision_image_sizes,
        (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
-       tts_enabled ? webui_sentence_audio_callback : NULL, tts_enabled ? session : NULL);
+       &dispatch_opts);
 
    /* Free vision data after LLM call (it's been sent over HTTP, no longer needed) */
    for (int i = 0; i < work->vision_image_count; i++) {

@@ -608,6 +608,7 @@ if(ENABLE_WEBUI)
     list(APPEND DAWN_SOURCES
         src/core/session_manager.c
         src/core/session_manager_llm.c
+        src/core/text_input_dispatch.c
         src/core/prompt_compose.c
         src/core/session_dedup.c
         src/core/worker_pool.c
