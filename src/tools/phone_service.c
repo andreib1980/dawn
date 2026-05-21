@@ -733,12 +733,17 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       }
       tts_announce(announce);
 
-      /* HUD — json-c for proper escaping of SMS body preview */
+      /* HUD — json-c for proper escaping of SMS body preview. Cap sized for MIRAGE's
+       * notification popup: at Aldrich-Regular 20pt with wrap_width=372, ~30-35 chars
+       * fit per line and the popup has room for ~3 wrapped lines before clipping
+       * vertically. Receive-side cap is MIRAGE's NOTIF_MAX_PREVIEW (128) — keep the
+       * 90-char content + "..." trailing well under that ceiling. Bumping the content
+       * cap will also need a vertical-overflow check on the MIRAGE side. */
       size_t body_len = strlen(body);
-      char preview[64] = "";
-      if (body_len > 50) {
-         memcpy(preview, body, 50);
-         preview[50] = '\0';
+      char preview[128] = "";
+      if (body_len > 90) {
+         memcpy(preview, body, 90);
+         preview[90] = '\0';
          strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
       } else {
          memcpy(preview, body, body_len + 1);
