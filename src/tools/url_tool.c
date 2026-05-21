@@ -89,7 +89,7 @@ static const tool_metadata_t url_metadata = {
    .param_count = 1,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
-   .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE,
+   .capabilities = TOOL_CAP_NETWORK | TOOL_CAP_SCHEDULABLE | TOOL_CAP_REQUIRES_VALUE,
    .is_getter = true,
    .skip_followup = false,
    .default_remote = true,

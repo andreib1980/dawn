@@ -765,6 +765,11 @@ typedef struct {
    int alarm_timeout_sec;       /* Stop ringing after this (hard max: 300) */
    int alarm_volume;            /* Alarm sound volume (0-100) */
    int event_retention_days;    /* Clean up fired/cancelled/missed events after N days */
+   /* When a briefing fires, TTS routes by source_client_type.  Voice-created
+    * briefings (LOCAL/DAP2) always speak — the user asked aloud, they expect
+    * to hear it.  WebUI-created briefings default to silent (the conversation
+    * IS the artifact) unless this flag is on. */
+   bool briefing_speak_aloud_on_webui_source;
 } scheduler_config_t;
 
 /* =============================================================================

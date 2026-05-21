@@ -1012,6 +1012,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (config->scheduler.alarm_volume > 100)
          config->scheduler.alarm_volume = 100;
       JSON_TO_CONFIG_INT(section, "event_retention_days", config->scheduler.event_retention_days);
+      JSON_TO_CONFIG_BOOL(section, "briefing_speak_aloud_on_webui_source",
+                          config->scheduler.briefing_speak_aloud_on_webui_source);
    }
 
    /* [calendar] */

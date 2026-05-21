@@ -1581,6 +1581,9 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->scheduler.alarm_volume));
    json_object_object_add(scheduler, "event_retention_days",
                           json_object_new_int(config->scheduler.event_retention_days));
+   json_object_object_add(scheduler, "briefing_speak_aloud_on_webui_source",
+                          json_object_new_boolean(
+                              config->scheduler.briefing_speak_aloud_on_webui_source));
    json_object_object_add(root, "scheduler", scheduler);
 
    /* [calendar] */

@@ -1505,6 +1505,7 @@ static void parse_scheduler(toml_table_t *table, scheduler_config_t *config) {
                                              "alarm_timeout_sec",
                                              "alarm_volume",
                                              "event_retention_days",
+                                             "briefing_speak_aloud_on_webui_source",
                                              NULL };
    warn_unknown_keys(table, "scheduler", known_keys);
 
@@ -1519,6 +1520,8 @@ static void parse_scheduler(toml_table_t *table, scheduler_config_t *config) {
    PARSE_INT(table, "alarm_timeout_sec", config->alarm_timeout_sec);
    PARSE_INT(table, "alarm_volume", config->alarm_volume);
    PARSE_INT(table, "event_retention_days", config->event_retention_days);
+   PARSE_BOOL(table, "briefing_speak_aloud_on_webui_source",
+              config->briefing_speak_aloud_on_webui_source);
 
    /* Clamp values */
    if (config->alarm_timeout_sec > 300)

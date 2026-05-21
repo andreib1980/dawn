@@ -105,6 +105,12 @@ typedef enum {
    TOOL_CAP_SECRETS = (1 << 3),       /**< Uses secrets.toml credentials */
    TOOL_CAP_ARMOR_FEATURE = (1 << 4), /**< OASIS armor-specific feature */
    TOOL_CAP_SCHEDULABLE = (1 << 5),   /**< Safe for scheduled task execution */
+   /* Tool callback requires a non-empty value for ANY of its actions.  Set
+    * ONLY on tools with no sensible default — e.g. search (no query =
+    * nothing to search), url_fetch (no URL = nothing to fetch).  Do NOT set
+    * on tools that fall back to config defaults like weather (uses
+    * configured location when value is empty). */
+   TOOL_CAP_REQUIRES_VALUE = (1 << 6),
 } tool_capability_t;
 
 /* =============================================================================
@@ -388,6 +394,25 @@ tool_callback_fn tool_registry_get_callback(const char *name);
  * @return true if enabled, false if disabled or not found
  */
 bool tool_registry_is_enabled(const char *name);
+
+/**
+ * @brief Validate a tool reference is safe to schedule / safe to fire
+ *
+ * Re-checks registry lookup, TOOL_CAP_SCHEDULABLE, enabled state, and the
+ * TOOL_CAP_REQUIRES_VALUE-vs-empty-value rule.  Used at create time (LLM
+ * scheduler tool, dispatcher) AND at fire time (briefing_thread_func) so a
+ * tool that was disabled between schedule and fire fails gracefully.
+ *
+ * @param tool_name Tool name to validate (must be NUL-terminated)
+ * @param tool_value Optional value (NULL or "" treated as absent)
+ * @param err_buf Output buffer for error message (untouched on success)
+ * @param err_buf_size Size of err_buf
+ * @return SUCCESS or FAILURE
+ */
+int tool_registry_validate_schedulable(const char *tool_name,
+                                       const char *tool_value,
+                                       char *err_buf,
+                                       size_t err_buf_size);
 
 /**
  * @brief Resolve device name from meta-tool device map

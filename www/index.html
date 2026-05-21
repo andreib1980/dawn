@@ -287,6 +287,29 @@
                   <span class="memory-proposal-indicator"></span>
                </button>
                <button
+                  id="scheduler-btn"
+                  class="hidden"
+                  title="Scheduler"
+                  aria-label="Open scheduler queue"
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+               >
+                  <svg
+                     width="20"
+                     height="20"
+                     viewBox="0 0 24 24"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="2"
+                     stroke-linecap="round"
+                     stroke-linejoin="round"
+                  >
+                     <circle cx="12" cy="12" r="9" />
+                     <polyline points="12 7 12 12 15 14" />
+                  </svg>
+                  <span class="sched-queue-indicator" aria-hidden="true"></span>
+               </button>
+               <button
                   id="doc-library-btn"
                   class="hidden"
                   title="Document Library"
@@ -548,6 +571,100 @@
                   </p>
                </div>
             </div>
+         </div>
+
+         <!-- Scheduler Queue Popover -->
+         <div
+            id="scheduler-popover"
+            class="popover hidden"
+            role="dialog"
+            aria-labelledby="scheduler-popover-title"
+         >
+            <div class="popover-arrow"></div>
+
+            <header class="sched-popover-header">
+               <h3 id="scheduler-popover-title">Scheduler</h3>
+               <button id="scheduler-close" aria-label="Close scheduler queue">&times;</button>
+            </header>
+
+            <div class="sched-popover-stats">
+               <span>Active <span id="sched-stat-active">0</span></span>
+               <span>Snoozed <span id="sched-stat-snoozed">0</span></span>
+               <span>Ringing <span id="sched-stat-ringing">0</span></span>
+               <span>Missed <span id="sched-stat-missed">0</span></span>
+            </div>
+
+            <nav class="sched-popover-tabs" role="tablist" aria-label="Scheduler tabs">
+               <button
+                  class="sched-popover-tab active"
+                  role="tab"
+                  aria-selected="true"
+                  data-tab="all"
+               >
+                  All
+               </button>
+               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="timer">
+                  Timers
+               </button>
+               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="alarm">
+                  Alarms
+               </button>
+               <button
+                  class="sched-popover-tab"
+                  role="tab"
+                  aria-selected="false"
+                  data-tab="reminder"
+               >
+                  Reminders
+               </button>
+               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="task">
+                  Tasks
+               </button>
+               <button
+                  class="sched-popover-tab"
+                  role="tab"
+                  aria-selected="false"
+                  data-tab="briefing"
+               >
+                  Briefings
+               </button>
+               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="missed">
+                  Missed
+               </button>
+            </nav>
+
+            <div class="sched-popover-search">
+               <input
+                  id="sched-popover-search-input"
+                  type="search"
+                  placeholder="Search by name or location…"
+                  aria-label="Search scheduled events"
+               />
+            </div>
+
+            <ul
+               class="sched-popover-list"
+               id="sched-popover-list"
+               role="list"
+               aria-live="polite"
+               aria-relevant="additions removals"
+            ></ul>
+
+            <div
+               class="sched-popover-sr-announce"
+               id="sched-popover-sr-announce"
+               role="status"
+               aria-live="assertive"
+            ></div>
+
+            <footer class="sched-popover-footer">
+               <span class="sched-popover-footer-hint">
+                  Use voice or text to create new events
+               </span>
+               <button class="sched-popover-footer-link" id="sched-clear-missed" type="button">
+                  Clear all missed
+               </button>
+            </footer>
          </div>
 
          <!-- Memory Source Modal (v40 provenance) -->
@@ -2819,6 +2936,7 @@ token = "eyJ..."</pre
       <!-- Main settings orchestrator -->
       <script defer src="/js/ui/settings.js"></script>
       <script defer src="/js/ui/scheduler.js"></script>
+      <script defer src="/js/ui/scheduler-queue.js"></script>
       <script defer src="/js/ui/visual-render.js"></script>
       <script defer src="/js/ui/plan-orchestrator.js"></script>
       <script defer src="/js/ui/user-badge.js"></script>

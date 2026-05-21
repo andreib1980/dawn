@@ -563,6 +563,40 @@ bool tool_registry_is_enabled(const char *name) {
    return false;
 }
 
+int tool_registry_validate_schedulable(const char *tool_name,
+                                       const char *tool_value,
+                                       char *err_buf,
+                                       size_t err_buf_size) {
+   if (!tool_name || !tool_name[0]) {
+      if (err_buf && err_buf_size)
+         snprintf(err_buf, err_buf_size, "tool_name is required");
+      return FAILURE;
+   }
+   const tool_metadata_t *meta = tool_registry_find(tool_name);
+   if (!meta) {
+      if (err_buf && err_buf_size)
+         snprintf(err_buf, err_buf_size, "unknown tool '%s'", tool_name);
+      return FAILURE;
+   }
+   if (!(meta->capabilities & TOOL_CAP_SCHEDULABLE)) {
+      if (err_buf && err_buf_size)
+         snprintf(err_buf, err_buf_size, "tool '%s' is not schedulable", tool_name);
+      return FAILURE;
+   }
+   if (!tool_registry_is_enabled(tool_name)) {
+      if (err_buf && err_buf_size)
+         snprintf(err_buf, err_buf_size, "tool '%s' is disabled", tool_name);
+      return FAILURE;
+   }
+   if ((meta->capabilities & TOOL_CAP_REQUIRES_VALUE) && (!tool_value || !tool_value[0])) {
+      if (err_buf && err_buf_size)
+         snprintf(err_buf, err_buf_size,
+                  "tool '%s' requires a non-empty tool_value (e.g. search query)", tool_name);
+      return FAILURE;
+   }
+   return SUCCESS;
+}
+
 const char *tool_registry_resolve_device(const tool_metadata_t *metadata, const char *key) {
    if (!metadata || !key || !metadata->device_map) {
       return NULL;

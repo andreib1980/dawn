@@ -30,4 +30,8 @@
  */
 int scheduler_tool_register(void);
 
+/* The scheduler step validator was relocated to tool_registry.h since it's a
+ * pure tool-registry-query utility and is called from Layer 2 (scheduler.c)
+ * — see tool_registry_validate_schedulable in include/tools/tool_registry.h. */
+
 #endif /* SCHEDULER_TOOL_H */

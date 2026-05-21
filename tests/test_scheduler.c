@@ -35,48 +35,60 @@
 #include "unity.h"
 
 /* Must match auth_db_core.c v18 migration */
-static const char *DDL = "CREATE TABLE IF NOT EXISTS users ("
-                         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                         "  username TEXT UNIQUE NOT NULL,"
-                         "  real_name TEXT DEFAULT NULL,"
-                         "  preferred_address TEXT DEFAULT NULL,"
-                         "  identity_aliases TEXT DEFAULT NULL"
-                         ");"
-                         "INSERT INTO users (id, username) VALUES (1, 'testuser');"
-                         "INSERT INTO users (id, username) VALUES (2, 'otheruser');"
-                         "CREATE TABLE IF NOT EXISTS scheduled_events ("
-                         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                         "  user_id INTEGER NOT NULL,"
-                         "  event_type TEXT NOT NULL DEFAULT 'timer',"
-                         "  status TEXT NOT NULL DEFAULT 'pending',"
-                         "  name TEXT NOT NULL,"
-                         "  message TEXT,"
-                         "  fire_at INTEGER NOT NULL,"
-                         "  created_at INTEGER NOT NULL,"
-                         "  duration_sec INTEGER DEFAULT 0,"
-                         "  snoozed_until INTEGER DEFAULT 0,"
-                         "  recurrence TEXT DEFAULT 'once',"
-                         "  recurrence_days TEXT,"
-                         "  original_time TEXT,"
-                         "  source_uuid TEXT,"
-                         "  source_location TEXT,"
-                         "  source_client_type INTEGER DEFAULT 0,"
-                         "  announce_all INTEGER DEFAULT 0,"
-                         "  tool_name TEXT,"
-                         "  tool_action TEXT,"
-                         "  tool_value TEXT,"
-                         "  fired_at INTEGER DEFAULT 0,"
-                         "  snooze_count INTEGER DEFAULT 0,"
-                         "  FOREIGN KEY (user_id) REFERENCES users(id)"
-                         ");"
-                         "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
-                         "  ON scheduled_events(status, fire_at);"
-                         "CREATE INDEX IF NOT EXISTS idx_sched_user "
-                         "  ON scheduled_events(user_id, status);"
-                         "CREATE INDEX IF NOT EXISTS idx_sched_user_name "
-                         "  ON scheduled_events(user_id, status, name);"
-                         "CREATE INDEX IF NOT EXISTS idx_sched_source "
-                         "  ON scheduled_events(source_uuid);";
+static const char *DDL =
+    "CREATE TABLE IF NOT EXISTS users ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  username TEXT UNIQUE NOT NULL,"
+    "  real_name TEXT DEFAULT NULL,"
+    "  preferred_address TEXT DEFAULT NULL,"
+    "  identity_aliases TEXT DEFAULT NULL"
+    ");"
+    "INSERT INTO users (id, username) VALUES (1, 'testuser');"
+    "INSERT INTO users (id, username) VALUES (2, 'otheruser');"
+    "CREATE TABLE IF NOT EXISTS scheduled_events ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  event_type TEXT NOT NULL DEFAULT 'timer',"
+    "  status TEXT NOT NULL DEFAULT 'pending',"
+    "  name TEXT NOT NULL,"
+    "  message TEXT,"
+    "  fire_at INTEGER NOT NULL,"
+    "  created_at INTEGER NOT NULL,"
+    "  duration_sec INTEGER DEFAULT 0,"
+    "  snoozed_until INTEGER DEFAULT 0,"
+    "  recurrence TEXT DEFAULT 'once',"
+    "  recurrence_days TEXT,"
+    "  original_time TEXT,"
+    "  source_uuid TEXT,"
+    "  source_location TEXT,"
+    "  source_client_type INTEGER DEFAULT 0,"
+    "  announce_all INTEGER DEFAULT 0,"
+    "  tool_name TEXT,"
+    "  tool_action TEXT,"
+    "  tool_value TEXT,"
+    "  fired_at INTEGER DEFAULT 0,"
+    "  snooze_count INTEGER DEFAULT 0,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
+    "  ON scheduled_events(status, fire_at);"
+    "CREATE INDEX IF NOT EXISTS idx_sched_user "
+    "  ON scheduled_events(user_id, status);"
+    "CREATE INDEX IF NOT EXISTS idx_sched_user_name "
+    "  ON scheduled_events(user_id, status, name);"
+    "CREATE INDEX IF NOT EXISTS idx_sched_source "
+    "  ON scheduled_events(source_uuid);"
+    "CREATE TABLE IF NOT EXISTS briefing_steps ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  event_id INTEGER NOT NULL,"
+    "  seq INTEGER NOT NULL,"
+    "  tool_name TEXT NOT NULL,"
+    "  tool_action TEXT NOT NULL DEFAULT '',"
+    "  tool_value TEXT NOT NULL DEFAULT '',"
+    "  FOREIGN KEY (event_id) REFERENCES scheduled_events(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_briefing_steps_event "
+    "  ON briefing_steps(event_id, seq);";
 
 static void setup_db(void) {
    int rc = sqlite3_open(":memory:", &s_db.db);
@@ -621,6 +633,271 @@ static void test_get_missed_events(void) {
 }
 
 /* ============================================================================
+ * Test: list_user_missed — user-scoped filter, status='missed' only, DESC sort
+ *
+ * Regression test against the bug where the WebUI panel briefly used
+ * scheduler_db_get_missed_events (a DB-wide pending/snoozed-overdue helper)
+ * and would have leaked across users + returned zero rows in steady state.
+ * ============================================================================ */
+
+static void test_list_user_missed(void) {
+   time_t now = time(NULL);
+
+   /* User 1: one missed, one pending, one cancelled */
+   sched_event_t m1 = make_event();
+   m1.user_id = 1;
+   m1.fire_at = now - 7200;
+   m1.status = SCHED_STATUS_MISSED;
+   strncpy(m1.name, "U1 Missed Older", SCHED_NAME_MAX - 1);
+   scheduler_db_insert(&m1, NULL);
+
+   sched_event_t m2 = make_event();
+   m2.user_id = 1;
+   m2.fire_at = now - 3600;
+   m2.status = SCHED_STATUS_MISSED;
+   strncpy(m2.name, "U1 Missed Newer", SCHED_NAME_MAX - 1);
+   scheduler_db_insert(&m2, NULL);
+
+   sched_event_t p1 = make_event();
+   p1.user_id = 1;
+   p1.fire_at = now + 3600;
+   p1.status = SCHED_STATUS_PENDING;
+   strncpy(p1.name, "U1 Pending", SCHED_NAME_MAX - 1);
+   scheduler_db_insert(&p1, NULL);
+
+   sched_event_t c1 = make_event();
+   c1.user_id = 1;
+   c1.fire_at = now - 1800;
+   c1.status = SCHED_STATUS_CANCELLED;
+   strncpy(c1.name, "U1 Cancelled", SCHED_NAME_MAX - 1);
+   scheduler_db_insert(&c1, NULL);
+
+   /* User 2: one missed — must NOT appear in user 1's results */
+   sched_event_t u2m = make_event();
+   u2m.user_id = 2;
+   u2m.fire_at = now - 5400;
+   u2m.status = SCHED_STATUS_MISSED;
+   strncpy(u2m.name, "U2 Missed", SCHED_NAME_MAX - 1);
+   scheduler_db_insert(&u2m, NULL);
+
+   sched_event_t results[10];
+   int count = scheduler_db_list_user_missed(1, results, 10);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   /* DESC by fire_at — newest first */
+   TEST_ASSERT_EQUAL_STRING("U1 Missed Newer", results[0].name);
+   TEST_ASSERT_EQUAL_STRING("U1 Missed Older", results[1].name);
+
+   /* User 2 sees only their own */
+   int u2_count = scheduler_db_list_user_missed(2, results, 10);
+   TEST_ASSERT_EQUAL_INT(1, u2_count);
+   TEST_ASSERT_EQUAL_STRING("U2 Missed", results[0].name);
+
+   /* Limit honored */
+   int limited = scheduler_db_list_user_missed(1, results, 1);
+   TEST_ASSERT_EQUAL_INT(1, limited);
+   TEST_ASSERT_EQUAL_STRING("U1 Missed Newer", results[0].name);
+
+   /* User with no missed rows returns zero */
+   sched_event_t results_empty[10];
+   int none = scheduler_db_list_user_missed(99, results_empty, 10);
+   TEST_ASSERT_EQUAL_INT(0, none);
+}
+
+/* ============================================================================
+ * Test: scheduler_db_clear_missed
+ *
+ * Covers the four branches: missed → dismissed success, wrong status (pending),
+ * wrong status (fired), wrong owner.  The user_id predicate added in the
+ * post-/review fix is the defense-in-depth gate beneath the dispatcher auth.
+ * ============================================================================ */
+
+static void test_clear_missed(void) {
+   time_t now = time(NULL);
+
+   /* (a) status='missed' → flips to 'dismissed', returns SUCCESS */
+   sched_event_t m = make_event();
+   m.user_id = 1;
+   m.fire_at = now - 3600;
+   m.status = SCHED_STATUS_MISSED;
+   strncpy(m.name, "U1 Missed", SCHED_NAME_MAX - 1);
+   int64_t m_id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&m, &m_id));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, scheduler_db_clear_missed(m_id, 1));
+   sched_event_t after;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, scheduler_db_get(m_id, &after));
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_DISMISSED, after.status);
+
+   /* (b) status='pending' → no-op, FAILURE, row unchanged */
+   sched_event_t p = make_event();
+   p.user_id = 1;
+   p.fire_at = now + 3600;
+   p.status = SCHED_STATUS_PENDING;
+   strncpy(p.name, "U1 Pending", SCHED_NAME_MAX - 1);
+   int64_t p_id = 0;
+   scheduler_db_insert(&p, &p_id);
+   TEST_ASSERT_EQUAL_INT(FAILURE, scheduler_db_clear_missed(p_id, 1));
+   scheduler_db_get(p_id, &after);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_PENDING, after.status);
+
+   /* (c) status='fired' → no-op, FAILURE, row unchanged */
+   sched_event_t f = make_event();
+   f.user_id = 1;
+   f.status = SCHED_STATUS_FIRED;
+   strncpy(f.name, "U1 Fired", SCHED_NAME_MAX - 1);
+   int64_t f_id = 0;
+   scheduler_db_insert(&f, &f_id);
+   TEST_ASSERT_EQUAL_INT(FAILURE, scheduler_db_clear_missed(f_id, 1));
+   scheduler_db_get(f_id, &after);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_FIRED, after.status);
+
+   /* (d) wrong user → FAILURE, row unchanged.  Defense in depth: the
+    *     dispatcher gate would already have rejected, but the DB-level
+    *     predicate prevents leakage across users if the gate is ever
+    *     bypassed. */
+   sched_event_t u2m = make_event();
+   u2m.user_id = 2;
+   u2m.fire_at = now - 1800;
+   u2m.status = SCHED_STATUS_MISSED;
+   strncpy(u2m.name, "U2 Missed", SCHED_NAME_MAX - 1);
+   int64_t u2_id = 0;
+   scheduler_db_insert(&u2m, &u2_id);
+   TEST_ASSERT_EQUAL_INT(FAILURE, scheduler_db_clear_missed(u2_id, 1));
+   scheduler_db_get(u2_id, &after);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_MISSED, after.status);
+   /* And the actual owner can still clear it */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, scheduler_db_clear_missed(u2_id, 2));
+}
+
+/* ============================================================================
+ * Test: briefing_steps set/list round-trip
+ * ============================================================================ */
+
+static void test_briefing_steps_roundtrip(void) {
+   /* Insert a briefing event row to attach steps to */
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   int64_t event_id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev, &event_id));
+
+   /* Empty list before set */
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_briefing_steps_list(
+                                               event_id, out, SCHED_BRIEFING_STEPS_MAX, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+
+   /* Set 3 steps */
+   sched_briefing_step_t steps[3];
+   memset(steps, 0, sizeof(steps));
+   strncpy(steps[0].tool_name, "weather", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[0].tool_action, "get", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[0].tool_value, "Atlanta", SCHED_TOOL_VALUE_MAX - 1);
+   strncpy(steps[1].tool_name, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[1].tool_action, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[1].tool_value, "top AI news today", SCHED_TOOL_VALUE_MAX - 1);
+   strncpy(steps[2].tool_name, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[2].tool_action, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[2].tool_value, "top world news today", SCHED_TOOL_VALUE_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_briefing_steps_set(event_id, steps, 3));
+
+   /* List returns them in seq order */
+   count = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_briefing_steps_list(
+                                               event_id, out, SCHED_BRIEFING_STEPS_MAX, &count));
+   TEST_ASSERT_EQUAL_INT(3, count);
+   TEST_ASSERT_EQUAL_STRING("weather", out[0].tool_name);
+   TEST_ASSERT_EQUAL_STRING("Atlanta", out[0].tool_value);
+   TEST_ASSERT_EQUAL_STRING("search", out[1].tool_name);
+   TEST_ASSERT_EQUAL_STRING("top AI news today", out[1].tool_value);
+   TEST_ASSERT_EQUAL_STRING("top world news today", out[2].tool_value);
+
+   /* Re-set replaces (atomic transaction inside the helper) */
+   sched_briefing_step_t replaced[1];
+   memset(replaced, 0, sizeof(replaced));
+   strncpy(replaced[0].tool_name, "url_fetch", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(replaced[0].tool_value, "https://example.com", SCHED_TOOL_VALUE_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_briefing_steps_set(event_id, replaced, 1));
+   count = 0;
+   scheduler_db_briefing_steps_list(event_id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_STRING("url_fetch", out[0].tool_name);
+
+   /* Reject above cap */
+   sched_briefing_step_t too_many[SCHED_BRIEFING_STEPS_MAX + 1];
+   memset(too_many, 0, sizeof(too_many));
+   for (int i = 0; i < SCHED_BRIEFING_STEPS_MAX + 1; i++)
+      strncpy(too_many[i].tool_name, "weather", SCHED_TOOL_NAME_MAX - 1);
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE, scheduler_db_briefing_steps_set(
+                                               event_id, too_many, SCHED_BRIEFING_STEPS_MAX + 1));
+}
+
+/* ============================================================================
+ * Test: insert_with_step_clone copies source briefing's steps atomically
+ * ============================================================================ */
+
+static void test_insert_with_step_clone(void) {
+   /* Source briefing with 2 steps */
+   sched_event_t src = make_event();
+   src.event_type = SCHED_EVENT_BRIEFING;
+   int64_t src_id = 0;
+   scheduler_db_insert(&src, &src_id);
+   sched_briefing_step_t steps[2];
+   memset(steps, 0, sizeof(steps));
+   strncpy(steps[0].tool_name, "weather", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[1].tool_name, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[1].tool_value, "AI news", SCHED_TOOL_VALUE_MAX - 1);
+   scheduler_db_briefing_steps_set(src_id, steps, 2);
+
+   /* Build the next-occurrence row and clone */
+   sched_event_t next = src;
+   next.id = 0;
+   next.status = SCHED_STATUS_PENDING;
+   next.fire_at = time(NULL) + 86400;
+   next.fired_at = 0;
+   int64_t new_id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_insert_with_step_clone(&next, src_id, &new_id));
+   TEST_ASSERT_TRUE(new_id > src_id);
+
+   /* Cloned steps present on the new row */
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(new_id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("weather", out[0].tool_name);
+   TEST_ASSERT_EQUAL_STRING("search", out[1].tool_name);
+   TEST_ASSERT_EQUAL_STRING("AI news", out[1].tool_value);
+
+   /* Source steps still intact (clone is read-only against src) */
+   count = 0;
+   scheduler_db_briefing_steps_list(src_id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+}
+
+/* ============================================================================
+ * Test: clone with zero source steps inserts but copies nothing
+ * ============================================================================ */
+
+static void test_insert_with_step_clone_no_source_steps(void) {
+   sched_event_t src = make_event();
+   src.event_type = SCHED_EVENT_BRIEFING;
+   int64_t src_id = 0;
+   scheduler_db_insert(&src, &src_id);
+
+   sched_event_t next = src;
+   next.id = 0;
+   next.fire_at = time(NULL) + 86400;
+   int64_t new_id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_insert_with_step_clone(&next, src_id, &new_id));
+
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = -1;
+   scheduler_db_briefing_steps_list(new_id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(0, count);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -643,5 +920,10 @@ int main(void) {
    RUN_TEST(test_next_fire_time);
    RUN_TEST(test_get_active_by_uuid);
    RUN_TEST(test_get_missed_events);
+   RUN_TEST(test_list_user_missed);
+   RUN_TEST(test_clear_missed);
+   RUN_TEST(test_briefing_steps_roundtrip);
+   RUN_TEST(test_insert_with_step_clone);
+   RUN_TEST(test_insert_with_step_clone_no_source_steps);
    return UNITY_END();
 }

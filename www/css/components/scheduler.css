@@ -276,3 +276,698 @@
       justify-content: flex-end;
    }
 }
+
+/* =============================================================================
+ * Scheduler Queue Header Button
+ *
+ * Mirrors the styling shape of #memory-btn / #music-btn so all three header
+ * attention buttons render uniformly.  position: relative anchors the
+ * absolutely-positioned indicator dot below.
+ * ============================================================================= */
+#scheduler-btn {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   cursor: pointer;
+   padding: 0.25rem;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   transition: color var(--transition-fast);
+   position: relative;
+}
+
+#scheduler-btn:hover {
+   color: var(--accent);
+}
+
+#scheduler-btn.active {
+   color: var(--accent);
+}
+
+#scheduler-btn svg {
+   width: 20px;
+   height: 20px;
+}
+
+/* =============================================================================
+ * Scheduler Queue Header Button Indicator Dot
+ *
+ * Third dot in the header attention-cue series (music = 0s, memory = 0.5s,
+ * scheduler = 0.667s).  A 1s delay on a 1s @keyframes cycle would be phase-
+ * equivalent to 0s — picking 0.667s gives a true three-way stagger at thirds
+ * so concurrent dots read as independent indicators, not a system alarm.
+ *
+ * Light-up rule: ONLY for ringing OR unacknowledged missed events.  A
+ * queue-not-empty state alone is background information, not attention.
+ * ============================================================================= */
+#scheduler-btn .sched-queue-indicator {
+   position: absolute;
+   top: -2px;
+   right: -2px;
+   width: 8px;
+   height: 8px;
+   background: var(--accent);
+   border-radius: 50%;
+   animation: led-pulse 1s ease-in-out infinite;
+   animation-delay: 0.667s;
+   display: none;
+}
+
+#scheduler-btn.has-attention .sched-queue-indicator {
+   display: block;
+}
+
+/* When live-ringing, switch to amber so the user can tell at a glance "live
+ * alert" vs "missed historical".  has-ringing wins over plain has-attention. */
+#scheduler-btn.has-attention.has-ringing .sched-queue-indicator {
+   background: var(--warning);
+}
+
+@media (prefers-reduced-motion: reduce) {
+   #scheduler-btn .sched-queue-indicator {
+      animation: none;
+   }
+}
+
+/* =============================================================================
+ * Scheduler Queue Popover Container
+ *
+ * Mirrors #memory-popover positioning, chrome, and dimensions.  Reuses the
+ * shared .popover-arrow primitive — do NOT redefine.
+ * ============================================================================= */
+#scheduler-popover {
+   position: fixed;
+   top: 50px;
+   right: 60px;
+   width: 460px;
+   max-height: 70vh;
+   background: rgba(18, 18, 26, 0.98);
+   backdrop-filter: blur(20px);
+   -webkit-backdrop-filter: blur(20px);
+   border: 1px solid var(--accent-border);
+   border-radius: 12px;
+   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+   z-index: 1000;
+   display: flex;
+   flex-direction: column;
+   opacity: 1;
+   transform: translateY(0);
+   transition:
+      opacity 0.15s ease,
+      transform 0.15s ease;
+}
+
+#scheduler-popover.hidden {
+   opacity: 0;
+   transform: translateY(-8px);
+   pointer-events: none;
+}
+
+/* Header */
+.sched-popover-header {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   padding: 0.875rem 1rem;
+   border-bottom: 1px solid var(--accent-border);
+   background: rgba(10, 10, 15, 0.5);
+   border-radius: 12px 12px 0 0;
+}
+
+.sched-popover-header h3 {
+   font-size: 1rem;
+   font-weight: 600;
+   color: var(--accent);
+   letter-spacing: 0.03em;
+   margin: 0;
+}
+
+#scheduler-close {
+   width: 28px;
+   height: 28px;
+   padding: 0;
+   background: transparent;
+   border: 1px solid var(--text-secondary);
+   border-radius: 50%;
+   color: var(--text-secondary);
+   font-size: 1.1rem;
+   line-height: 1;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+}
+
+#scheduler-close:hover {
+   border-color: var(--accent);
+   color: var(--accent);
+}
+
+/* Stats bar */
+.sched-popover-stats {
+   display: flex;
+   justify-content: space-around;
+   padding: 0.625rem 1rem;
+   background: rgba(0, 0, 0, 0.2);
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   gap: 0.25rem;
+}
+
+.sched-popover-stats > span {
+   display: flex;
+   align-items: center;
+   gap: 0.25rem;
+}
+
+.sched-popover-stats > span > span {
+   color: var(--text-primary);
+   font-weight: 500;
+   font-family: 'IBM Plex Mono', monospace;
+   font-variant-numeric: tabular-nums;
+}
+
+/* Tabs */
+.sched-popover-tabs {
+   display: flex;
+   gap: 0;
+   padding: 0 0.5rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+   background: rgba(0, 0, 0, 0.15);
+   overflow-x: auto;
+   scrollbar-width: none;
+   scroll-snap-type: x mandatory;
+}
+
+.sched-popover-tabs::-webkit-scrollbar {
+   display: none;
+}
+
+.sched-popover-tab {
+   padding: 0.625rem 0.75rem;
+   background: transparent;
+   border: none;
+   border-bottom: 2px solid transparent;
+   color: var(--text-secondary);
+   font-size: 0.8rem;
+   font-weight: 500;
+   cursor: pointer;
+   white-space: nowrap;
+   scroll-snap-align: start;
+   transition: all var(--transition-fast);
+}
+
+.sched-popover-tab:hover {
+   color: var(--text-primary);
+   background: rgba(255, 255, 255, 0.03);
+}
+
+.sched-popover-tab.active {
+   color: var(--accent);
+   border-bottom-color: var(--accent);
+}
+
+/* Search */
+.sched-popover-search {
+   padding: 0.625rem 1rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+#sched-popover-search-input {
+   width: 100%;
+   padding: 0.5rem 0.75rem;
+   background: rgba(0, 0, 0, 0.3);
+   border: 1px solid var(--border-color, #2a323a);
+   border-radius: var(--border-radius-sm, 4px);
+   color: var(--text-primary);
+   font-size: 0.85rem;
+   font-family: inherit;
+}
+
+#sched-popover-search-input:focus {
+   outline: none;
+   border-color: var(--accent);
+}
+
+#sched-popover-search-input::placeholder {
+   color: var(--text-tertiary);
+}
+
+/* List */
+.sched-popover-list {
+   list-style: none;
+   margin: 0;
+   padding: 0.25rem 0;
+   flex: 1;
+   overflow-y: auto;
+   max-height: 50vh;
+}
+
+/* Empty states */
+.sched-popover-empty {
+   padding: 2.5rem 1rem;
+   text-align: center;
+   color: var(--text-secondary);
+}
+
+.sched-popover-empty-icon {
+   width: 32px;
+   height: 32px;
+   color: var(--text-tertiary);
+   margin: 0 auto 0.75rem;
+   display: block;
+}
+
+.sched-popover-empty-headline {
+   margin: 0 0 0.75rem;
+   font-size: 0.95rem;
+   color: var(--text-secondary);
+   font-weight: 500;
+}
+
+.sched-popover-empty-hint {
+   margin: 0;
+   font-size: 0.8rem;
+   color: var(--text-tertiary);
+   line-height: 1.6;
+}
+
+.sched-popover-empty-hint code {
+   font-family: 'IBM Plex Mono', monospace;
+   background: var(--bg-tertiary, #242a31);
+   color: var(--text-secondary);
+   padding: 1px 6px;
+   border-radius: 3px;
+   font-size: 0.75rem;
+}
+
+.sched-popover-empty-compact {
+   padding: 1.5rem 1rem;
+   text-align: center;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+   font-style: italic;
+}
+
+/* Footer */
+.sched-popover-footer {
+   padding: 0.625rem 1rem;
+   border-top: 1px solid rgba(255, 255, 255, 0.05);
+   background: rgba(0, 0, 0, 0.2);
+   border-radius: 0 0 12px 12px;
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 0.75rem;
+}
+
+.sched-popover-footer-hint {
+   font-size: 0.7rem;
+   color: var(--text-tertiary);
+}
+
+.sched-popover-footer-link {
+   background: none;
+   border: none;
+   color: var(--accent);
+   font-size: 0.8rem;
+   cursor: pointer;
+   padding: 0;
+   font-family: inherit;
+}
+
+.sched-popover-footer-link:hover {
+   text-decoration: underline;
+}
+
+.sched-popover-footer-link.armed {
+   color: var(--error);
+   font-weight: 600;
+}
+
+/* Hidden screen-reader-only live region for ringing announcements */
+.sched-popover-sr-announce {
+   position: absolute;
+   left: -10000px;
+   width: 1px;
+   height: 1px;
+   overflow: hidden;
+}
+
+/* =============================================================================
+ * Scheduler Queue Row
+ * ============================================================================= */
+.sched-row {
+   position: relative;
+   display: grid;
+   grid-template-columns: 3px auto auto 1fr auto auto;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.625rem 0.875rem;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+   transition: background var(--transition-fast);
+}
+
+.sched-row:last-child {
+   border-bottom: none;
+}
+
+.sched-row:hover,
+.sched-row:focus-within {
+   background: var(--accent-subtle);
+}
+
+.sched-row-accent {
+   width: 3px;
+   align-self: stretch;
+   border-radius: 1.5px;
+   background: currentColor;
+}
+
+.sched-row-icon {
+   color: currentColor;
+   display: flex;
+   align-items: center;
+}
+
+.sched-row-icon svg {
+   width: 16px;
+   height: 16px;
+}
+
+.sched-row-badge {
+   font-size: 0.6875rem;
+   font-weight: 700;
+   letter-spacing: 0.05em;
+   text-transform: uppercase;
+   padding: 2px 6px;
+   border-radius: 3px;
+   white-space: nowrap;
+   background: rgba(255, 255, 255, 0.06);
+   color: currentColor;
+}
+
+.sched-row-body {
+   min-width: 0;
+   display: flex;
+   flex-direction: column;
+   gap: 2px;
+}
+
+.sched-row-name {
+   font-size: 0.95rem;
+   font-weight: 500;
+   color: var(--text-primary);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.sched-row-meta {
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   display: flex;
+   flex-wrap: wrap;
+   gap: 0.25rem;
+   align-items: baseline;
+}
+
+.sched-row-meta-sep {
+   color: var(--text-tertiary);
+   font-weight: 600;
+}
+
+.sched-row-tool {
+   font-size: 0.7rem;
+   color: var(--text-tertiary);
+   font-family: 'IBM Plex Mono', monospace;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+/* Multi-step briefing — clickable summary that toggles the steps panel */
+.sched-row-tool-expandable {
+   cursor: pointer;
+   user-select: none;
+   white-space: normal;
+   color: var(--text-secondary);
+}
+
+.sched-row-tool-expandable:hover {
+   color: var(--accent);
+}
+
+.sched-row-tool-chevron {
+   display: inline-block;
+   width: 0.75rem;
+   color: var(--text-tertiary);
+   font-size: 0.65rem;
+   transition: transform var(--transition-fast);
+}
+
+.sched-row-tool-expandable:hover .sched-row-tool-chevron {
+   color: var(--accent);
+}
+
+/* Expanded steps list — ordered for sequence clarity */
+.sched-row-steps {
+   list-style: decimal inside;
+   margin: 4px 0 2px 0;
+   padding: 6px 8px;
+   background: rgba(0, 0, 0, 0.18);
+   border-left: 2px solid var(--accent-border);
+   border-radius: 3px;
+   font-size: 0.72rem;
+   font-family: 'IBM Plex Mono', monospace;
+   color: var(--text-secondary);
+}
+
+.sched-row-steps li {
+   margin: 0;
+   padding: 1px 0;
+   line-height: 1.4;
+   white-space: normal;
+   word-break: break-word;
+}
+
+.sched-row-steps-tool {
+   color: var(--text-primary);
+   font-weight: 500;
+}
+
+.sched-row-steps-arg {
+   color: var(--text-tertiary);
+}
+
+.sched-row-time {
+   font-family: 'IBM Plex Mono', monospace;
+   font-variant-numeric: tabular-nums;
+   font-size: 0.9rem;
+   color: var(--text-primary);
+   text-align: right;
+   white-space: nowrap;
+}
+
+.sched-row-actions {
+   display: flex;
+   gap: 0.25rem;
+   opacity: 0;
+   transition: opacity var(--transition-fast);
+}
+
+.sched-row:hover .sched-row-actions,
+.sched-row:focus-within .sched-row-actions,
+.sched-row.is-armed .sched-row-actions {
+   opacity: 1;
+}
+
+@media (pointer: coarse) {
+   .sched-row-actions {
+      opacity: 0.7;
+   }
+}
+
+/* Type colorways — row applies the color to currentColor, accent + icon + badge
+ * inherit it.  Reuses the existing banner palette for visual continuity. */
+.sched-row.sched-type-timer {
+   color: #4caf50;
+}
+.sched-row.sched-type-alarm {
+   color: #f0b429;
+}
+.sched-row.sched-type-reminder {
+   color: #64b5f6;
+}
+.sched-row.sched-type-task {
+   color: #ab47bc;
+}
+.sched-row.sched-type-briefing {
+   color: #26a69a;
+}
+
+/* Type-specific badge background tints */
+.sched-row.sched-type-timer .sched-row-badge {
+   background: rgba(76, 175, 80, 0.18);
+}
+.sched-row.sched-type-alarm .sched-row-badge {
+   background: rgba(240, 180, 41, 0.18);
+}
+.sched-row.sched-type-reminder .sched-row-badge {
+   background: rgba(100, 181, 246, 0.18);
+}
+.sched-row.sched-type-task .sched-row-badge {
+   background: rgba(171, 71, 188, 0.18);
+}
+.sched-row.sched-type-briefing .sched-row-badge {
+   background: rgba(38, 166, 154, 0.18);
+}
+
+/* State: snoozed */
+.sched-row.is-snoozed .sched-row-name {
+   color: var(--text-secondary);
+}
+
+.sched-row.is-snoozed .sched-row-snooze-glyph {
+   margin-right: 0.25rem;
+   color: var(--text-tertiary);
+   font-style: italic;
+}
+
+/* State: ringing */
+.sched-row.is-ringing {
+   background: var(--accent-subtle);
+   animation: sched-pulse 2s ease-in-out infinite;
+}
+
+.sched-row.is-ringing.sched-type-alarm {
+   background: rgba(240, 180, 41, 0.08);
+}
+
+.sched-row.is-ringing .sched-row-when {
+   color: var(--warning);
+   font-weight: 600;
+   text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: reduce) {
+   .sched-row.is-ringing {
+      animation: none;
+   }
+}
+
+/* State: missed — three layered cues so it never reads as pending */
+.sched-row.is-missed .sched-row-accent {
+   /* Convert the 3px solid accent to a dashed stripe by drawing dashes via
+    * repeating-linear-gradient — border-style on a 3px-wide stripe renders
+    * as dots which looks like a bug.  This gives a real dashed stripe. */
+   background: repeating-linear-gradient(to bottom, currentColor 0 4px, transparent 4px 7px);
+}
+
+.sched-row.is-missed .sched-row-name {
+   color: var(--text-secondary);
+}
+
+.sched-row.is-missed .sched-row-time {
+   color: var(--text-tertiary);
+   text-decoration: line-through;
+}
+
+/* Delete / dismiss / acknowledge button */
+.sched-row-delete {
+   width: 28px;
+   height: 28px;
+   padding: 0;
+   background: transparent;
+   border: 1px solid transparent;
+   border-radius: 4px;
+   color: var(--text-tertiary);
+   cursor: pointer;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   transition: all var(--transition-fast);
+}
+
+.sched-row-delete:hover,
+.sched-row-delete:focus-visible {
+   color: var(--error);
+   border-color: var(--error);
+   background: rgba(239, 68, 68, 0.12);
+   outline: none;
+}
+
+.sched-row-delete svg {
+   width: 14px;
+   height: 14px;
+}
+
+/* Inline-confirm: the trash icon morphs to an "× Confirm?" pill in place */
+.sched-row-delete.armed {
+   width: auto;
+   padding: 0 0.625rem;
+   color: var(--error);
+   border-color: var(--error);
+   background: rgba(239, 68, 68, 0.15);
+   font-size: 0.75rem;
+   font-weight: 600;
+   transition: all 0.18s ease-out;
+}
+
+.sched-row-delete.armed svg {
+   display: none;
+}
+
+/* Mobile touch target */
+@media (pointer: coarse) {
+   .sched-row-delete {
+      width: 36px;
+      height: 36px;
+   }
+   .sched-row-delete.armed {
+      width: auto;
+      height: 36px;
+   }
+}
+
+/* Recurring-cancel disambiguation popup uses .dawn-split-menu .below
+ * (added in components.css) so it opens downward from the trash button. */
+
+/* Responsive */
+@media (max-width: 600px) {
+   #scheduler-popover {
+      width: calc(100vw - 24px);
+      max-width: 460px;
+      top: 60px;
+      right: 12px;
+      left: 12px;
+   }
+}
+
+@media (max-width: 480px) {
+   .sched-row {
+      grid-template-columns: 3px auto 1fr auto auto;
+   }
+   .sched-row-icon {
+      display: none;
+   }
+}
+
+@media (max-width: 400px) {
+   #scheduler-popover {
+      top: auto;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      width: 100%;
+      max-width: 100%;
+      border-radius: 12px 12px 0 0;
+      max-height: 80vh;
+   }
+   #scheduler-popover .popover-arrow {
+      display: none;
+   }
+}

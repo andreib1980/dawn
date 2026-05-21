@@ -57,11 +57,20 @@
     * @param {string} text - Markdown text to format
     * @returns {string} Sanitized HTML
     */
-   // Custom marked renderer: open links in new tab
+   /**
+    * Escape a string for safe use inside an HTML attribute value.
+    *
+    * escapeHtml (above) uses div.textContent → innerHTML, which escapes
+    * &lt;/&gt;/&amp; but NOT quotes — safe for text-node insertion but UNSAFE
+    * for interpolation between attribute-value quotes.  Use escapeAttr for
+    * any `attr="..."` interpolation.
+    */
    function escapeAttr(s) {
-      return s
+      if (s == null) return '';
+      return String(s)
          .replace(/&/g, '&amp;')
          .replace(/"/g, '&quot;')
+         .replace(/'/g, '&#39;')
          .replace(/</g, '&lt;')
          .replace(/>/g, '&gt;');
    }
@@ -163,6 +172,7 @@
    // Expose globally
    global.DawnFormat = {
       escapeHtml: escapeHtml,
+      escapeAttr: escapeAttr,
       markdown: formatMarkdown,
       relativeTime: formatRelativeTime,
       addCopyButtons: addCopyButtons,

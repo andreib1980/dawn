@@ -734,6 +734,11 @@
 # alarm_timeout_sec = 60          # Auto-dismiss alarms after N seconds
 # alarm_volume = 80               # Alarm chime volume (0-100)
 # event_retention_days = 30       # Keep completed events for N days
+# When a briefing fires, voice-created briefings (local mic / satellite) always
+# speak the LLM-summarized result via TTS — the user asked aloud, they expect
+# to hear it.  WebUI-created briefings are silent by default (the conversation
+# IS the artifact).  Set to true to also speak WebUI-created briefings.
+# briefing_speak_aloud_on_webui_source = false
 
 # =============================================================================
 # Music Playback

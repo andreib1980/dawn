@@ -516,6 +516,21 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_sched_user_name ON scheduled_events(user_id, status, name);"
     "CREATE INDEX IF NOT EXISTS idx_sched_source ON scheduled_events(source_uuid);"
 
+    /* Multi-step briefing steps (v50).  One row per step; briefings without
+     * a row here are either single-tool legacy rows (read tool_name from
+     * scheduled_events) or no-ops.  FK ON DELETE CASCADE so steps go with
+     * their parent event when scheduler_db_cleanup_old_events purges. */
+    "CREATE TABLE IF NOT EXISTS briefing_steps ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  event_id INTEGER NOT NULL,"
+    "  seq INTEGER NOT NULL,"
+    "  tool_name TEXT NOT NULL,"
+    "  tool_action TEXT NOT NULL DEFAULT '',"
+    "  tool_value TEXT NOT NULL DEFAULT '',"
+    "  FOREIGN KEY (event_id) REFERENCES scheduled_events(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_briefing_steps_event ON briefing_steps(event_id, seq);"
+
     /* Missed scheduler notifications (v32) — queued when a ringing event has no
      * connected clients for the target user; replayed on reconnect. */
     "CREATE TABLE IF NOT EXISTS missed_notifications ("
@@ -2589,6 +2604,64 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v50 — briefing_steps table for multi-step briefings.  Single
+    * BEGIN IMMEDIATE wrapping CREATE TABLE + CREATE INDEX + backfill of
+    * existing single-tool briefings.  Backfills regardless of status
+    * (terminal rows may still surface in history queries; steps
+    * CASCADE-delete with the parent on purge anyway).
+    *
+    * Gated `>= 18` because scheduled_events itself only exists from v18.
+    * On a pre-v18 DB the table doesn't exist; fresh installs at 0 create
+    * briefing_steps via SCHEMA_SQL above and skip this block. */
+   bool v50_ok = (current_version >= 50) || (current_version == 0);
+   if (current_version >= 18 && current_version < 50) {
+      rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v50 BEGIN failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         const char *v50_sql =
+             "CREATE TABLE IF NOT EXISTS briefing_steps ("
+             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  event_id INTEGER NOT NULL,"
+             "  seq INTEGER NOT NULL,"
+             "  tool_name TEXT NOT NULL,"
+             "  tool_action TEXT NOT NULL DEFAULT '',"
+             "  tool_value TEXT NOT NULL DEFAULT '',"
+             "  FOREIGN KEY (event_id) REFERENCES scheduled_events(id) ON DELETE CASCADE"
+             ");"
+             "CREATE INDEX IF NOT EXISTS idx_briefing_steps_event "
+             "  ON briefing_steps(event_id, seq);"
+             /* Backfill existing single-tool briefings into the new table. */
+             "INSERT INTO briefing_steps(event_id, seq, tool_name, tool_action, tool_value) "
+             "SELECT id, 0, tool_name, COALESCE(tool_action,''), COALESCE(tool_value,'') "
+             "  FROM scheduled_events "
+             " WHERE event_type='briefing' AND tool_name IS NOT NULL AND tool_name != '';";
+         rc = sqlite3_exec(s_db.db, v50_sql, NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_ERROR("auth_db: v50 migration failed: %s", errmsg ? errmsg : "unknown");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+            sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         } else {
+            int backfill = 0;
+            sqlite3_stmt *count_stmt = NULL;
+            if (sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM briefing_steps", -1, &count_stmt,
+                                   NULL) == SQLITE_OK) {
+               if (sqlite3_step(count_stmt) == SQLITE_ROW)
+                  backfill = sqlite3_column_int(count_stmt, 0);
+               sqlite3_finalize(count_stmt);
+            }
+            sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+            OLOG_INFO("auth_db: v50 created briefing_steps table; backfilled %d existing "
+                      "single-tool briefing(s)",
+                      backfill);
+            v50_ok = true;
+         }
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2725,7 +2798,7 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok && v49_ok;
+   const bool ready_to_bump = v48_ok && v49_ok && v50_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

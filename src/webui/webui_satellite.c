@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <sodium.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <string.h>
 #include <time.h>
 
@@ -501,13 +502,23 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    strncpy(identity.name, name, sizeof(identity.name) - 1);
    strncpy(identity.location, location, sizeof(identity.location) - 1);
 
-   /* Sanitize name/location: strip non-printable chars to prevent log injection */
+   /* Sanitize name/location to [a-zA-Z0-9 _.\-].  These fields surface in
+    * the WebUI scheduler panel and other client-rendered surfaces; anything
+    * outside this allowlist (notably HTML metachars `<>&"'/`) would be an XSS
+    * vector if a satellite were compromised.  Allowlist also matches the
+    * operational intent — these are short device labels like "kitchen". */
    for (char *p = identity.name; *p; p++) {
-      if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7E)
+      unsigned char c = (unsigned char)*p;
+      bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                c == ' ' || c == '_' || c == '.' || c == '-';
+      if (!ok)
          *p = '_';
    }
    for (char *p = identity.location; *p; p++) {
-      if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7E)
+      unsigned char c = (unsigned char)*p;
+      bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                c == ' ' || c == '_' || c == '.' || c == '-';
+      if (!ok)
          *p = '_';
    }
 

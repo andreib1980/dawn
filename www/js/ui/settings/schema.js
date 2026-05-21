@@ -1860,6 +1860,12 @@
                hint: 'Clean up completed/cancelled events after this many days',
                advanced: true,
             },
+            briefing_speak_aloud_on_webui_source: {
+               type: 'checkbox',
+               label: 'Speak WebUI-Created Briefings Aloud',
+               hint: 'Voice-created briefings always speak.  Briefings created via WebUI text are silent by default — enable this to speak them too.',
+               advanced: true,
+            },
          },
       },
       calendar: {

@@ -1163,6 +1163,14 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
       if (!action || !action[0]) {
          send_error_impl(conn->wsi, "INVALID_PARAM", "Missing action");
+      } else if (strcmp(action, "list") == 0) {
+         handle_scheduler_list_events(conn);
+      } else if (strcmp(action, "cancel") == 0) {
+         handle_scheduler_cancel_event(conn, event_id);
+      } else if (strcmp(action, "cancel_occurrence") == 0) {
+         handle_scheduler_cancel_occurrence(conn, event_id);
+      } else if (strcmp(action, "clear_missed") == 0) {
+         handle_scheduler_clear_missed(conn, event_id);
       } else if (strcmp(action, "dismiss_missed") == 0) {
          /* Delete a queued missed notification. Uses missed_notif_id rather than
           * event_id, so this branch runs before the event_id validation.
@@ -1205,6 +1213,7 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                /* Already dismissed (e.g. auto-dismiss for timers) — rebroadcast
                 * so other clients (satellites) can sync their UI. */
                scheduler_broadcast_notification(&ev, "Dismissed");
+               scheduler_broadcast_events_changed(ev.user_id);
             }
          } else if (strcmp(action, "snooze") == 0) {
             json_object_object_get_ex(payload, "snooze_minutes", &snooze_obj);
@@ -1212,6 +1221,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             int rc = scheduler_snooze(event_id, snooze_min);
             if (rc != 0)
                send_error_impl(conn->wsi, "NOT_FOUND", "No ringing event to snooze");
+            else
+               scheduler_broadcast_events_changed(ev.user_id);
          } else {
             send_error_impl(conn->wsi, "INVALID_PARAM", "Unknown scheduler action");
          }

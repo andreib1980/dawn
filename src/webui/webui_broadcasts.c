@@ -849,3 +849,46 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
                 sent);
    }
 }
+
+/*
+ * Strong symbol that overrides the weak stub in scheduler.c.
+ * Empty payload — clients refetch the queue on receipt.
+ */
+void scheduler_broadcast_events_changed(int user_id) {
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("scheduler_events_changed"));
+   json_object_object_add(root, "payload", json_object_new_object());
+
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      /* user_id <= 0 means "system event" — fan out to every authenticated
+       * session.  The startup missed-recovery sweep uses this since multiple
+       * users' events may have transitioned to 'missed' in one pass. */
+      if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+
+      char *json_copy = strdup(json_str);
+      if (!json_copy)
+         continue;
+
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   json_object_put(root);
+
+   if (sent > 0) {
+      OLOG_INFO("WebUI: Broadcast scheduler_events_changed (user=%d) to %d client(s)", user_id,
+                sent);
+   }
+}

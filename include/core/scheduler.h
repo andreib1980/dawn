@@ -107,6 +107,34 @@ int scheduler_dismiss(int64_t event_id);
  */
 int scheduler_snooze(int64_t event_id, int snooze_minutes);
 
+/**
+ * @brief Cancel a single occurrence of an event, keeping the recurrence chain
+ *
+ * For one-shot events, behaves identically to scheduler_db_cancel.  For
+ * recurring events, cancels the current pending/snoozed row AND inserts the
+ * next-occurrence row so the daily/weekly chain stays alive.  Use
+ * scheduler_db_cancel directly when the caller wants to break the chain.
+ *
+ * @param id Event ID
+ * @return SUCCESS if cancelled (next occurrence scheduled when recurring),
+ *         FAILURE if the row was already non-pending or didn't exist.
+ */
+int scheduler_cancel_occurrence(int64_t id);
+
+/**
+ * @brief Cancel an event (series) and broadcast scheduler_events_changed.
+ *
+ * Thin wrapper used by the WebUI dispatcher and the LLM scheduler tool so
+ * the broadcast emission lives in one place.  Cancels via scheduler_db_cancel
+ * (no next-occurrence — recurrence chain breaks intentionally).
+ */
+int scheduler_cancel_and_broadcast(int64_t id, int user_id);
+
+/**
+ * @brief Cancel just this occurrence (recurrence chain preserved) and broadcast.
+ */
+int scheduler_cancel_occurrence_and_broadcast(int64_t id, int user_id);
+
 /* =============================================================================
  * Notification Broadcast Hooks
  *
@@ -125,6 +153,12 @@ int scheduler_route_tts_to_user(int user_id,
                                 const char *text,
                                 const char *skip_uuid,
                                 int skip_user_id);
+
+/* Fires whenever an event is created / cancelled / fires / dismissed /
+ * recovered-missed.  WebUI panels refetch on receipt; the broadcast payload
+ * is intentionally empty so we don't ship per-row state through the push
+ * channel.  user_id <= 0 means "system event, fan out to all sessions". */
+void scheduler_broadcast_events_changed(int user_id);
 
 /* Weak/strong override sibling to scheduler_broadcast_*.  Strong definition
  * lives in src/webui/webui_audio.c so TTS can play through an active WebUI

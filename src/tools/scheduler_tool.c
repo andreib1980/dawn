@@ -243,41 +243,116 @@ static char *handle_create(struct json_object *details,
    /* Announce all */
    event.announce_all = json_get_bool(details, "announce_all", false);
 
-   /* Tool scheduling (Phase 5) */
-   const char *tool_name = json_get_string(details, "tool_name");
-   if ((type == SCHED_EVENT_TASK || type == SCHED_EVENT_BRIEFING) && !tool_name) {
-      snprintf(result, sizeof(result),
-               "Error: 'tool_name' is required for scheduled %s. "
-               "System shutdown is not available as a schedulable tool.",
-               type == SCHED_EVENT_BRIEFING ? "briefings" : "tasks");
-      return strdup(result);
-   }
-   if (tool_name) {
-      /* Validate tool exists and is schedulable */
-      const tool_metadata_t *meta = tool_registry_find(tool_name);
-      if (!meta) {
-         snprintf(result, sizeof(result), "Error: unknown tool '%s'", tool_name);
+   /* Tool scheduling — supports both legacy single-tool (top-level
+    * tool_name/tool_action/tool_value) AND multi-step briefings (a `steps`
+    * JSON array).  If `steps` is present, it wins; top-level tool_* is
+    * ignored.  Steps are validated NOW (so we reject the create) but only
+    * written to briefing_steps AFTER the event row insert succeeds. */
+   sched_briefing_step_t parsed_steps[SCHED_BRIEFING_STEPS_MAX];
+   int parsed_step_count = 0;
+   struct json_object *steps_arr = NULL;
+   json_object_object_get_ex(details, "steps", &steps_arr);
+   bool has_steps_array = (steps_arr && json_object_is_type(steps_arr, json_type_array));
+
+   if (has_steps_array) {
+      if (type != SCHED_EVENT_BRIEFING) {
+         snprintf(result, sizeof(result), "Error: 'steps' is only supported for type='briefing'");
          return strdup(result);
       }
-      if (!(meta->capabilities & TOOL_CAP_SCHEDULABLE)) {
-         snprintf(result, sizeof(result), "Error: tool '%s' is not schedulable", tool_name);
+      int n = (int)json_object_array_length(steps_arr);
+      if (n <= 0) {
+         snprintf(result, sizeof(result), "Error: 'steps' array is empty");
          return strdup(result);
       }
-      strncpy(event.tool_name, tool_name, SCHED_TOOL_NAME_MAX - 1);
-   }
-   const char *tool_action = json_get_string(details, "tool_action");
-   if (tool_action)
-      strncpy(event.tool_action, tool_action, SCHED_TOOL_NAME_MAX - 1);
-   const char *tool_value = json_get_string(details, "tool_value");
-   if (tool_value) {
-      if (strlen(tool_value) >= SCHED_TOOL_VALUE_MAX) {
+      if (n > SCHED_BRIEFING_STEPS_MAX) {
          snprintf(result, sizeof(result),
-                  "Error: tool_value too long (%zu bytes, max %d). "
-                  "Shorten the content and retry.",
-                  strlen(tool_value), SCHED_TOOL_VALUE_MAX - 1);
+                  "Error: too many steps (%d, max %d).  Split into multiple briefings.", n,
+                  SCHED_BRIEFING_STEPS_MAX);
          return strdup(result);
       }
-      strncpy(event.tool_value, tool_value, SCHED_TOOL_VALUE_MAX - 1);
+      memset(parsed_steps, 0, sizeof(parsed_steps));
+      for (int i = 0; i < n; i++) {
+         struct json_object *step = json_object_array_get_idx(steps_arr, i);
+         if (!step || !json_object_is_type(step, json_type_object)) {
+            snprintf(result, sizeof(result), "Error: steps[%d] is not an object", i);
+            return strdup(result);
+         }
+         /* Per-field type check — json_object_get_string coerces non-strings
+          * (numbers, nested objects) to their JSON serialization, which would
+          * silently store e.g. `{"$cmd":"..."}` as the literal tool_value
+          * string.  Reject anything that isn't a JSON string outright. */
+         struct json_object *jname = NULL, *jaction = NULL, *jvalue = NULL;
+         json_object_object_get_ex(step, "tool_name", &jname);
+         json_object_object_get_ex(step, "tool_action", &jaction);
+         json_object_object_get_ex(step, "tool_value", &jvalue);
+         if (jname && !json_object_is_type(jname, json_type_string)) {
+            snprintf(result, sizeof(result), "Error: steps[%d].tool_name must be a string", i);
+            return strdup(result);
+         }
+         if (jaction && !json_object_is_type(jaction, json_type_string)) {
+            snprintf(result, sizeof(result), "Error: steps[%d].tool_action must be a string", i);
+            return strdup(result);
+         }
+         if (jvalue && !json_object_is_type(jvalue, json_type_string)) {
+            snprintf(result, sizeof(result), "Error: steps[%d].tool_value must be a string", i);
+            return strdup(result);
+         }
+         const char *s_name = jname ? json_object_get_string(jname) : NULL;
+         const char *s_action = jaction ? json_object_get_string(jaction) : NULL;
+         const char *s_value = jvalue ? json_object_get_string(jvalue) : NULL;
+         char err[160];
+         if (tool_registry_validate_schedulable(s_name, s_value, err, sizeof(err)) != SUCCESS) {
+            snprintf(result, sizeof(result), "Error: steps[%d]: %s", i, err);
+            return strdup(result);
+         }
+         if (s_value && strlen(s_value) >= SCHED_TOOL_VALUE_MAX) {
+            snprintf(result, sizeof(result),
+                     "Error: steps[%d] tool_value too long (%zu bytes, max %d)", i, strlen(s_value),
+                     SCHED_TOOL_VALUE_MAX - 1);
+            return strdup(result);
+         }
+         strncpy(parsed_steps[i].tool_name, s_name, SCHED_TOOL_NAME_MAX - 1);
+         if (s_action)
+            strncpy(parsed_steps[i].tool_action, s_action, SCHED_TOOL_NAME_MAX - 1);
+         if (s_value)
+            strncpy(parsed_steps[i].tool_value, s_value, SCHED_TOOL_VALUE_MAX - 1);
+         parsed_step_count++;
+      }
+      /* New multi-step briefings leave the legacy tool_* fields empty.
+       * Steps are written to briefing_steps after the insert succeeds. */
+   } else {
+      /* Legacy single-tool path */
+      const char *tool_name = json_get_string(details, "tool_name");
+      if ((type == SCHED_EVENT_TASK || type == SCHED_EVENT_BRIEFING) && !tool_name) {
+         snprintf(result, sizeof(result),
+                  "Error: 'tool_name' (or 'steps' array for briefings) is required for "
+                  "scheduled %s. System shutdown is not available as a schedulable tool.",
+                  type == SCHED_EVENT_BRIEFING ? "briefings" : "tasks");
+         return strdup(result);
+      }
+      const char *tool_value = json_get_string(details, "tool_value");
+      if (tool_name) {
+         char err[160];
+         if (tool_registry_validate_schedulable(tool_name, tool_value, err, sizeof(err)) !=
+             SUCCESS) {
+            snprintf(result, sizeof(result), "Error: %s", err);
+            return strdup(result);
+         }
+         strncpy(event.tool_name, tool_name, SCHED_TOOL_NAME_MAX - 1);
+      }
+      const char *tool_action = json_get_string(details, "tool_action");
+      if (tool_action)
+         strncpy(event.tool_action, tool_action, SCHED_TOOL_NAME_MAX - 1);
+      if (tool_value) {
+         if (strlen(tool_value) >= SCHED_TOOL_VALUE_MAX) {
+            snprintf(result, sizeof(result),
+                     "Error: tool_value too long (%zu bytes, max %d). "
+                     "Shorten the content and retry.",
+                     strlen(tool_value), SCHED_TOOL_VALUE_MAX - 1);
+            return strdup(result);
+         }
+         strncpy(event.tool_value, tool_value, SCHED_TOOL_VALUE_MAX - 1);
+      }
    }
 
    /* Atomic limit check + insert */
@@ -300,8 +375,24 @@ static char *handle_create(struct json_object *details,
       return strdup(result);
    }
 
+   /* Multi-step briefing: write the parsed steps to briefing_steps now that
+    * the event row exists.  On failure, cancel the just-inserted event row
+    * (status='cancelled' — row stays for the retention sweep but is invisible
+    * to the queue) so we don't leave a zero-step briefing pending that would
+    * silently no-op at fire time. */
+   if (has_steps_array && parsed_step_count > 0) {
+      int set_rc = scheduler_db_briefing_steps_set(id, parsed_steps, parsed_step_count);
+      if (set_rc != SCHED_DB_SUCCESS) {
+         scheduler_db_cancel(id);
+         snprintf(result, sizeof(result),
+                  "Error: failed to store briefing steps (event marked cancelled)");
+         return strdup(result);
+      }
+   }
+
    /* Notify scheduler thread */
    scheduler_notify_new_event();
+   scheduler_broadcast_events_changed(event.user_id);
 
    /* Format response with current time + fire time so the LLM can relay accurately */
    time_t now = time(NULL);
@@ -375,6 +466,40 @@ static char *handle_list(struct json_object *details, int user_id) {
             break;
          if (e->recurrence != SCHED_RECUR_ONCE)
             strbuf_appendf(&sb, " (%s)", sched_recurrence_to_str(e->recurrence));
+         /* Tasks and briefings carry tool(s) to execute at fire time —
+          * surface them so the LLM can describe what the schedule will
+          * actually do without waiting for it to fire.  Briefings may have
+          * multi-step rows in briefing_steps; tasks always single-tool. */
+         if (e->event_type == SCHED_EVENT_BRIEFING) {
+            sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
+            int step_count = 0;
+            scheduler_db_briefing_steps_list(e->id, steps, SCHED_BRIEFING_STEPS_MAX, &step_count);
+            if (step_count > 0) {
+               strbuf_append(&sb, " — runs ");
+               for (int s = 0; s < step_count; s++) {
+                  if (s > 0)
+                     strbuf_append(&sb, " → ");
+                  strbuf_appendf(&sb, "%s", steps[s].tool_name);
+                  if (steps[s].tool_action[0])
+                     strbuf_appendf(&sb, ".%s", steps[s].tool_action);
+                  if (steps[s].tool_value[0])
+                     strbuf_appendf(&sb, "(%s)", steps[s].tool_value);
+               }
+            } else if (e->tool_name[0]) {
+               /* Legacy single-tool briefing — same shape as task rendering */
+               strbuf_appendf(&sb, " — runs %s", e->tool_name);
+               if (e->tool_action[0])
+                  strbuf_appendf(&sb, ".%s", e->tool_action);
+               if (e->tool_value[0])
+                  strbuf_appendf(&sb, "(%s)", e->tool_value);
+            }
+         } else if (e->event_type == SCHED_EVENT_TASK && e->tool_name[0]) {
+            strbuf_appendf(&sb, " — runs %s", e->tool_name);
+            if (e->tool_action[0])
+               strbuf_appendf(&sb, ".%s", e->tool_action);
+            if (e->tool_value[0])
+               strbuf_appendf(&sb, "(%s)", e->tool_value);
+         }
          strbuf_append(&sb, "\n");
       }
    }
@@ -416,7 +541,7 @@ static char *handle_cancel(struct json_object *details, int user_id) {
       return strdup(result);
    }
 
-   if (scheduler_db_cancel(event_id) == 0) {
+   if (scheduler_cancel_and_broadcast(event_id, event.user_id) == 0) {
       snprintf(result, sizeof(result), "Cancelled %s '%s'.",
                sched_event_type_to_str(event.event_type), event.name);
    } else {
@@ -474,9 +599,47 @@ static char *handle_query(struct json_object *details, int user_id) {
       localtime_r(&event.fire_at, &fire_tm);
       char time_str[32];
       strftime(time_str, sizeof(time_str), "%I:%M %p on %b %d", &fire_tm);
-      snprintf(result, sizeof(result), "%s '%s' is set for %s. Status: %s.",
-               sched_event_type_to_str(event.event_type), event.name, time_str,
-               sched_status_to_str(event.status));
+      int written = snprintf(result, sizeof(result), "%s '%s' is set for %s. Status: %s.",
+                             sched_event_type_to_str(event.event_type), event.name, time_str,
+                             sched_status_to_str(event.status));
+      /* For tasks and briefings, append the tool(s) the schedule will run so
+       * the LLM can describe the configured behavior without waiting for fire.
+       * Briefings may have multi-step rows; render as `t1.a1(v1) → t2.a2(v2)`. */
+      if (written > 0 && (size_t)written < sizeof(result) &&
+          event.event_type == SCHED_EVENT_BRIEFING) {
+         sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
+         int step_count = 0;
+         scheduler_db_briefing_steps_list(event.id, steps, SCHED_BRIEFING_STEPS_MAX, &step_count);
+         size_t off = (size_t)written;
+         if (step_count > 0) {
+            off += snprintf(result + off, sizeof(result) - off, " Runs ");
+            for (int s = 0; s < step_count && off < sizeof(result); s++) {
+               if (s > 0)
+                  off += snprintf(result + off, sizeof(result) - off, " → ");
+               if (off < sizeof(result))
+                  off += snprintf(result + off, sizeof(result) - off, "%s", steps[s].tool_name);
+               if (off < sizeof(result) && steps[s].tool_action[0])
+                  off += snprintf(result + off, sizeof(result) - off, ".%s", steps[s].tool_action);
+               if (off < sizeof(result) && steps[s].tool_value[0])
+                  off += snprintf(result + off, sizeof(result) - off, "(%s)", steps[s].tool_value);
+            }
+         } else if (event.tool_name[0]) {
+            /* Legacy single-tool briefing */
+            off += snprintf(result + off, sizeof(result) - off, " Runs %s", event.tool_name);
+            if (off < sizeof(result) && event.tool_action[0])
+               off += snprintf(result + off, sizeof(result) - off, ".%s", event.tool_action);
+            if (off < sizeof(result) && event.tool_value[0])
+               snprintf(result + off, sizeof(result) - off, "(%s)", event.tool_value);
+         }
+      } else if (written > 0 && (size_t)written < sizeof(result) &&
+                 event.event_type == SCHED_EVENT_TASK && event.tool_name[0]) {
+         size_t off = (size_t)written;
+         off += snprintf(result + off, sizeof(result) - off, " Runs %s", event.tool_name);
+         if (off < sizeof(result) && event.tool_action[0])
+            off += snprintf(result + off, sizeof(result) - off, ".%s", event.tool_action);
+         if (off < sizeof(result) && event.tool_value[0])
+            snprintf(result + off, sizeof(result) - off, "(%s)", event.tool_value);
+      }
    }
 
    return strdup(result);
@@ -611,22 +774,18 @@ static const treg_param_t scheduler_params[] = {
        .name = "details",
        .description =
            "JSON object with action-specific fields. "
-           "For 'create': {type (timer|alarm|reminder|briefing), name (optional), "
-           "fire_at (ISO 8601 absolute time — PREFERRED for alarms/reminders at specific times, "
-           "e.g. '2026-03-19T07:00:00'), "
-           "duration_minutes (1-43200, relative offset from now — use for timers or "
-           "'in X minutes' requests only), "
-           "message (for reminders, max 512 chars), recurrence (once|daily|weekdays|weekends|"
-           "weekly|custom), recurrence_days (csv: mon,tue,...), announce_all (bool)}. "
-           "Type 'task' is ONLY for scheduling execution of other registered tools and "
-           "requires tool_name (must be a valid registered tool), tool_action, tool_value. "
-           "Type 'briefing' is like 'task' but summarizes the tool output via LLM, speaks the "
-           "summary, and creates a conversation the user can continue (e.g., weather briefing). "
-           "Do NOT use type 'task' for arbitrary system operations like shutdown or reboot. "
-           "For 'list': {type (optional filter: timer|alarm|reminder|task|briefing)}. "
-           "For 'cancel'/'query': {name or event_id}. "
-           "For 'snooze': {event_id (optional), snooze_minutes (1-120, optional)}. "
-           "For 'dismiss': {event_id (optional)}.",
+           "create: {type (timer|alarm|reminder|task|briefing), name (optional), "
+           "fire_at (ISO 8601, PREFERRED for absolute times e.g. '2026-03-19T07:00:00'), "
+           "duration_minutes (1-43200, relative offset — use for timers or 'in X minutes'), "
+           "message (reminders, ≤512 chars), recurrence (once|daily|weekdays|weekends|weekly|"
+           "custom), recurrence_days (csv: mon,tue,...), announce_all (bool)}. "
+           "task/briefing also require tool_name + tool_action + tool_value (or briefing-only "
+           "`steps` array — see the tool's top-level description for multi-step shape). "
+           "tool_value MUST be the literal arguments the tool receives (e.g. the search query "
+           "string); search/url_fetch reject empty tool_value at create time. "
+           "list: {type (optional filter)}. cancel/query: {name or event_id}. "
+           "snooze: {event_id (optional), snooze_minutes (1-120, optional)}. "
+           "dismiss: {event_id (optional)}.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -644,13 +803,32 @@ static const tool_metadata_t scheduler_metadata = {
    .aliases = { "timer", "alarm", "reminder", "schedule" },
    .alias_count = 4,
 
-   .description = "Manage timers, alarms, reminders, scheduled tasks, and briefings. "
-                  "Set timers with duration ('set a 10 minute timer'), "
-                  "alarms at specific times ('set an alarm for 7 AM'), "
-                  "reminders with messages ('remind me to call Mom at 3pm'), "
-                  "schedule tool execution ('turn off lights at midnight'), "
-                  "or briefings that summarize tool output via LLM ('weather briefing at 7am'). "
-                  "Query time remaining, list active events, cancel, snooze, or dismiss.",
+   .description =
+       "Manage timers, alarms, reminders, scheduled tasks, and briefings. "
+       "Set timers with duration ('set a 10 minute timer'), "
+       "alarms at specific times ('set an alarm for 7 AM'), "
+       "reminders with messages ('remind me to call Mom at 3pm'), "
+       "schedule tool execution ('turn off lights at midnight'), "
+       "or briefings that summarize tool output via LLM ('weather briefing at 7am'). "
+       "Query time remaining, list active events, cancel, snooze, or dismiss.\n\n"
+       "Briefings can be SINGLE-STEP (one tool, one summary) or MULTI-STEP (run several "
+       "tools, summarize the combined output).  For multi-step, pass a `steps` array "
+       "inside `details` and omit top-level tool_name; each step is "
+       "{tool_name, tool_action, tool_value}.  Each step's tool_value MUST be the literal "
+       "arguments the tool receives (for `search`, that's the query string).  Empty "
+       "tool_value for tools that require it (search, url_fetch) is rejected at create "
+       "time.  Maximum 8 steps per briefing.\n\n"
+       "AUDIO: briefings created via voice (local mic / satellite) speak their summary "
+       "aloud when they fire.  Briefings created via text in the WebUI are SILENT by "
+       "default — the conversation is the artifact.  If the user explicitly asks to "
+       "hear the briefing out loud, either schedule it via voice or note that the "
+       "operator can flip [scheduler] briefing_speak_aloud_on_webui_source in dawn.toml.\n\n"
+       "Example: "
+       "{\"type\":\"briefing\",\"name\":\"Morning Briefing\","
+       "\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\","
+       "\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\","
+       "\"tool_value\":\"Atlanta\"},{\"tool_name\":\"search\",\"tool_action\":\"search\","
+       "\"tool_value\":\"top tech news today\"}]}",
    .params = scheduler_params,
    .param_count = 2,
 

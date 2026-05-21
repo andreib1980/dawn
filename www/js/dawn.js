@@ -738,6 +738,16 @@
                   DawnScheduler.handleNotification(msg.payload);
                }
                break;
+            case 'scheduler_events_response':
+               if (window.DawnSchedulerQueue) {
+                  DawnSchedulerQueue.handleListResponse(msg.payload);
+               }
+               break;
+            case 'scheduler_events_changed':
+               if (window.DawnSchedulerQueue) {
+                  DawnSchedulerQueue.refresh();
+               }
+               break;
             case 'memory_extraction_notice':
                if (msg.payload) {
                   showMemoryExtractionNotice(msg.payload.level, msg.payload.message);
@@ -1653,6 +1663,14 @@
          },
          updateHistoryButtonVisibility: DawnHistory.updateButtonVisibility,
          updateMemoryButtonVisibility: DawnMemory.updateVisibility,
+         updateSchedulerButtonVisibility: () => {
+            if (window.DawnSchedulerQueue) {
+               DawnSchedulerQueue.updateVisibility(DawnState.authState);
+               if (DawnState.authState && DawnState.authState.authenticated) {
+                  DawnSchedulerQueue.refresh();
+               }
+            }
+         },
          restoreHistorySidebarState: DawnHistory.restoreSidebarState,
       });
       DawnSettings.init();
@@ -1713,6 +1731,12 @@
          trapFocus: DawnSettings.trapFocus,
          getAuthState: () => DawnState.authState,
       });
+
+      // Initialize scheduler queue panel
+      if (window.DawnSchedulerQueue) {
+         DawnSchedulerQueue.init();
+         DawnSchedulerQueue.updateVisibility(DawnState.authState);
+      }
 
       // Initialize vision module (paste, camera, image processing)
       DawnVision.init();

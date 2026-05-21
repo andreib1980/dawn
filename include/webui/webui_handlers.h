@@ -283,6 +283,45 @@ void handle_doc_library_delete(ws_connection_t *conn, struct json_object *payloa
 void handle_doc_library_index(ws_connection_t *conn, struct json_object *payload);
 
 /* =============================================================================
+ * Scheduler Queue Handler Functions (defined in webui_scheduler.c)
+ *
+ * Surfaces the per-user scheduled-events queue (timers / alarms / reminders /
+ * tasks / briefings) to the WebUI panel.  Routed under the existing
+ * scheduler_action sub-action umbrella so the dispatcher only adds one case.
+ * ============================================================================= */
+
+/**
+ * @brief List the user's active queue (pending/snoozed/ringing) plus missed entries
+ *
+ * Returns a scheduler_events_response payload with an events[] array.  When
+ * the caller is an unassigned satellite (auth_user_id <= 0) the events array
+ * is empty rather than an error — keeps satellite reconnect flows quiet.
+ */
+void handle_scheduler_list_events(ws_connection_t *conn);
+
+/**
+ * @brief Cancel a scheduled event the caller owns (breaks the recurrence chain)
+ *
+ * Enforces event.user_id == conn->auth_user_id with NO satellite carve-out
+ * (cancel is not a live-alarm operation).  Sends NOT_FOUND for both
+ * "doesn't exist" and "not yours" to avoid ownership-existence leakage.
+ */
+void handle_scheduler_cancel_event(ws_connection_t *conn, int64_t event_id);
+
+/**
+ * @brief Cancel just this occurrence; keep the recurrence chain alive
+ */
+void handle_scheduler_cancel_occurrence(ws_connection_t *conn, int64_t event_id);
+
+/**
+ * @brief Acknowledge a missed event (status='missed' → 'dismissed')
+ *
+ * Used by the panel's per-row Acknowledge button and the Clear All Missed
+ * footer.  Same auth shape as cancel — no satellite carve-out.
+ */
+void handle_scheduler_clear_missed(ws_connection_t *conn, int64_t event_id);
+
+/* =============================================================================
  * Calendar Handler Functions (defined in webui_calendar.c)
  * ============================================================================= */
 

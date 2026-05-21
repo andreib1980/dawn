@@ -508,6 +508,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->scheduler.alarm_timeout_sec = 60;
    config->scheduler.alarm_volume = 80;
    config->scheduler.event_retention_days = 30;
+   config->scheduler.briefing_speak_aloud_on_webui_source = false;
 
    /* Calendar */
    config->calendar.enabled = true;

@@ -346,6 +346,30 @@
    transform: translateY(4px) scale(0.95);
 }
 
+/* Open downward from the trigger button instead of upward.  Default
+ * .dawn-split-menu anchors `bottom: 100%` because it's designed for buttons
+ * near the bottom of their container; row-anchored consumers (e.g. the
+ * scheduler queue's per-row recurring-cancel disambiguation popup) need to
+ * open below the trigger so the menu doesn't fly off the top of the popover. */
+.dawn-split-menu.below {
+   bottom: auto;
+   top: 100%;
+   margin-bottom: 0;
+   margin-top: 4px;
+}
+
+.dawn-split-menu.below.anchor-left {
+   transform-origin: top left;
+}
+
+.dawn-split-menu.below.anchor-right {
+   transform-origin: top right;
+}
+
+.dawn-split-menu.below.hidden {
+   transform: translateY(-4px) scale(0.95);
+}
+
 /* Active mode indicator (for mode-selection menus) */
 .dawn-split-menu .dropdown-item.active {
    color: var(--success);

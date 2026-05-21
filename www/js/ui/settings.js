@@ -31,6 +31,7 @@
       setAuthState: null,
       updateHistoryButtonVisibility: null,
       updateMemoryButtonVisibility: null,
+      updateSchedulerButtonVisibility: null,
       restoreHistorySidebarState: null,
    };
 
@@ -207,6 +208,11 @@
       // Update memory button visibility
       if (callbacks.updateMemoryButtonVisibility) {
          callbacks.updateMemoryButtonVisibility();
+      }
+
+      // Update scheduler button visibility
+      if (callbacks.updateSchedulerButtonVisibility) {
+         callbacks.updateSchedulerButtonVisibility();
       }
 
       // Update document library button visibility
