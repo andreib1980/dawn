@@ -105,6 +105,7 @@
 #ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
 #include "tools/image_search_tool.h"
 #endif
+#include "tools/messaging_tool.h"
 #ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
 #include "tools/context_expand_tool.h"
 #endif
@@ -300,6 +301,13 @@ int tools_register_all(void) {
    /* Plan executor (always available — meta-tool, no external deps) */
    if (plan_executor_tool_register() != 0) {
       OLOG_WARNING("Failed to register plan_executor tool");
+   }
+
+   /* Messaging channels (Telegram / future Discord, Slack, SMS).
+    * Tool's .init hook spawns the engine + driver; .cleanup tears
+    * them down.  Skips driver registration when no token is set. */
+   if (messaging_tool_register() != 0) {
+      OLOG_WARNING("Failed to register messaging tool");
    }
 
    OLOG_INFO("Tool registration complete");

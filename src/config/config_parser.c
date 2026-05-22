@@ -1695,6 +1695,9 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
 
       /* Tavily API key (used by Tavily search + URL extract adapters) */
       PARSE_STRING(secrets_section, "tavily_api_key", secrets->tavily_api_key);
+
+      /* Telegram Bot API token (messaging channels driver) */
+      PARSE_STRING(secrets_section, "telegram_bot_token", secrets->telegram_bot_token);
    }
 
    /* Legacy: Parse [api_keys] section (old format) */

@@ -142,7 +142,19 @@ static bool match_exact(const char *normalized, const char **list, size_t count)
    return false;
 }
 
-wake_word_result_t wake_word_check(const char *text) {
+/**
+ * Shared core for wake_word_check() and wake_word_check_prefix().
+ *
+ * prefix_only=false  → substring search via strstr (voice ASR semantics).
+ * prefix_only=true   → match only when a wake-word variant appears at
+ *                      byte 0 of the normalized string (text-input
+ *                      semantics; mandatory for untrusted input).
+ *
+ * Goodbye / ignore / cancel phrases are only checked in substring mode
+ * — those are voice-state-machine routing decisions and don't apply to
+ * a prefix-gated text path.
+ */
+static wake_word_result_t wake_word_check_internal(const char *text, bool prefix_only) {
    wake_word_result_t result = { 0 };
 
    if (!text || text[0] == '\0') {
@@ -154,26 +166,51 @@ wake_word_result_t wake_word_check(const char *text) {
       return result;
    }
 
-   /* Check goodbye phrases */
-   result.is_goodbye = match_exact(normalized, s_goodbye_words, NUM_GOODBYE);
+   if (!prefix_only) {
+      result.is_goodbye = match_exact(normalized, s_goodbye_words, NUM_GOODBYE);
+      result.is_ignore = match_exact(normalized, s_ignore_words, NUM_IGNORE);
+      result.is_cancel = match_exact(normalized, s_cancel_words, NUM_CANCEL);
+   }
 
-   /* Check ignore phrases */
-   result.is_ignore = match_exact(normalized, s_ignore_words, NUM_IGNORE);
-
-   /* Check cancel phrases */
-   result.is_cancel = match_exact(normalized, s_cancel_words, NUM_CANCEL);
+   /* In prefix mode, skip any leading whitespace on the normalized
+    * string before the start-anchored check.  Punctuation is already
+    * stripped by wake_word_normalize, but a leading space can remain
+    * (e.g., "...Hey, friday" → " hey friday").  Treating leading
+    * whitespace as not significant matches what the user expects from
+    * "starts with the wake word" without weakening the gate — an
+    * attacker who can craft " hey friday X" can already craft
+    * "hey friday X". */
+   const char *prefix_search_start = normalized;
+   if (prefix_only) {
+      while (*prefix_search_start == ' ') {
+         prefix_search_start++;
+      }
+   }
 
    /* Search for wake word */
    for (size_t i = 0; i < s_num_wake_words; i++) {
-      char *found = strstr(normalized, s_wake_words[i]);
-      if (found) {
+      size_t wake_len = strlen(s_wake_words[i]);
+      size_t norm_offset = 0;
+      bool matched = false;
+
+      if (prefix_only) {
+         if (strncmp(prefix_search_start, s_wake_words[i], wake_len) == 0) {
+            matched = true;
+            norm_offset = (size_t)(prefix_search_start - normalized);
+         }
+      } else {
+         char *found = strstr(normalized, s_wake_words[i]);
+         if (found) {
+            matched = true;
+            norm_offset = (size_t)(found - normalized);
+         }
+      }
+
+      if (matched) {
          result.detected = true;
 
          /* Map back to original text position after the wake word */
-         size_t norm_offset = (size_t)(found - normalized);
-         size_t wake_len = strlen(s_wake_words[i]);
          size_t orig_after = map_normalized_to_original(text, norm_offset + wake_len);
-
          result.command = skip_whitespace_punct(text + orig_after);
          result.has_command = (*result.command != '\0');
 
@@ -183,4 +220,12 @@ wake_word_result_t wake_word_check(const char *text) {
 
    free(normalized);
    return result;
+}
+
+wake_word_result_t wake_word_check(const char *text) {
+   return wake_word_check_internal(text, false);
+}
+
+wake_word_result_t wake_word_check_prefix(const char *text) {
+   return wake_word_check_internal(text, true);
 }

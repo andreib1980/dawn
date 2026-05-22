@@ -843,6 +843,11 @@ typedef struct {
    /* Tavily API key (LLM-optimized search + URL extract; opt-in alternative
     * to SearXNG + FlareSolverr). https://tavily.com — free tier 1000/mo. */
    char tavily_api_key[CONFIG_API_KEY_MAX];
+
+   /* Telegram Bot API token (from @BotFather).  When empty, the
+    * Telegram messaging driver is not registered.  See
+    * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram). */
+   char telegram_bot_token[CONFIG_API_KEY_MAX];
 } secrets_config_t;
 
 /* =============================================================================

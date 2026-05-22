@@ -1,0 +1,558 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Telegram Bot API driver — long-poll inbound + REST outbound.  v1
+ * text-only.  See docs/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram).
+ *
+ * Connection reuse: single persistent CURL handle with TCP keep-alive
+ * and HTTP/2 enabled.  Listener thread runs on a 64 KB pthread stack.
+ *
+ * Token redaction: the bot token lives in the URL path; the driver
+ * builds a "safe" version of the URL for log output that replaces the
+ * token with "<REDACTED>".
+ */
+#include "messaging/messaging_telegram.h"
+
+#include <ctype.h>
+#include <curl/curl.h>
+#include <inttypes.h>
+#include <json-c/json.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "dawn_error.h"
+#include "logging.h"
+#include "messaging/messaging_driver.h"
+#include "messaging/messaging_engine.h"
+
+/* =============================================================================
+ * Driver state
+ * ============================================================================= */
+
+#define TG_BOT_TOKEN_MAX 128
+#define TG_BASE_URL_MAX 256
+#define TG_USER_AGENT "DAWN-Telegram/0.1 (libcurl)"
+#define TG_LONGPOLL_TIMEOUT 30 /* seconds */
+#define TG_HTTP_TIMEOUT 45     /* seconds — must exceed long-poll timeout */
+#define TG_LISTENER_STACK (64 * 1024)
+#define TG_RECONNECT_BACKOFF 5 /* seconds between retries on transient errors */
+
+static char s_bot_token[TG_BOT_TOKEN_MAX];
+static char s_base_url[TG_BASE_URL_MAX]; /* "https://api.telegram.org/bot<TOKEN>" */
+static atomic_bool s_running = ATOMIC_VAR_INIT(false);
+static atomic_bool s_connected = ATOMIC_VAR_INIT(false);
+
+static pthread_t s_listener_thread;
+static bool s_listener_started = false;
+
+static messaging_inbound_fn s_inbound_cb = NULL;
+static pthread_mutex_t s_inbound_cb_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t s_next_update_id = 0;
+
+/* Per-thread CURL handles guard global state with their own mutex
+ * because send_text() can be called from arbitrary worker threads. */
+static CURL *s_send_curl = NULL;
+static pthread_mutex_t s_send_curl_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* =============================================================================
+ * Internal helpers
+ * ============================================================================= */
+
+struct buffer {
+   char *data;
+   size_t len;
+   size_t cap;
+};
+
+static size_t buffer_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
+   struct buffer *buf = (struct buffer *)userdata;
+   size_t add = size * nmemb;
+   if (buf->len + add + 1 > buf->cap) {
+      size_t new_cap = buf->cap ? buf->cap * 2 : 4096;
+      while (new_cap < buf->len + add + 1) {
+         new_cap *= 2;
+      }
+      char *nd = realloc(buf->data, new_cap);
+      if (!nd) {
+         return 0;
+      }
+      buf->data = nd;
+      buf->cap = new_cap;
+   }
+   memcpy(buf->data + buf->len, ptr, add);
+   buf->len += add;
+   buf->data[buf->len] = '\0';
+   return add;
+}
+
+static void buffer_free(struct buffer *buf) {
+   free(buf->data);
+   buf->data = NULL;
+   buf->len = 0;
+   buf->cap = 0;
+}
+
+/* Build a logger-safe URL representation by replacing the token in the
+ * path with "<REDACTED>".  Caller-supplied buffer. */
+static void redact_url(const char *url, char *out, size_t out_size) {
+   if (!url || !out || out_size == 0) {
+      return;
+   }
+   const char *bot_prefix = strstr(url, "/bot");
+   if (!bot_prefix) {
+      snprintf(out, out_size, "%s", url);
+      return;
+   }
+   /* Find the next '/' after "/bot<TOKEN>". */
+   const char *after_token = strchr(bot_prefix + 4, '/');
+   if (!after_token) {
+      after_token = bot_prefix + strlen(bot_prefix);
+   }
+   /* Length of the URL up to /bot. */
+   size_t prefix_len = (size_t)(bot_prefix - url) + 4; /* include "/bot" */
+   if (prefix_len >= out_size) {
+      snprintf(out, out_size, "%s", url);
+      return;
+   }
+   memcpy(out, url, prefix_len);
+   const char *redacted = "<REDACTED>";
+   size_t r_len = strlen(redacted);
+   size_t tail_len = strlen(after_token);
+   if (prefix_len + r_len + tail_len + 1 > out_size) {
+      snprintf(out + prefix_len, out_size - prefix_len, "<REDACTED>");
+      return;
+   }
+   memcpy(out + prefix_len, redacted, r_len);
+   memcpy(out + prefix_len + r_len, after_token, tail_len);
+   out[prefix_len + r_len + tail_len] = '\0';
+}
+
+/* =============================================================================
+ * Outbound — sendMessage
+ * ============================================================================= */
+
+static int tg_extract_chat_id(const char *address_json, char *chat_id_out, size_t out_size) {
+   if (!address_json || !chat_id_out || out_size == 0) {
+      return FAILURE;
+   }
+   struct json_object *obj = json_tokener_parse(address_json);
+   if (!obj) {
+      return FAILURE;
+   }
+   struct json_object *cid_obj = NULL;
+   int rc = FAILURE;
+   if (json_object_object_get_ex(obj, "chat_id", &cid_obj) && cid_obj) {
+      const char *s = json_object_get_string(cid_obj);
+      if (s && s[0]) {
+         snprintf(chat_id_out, out_size, "%s", s);
+         rc = SUCCESS;
+      }
+   }
+   json_object_put(obj);
+   return rc;
+}
+
+static int tg_send_text(const char *address_json, const char *text) {
+   if (!address_json || !text) {
+      return FAILURE;
+   }
+   if (s_base_url[0] == '\0') {
+      return FAILURE;
+   }
+   char chat_id[64];
+   if (tg_extract_chat_id(address_json, chat_id, sizeof(chat_id)) != SUCCESS) {
+      OLOG_WARNING("telegram: send failed — no chat_id in address_json");
+      return FAILURE;
+   }
+
+   /* Build JSON request body. */
+   struct json_object *body = json_object_new_object();
+   if (!body) {
+      return FAILURE;
+   }
+   json_object_object_add(body, "chat_id", json_object_new_string(chat_id));
+   json_object_object_add(body, "text", json_object_new_string(text));
+   const char *body_str = json_object_to_json_string_ext(body, JSON_C_TO_STRING_PLAIN);
+
+   char url[TG_BASE_URL_MAX + 32];
+   snprintf(url, sizeof(url), "%s/sendMessage", s_base_url);
+
+   struct buffer resp = { 0 };
+   int rc = FAILURE;
+
+   pthread_mutex_lock(&s_send_curl_mutex);
+   if (!s_send_curl) {
+      s_send_curl = curl_easy_init();
+   }
+   if (s_send_curl) {
+      curl_easy_reset(s_send_curl);
+      curl_easy_setopt(s_send_curl, CURLOPT_URL, url);
+      curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
+      curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, body_str);
+      curl_easy_setopt(s_send_curl, CURLOPT_USERAGENT, TG_USER_AGENT);
+      curl_easy_setopt(s_send_curl, CURLOPT_TCP_KEEPALIVE, 1L);
+      curl_easy_setopt(s_send_curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, buffer_write);
+      curl_easy_setopt(s_send_curl, CURLOPT_WRITEDATA, &resp);
+      curl_easy_setopt(s_send_curl, CURLOPT_TIMEOUT, 30L);
+      struct curl_slist *hdrs = NULL;
+      hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+      curl_easy_setopt(s_send_curl, CURLOPT_HTTPHEADER, hdrs);
+
+      CURLcode cc = curl_easy_perform(s_send_curl);
+      long http_status = 0;
+      curl_easy_getinfo(s_send_curl, CURLINFO_RESPONSE_CODE, &http_status);
+      curl_slist_free_all(hdrs);
+
+      if (cc == CURLE_OK && http_status >= 200 && http_status < 300) {
+         /* Check ok=true */
+         struct json_object *r = json_tokener_parse(resp.data ? resp.data : "");
+         if (r) {
+            struct json_object *ok_obj = NULL;
+            if (json_object_object_get_ex(r, "ok", &ok_obj) && json_object_get_boolean(ok_obj)) {
+               rc = SUCCESS;
+            }
+            json_object_put(r);
+         }
+      } else {
+         char safe[TG_BASE_URL_MAX + 32];
+         redact_url(url, safe, sizeof(safe));
+         OLOG_WARNING("telegram: sendMessage failed (curl=%d http=%ld) on %s", cc, http_status,
+                      safe);
+      }
+   }
+   pthread_mutex_unlock(&s_send_curl_mutex);
+
+   buffer_free(&resp);
+   json_object_put(body);
+   return rc;
+}
+
+/* =============================================================================
+ * Inbound — getUpdates long-poll loop
+ * ============================================================================= */
+
+static void tg_handle_update(struct json_object *update) {
+   struct json_object *upd_id_obj = NULL;
+   struct json_object *msg_obj = NULL;
+   if (!json_object_object_get_ex(update, "update_id", &upd_id_obj) || !upd_id_obj) {
+      return;
+   }
+   int64_t upd_id = json_object_get_int64(upd_id_obj);
+   if (upd_id >= s_next_update_id) {
+      s_next_update_id = upd_id + 1;
+   }
+
+   if (!json_object_object_get_ex(update, "message", &msg_obj) || !msg_obj) {
+      return; /* edits, channel posts, etc. — ignored in v1 */
+   }
+
+   /* Required fields: chat.id, text */
+   struct json_object *chat_obj = NULL;
+   struct json_object *text_obj = NULL;
+   struct json_object *from_obj = NULL;
+   struct json_object *date_obj = NULL;
+
+   if (!json_object_object_get_ex(msg_obj, "chat", &chat_obj) ||
+       !json_object_object_get_ex(msg_obj, "text", &text_obj)) {
+      return;
+   }
+   json_object_object_get_ex(msg_obj, "from", &from_obj);
+   json_object_object_get_ex(msg_obj, "date", &date_obj);
+
+   struct json_object *chat_id_obj = NULL;
+   if (!json_object_object_get_ex(chat_obj, "id", &chat_id_obj)) {
+      return;
+   }
+
+   char chat_id_str[64];
+   snprintf(chat_id_str, sizeof(chat_id_str), "%" PRId64, json_object_get_int64(chat_id_obj));
+
+   const char *body = json_object_get_string(text_obj);
+   if (!body) {
+      return;
+   }
+
+   /* Sender display: prefer first_name from "from", else "chat". */
+   const char *sender_display = NULL;
+   struct json_object *fn_obj = NULL;
+   if (from_obj && json_object_object_get_ex(from_obj, "first_name", &fn_obj) && fn_obj) {
+      sender_display = json_object_get_string(fn_obj);
+   }
+   if (!sender_display && json_object_object_get_ex(chat_obj, "first_name", &fn_obj) && fn_obj) {
+      sender_display = json_object_get_string(fn_obj);
+   }
+   if (!sender_display) {
+      sender_display = "telegram_user";
+   }
+
+   int64_t timestamp = date_obj ? json_object_get_int64(date_obj) : 0;
+
+   /* Dispatch to engine. */
+   messaging_inbound_fn cb = NULL;
+   pthread_mutex_lock(&s_inbound_cb_mutex);
+   cb = s_inbound_cb;
+   pthread_mutex_unlock(&s_inbound_cb_mutex);
+   if (cb) {
+      cb("telegram", chat_id_str, sender_display, body, timestamp);
+   }
+}
+
+static void tg_poll_once(CURL *handle) {
+   char url[TG_BASE_URL_MAX + 128];
+   snprintf(url, sizeof(url), "%s/getUpdates?offset=%" PRId64 "&timeout=%d", s_base_url,
+            s_next_update_id, TG_LONGPOLL_TIMEOUT);
+
+   struct buffer resp = { 0 };
+
+   curl_easy_reset(handle);
+   curl_easy_setopt(handle, CURLOPT_URL, url);
+   curl_easy_setopt(handle, CURLOPT_USERAGENT, TG_USER_AGENT);
+   curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
+   curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, buffer_write);
+   curl_easy_setopt(handle, CURLOPT_WRITEDATA, &resp);
+   curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)TG_HTTP_TIMEOUT);
+   /* getUpdates is a GET; explicit reset above clears prior POST/post-fields. */
+
+   CURLcode cc = curl_easy_perform(handle);
+   long http_status = 0;
+   curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &http_status);
+
+   if (cc != CURLE_OK || http_status < 200 || http_status >= 300) {
+      char safe[TG_BASE_URL_MAX + 64];
+      redact_url(url, safe, sizeof(safe));
+      OLOG_WARNING("telegram: getUpdates failed (curl=%d http=%ld) on %s", cc, http_status, safe);
+      atomic_store(&s_connected, false);
+      buffer_free(&resp);
+      sleep(TG_RECONNECT_BACKOFF);
+      return;
+   }
+
+   atomic_store(&s_connected, true);
+
+   if (!resp.data) {
+      buffer_free(&resp);
+      return;
+   }
+
+   struct json_object *r = json_tokener_parse(resp.data);
+   if (!r) {
+      OLOG_WARNING("telegram: failed to parse getUpdates response");
+      buffer_free(&resp);
+      return;
+   }
+
+   struct json_object *ok_obj = NULL;
+   if (json_object_object_get_ex(r, "ok", &ok_obj) && json_object_get_boolean(ok_obj)) {
+      struct json_object *result_arr = NULL;
+      if (json_object_object_get_ex(r, "result", &result_arr) &&
+          json_object_is_type(result_arr, json_type_array)) {
+         size_t n = json_object_array_length(result_arr);
+         for (size_t i = 0; i < n; i++) {
+            struct json_object *upd = json_object_array_get_idx(result_arr, i);
+            if (upd) {
+               tg_handle_update(upd);
+            }
+         }
+      }
+   } else {
+      struct json_object *desc_obj = NULL;
+      if (json_object_object_get_ex(r, "description", &desc_obj) && desc_obj) {
+         OLOG_WARNING("telegram: getUpdates ok=false: %s", json_object_get_string(desc_obj));
+      }
+   }
+
+   json_object_put(r);
+   buffer_free(&resp);
+}
+
+static void *tg_listener_thread(void *arg) {
+   (void)arg;
+   OLOG_INFO("telegram: listener thread started");
+
+   CURL *handle = curl_easy_init();
+   if (!handle) {
+      OLOG_ERROR("telegram: curl_easy_init failed; listener exiting");
+      return NULL;
+   }
+
+   while (atomic_load(&s_running)) {
+      tg_poll_once(handle);
+   }
+
+   curl_easy_cleanup(handle);
+   atomic_store(&s_connected, false);
+   OLOG_INFO("telegram: listener thread exiting");
+   return NULL;
+}
+
+/* =============================================================================
+ * Driver hooks
+ * ============================================================================= */
+
+static int tg_init(const char *credentials_json) {
+   /* credentials_json is `{"bot_token":"..."}`.  Driver also reads
+    * directly from g_secrets at startup if credentials_json is NULL. */
+   char token[TG_BOT_TOKEN_MAX] = { 0 };
+   if (credentials_json && credentials_json[0]) {
+      struct json_object *obj = json_tokener_parse(credentials_json);
+      if (obj) {
+         struct json_object *tk = NULL;
+         if (json_object_object_get_ex(obj, "bot_token", &tk) && tk) {
+            snprintf(token, sizeof(token), "%s", json_object_get_string(tk));
+         }
+         json_object_put(obj);
+      }
+   }
+   if (token[0] == '\0') {
+      OLOG_ERROR("telegram: no bot_token supplied");
+      return FAILURE;
+   }
+
+   snprintf(s_bot_token, sizeof(s_bot_token), "%s", token);
+   snprintf(s_base_url, sizeof(s_base_url), "https://api.telegram.org/bot%s", token);
+
+   /* Spawn listener thread with 64 KB stack. */
+   atomic_store(&s_running, true);
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setstacksize(&attr, TG_LISTENER_STACK);
+   int prc = pthread_create(&s_listener_thread, &attr, tg_listener_thread, NULL);
+   pthread_attr_destroy(&attr);
+   if (prc != 0) {
+      atomic_store(&s_running, false);
+      OLOG_ERROR("telegram: failed to spawn listener thread (rc=%d)", prc);
+      return FAILURE;
+   }
+   s_listener_started = true;
+   OLOG_INFO("telegram: driver initialized (bot endpoint configured)");
+   return SUCCESS;
+}
+
+static void tg_shutdown(void) {
+   atomic_store(&s_running, false);
+   if (s_listener_started) {
+      pthread_join(s_listener_thread, NULL);
+      s_listener_started = false;
+   }
+   pthread_mutex_lock(&s_send_curl_mutex);
+   if (s_send_curl) {
+      curl_easy_cleanup(s_send_curl);
+      s_send_curl = NULL;
+   }
+   pthread_mutex_unlock(&s_send_curl_mutex);
+   /* Don't zero s_bot_token here — reconnect() may need it.  Zeroed
+    * at process exit anyway. */
+   OLOG_INFO("telegram: driver shut down");
+}
+
+static int tg_register_inbound_cb(messaging_inbound_fn cb) {
+   pthread_mutex_lock(&s_inbound_cb_mutex);
+   s_inbound_cb = cb;
+   pthread_mutex_unlock(&s_inbound_cb_mutex);
+   return SUCCESS;
+}
+
+static int tg_validate_address(const char *address_json) {
+   if (!address_json || address_json[0] == '\0') {
+      return FAILURE;
+   }
+   struct json_object *obj = json_tokener_parse(address_json);
+   if (!obj) {
+      return FAILURE;
+   }
+   struct json_object *cid = NULL;
+   int rc = FAILURE;
+   if (json_object_object_get_ex(obj, "chat_id", &cid) && cid) {
+      const char *s = json_object_get_string(cid);
+      if (s && s[0]) {
+         /* All chars must be digits or leading '-' (private chats are
+          * positive, supergroups/channels are negative). */
+         size_t i = 0;
+         if (s[0] == '-') {
+            i = 1;
+         }
+         bool valid = (s[i] != '\0');
+         for (; s[i] != '\0'; i++) {
+            if (!isdigit((unsigned char)s[i])) {
+               valid = false;
+               break;
+            }
+         }
+         if (valid) {
+            rc = SUCCESS;
+         }
+      }
+   }
+   json_object_put(obj);
+   return rc;
+}
+
+static int tg_is_connected(void) {
+   return atomic_load(&s_connected) ? 1 : 0;
+}
+
+static int tg_reconnect(void) {
+   /* The listener naturally reconnects on transient failure
+    * (curl_easy_perform fails → sleep → loop).  Explicit reconnect
+    * not needed for v1. */
+   return SUCCESS;
+}
+
+/* =============================================================================
+ * Driver descriptor + registration entry point
+ * ============================================================================= */
+
+static const messaging_driver_t s_telegram_driver = {
+   .name = "telegram",
+   .init = tg_init,
+   .shutdown = tg_shutdown,
+   .send_text = tg_send_text,
+   .register_inbound_cb = tg_register_inbound_cb,
+   .validate_address = tg_validate_address,
+   .is_connected = tg_is_connected,
+   .reconnect = tg_reconnect,
+};
+
+int messaging_telegram_register(const char *bot_token) {
+   if (!bot_token || bot_token[0] == '\0') {
+      OLOG_INFO("telegram: no bot_token configured; driver not registered");
+      return FAILURE;
+   }
+   if (messaging_engine_register_driver(&s_telegram_driver) != MESSAGING_SUCCESS) {
+      OLOG_ERROR("telegram: driver registration with engine failed");
+      return FAILURE;
+   }
+   /* Initialize the driver with the token. */
+   char creds[TG_BOT_TOKEN_MAX + 32];
+   snprintf(creds, sizeof(creds), "{\"bot_token\":\"%s\"}", bot_token);
+   if (tg_init(creds) != SUCCESS) {
+      return FAILURE;
+   }
+   return SUCCESS;
+}
+
+void messaging_telegram_shutdown(void) {
+   tg_shutdown();
+}

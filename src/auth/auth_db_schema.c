@@ -736,7 +736,65 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_phone_sms_user_ts "
     "  ON phone_sms_log(user_id, timestamp DESC);"
     "CREATE INDEX IF NOT EXISTS idx_phone_sms_unread "
-    "  ON phone_sms_log(user_id, read) WHERE read = 0;";
+    "  ON phone_sms_log(user_id, read) WHERE read = 0;"
+
+    /* Messaging channels (v51) — per-user binding of an external chat
+     * platform identity (Telegram chat_id / Discord channel_id /
+     * Slack channel_id / SMS E.164) to a DAWN user.  See
+     * docs/MESSAGING_CHANNELS_DESIGN.md §5. */
+    "CREATE TABLE IF NOT EXISTS messaging_channels ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  user_id INTEGER NOT NULL,"
+    "  provider TEXT NOT NULL "
+    "    CHECK(provider IN ('telegram','discord','slack','sms')),"
+    "  provider_address TEXT NOT NULL,"
+    "  address_json TEXT NOT NULL,"
+    "  display_name TEXT,"
+    "  credentials_ref TEXT,"
+    "  is_enabled INTEGER NOT NULL DEFAULT 1,"
+    "  rate_limit_per_min INTEGER NOT NULL DEFAULT 10,"
+    "  rate_limit_per_day INTEGER NOT NULL DEFAULT 200,"
+    "  created_at INTEGER NOT NULL,"
+    "  last_used_at INTEGER,"
+    "  UNIQUE(user_id, provider, provider_address),"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_messaging_channels_user "
+    "  ON messaging_channels(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_messaging_channels_provider_addr "
+    "  ON messaging_channels(provider, provider_address);"
+    "CREATE INDEX IF NOT EXISTS idx_messaging_channels_active "
+    "  ON messaging_channels(provider, provider_address) WHERE is_enabled = 1;"
+
+    /* Pending link codes (v51) — short-lived (10-minute TTL) one-time
+     * codes generated in the WebUI and claimed when the user sends
+     * `/link CODE` from the chat app. */
+    "CREATE TABLE IF NOT EXISTS messaging_link_codes ("
+    "  code TEXT PRIMARY KEY,"
+    "  user_id INTEGER NOT NULL,"
+    "  provider_hint TEXT "
+    "    CHECK(provider_hint IN ('telegram','discord','slack','sms') OR provider_hint IS NULL),"
+    "  created_at INTEGER NOT NULL,"
+    "  expires_at INTEGER NOT NULL,"
+    "  claimed_at INTEGER,"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_messaging_link_codes_expires "
+    "  ON messaging_link_codes(expires_at);"
+
+    /* Link attempts audit log (v51) — every /link attempt, successful
+     * or not, for post-hoc abuse review.  7-day TTL via periodic
+     * sweep. */
+    "CREATE TABLE IF NOT EXISTS messaging_link_attempts ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  provider TEXT NOT NULL,"
+    "  sender_address TEXT NOT NULL,"
+    "  code_tried TEXT,"
+    "  result TEXT NOT NULL,"
+    "  created_at INTEGER NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_messaging_link_attempts_recent "
+    "  ON messaging_link_attempts(provider, sender_address, created_at);";
 
 /* =============================================================================
  * Schema Version and Migration
@@ -2662,6 +2720,83 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v51 — messaging channels (Telegram / Discord / Slack / SMS).
+    * Three new tables: messaging_channels (per-user channel bindings),
+    * messaging_link_codes (10-min TTL one-time codes for the linking
+    * flow), messaging_link_attempts (audit log for /link attempts).
+    * Single BEGIN IMMEDIATE wrapping CREATE TABLE + CREATE INDEX.  No
+    * data backfill (all new tables — empty on first boot).  See
+    * docs/MESSAGING_CHANNELS_DESIGN.md §5. */
+   bool v51_ok = (current_version >= 51) || (current_version == 0);
+   if (current_version > 0 && current_version < 51) {
+      rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v51 BEGIN failed: %s", errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         const char *v51_sql =
+             "CREATE TABLE IF NOT EXISTS messaging_channels ("
+             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  user_id INTEGER NOT NULL,"
+             "  provider TEXT NOT NULL "
+             "    CHECK(provider IN ('telegram','discord','slack','sms')),"
+             "  provider_address TEXT NOT NULL,"
+             "  address_json TEXT NOT NULL,"
+             "  display_name TEXT,"
+             "  credentials_ref TEXT,"
+             "  is_enabled INTEGER NOT NULL DEFAULT 1,"
+             "  rate_limit_per_min INTEGER NOT NULL DEFAULT 10,"
+             "  rate_limit_per_day INTEGER NOT NULL DEFAULT 200,"
+             "  created_at INTEGER NOT NULL,"
+             "  last_used_at INTEGER,"
+             "  UNIQUE(user_id, provider, provider_address),"
+             "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+             ");"
+             "CREATE INDEX IF NOT EXISTS idx_messaging_channels_user "
+             "  ON messaging_channels(user_id);"
+             "CREATE INDEX IF NOT EXISTS idx_messaging_channels_provider_addr "
+             "  ON messaging_channels(provider, provider_address);"
+             "CREATE INDEX IF NOT EXISTS idx_messaging_channels_active "
+             "  ON messaging_channels(provider, provider_address) WHERE is_enabled = 1;"
+             "CREATE TABLE IF NOT EXISTS messaging_link_codes ("
+             "  code TEXT PRIMARY KEY,"
+             "  user_id INTEGER NOT NULL,"
+             "  provider_hint TEXT "
+             "    CHECK(provider_hint IN ('telegram','discord','slack','sms') "
+             "          OR provider_hint IS NULL),"
+             "  created_at INTEGER NOT NULL,"
+             "  expires_at INTEGER NOT NULL,"
+             "  claimed_at INTEGER,"
+             "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+             ");"
+             "CREATE INDEX IF NOT EXISTS idx_messaging_link_codes_expires "
+             "  ON messaging_link_codes(expires_at);"
+             "CREATE TABLE IF NOT EXISTS messaging_link_attempts ("
+             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  provider TEXT NOT NULL,"
+             "  sender_address TEXT NOT NULL,"
+             "  code_tried TEXT,"
+             "  result TEXT NOT NULL,"
+             "  created_at INTEGER NOT NULL"
+             ");"
+             "CREATE INDEX IF NOT EXISTS idx_messaging_link_attempts_recent "
+             "  ON messaging_link_attempts(provider, sender_address, created_at);";
+         rc = sqlite3_exec(s_db.db, v51_sql, NULL, NULL, &errmsg);
+         if (rc != SQLITE_OK) {
+            OLOG_ERROR("auth_db: v51 migration failed: %s", errmsg ? errmsg : "unknown");
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+            sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+         } else {
+            sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+            OLOG_INFO("auth_db: v51 created messaging_channels, messaging_link_codes, "
+                      "messaging_link_attempts tables");
+            v51_ok = true;
+         }
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2798,7 +2933,7 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok && v49_ok && v50_ok;
+   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
