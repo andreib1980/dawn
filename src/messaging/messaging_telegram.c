@@ -33,6 +33,7 @@
 #include <inttypes.h>
 #include <json-c/json.h>
 #include <pthread.h>
+#include <sodium.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,8 +49,11 @@
  * Driver state
  * ============================================================================= */
 
-#define TG_BOT_TOKEN_MAX 128
-#define TG_BASE_URL_MAX 256
+/* Match CONFIG_API_KEY_MAX from include/config/dawn_config.h.  Today's
+ * Telegram tokens are ~70 chars but raising the cap defends against
+ * silent mid-token truncation if @BotFather ever issues longer ones. */
+#define TG_BOT_TOKEN_MAX 256
+#define TG_BASE_URL_MAX 320 /* "https://api.telegram.org/bot" + TG_BOT_TOKEN_MAX + null */
 #define TG_USER_AGENT "DAWN-Telegram/0.1 (libcurl)"
 #define TG_LONGPOLL_TIMEOUT 30 /* seconds */
 #define TG_HTTP_TIMEOUT 45     /* seconds — must exceed long-poll timeout */
@@ -540,8 +544,11 @@ static void tg_shutdown(void) {
       s_send_curl = NULL;
    }
    pthread_mutex_unlock(&s_send_curl_mutex);
-   /* Don't zero s_bot_token here — reconnect() may need it.  Zeroed
-    * at process exit anyway. */
+   /* Wipe the token from process memory so a post-shutdown core dump
+    * or /proc/$PID/maps inspection can't recover it.  reconnect() does
+    * not need it (tg_init re-reads from credentials on next invoke). */
+   sodium_memzero(s_bot_token, sizeof(s_bot_token));
+   sodium_memzero(s_base_url, sizeof(s_base_url));
    OLOG_INFO("telegram: driver shut down");
 }
 
@@ -630,14 +637,21 @@ int messaging_telegram_register(const char *bot_token) {
       OLOG_INFO("telegram: no bot_token configured; driver not registered");
       return FAILURE;
    }
-   if (messaging_engine_register_driver(&s_telegram_driver) != MESSAGING_SUCCESS) {
-      OLOG_ERROR("telegram: driver registration with engine failed");
-      return FAILURE;
-   }
-   /* Initialize the driver with the token. */
+   /* Init BEFORE engine registration so that an init failure (bad token,
+    * listener spawn fail) doesn't leave a dead driver in the engine's
+    * registry.  tg_init rolls back its own state internally on failure.
+    * The race window where the listener could fire an update before
+    * register_driver wires up the engine's inbound_cb is theoretical —
+    * the long-poll cycle takes ~30 s while register_driver completes in
+    * microseconds. */
    char creds[TG_BOT_TOKEN_MAX + 32];
    snprintf(creds, sizeof(creds), "{\"bot_token\":\"%s\"}", bot_token);
    if (tg_init(creds) != SUCCESS) {
+      return FAILURE;
+   }
+   if (messaging_engine_register_driver(&s_telegram_driver) != MESSAGING_SUCCESS) {
+      OLOG_ERROR("telegram: driver registration with engine failed");
+      tg_shutdown(); /* roll back the listener we just spawned */
       return FAILURE;
    }
    return SUCCESS;

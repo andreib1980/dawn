@@ -615,10 +615,12 @@ if(ENABLE_WEBUI)
         src/core/text_filter.c
         src/core/rate_limiter.c
         src/core/embedding_engine.c
-        # Messaging channels (Telegram, SMS / future Discord, Slack)
+        # Messaging channels (Telegram, SMS, Discord / future Slack)
         src/messaging/messaging_engine.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_sms.c
+        src/messaging/messaging_discord.c
+        src/messaging/ws_reconnect.c
         src/tools/messaging_tool.c
     )
 endif()

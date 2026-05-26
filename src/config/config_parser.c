@@ -1719,6 +1719,9 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
 
       /* Telegram Bot API token (messaging channels driver) */
       PARSE_STRING(secrets_section, "telegram_bot_token", secrets->telegram_bot_token);
+
+      /* Discord bot token (messaging channels driver) */
+      PARSE_STRING(secrets_section, "discord_bot_token", secrets->discord_bot_token);
    }
 
    /* Legacy: Parse [api_keys] section (old format) */

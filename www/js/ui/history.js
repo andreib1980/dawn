@@ -658,9 +658,10 @@
       // Only act when the affected conversation is currently being viewed.
       if (historyState.activeConversationId !== id) return;
 
-      // Re-fetch the conversation to append the new turns.  Uses the
-      // existing load path which re-renders the message panel and
-      // restores the session-side context.
+      // Re-fetch and full-re-render the conversation so the new
+      // external turns appear.  TODO: switch to an incremental-append
+      // path when forever-conversations get long enough that the full
+      // re-render's scroll-jump becomes annoying.
       requestLoadConversation(id);
    }
 

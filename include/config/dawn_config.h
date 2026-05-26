@@ -873,6 +873,12 @@ typedef struct {
     * Telegram messaging driver is not registered.  See
     * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram). */
    char telegram_bot_token[CONFIG_API_KEY_MAX];
+
+   /* Discord bot token (from Developer Portal → Bot).  When empty, the
+    * Discord messaging driver is not registered.  v1 is DM-only and
+    * requires the privileged MESSAGE_CONTENT intent.  See
+    * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Discord). */
+   char discord_bot_token[CONFIG_API_KEY_MAX];
 } secrets_config_t;
 
 /* =============================================================================

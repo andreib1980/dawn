@@ -30,6 +30,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "messaging/messaging_discord.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_sms.h"
 #include "messaging/messaging_telegram.h"
@@ -240,10 +241,21 @@ static int messaging_tool_init(void) {
    } else {
       OLOG_INFO("messaging_tool: no telegram_bot_token configured; Telegram disabled");
    }
+
+   if (g_secrets.discord_bot_token[0] != '\0') {
+      if (messaging_discord_register(g_secrets.discord_bot_token) != SUCCESS) {
+         OLOG_WARNING("messaging_tool: Discord driver registration failed");
+      }
+   } else {
+      OLOG_INFO("messaging_tool: no discord_bot_token configured; Discord disabled");
+   }
    return SUCCESS;
 }
 
 static void messaging_tool_cleanup(void) {
+   if (g_secrets.discord_bot_token[0] != '\0') {
+      messaging_discord_shutdown();
+   }
    if (g_secrets.telegram_bot_token[0] != '\0') {
       messaging_telegram_shutdown();
    }
