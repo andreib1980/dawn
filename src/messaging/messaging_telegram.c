@@ -191,16 +191,30 @@ static int tg_extract_chat_id(const char *address_json, char *chat_id_out, size_
    return rc;
 }
 
-static int tg_send_text(const char *address_json, const char *text) {
-   if (!address_json || !text) {
+static int tg_send_text(const char *provider_address, const char *address_json, const char *text) {
+   if (!text) {
       return FAILURE;
    }
    if (s_base_url[0] == '\0') {
       return FAILURE;
    }
+   /* Prefer the typed provider_address (chat_id as decimal string).
+    * Fall back to parsing address_json for callers that haven't yet
+    * been migrated to the new contract.  The fallback covers the
+    * narrow window between contract change and engine update; once
+    * every caller passes provider_address explicitly the address_json
+    * branch becomes dead code but stays as a safety net. */
    char chat_id[64];
-   if (tg_extract_chat_id(address_json, chat_id, sizeof(chat_id)) != SUCCESS) {
-      OLOG_WARNING("telegram: send failed — no chat_id in address_json");
+   chat_id[0] = '\0';
+   if (provider_address && provider_address[0] != '\0') {
+      snprintf(chat_id, sizeof(chat_id), "%s", provider_address);
+   } else if (address_json) {
+      if (tg_extract_chat_id(address_json, chat_id, sizeof(chat_id)) != SUCCESS) {
+         OLOG_WARNING("telegram: send failed — no chat_id in provider_address or address_json");
+         return FAILURE;
+      }
+   } else {
+      OLOG_WARNING("telegram: send failed — no provider_address or address_json");
       return FAILURE;
    }
 
@@ -554,6 +568,17 @@ static int tg_is_connected(void) {
    return atomic_load(&s_connected) ? 1 : 0;
 }
 
+static void tg_build_address_json(const char *provider_address, char *buf, size_t buf_size) {
+   if (!buf || buf_size == 0) {
+      return;
+   }
+   if (!provider_address || provider_address[0] == '\0') {
+      snprintf(buf, buf_size, "{}");
+      return;
+   }
+   snprintf(buf, buf_size, "{\"chat_id\":\"%s\"}", provider_address);
+}
+
 static int tg_reconnect(void) {
    /* The listener naturally reconnects on transient failure
     * (curl_easy_perform fails → sleep → loop).  Explicit reconnect
@@ -570,6 +595,7 @@ static const messaging_driver_t s_telegram_driver = {
    .init = tg_init,
    .shutdown = tg_shutdown,
    .send_text = tg_send_text,
+   .build_address_json = tg_build_address_json,
    .register_inbound_cb = tg_register_inbound_cb,
    .validate_address = tg_validate_address,
    .is_connected = tg_is_connected,

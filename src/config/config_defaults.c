@@ -517,6 +517,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->calendar.cache_future_days = 365;
    config->calendar.default_event_duration_min = 60;
 
+   /* Messaging channels */
+   config->messaging.sms_active_window_sec = 600; /* 10 minutes */
+
    /* Music - streaming settings */
    config->music.streaming_enabled = true;
    strncpy(config->music.streaming_quality, "standard",

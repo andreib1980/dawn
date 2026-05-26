@@ -1559,6 +1559,26 @@ static void parse_calendar(toml_table_t *table, calendar_config_t *config) {
       config->default_event_duration_min = 1;
 }
 
+static void parse_messaging(toml_table_t *table, messaging_config_t *config) {
+   if (!table)
+      return;
+
+   /* [messaging.sms] sub-section. */
+   toml_table_t *sms = toml_table_in(table, "sms");
+   if (sms) {
+      static const char *const sms_known_keys[] = { "active_window_sec", NULL };
+      warn_unknown_keys(sms, "messaging.sms", sms_known_keys);
+      PARSE_INT(sms, "active_window_sec", config->sms_active_window_sec);
+   }
+
+   /* Clamp.  Negative is nonsense; 0 disables; cap at 24h to avoid
+    * accidental "forever" via stale config. */
+   if (config->sms_active_window_sec < 0)
+      config->sms_active_window_sec = 0;
+   if (config->sms_active_window_sec > 86400)
+      config->sms_active_window_sec = 86400;
+}
+
 /* =============================================================================
  * Public API
  * ============================================================================= */
@@ -1628,6 +1648,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_music(toml_table_in(root, "music"), &config->music);
    parse_scheduler(toml_table_in(root, "scheduler"), &config->scheduler);
    parse_calendar(toml_table_in(root, "calendar"), &config->calendar);
+   parse_messaging(toml_table_in(root, "messaging"), &config->messaging);
 
    toml_free(root);
 

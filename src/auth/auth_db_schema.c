@@ -756,8 +756,17 @@ static const char *SCHEMA_SQL =
     "  rate_limit_per_day INTEGER NOT NULL DEFAULT 200,"
     "  created_at INTEGER NOT NULL,"
     "  last_used_at INTEGER,"
+    /* conversation_id (v52): forever-binding to a conversations row.
+     * NULL = no conversation yet (next inbound will create one).  Set
+     * non-NULL after the first inbound and reused for every subsequent
+     * turn on this channel until the user issues /new (which clears it
+     * back to NULL).  LCM handles context compaction in-place so a
+     * single conv row can live indefinitely; the recovery worker
+     * extracts memory incrementally via last_extracted_msg_id. */
+    "  conversation_id INTEGER DEFAULT NULL,"
     "  UNIQUE(user_id, provider, provider_address),"
-    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messaging_channels_user "
     "  ON messaging_channels(user_id);"
@@ -2797,6 +2806,38 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v52 — messaging_channels.conversation_id (forever-binding).
+    * Adds a NULL-default column with FK to conversations(id) ON DELETE
+    * SET NULL so a channel mapping persistently references one
+    * conversation row that grows indefinitely.  LCM handles context
+    * compaction in-place; recovery worker extracts memory
+    * incrementally.  Literal-NULL default → SQLite O(1) ALTER fast
+    * path.  Schema v51 just shipped (2026-05-26); no /link binding
+    * predating that needs backfill — every existing row has
+    * conversation_id = NULL on first read, which means "create a fresh
+    * conv on next inbound."  See docs/MESSAGING_CHANNELS_DESIGN.md
+    * §13 Phase 2.5 — forever-conversation model.
+    *
+    * Duplicate-column handling mirrors the v47 pattern: SCHEMA_SQL
+    * (executed before this block on a multi-step migration from
+    * pre-v51) may have already created the table at the v52 shape via
+    * CREATE TABLE IF NOT EXISTS, leaving no work for the ALTER.  Treat
+    * "duplicate column" as success in that case. */
+   bool v52_ok = (current_version >= 52) || (current_version == 0);
+   if (current_version > 0 && current_version < 52) {
+      const char *v52_sql = "ALTER TABLE messaging_channels ADD COLUMN conversation_id INTEGER "
+                            "REFERENCES conversations(id) ON DELETE SET NULL";
+      rc = sqlite3_exec(s_db.db, v52_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_ERROR("auth_db: v52 migration failed: %s", errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: v52 added messaging_channels.conversation_id (forever-binding)");
+         v52_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2933,7 +2974,7 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok;
+   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

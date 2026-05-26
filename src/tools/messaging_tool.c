@@ -94,6 +94,31 @@ static char *handle_send(struct json_object *details, int user_id) {
    }
 }
 
+static char *handle_reset_conversation(struct json_object *details, int user_id) {
+   if (!details) {
+      return make_response("Error: 'reset_conversation' requires details with a 'channel' field.");
+   }
+   struct json_object *chan_obj = NULL;
+   if (!json_object_object_get_ex(details, "channel", &chan_obj)) {
+      return make_response("Error: 'reset_conversation' requires 'channel'.");
+   }
+   const char *channel = json_object_get_string(chan_obj);
+   if (!channel || channel[0] == '\0') {
+      return make_response("Error: 'channel' must be non-empty.");
+   }
+   int rc = messaging_engine_reset_by_name(user_id, channel);
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         return make_response("Conversation reset. The next message on that channel will start a "
+                              "fresh thread; prior history is preserved in the WebUI.");
+      case MESSAGING_UNKNOWN_CHANNEL:
+         return make_response("Error: no channel by that name is linked. Use 'list_channels' to "
+                              "see what's available.");
+      default:
+         return make_response("Error: reset failed (internal error).");
+   }
+}
+
 static char *handle_link_status(struct json_object *details) {
    if (!details) {
       return make_response("Error: 'link_status' requires a 'code' field.");
@@ -150,6 +175,8 @@ static char *messaging_callback(const char *action, char *value, int *should_res
       result = handle_send(details, user_id);
    } else if (strcmp(action, "link_status") == 0) {
       result = handle_link_status(details);
+   } else if (strcmp(action, "reset_conversation") == 0) {
+      result = handle_reset_conversation(details, user_id);
    } else {
       char buf[128];
       snprintf(buf, sizeof(buf), "Error: unknown action '%s'.", action);
@@ -167,12 +194,14 @@ static const treg_param_t messaging_params[] = {
        .name = "action",
        .description = "The messaging action: 'list_channels' (show linked channels for the "
                       "current user), 'send' (deliver a text message to a named channel), "
-                      "'link_status' (check whether a pending link code has been claimed)",
+                      "'link_status' (check whether a pending link code has been claimed), "
+                      "'reset_conversation' (close the current forever-thread on a channel and "
+                      "start fresh next message; prior history is preserved in the WebUI)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "list_channels", "send", "link_status" },
-       .enum_count = 3,
+       .enum_values = { "list_channels", "send", "link_status", "reset_conversation" },
+       .enum_count = 4,
    },
    {
        .name = "details",
@@ -180,6 +209,8 @@ static const treg_param_t messaging_params[] = {
                       "For 'send': {channel: 'telegram_main', text: 'message body'}. The 'channel' "
                       "name must match a row in the user's linked channels (see 'list_channels'). "
                       "For 'link_status': {code: 'DAWNA7K9PQ'}. "
+                      "For 'reset_conversation': {channel: 'telegram_main'} — equivalent to the "
+                      "user sending /new in the chat app. "
                       "For 'list_channels': no fields required.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,

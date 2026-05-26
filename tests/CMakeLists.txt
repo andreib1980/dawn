@@ -178,6 +178,11 @@ dawn_add_unit_test(test_v49_migration
    LIBS    unity sqlite3
    LABEL   ci)
 
+dawn_add_unit_test(test_v52_migration
+   SOURCES test_v52_migration.c
+   LIBS    unity sqlite3
+   LABEL   ci)
+
 dawn_add_unit_test(test_temporal_relations
    SOURCES test_temporal_relations.c test_temporal_relations_stub.c
            ${SRC_ROOT}/src/memory/memory_db.c

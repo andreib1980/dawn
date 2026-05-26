@@ -112,10 +112,14 @@ extern "C" {
  * @brief Session type enumeration
  */
 typedef enum {
-   SESSION_TYPE_LOCAL,  // Local microphone
-   SESSION_TYPE_DAP,    // ESP32 satellite (DAP protocol)
-   SESSION_TYPE_DAP2,   // DAP 2.0 satellite (Tier 1 or Tier 2)
-   SESSION_TYPE_WEBUI,  // WebUI browser client
+   SESSION_TYPE_LOCAL,      // Local microphone
+   SESSION_TYPE_DAP,        // ESP32 satellite (DAP protocol)
+   SESSION_TYPE_DAP2,       // DAP 2.0 satellite (Tier 1 or Tier 2)
+   SESSION_TYPE_WEBUI,      // WebUI browser client
+   SESSION_TYPE_MESSAGING,  // Messaging channel (Telegram / Discord / Slack / SMS).
+                            // Owned by the messaging engine's slot map.  Exempt
+                            // from session_cleanup_expired (engine handles
+                            // lifetime via LRU eviction + /new reset).
 } session_type_t;
 
 /**

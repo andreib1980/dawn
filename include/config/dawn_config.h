@@ -810,6 +810,31 @@ typedef struct {
 } calendar_config_t;
 
 /* =============================================================================
+ * Messaging Channels Configuration
+ *
+ * Runtime knobs for the messaging-channels engine (Telegram / Discord /
+ * Slack / SMS).  Driver-specific tokens live in secrets.toml; this
+ * section covers behavior tunables.  See
+ * docs/MESSAGING_CHANNELS_DESIGN.md.
+ * ============================================================================= */
+typedef struct {
+   /* SMS-only: window after the LAST LLM-bound exchange during which
+    * subsequent SMS from the same linked sender bypass the wake-word
+    * gate and route directly to the LLM.  Outside the window an SMS
+    * without a wake-word falls through to existing MIRAGE HUD + ctx
+    * inject behavior.  Forever-conversation thread (the conv_id
+    * binding on messaging_channels) persists across windows — this
+    * only controls LLM routing, not conversation lifetime.
+    *
+    * Telegram/Discord/Slack are LLM-exclusive (every linked-sender
+    * message routes to LLM), so this knob doesn't apply there.
+    *
+    * Default 600 (10 minutes).  Set 0 to disable (every SMS requires
+    * an explicit wake-word). */
+   int sms_active_window_sec;
+} messaging_config_t;
+
+/* =============================================================================
  * Secrets Configuration (loaded separately from secrets.toml)
  * ============================================================================= */
 typedef struct {
@@ -879,6 +904,7 @@ typedef struct {
    music_config_t music;
    scheduler_config_t scheduler;
    calendar_config_t calendar;
+   messaging_config_t messaging;
 } dawn_config_t;
 
 /* =============================================================================

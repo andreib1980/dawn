@@ -74,12 +74,24 @@ static void sms_shutdown_impl(void) {
     * down. */
 }
 
-static int sms_send_text(const char *address_json, const char *text) {
+static int sms_send_text(const char *provider_address, const char *address_json, const char *text) {
    char e164[32];
-   if (sms_extract_phone_e164(address_json, e164, sizeof(e164)) != SUCCESS) {
-      OLOG_WARNING("sms_driver: send_text — no phone_e164 in address_json");
+   e164[0] = '\0';
+   /* Prefer typed provider_address (the E.164 string); fall back to
+    * parsing address_json for callers that haven't migrated to the
+    * new contract. */
+   if (provider_address && provider_address[0] != '\0') {
+      snprintf(e164, sizeof(e164), "%s", provider_address);
+   } else if (address_json) {
+      if (sms_extract_phone_e164(address_json, e164, sizeof(e164)) != SUCCESS) {
+         OLOG_WARNING("sms_driver: send_text — no phone_e164 in provider_address or address_json");
+         return FAILURE;
+      }
+   } else {
+      OLOG_WARNING("sms_driver: send_text — no provider_address or address_json");
       return FAILURE;
    }
+
    char result[256] = { 0 };
    int rc = phone_service_send_sms(SMS_DEFAULT_USER_ID, e164, text, result, sizeof(result));
    if (rc != SUCCESS) {
@@ -87,6 +99,17 @@ static int sms_send_text(const char *address_json, const char *text) {
       return FAILURE;
    }
    return SUCCESS;
+}
+
+static void sms_build_address_json(const char *provider_address, char *buf, size_t buf_size) {
+   if (!buf || buf_size == 0) {
+      return;
+   }
+   if (!provider_address || provider_address[0] == '\0') {
+      snprintf(buf, buf_size, "{}");
+      return;
+   }
+   snprintf(buf, buf_size, "{\"phone_e164\":\"%s\"}", provider_address);
 }
 
 static int sms_register_inbound_cb(messaging_inbound_fn cb) {
@@ -139,6 +162,7 @@ static const messaging_driver_t s_sms_driver = {
    .init = sms_init,
    .shutdown = sms_shutdown_impl,
    .send_text = sms_send_text,
+   .build_address_json = sms_build_address_json,
    .register_inbound_cb = sms_register_inbound_cb,
    .validate_address = sms_validate_address,
    .is_connected = sms_is_connected,

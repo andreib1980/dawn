@@ -957,8 +957,12 @@ void session_destroy(uint32_t session_id) {
    }
    pthread_mutex_unlock(&session->metrics_mutex);
 
-   /* Trigger memory extraction for authenticated sessions (WebUI + DAP2) with queries */
-   if ((session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2) &&
+   /* Trigger memory extraction for authenticated sessions (WebUI / DAP2
+    * / MESSAGING) with queries.  MESSAGING sessions reach this path on
+    * /new reset (engine evicts the slot and calls session_destroy),
+    * LRU eviction in the engine, and engine shutdown. */
+   if ((session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2 ||
+        session->type == SESSION_TYPE_MESSAGING) &&
        session->metrics.user_id > 0 && session->metrics.queries_total > 0 &&
        g_config.memory.enabled) {
       /* Copy conversation history reference while we still have it */
@@ -1012,14 +1016,16 @@ void session_cleanup_expired(void) {
    for (int i = 1; i < MAX_SESSIONS; i++) {  // Skip local session (i=0)
       if (sessions[i] != NULL) {
          /* Skip sessions whose lifetime is managed by an external
-          * subsystem (e.g., the messaging engine maintains a long-lived
-          * (provider, address) → session_t map for SMS / chat-app
-          * conversations that may sit idle between messages for hours).
-          * Those subsystems destroy their sessions through their own
-          * eviction logic — destroying them here would leave them with
-          * dangling pointers after session_destroy's 3-sec ref-count
+          * subsystem.  Two gates, both honored: (a) SESSION_TYPE_MESSAGING
+          * — the messaging engine maintains a long-lived (provider,
+          * address) → session_t map for SMS / chat-app conversations
+          * that may sit idle between messages for hours; (b) the
+          * idle_timeout_exempt escape hatch for any other subsystem
+          * that needs the same semantics without claiming a dedicated
+          * type.  Destroying these here would leave dangling pointers
+          * in the owner's map after session_destroy's 3-sec ref-count
           * wait times out. */
-         if (sessions[i]->idle_timeout_exempt) {
+         if (sessions[i]->type == SESSION_TYPE_MESSAGING || sessions[i]->idle_timeout_exempt) {
             continue;
          }
          time_t idle_time = now - sessions[i]->last_activity;
@@ -2106,6 +2112,8 @@ const char *session_type_name(session_type_t type) {
          return "DAP2";
       case SESSION_TYPE_WEBUI:
          return "WEBUI";
+      case SESSION_TYPE_MESSAGING:
+         return "MESSAGING";
       default:
          return "UNKNOWN";
    }

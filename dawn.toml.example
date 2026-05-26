@@ -777,6 +777,27 @@
 #       Account credentials are stored encrypted in the database.
 
 # =============================================================================
+# Messaging Channels (Telegram / Discord / Slack / SMS)
+# =============================================================================
+# Unified LLM-facing tool for sending and receiving across chat apps and SMS.
+# Driver tokens (telegram_bot_token, etc.) live in secrets.toml.
+# Channel bindings are managed via the /link flow from the chat app.
+
+[messaging.sms]
+# active_window_sec = 600           # SMS-only: window after the last LLM-bound
+                                    # exchange during which subsequent SMS from
+                                    # the same linked sender bypass the
+                                    # wake-word gate and route directly to the
+                                    # LLM.  Outside the window, an SMS without
+                                    # a wake-word falls through to existing
+                                    # MIRAGE HUD + ctx-inject behavior.  The
+                                    # conversation thread (one conv_id per
+                                    # channel) persists across windows — this
+                                    # only controls LLM routing, not lifetime.
+                                    # Set to 0 to disable.  Range: 0-86400
+                                    # (default: 600 = 10 minutes).
+
+# =============================================================================
 # Shutdown Control
 # =============================================================================
 

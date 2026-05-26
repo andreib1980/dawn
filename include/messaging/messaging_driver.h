@@ -89,15 +89,45 @@ typedef struct messaging_driver_s {
    /**
     * Send a plain-text message to a provider address.
     *
-    * @param address_json  Full address blob (driver-defined shape).
-    *                      Typically the row's `address_json` column.
-    * @param text          UTF-8 message body.  Driver may segment if
-    *                      provider has a per-message length cap.
+    * @param provider_address  Typed primary key for this driver
+    *                          (chat_id / phone_e164 / channel_id).
+    *                          Drivers that need ONLY this can skip
+    *                          parsing `address_json`.  Must be
+    *                          non-NULL.
+    * @param address_json      Full address blob with provider extras
+    *                          (e.g. Discord's guild_id, Slack's
+    *                          team_id, Telegram's reply_to overrides).
+    *                          May be NULL or "{}" for providers with
+    *                          no extras (SMS, Telegram MVP).  Driver
+    *                          parses only when it needs an extra.
+    * @param text              UTF-8 message body.  Driver may segment
+    *                          if provider has a per-message length cap.
     *
     * @return SUCCESS / FAILURE.  Network errors map to FAILURE; the
     *         engine layer may retry per its rate-limit policy.
     */
-   int (*send_text)(const char *address_json, const char *text);
+   int (*send_text)(const char *provider_address, const char *address_json, const char *text);
+
+   /**
+    * Build the canonical address_json blob for this driver given a
+    * provider_address.  Used by the engine when it has only a typed
+    * primary key (e.g., the inbound dispatcher's process_inbound,
+    * /link confirmations, /new replies) and needs to construct the
+    * full JSON shape for downstream consumers.  Each driver owns the
+    * shape of its own JSON — eliminates the engine's strcmp-on-provider
+    * switch and lets Phase 3 (Discord) add a new driver without
+    * touching the engine.
+    *
+    * Drivers SHOULD write `{}` (or the minimal valid shape) when
+    * `provider_address` is the only data available.  Buffer too small
+    * → caller's responsibility; drivers SHOULD null-terminate within
+    * `buf_size`.
+    *
+    * @param provider_address  Typed primary key.
+    * @param buf               Caller-provided buffer.
+    * @param buf_size          Buffer size (recommended >= 256).
+    */
+   void (*build_address_json)(const char *provider_address, char *buf, size_t buf_size);
 
    /**
     * Register the inbound-event sink.  Called once at engine init,

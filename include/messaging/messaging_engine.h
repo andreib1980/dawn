@@ -147,6 +147,43 @@ int messaging_engine_generate_link_code(int user_id,
 messaging_link_state_t messaging_engine_link_status(const char *code);
 
 /**
+ * @brief Reset a channel's forever-conversation binding.
+ *
+ * Clears messaging_channels.conversation_id back to NULL so the next
+ * inbound for this channel starts a fresh conversations row.  Evicts
+ * the in-memory session slot for the channel (if any), which triggers
+ * memory extraction on the closing conversation's tail via the
+ * existing session_destroy → memory_trigger_extraction path.  Used by
+ * both the engine-internal `/new` slash command and the LLM-facing
+ * `messaging.reset_conversation` action.
+ *
+ * @param provider          "telegram" / "discord" / "slack" / "sms"
+ * @param provider_address  The channel's typed primary key (chat_id /
+ *                          E.164 / etc.).
+ *
+ * @return MESSAGING_SUCCESS          channel found, reset succeeded.
+ *         MESSAGING_UNKNOWN_CHANNEL  no channel exists for that
+ *                                    (provider, provider_address).
+ *         MESSAGING_FAILURE          internal error (DB lock, etc.).
+ */
+int messaging_engine_reset_channel(const char *provider, const char *provider_address);
+
+/**
+ * @brief Reset a channel by its display_name for a specific user.
+ *
+ * Convenience wrapper around `messaging_engine_reset_channel` for the
+ * LLM tool surface.  Looks up the channel by (user_id, channel_name)
+ * to find its provider + provider_address, then delegates.  Enforces
+ * the same ownership boundary as `messaging_engine_send`.
+ *
+ * @param user_id       The DAWN user the LLM tool is acting on behalf of.
+ * @param channel_name  Display name as registered.  Case-insensitive.
+ *
+ * @return Same codes as `messaging_engine_reset_channel`.
+ */
+int messaging_engine_reset_by_name(int user_id, const char *channel_name);
+
+/**
  * @brief Try to handle an inbound SMS as a messaging-channels event.
  *
  * Called by phone_service.c on every inbound SMS.  Applies the

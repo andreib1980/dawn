@@ -38,6 +38,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
 #include "core/memory_filter.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
@@ -147,6 +148,13 @@ static void link_attempt_log(const char *provider,
                              const char *code_tried,
                              const char *result);
 static void purge_expired_link_codes(void);
+static int64_t resolve_channel_conversation_id(const char *provider,
+                                               const char *provider_address,
+                                               int user_id);
+static void evict_session_slot(const char *provider, const char *provider_address);
+static int clear_channel_conversation_id(const char *provider, const char *provider_address);
+static bool sms_within_active_window(const char *sender_e164);
+static void touch_channel_last_used(const char *provider, const char *provider_address);
 
 /* =============================================================================
  * Init / shutdown
@@ -205,15 +213,33 @@ void messaging_engine_shutdown(void) {
       s_worker_started = false;
    }
 
-   /* Release any retained sessions. */
+   /* Destroy any retained sessions.  Using session_destroy (vs the
+    * old session_release-only path) triggers memory extraction for
+    * the closing conversation via session_destroy's existing hook —
+    * so in-flight forever-conversations get their facts extracted on
+    * graceful shutdown.  Cost: up to 3 sec per slot waiting for
+    * ref_count to converge, × MESSAGING_MAX_SESSIONS=64 worst-case.
+    * In practice only a handful of slots are active, and ref_count
+    * is already 1 (engine's retain) since the worker thread joined
+    * above — destroy returns essentially instantly per slot.  We
+    * capture the session_ids under the lock, drop it, then call
+    * session_destroy outside (avoids the per-module → global lock
+    * inversion that the eviction path already documented). */
    pthread_mutex_lock(&s_session_slots_mutex);
+   uint32_t shutdown_session_ids[MESSAGING_MAX_SESSIONS];
+   size_t shutdown_session_count = 0;
    for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
       if (s_session_slots[i].session) {
+         shutdown_session_ids[shutdown_session_count++] = s_session_slots[i].session->session_id;
          session_release(s_session_slots[i].session);
          memset(&s_session_slots[i], 0, sizeof(session_slot_t));
       }
    }
    pthread_mutex_unlock(&s_session_slots_mutex);
+
+   for (size_t i = 0; i < shutdown_session_count; i++) {
+      session_destroy(shutdown_session_ids[i]);
+   }
 
    /* Drain remaining items in the queue. */
    pthread_mutex_lock(&s_inbound_mutex);
@@ -364,6 +390,327 @@ static char *lookup_channel_address(int user_id,
    return address_json;
 }
 
+/* Resolve the forever-binding conversation_id for a (provider,
+ * provider_address) channel.  If the channel already has a non-NULL
+ * conversation_id, return it.  Otherwise create a fresh conversations
+ * row via conv_db_create_with_origin (origin="messaging:<provider>"),
+ * stamp it onto the channel mapping, and return the new id.
+ *
+ * Returns 0 on any failure (lookup miss, conv-create failure, lock
+ * failure).  Callers MUST handle the 0 case as "no DB persistence this
+ * turn" — the conversation still works in memory, but messages won't
+ * survive daemon restart and the recovery worker won't extract from
+ * them.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+static int64_t resolve_channel_conversation_id(const char *provider,
+                                               const char *provider_address,
+                                               int user_id) {
+   if (!provider || !provider_address || user_id <= 0) {
+      return 0;
+   }
+
+   /* Phase 1: read existing conversation_id under lock. */
+   AUTH_DB_LOCK_OR_RETURN(0);
+   int64_t existing = 0;
+   char display_name[128] = { 0 };
+   sqlite3_stmt *stmt = NULL;
+   const char *sel_sql = "SELECT COALESCE(conversation_id, 0), COALESCE(display_name,'') "
+                         "FROM messaging_channels "
+                         "WHERE provider = ? AND provider_address = ? AND is_enabled = 1 LIMIT 1";
+   bool found = false;
+   if (sqlite3_prepare_v2(s_db.db, sel_sql, -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_text(stmt, 1, provider, -1, SQLITE_STATIC);
+      sqlite3_bind_text(stmt, 2, provider_address, -1, SQLITE_STATIC);
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+         existing = sqlite3_column_int64(stmt, 0);
+         const unsigned char *dn = sqlite3_column_text(stmt, 1);
+         if (dn) {
+            snprintf(display_name, sizeof(display_name), "%s", (const char *)dn);
+         }
+         found = true;
+      }
+   }
+   if (stmt) {
+      sqlite3_finalize(stmt);
+   }
+   AUTH_DB_UNLOCK();
+
+   if (!found) {
+      OLOG_WARNING("messaging: resolve_conv: channel %s:%s not found (race with unlink?)", provider,
+                   provider_address);
+      return 0;
+   }
+
+   if (existing > 0) {
+      return existing;
+   }
+
+   /* Phase 2: no existing conversation — create one.  Title uses the
+    * channel's display_name when set, falling back to the address.
+    * conv_db_create_with_origin takes the auth_db lock itself, so we
+    * MUST release ours first. */
+   char title[256];
+   if (display_name[0] != '\0') {
+      snprintf(title, sizeof(title), "%s (%s)", display_name, provider);
+   } else {
+      snprintf(title, sizeof(title), "%s: %s", provider, provider_address);
+   }
+   char origin[64];
+   snprintf(origin, sizeof(origin), "messaging:%s", provider);
+
+   int64_t new_conv_id = 0;
+   int rc = conv_db_create_with_origin(user_id, title, origin, &new_conv_id);
+   if (rc != AUTH_DB_SUCCESS || new_conv_id <= 0) {
+      OLOG_ERROR("messaging: resolve_conv: conv_db_create_with_origin failed for %s:%s (rc=%d)",
+                 provider, provider_address, rc);
+      return 0;
+   }
+
+   /* Phase 3: stamp the new conv_id onto the channel row.  If this
+    * UPDATE fails the conv row is orphaned (no link back to the
+    * channel) — recoverable but ugly.  Logging surfaces the case for
+    * post-hoc cleanup. */
+   AUTH_DB_LOCK_OR_RETURN(new_conv_id); /* fall through on lock fail; conv exists, just unlinked */
+   sqlite3_stmt *upd = NULL;
+   const char *upd_sql = "UPDATE messaging_channels SET conversation_id = ? "
+                         "WHERE provider = ? AND provider_address = ? AND is_enabled = 1 AND "
+                         "conversation_id IS NULL";
+   bool stamped = false;
+   if (sqlite3_prepare_v2(s_db.db, upd_sql, -1, &upd, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(upd, 1, new_conv_id);
+      sqlite3_bind_text(upd, 2, provider, -1, SQLITE_STATIC);
+      sqlite3_bind_text(upd, 3, provider_address, -1, SQLITE_STATIC);
+      if (sqlite3_step(upd) == SQLITE_DONE) {
+         stamped = (sqlite3_changes(s_db.db) > 0);
+      }
+   }
+   if (upd) {
+      sqlite3_finalize(upd);
+   }
+   AUTH_DB_UNLOCK();
+
+   if (!stamped) {
+      OLOG_WARNING("messaging: resolve_conv: created conv %lld but UPDATE matched 0 rows for %s:%s "
+                   "(concurrent claim?) — conv is orphaned, will be invisible to /new",
+                   (long long)new_conv_id, provider, provider_address);
+   } else {
+      OLOG_INFO("messaging: bound channel %s:%s to conv %lld (origin=%s)", provider,
+                provider_address, (long long)new_conv_id, origin);
+   }
+
+   return new_conv_id;
+}
+
+/* Find the in-memory session slot for (provider, provider_address) and
+ * evict it.  Eviction triggers memory extraction on the closing
+ * conversation via session_destroy's existing extraction hook.  No-op
+ * when no slot matches (channel never received an inbound this
+ * daemon-uptime).  Drops s_session_slots_mutex before calling
+ * session_destroy per the same lock-order rule the LRU path follows
+ * (per-module → global is forbidden). */
+static void evict_session_slot(const char *provider, const char *provider_address) {
+   if (!provider || !provider_address) {
+      return;
+   }
+
+   pthread_mutex_lock(&s_session_slots_mutex);
+   session_t *evictee = NULL;
+   uint32_t evictee_session_id = 0;
+   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
+      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, provider) == 0 &&
+          strcmp(s_session_slots[i].provider_address, provider_address) == 0) {
+         evictee = s_session_slots[i].session;
+         evictee_session_id = evictee->session_id;
+         memset(&s_session_slots[i], 0, sizeof(session_slot_t));
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_session_slots_mutex);
+
+   if (evictee) {
+      OLOG_INFO("messaging: /new evicting session slot for %s:%s (session_id=%u)", provider,
+                provider_address, evictee_session_id);
+      /* Drop the engine's retain so session_destroy's ref-count wait
+       * converges immediately.  session_destroy fires memory extraction
+       * for the closing conversation. */
+      session_release(evictee);
+      session_destroy(evictee_session_id);
+   }
+}
+
+/* Clear messaging_channels.conversation_id for a channel.  Returns
+ * MESSAGING_SUCCESS on a 1-row update, MESSAGING_UNKNOWN_CHANNEL if no
+ * row matched, MESSAGING_FAILURE on lock / prepare failure. */
+static int clear_channel_conversation_id(const char *provider, const char *provider_address) {
+   if (!provider || !provider_address) {
+      return MESSAGING_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
+   sqlite3_stmt *stmt = NULL;
+   int rc = MESSAGING_FAILURE;
+   const char *sql = "UPDATE messaging_channels SET conversation_id = NULL "
+                     "WHERE provider = ? AND provider_address = ? AND is_enabled = 1";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_text(stmt, 1, provider, -1, SQLITE_STATIC);
+      sqlite3_bind_text(stmt, 2, provider_address, -1, SQLITE_STATIC);
+      if (sqlite3_step(stmt) == SQLITE_DONE) {
+         rc = (sqlite3_changes(s_db.db) > 0) ? MESSAGING_SUCCESS : MESSAGING_UNKNOWN_CHANNEL;
+      }
+   }
+   if (stmt) {
+      sqlite3_finalize(stmt);
+   }
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+/* Active-conversation window for SMS.  Returns true when an inbound
+ * SMS from this sender should bypass the wake-word gate because the
+ * channel had an LLM-bound exchange within g_config.messaging
+ * .sms_active_window_sec.  Returns false when:
+ *   - the window is disabled (config value 0 or negative),
+ *   - the sender isn't linked (no channel row),
+ *   - no prior LLM exchange has happened yet (last_used_at NULL or 0),
+ *   - the most recent exchange is older than the window.
+ *
+ * Reads BOTH user_id and last_used_at in one query to avoid a
+ * double-lookup on the inbound hot path. */
+static bool sms_within_active_window(const char *sender_e164) {
+   if (!sender_e164) {
+      return false;
+   }
+   int window_sec = g_config.messaging.sms_active_window_sec;
+   if (window_sec <= 0) {
+      return false;
+   }
+
+   AUTH_DB_LOCK_OR_RETURN(false);
+   sqlite3_stmt *stmt = NULL;
+   bool within = false;
+   const char *sql = "SELECT COALESCE(last_used_at, 0) FROM messaging_channels "
+                     "WHERE provider = 'sms' AND provider_address = ? AND is_enabled = 1 LIMIT 1";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_text(stmt, 1, sender_e164, -1, SQLITE_STATIC);
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+         int64_t last_used = sqlite3_column_int64(stmt, 0);
+         if (last_used > 0) {
+            int64_t now = (int64_t)time(NULL);
+            within = ((now - last_used) <= (int64_t)window_sec);
+         }
+      }
+   }
+   if (stmt) {
+      sqlite3_finalize(stmt);
+   }
+   AUTH_DB_UNLOCK();
+   return within;
+}
+
+/* Touch a channel's last_used_at to NOW.  Called after a successful
+ * LLM-bound exchange so the active-conversation window slides forward
+ * with each turn.  Best-effort — failure is logged at DEBUG and the
+ * turn still completes. */
+static void touch_channel_last_used(const char *provider, const char *provider_address) {
+   if (!provider || !provider_address) {
+      return;
+   }
+   AUTH_DB_LOCK_OR_RETURN_VOID();
+   sqlite3_stmt *stmt = NULL;
+   const char *sql = "UPDATE messaging_channels SET last_used_at = ? "
+                     "WHERE provider = ? AND provider_address = ? AND is_enabled = 1";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(stmt, 1, (int64_t)time(NULL));
+      sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
+      sqlite3_bind_text(stmt, 3, provider_address, -1, SQLITE_STATIC);
+      sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+   }
+   AUTH_DB_UNLOCK();
+}
+
+int messaging_engine_reset_channel(const char *provider, const char *provider_address) {
+   if (!provider || !provider_address) {
+      return MESSAGING_FAILURE;
+   }
+   if (!atomic_load(&s_initialized)) {
+      return MESSAGING_FAILURE;
+   }
+
+   /* Validate the channel exists first.  reset is a no-op + error if
+    * the channel isn't linked (matches messaging_engine_send's contract). */
+   int user_id = lookup_channel_user(provider, provider_address, NULL, 0);
+   if (user_id <= 0) {
+      return MESSAGING_UNKNOWN_CHANNEL;
+   }
+
+   /* Order matters: evict FIRST (triggers extraction on the closing
+    * conv via session_destroy → memory_trigger_extraction with the
+    * session's in-memory history), then clear the DB binding.  If we
+    * cleared first, the extraction trigger inside session_destroy
+    * would still fire but on a session whose conv_id was already
+    * un-stamped — extraction works either way (it copies history) but
+    * the audit log makes more sense in eviction-then-clear order. */
+   evict_session_slot(provider, provider_address);
+
+   int rc = clear_channel_conversation_id(provider, provider_address);
+   if (rc == MESSAGING_SUCCESS) {
+      OLOG_INFO("messaging: /new reset channel %s:%s — next inbound will start a fresh conv",
+                provider, provider_address);
+   } else if (rc == MESSAGING_UNKNOWN_CHANNEL) {
+      /* Channel exists (lookup succeeded above) but conversation_id was
+       * already NULL — that's not an error, just nothing to clear. */
+      OLOG_DEBUG("messaging: /new on %s:%s — conversation_id already NULL, no-op", provider,
+                 provider_address);
+      rc = MESSAGING_SUCCESS;
+   }
+   return rc;
+}
+
+int messaging_engine_reset_by_name(int user_id, const char *channel_name) {
+   if (user_id <= 0 || !channel_name) {
+      return MESSAGING_FAILURE;
+   }
+   if (!atomic_load(&s_initialized)) {
+      return MESSAGING_FAILURE;
+   }
+
+   /* Resolve channel_name → (provider, provider_address) under the
+    * authenticated user.  Mirrors the ownership boundary that
+    * messaging_engine_send enforces. */
+   AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
+   char provider[16] = { 0 };
+   char provider_address[128] = { 0 };
+   sqlite3_stmt *stmt = NULL;
+   bool found = false;
+   const char *sql = "SELECT provider, provider_address FROM messaging_channels "
+                     "WHERE user_id = ? AND is_enabled = 1 AND "
+                     "LOWER(COALESCE(display_name,'')) = LOWER(?) LIMIT 1";
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(stmt, 1, user_id);
+      sqlite3_bind_text(stmt, 2, channel_name, -1, SQLITE_STATIC);
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+         const unsigned char *p = sqlite3_column_text(stmt, 0);
+         const unsigned char *a = sqlite3_column_text(stmt, 1);
+         if (p) {
+            snprintf(provider, sizeof(provider), "%s", (const char *)p);
+         }
+         if (a) {
+            snprintf(provider_address, sizeof(provider_address), "%s", (const char *)a);
+         }
+         found = true;
+      }
+   }
+   if (stmt) {
+      sqlite3_finalize(stmt);
+   }
+   AUTH_DB_UNLOCK();
+
+   if (!found || provider[0] == '\0' || provider_address[0] == '\0') {
+      return MESSAGING_UNKNOWN_CHANNEL;
+   }
+
+   return messaging_engine_reset_channel(provider, provider_address);
+}
+
 /* =============================================================================
  * Outbound send
  * ============================================================================= */
@@ -396,7 +743,12 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
       return MESSAGING_DRIVER_NOT_REGISTERED;
    }
 
-   int rc = drv->send_text(address_json, text);
+   /* Pass NULL for provider_address — this code path looks the channel
+    * up by display_name (LLM tool's `send` action), so we only have
+    * address_json.  Drivers fall back to parsing it.  Future
+    * optimization: extend lookup_channel_address to also return
+    * provider_address so this hot path can skip the JSON parse too. */
+   int rc = drv->send_text(NULL, address_json, text);
    free(address_json);
 
    if (rc == 0) {
@@ -632,6 +984,7 @@ messaging_link_state_t messaging_engine_link_status(const char *code) {
 
 typedef struct {
    const messaging_driver_t *drv;
+   char provider_address[128];
    char address_json[256];
    char text[1024];
 } async_send_item_t;
@@ -639,25 +992,36 @@ typedef struct {
 static void *async_send_thread(void *arg) {
    async_send_item_t *item = (async_send_item_t *)arg;
    if (item && item->drv && item->drv->send_text) {
-      item->drv->send_text(item->address_json, item->text);
+      item->drv->send_text(item->provider_address, item->address_json, item->text);
    }
    free(item);
    return NULL;
 }
 
 static void engine_send_async(const messaging_driver_t *drv,
+                              const char *provider_address,
                               const char *address_json,
                               const char *text) {
-   if (!drv || !drv->send_text || !address_json || !text) {
+   if (!drv || !drv->send_text || !text) {
+      return;
+   }
+   if ((!provider_address || provider_address[0] == '\0') &&
+       (!address_json || address_json[0] == '\0')) {
       return;
    }
    async_send_item_t *item = calloc(1, sizeof(*item));
    if (!item) {
-      OLOG_WARNING("messaging: async-send alloc failed; dropping send to %s", address_json);
+      OLOG_WARNING("messaging: async-send alloc failed; dropping send to %s",
+                   provider_address ? provider_address : "(no addr)");
       return;
    }
    item->drv = drv;
-   snprintf(item->address_json, sizeof(item->address_json), "%s", address_json);
+   if (provider_address) {
+      snprintf(item->provider_address, sizeof(item->provider_address), "%s", provider_address);
+   }
+   if (address_json) {
+      snprintf(item->address_json, sizeof(item->address_json), "%s", address_json);
+   }
    snprintf(item->text, sizeof(item->text), "%s", text);
 
    pthread_attr_t attr;
@@ -674,9 +1038,14 @@ static void engine_send_async(const messaging_driver_t *drv,
    }
 }
 
-/* Per-provider address_json builder.  Different providers carry
- * different shapes in messaging_channels.address_json; this is the
- * single source of truth for what to write when /link claims a row.
+/* Per-provider address_json builder.  Delegates to the driver's
+ * `build_address_json` hook when the driver is registered + provides
+ * one — that's the single source of truth for each provider's JSON
+ * shape and lets Phase 3 (Discord) and Phase 4 (Slack) add new drivers
+ * without touching the engine.  Falls back to an inline shape table
+ * when no driver is registered yet (e.g., during /link claim, before
+ * the driver's init has wired its callbacks — though in practice the
+ * driver always registers before claims).
  *
  * Telegram → {"chat_id":"<numeric_string>"}
  * SMS      → {"phone_e164":"<+1...>"}
@@ -695,6 +1064,15 @@ static void build_address_json_for(const char *provider,
       }
       return;
    }
+   /* Driver-side dispatch (preferred). */
+   const messaging_driver_t *drv = find_driver(provider);
+   if (drv && drv->build_address_json) {
+      drv->build_address_json(sender_address, buf, buf_size);
+      return;
+   }
+   /* Fallback inline table.  Kept as a safety net for the narrow
+    * window where /link claims a row before the driver finishes
+    * registering its callbacks. */
    if (strcmp(provider, "telegram") == 0) {
       snprintf(buf, buf_size, "{\"chat_id\":\"%s\"}", sender_address);
    } else if (strcmp(provider, "sms") == 0) {
@@ -866,10 +1244,11 @@ static int handle_link_command(const char *provider,
     * (echo/events delivery), and a synchronous send_text would
     * self-deadlock waiting for echo/response while the mosquitto
     * thread is busy executing us.  Reuses the same address_json shape
-    * the row carries. */
+    * the row carries; sender_address is the typed primary key so the
+    * driver can skip the JSON parse. */
    if (drv) {
       engine_send_async(
-          drv, address_json,
+          drv, sender_address, address_json,
           "Your channel has been linked. Messages here will now reach the assistant.");
    }
    return MESSAGING_SUCCESS;
@@ -945,6 +1324,36 @@ static int engine_inbound_dispatch(const char *provider,
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
+   /* /new short-circuit — resets the channel's forever-conversation
+    * binding.  Only honored from sender-in-channels (gated above);
+    * unlinked senders can't trigger a reset on someone else's channel.
+    * Recognized as case-insensitive "/new" followed by EOF or
+    * whitespace; trailing content is tolerated and ignored (so "/new
+    * conversation please" works as expected).  See
+    * docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+   if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
+       (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
+       (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {
+      int rc = messaging_engine_reset_channel(provider, provider_address);
+      /* Send confirmation through engine_send_async so callers running
+       * on the mosquitto callback thread (SMS) don't deadlock waiting
+       * for the echo/response that mosquitto can't deliver while the
+       * callback is blocked.  Same pattern as handle_link_command. */
+      const messaging_driver_t *drv = find_driver(provider);
+      if (drv && drv->send_text) {
+         char address_json[256];
+         build_address_json_for(provider, provider_address, address_json, sizeof(address_json));
+         const char *msg =
+             (rc == MESSAGING_SUCCESS)
+                 ? "Started a new conversation. Previous context is preserved in the WebUI."
+                 : "Couldn't reset the conversation (internal error). Try again or check the "
+                   "WebUI.";
+         engine_send_async(drv, provider_address, address_json, msg);
+      }
+      OLOG_INFO("messaging: /new from %s:%s (rc=%d)", provider, provider_address, rc);
+      return rc;
+   }
+
    /* Enqueue for the worker drain.  user_id is already resolved by
     * the channel lookup above — pass it through so the worker
     * doesn't have to re-query. */
@@ -1005,12 +1414,10 @@ static int enqueue_inbound(const char *provider,
  * already drops s_session_slots_mutex before calling session_destroy;
  * extend the same shape to the create branch.  Filed separately to
  * keep the eviction-path fix surgical. */
-/* TODO(messaging): engine_shutdown still uses session_release on each
- * slot.  Migrating shutdown to session_destroy would trigger memory
- * extraction for any in-flight conversation, but with up to 3 sec
- * ref-count wait per slot × 64 slots that's a real shutdown delay.
- * Deferred — process exit reclaims slots anyway, and live operation
- * routes extraction through the eviction path below. */
+/* NOTE: engine_shutdown now uses session_destroy for each slot, so
+ * in-flight forever-conversations get their facts extracted on
+ * graceful shutdown via session_destroy's existing memory-extraction
+ * hook.  See messaging_engine_shutdown above. */
 static session_t *get_or_create_messaging_session(const char *provider,
                                                   const char *provider_address,
                                                   int user_id) {
@@ -1106,10 +1513,14 @@ static session_t *get_or_create_messaging_session(const char *provider,
       }
    }
 
-   /* Create new session.  Reuse SESSION_TYPE_WEBUI for the type tag —
-    * client_data stays NULL; code that needs WebUI-specific state
-    * (webui_send_*, ws_connection_t) NULL-checks before deref. */
-   session_t *s = session_create(SESSION_TYPE_WEBUI, -1);
+   /* Create new session with SESSION_TYPE_MESSAGING.  The type itself
+    * exempts the session from session_cleanup_expired (see
+    * session_manager.c) — the messaging engine owns this session's
+    * lifetime via its own LRU eviction (which calls session_destroy
+    * when needed).  client_data stays NULL; code that branches on
+    * type=WEBUI for WebSocket delivery (webui_send_*, ws_connection_t)
+    * correctly excludes messaging sessions. */
+   session_t *s = session_create(SESSION_TYPE_MESSAGING, -1);
    if (!s) {
       pthread_mutex_unlock(&s_session_slots_mutex);
       return NULL;
@@ -1122,15 +1533,6 @@ static session_t *get_or_create_messaging_session(const char *provider,
    if (user_id > 0) {
       s->metrics.user_id = user_id;
    }
-
-   /* Exempt from session_cleanup_expired's idle-timeout sweep.  The
-    * messaging engine owns this session's lifetime via its own LRU
-    * eviction (which calls session_destroy when needed).  Without this
-    * flag, auth_maintenance's periodic call to session_cleanup_expired
-    * would destroy any messaging session idle longer than
-    * session_timeout_sec (default 30 min) and leave our slot pointer
-    * dangling — readable but pointing at freed memory. */
-   s->idle_timeout_exempt = true;
 
    snprintf(s_session_slots[target].provider, sizeof(s_session_slots[target].provider), "%s",
             provider);
@@ -1254,8 +1656,21 @@ static void process_inbound(inbound_item_t *item) {
       }
    }
 
+   /* Forever-binding: every messaging-backed exchange persists into one
+    * conversations row per (provider, provider_address).  First inbound
+    * for a channel creates the conv; subsequent inbound reuses it.
+    * /new clears the binding and the next inbound starts a fresh conv.
+    * LCM handles in-place context compaction; the recovery worker
+    * extracts memory incrementally via last_extracted_msg_id.
+    * resolve_channel_conversation_id returns 0 on any failure — when
+    * that happens we still dispatch the turn, but messages won't
+    * persist to DB for this turn (degraded mode, logged at the
+    * resolver). */
+   int64_t conv_id = resolve_channel_conversation_id(item->provider, item->provider_address,
+                                                     item->user_id);
+
    text_input_dispatch_opts_t opts = {
-      .conversation_id = 0, /* v1: no persistent conv_db row for messaging-backed */
+      .conversation_id = conv_id,
       .auth_user_id = item->user_id,
       .sentence_cb = NULL,
       .sentence_userdata = NULL,
@@ -1291,17 +1706,45 @@ static void process_inbound(inbound_item_t *item) {
       }
    }
 
+   /* Persist the assistant message to conv_db so the WebUI conversation
+    * list shows the full thread, the recovery worker can extract
+    * memory incrementally, and LCM context_expand can drill back to
+    * original text after compaction.  We persist the POST-truncation
+    * text — that's what the user actually received, and what the
+    * in-memory history now holds.  conv_db_add_message_ex enforces
+    * ownership; passing user_id is mandatory.  Failure is logged but
+    * non-fatal: the turn already happened in memory and the response
+    * still goes to the driver. */
+   if (conv_id > 0) {
+      int64_t assistant_msg_id = 0;
+      int rc = conv_db_add_message_ex(conv_id, item->user_id, "assistant", response,
+                                      &assistant_msg_id);
+      if (rc == AUTH_DB_SUCCESS && assistant_msg_id > 0) {
+         session_stamp_last_message_id(session, "assistant", assistant_msg_id);
+      } else if (rc != AUTH_DB_SUCCESS) {
+         OLOG_WARNING("messaging: failed to persist assistant message to conv %lld (rc=%d)",
+                      (long long)conv_id, rc);
+      }
+   }
+
+   /* Touch last_used_at so the SMS active-conversation window slides
+    * forward.  Also drives outbound rate-limit accounting and the
+    * "most-recent channel" sort in any future WebUI surfacing.  Cheap
+    * UPDATE; failure is silent (not enough signal to log). */
+   touch_channel_last_used(item->provider, item->provider_address);
+
    session_release(session);
 
    /* Send the (possibly truncated) response back via the originating
-    * driver.  Use the shared per-provider builder so SMS gets
-    * {"phone_e164":"..."}, Telegram gets {"chat_id":"..."}, etc. */
+    * driver.  Pass provider_address natively so the driver can skip
+    * the JSON parse on the hot path.  Builder still constructs the
+    * address_json blob for providers that need extras. */
    const messaging_driver_t *drv = find_driver(item->provider);
    if (drv && drv->send_text) {
       char address_json[256];
       build_address_json_for(item->provider, item->provider_address, address_json,
                              sizeof(address_json));
-      drv->send_text(address_json, response);
+      drv->send_text(item->provider_address, address_json, response);
    }
    free(response);
 }
@@ -1397,17 +1840,70 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
-   /* Wake-word prefix gate.  Use the start-anchored matcher
-    * (wake_word_check_prefix); the existing wake_word_check() uses
-    * strstr substring search which is exploitable on arbitrary-sender
-    * text. */
-   wake_word_result_t wr = wake_word_check_prefix(body);
-   if (!wr.detected) {
-      return MESSAGING_UNKNOWN_CHANNEL; /* caller falls through */
+   /* /new short-circuit — runs BEFORE the wake-word gate so users
+    * don't have to say "Hey Friday /new", but AFTER the injection
+    * filter and channel-lookup so unlinked senders can't trigger
+    * resets.  Same recognition shape as the Telegram path: case-
+    * insensitive "/new" + EOF or whitespace; trailing content
+    * ignored.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+   if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
+       (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
+       (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {
+      /* Sender-in-channels guard.  Unlinked phones can't reset
+       * someone else's binding. */
+      if (lookup_channel_user("sms", sender_e164, NULL, 0) <= 0) {
+         OLOG_DEBUG("messaging: SMS /new from unlinked %s — dropping", sender_e164);
+         return MESSAGING_UNKNOWN_CHANNEL;
+      }
+      int rc = messaging_engine_reset_channel("sms", sender_e164);
+      const messaging_driver_t *drv = find_driver("sms");
+      if (drv && drv->send_text) {
+         char address_json[256];
+         build_address_json_for("sms", sender_e164, address_json, sizeof(address_json));
+         const char *msg =
+             (rc == MESSAGING_SUCCESS)
+                 ? "Started a new conversation. Previous context is preserved in the WebUI."
+                 : "Couldn't reset the conversation (internal error). Try again or check the "
+                   "WebUI.";
+         engine_send_async(drv, sender_e164, address_json, msg);
+      }
+      OLOG_INFO("messaging: /new from sms:%s (rc=%d)", sender_e164, rc);
+      return MESSAGING_SUCCESS;
    }
 
-   /* Sender-in-channels check.  Even with a perfect wake-word prefix,
-    * an unlinked phone number can't reach the LLM. */
+   /* Active-conversation window — skip the wake-word gate when this
+    * sender's channel had an LLM-bound exchange recently.  Mirrors the
+    * iMessage thread metaphor: once you're in a back-and-forth with
+    * Friday, you don't need to re-announce her name on every reply.
+    * The window slides forward on each successful exchange (see
+    * touch_channel_last_used in process_inbound).  Telegram/Discord/
+    * Slack don't need this (LLM-exclusive — every linked-sender
+    * message routes to LLM unconditionally). */
+   bool active_window = sms_within_active_window(sender_e164);
+   const char *cmd = NULL;
+   if (active_window) {
+      /* No wake-word required — route the full body as the user
+       * command.  Sender-in-channels was implicitly verified by the
+       * window check (window only returns true for linked channels). */
+      cmd = body;
+   } else {
+      /* Wake-word prefix gate.  Use the start-anchored matcher
+       * (wake_word_check_prefix); the existing wake_word_check() uses
+       * strstr substring search which is exploitable on
+       * arbitrary-sender text. */
+      wake_word_result_t wr = wake_word_check_prefix(body);
+      if (!wr.detected) {
+         return MESSAGING_UNKNOWN_CHANNEL; /* caller falls through */
+      }
+      /* Pass just the command remainder to the LLM, not the wake
+       * word.  If the user only said the wake word with no command
+       * ("hey friday"), there's nothing for the LLM to act on. */
+      cmd = (wr.has_command && wr.command) ? wr.command : "";
+   }
+
+   /* Sender-in-channels check.  Even with a perfect wake-word prefix
+    * (or an open active-window match), an unlinked phone number
+    * can't reach the LLM. */
    int user_id = lookup_channel_user("sms", sender_e164, NULL, 0);
    if (user_id <= 0) {
       OLOG_DEBUG("messaging: SMS from unlinked %s passed wake-word but no channel — dropping",
@@ -1415,10 +1911,6 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
-   /* Pass just the command remainder to the LLM, not the wake word.
-    * If the user only said the wake word with no command ("hey
-    * friday"), there's nothing for the LLM to act on. */
-   const char *cmd = (wr.has_command && wr.command) ? wr.command : "";
    if (cmd[0] == '\0') {
       return MESSAGING_SUCCESS; /* handled — no-op */
    }
