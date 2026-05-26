@@ -112,6 +112,25 @@ static void buffer_free(struct buffer *buf) {
    buf->cap = 0;
 }
 
+/* Progress callback for both the listener long-poll and the send
+ * handle.  Curl invokes this periodically (~1s default cadence) during
+ * any transfer.  Returning non-zero aborts the transfer with
+ * CURLE_ABORTED_BY_CALLBACK — the only way to break out of the 30-45
+ * second long-poll cycle promptly when shutdown is signaled.  Without
+ * this, pthread_join on the listener can wait the full HTTP timeout. */
+static int tg_progress_callback(void *clientp,
+                                curl_off_t dltotal,
+                                curl_off_t dlnow,
+                                curl_off_t ultotal,
+                                curl_off_t ulnow) {
+   (void)clientp;
+   (void)dltotal;
+   (void)dlnow;
+   (void)ultotal;
+   (void)ulnow;
+   return atomic_load(&s_running) ? 0 : 1;
+}
+
 /* Build a logger-safe URL representation by replacing the token in the
  * path with "<REDACTED>".  Caller-supplied buffer. */
 static void redact_url(const char *url, char *out, size_t out_size) {
@@ -325,21 +344,28 @@ static void tg_poll_once(CURL *handle) {
 
    struct buffer resp = { 0 };
 
-   curl_easy_reset(handle);
+   /* The static setopts (USERAGENT / KEEPALIVE / HTTP_VERSION /
+    * WRITEFUNCTION / TIMEOUT) are applied ONCE in tg_listener_thread
+    * before the poll loop — they don't change between cycles, and
+    * curl_easy_reset would wipe the connection-reuse hints.  Only
+    * URL and WRITEDATA need to be re-set per cycle. */
    curl_easy_setopt(handle, CURLOPT_URL, url);
-   curl_easy_setopt(handle, CURLOPT_USERAGENT, TG_USER_AGENT);
-   curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
-   curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
-   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, buffer_write);
    curl_easy_setopt(handle, CURLOPT_WRITEDATA, &resp);
-   curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)TG_HTTP_TIMEOUT);
-   /* getUpdates is a GET; explicit reset above clears prior POST/post-fields. */
 
    CURLcode cc = curl_easy_perform(handle);
    long http_status = 0;
    curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &http_status);
 
    if (cc != CURLE_OK || http_status < 200 || http_status >= 300) {
+      /* CURLE_ABORTED_BY_CALLBACK is our own shutdown signal — exit
+       * immediately rather than logging it as a failure or sleeping
+       * the reconnect backoff.  The next loop iteration will see
+       * s_running=false and the listener will return. */
+      if (cc == CURLE_ABORTED_BY_CALLBACK) {
+         atomic_store(&s_connected, false);
+         buffer_free(&resp);
+         return;
+      }
       char safe[TG_BASE_URL_MAX + 64];
       redact_url(url, safe, sizeof(safe));
       OLOG_WARNING("telegram: getUpdates failed (curl=%d http=%ld) on %s", cc, http_status, safe);
@@ -396,6 +422,21 @@ static void *tg_listener_thread(void *arg) {
       OLOG_ERROR("telegram: curl_easy_init failed; listener exiting");
       return NULL;
    }
+
+   /* One-time setopts that don't change per cycle.  Hoisting them
+    * out of tg_poll_once saves the per-cycle curl_easy_reset that
+    * was wiping connection-reuse hints.
+    *
+    * Progress callback lets shutdown abort the in-flight long-poll
+    * promptly — without it, pthread_join on this thread can wait the
+    * full TG_HTTP_TIMEOUT for the current cycle to finish. */
+   curl_easy_setopt(handle, CURLOPT_USERAGENT, TG_USER_AGENT);
+   curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
+   curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, buffer_write);
+   curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)TG_HTTP_TIMEOUT);
+   curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+   curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, tg_progress_callback);
 
    while (atomic_load(&s_running)) {
       tg_poll_once(handle);

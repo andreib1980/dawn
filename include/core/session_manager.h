@@ -267,6 +267,24 @@ typedef struct session {
 
    // Cancellation (atomic for cross-thread visibility on ARM64)
    atomic_bool disconnected;  // Set on client disconnect
+
+   /* Idle-timeout-sweep exemption.
+    *
+    * Set by subsystems that retain a long-lived reference to this
+    * session_t outside session_manager (e.g., the messaging engine's
+    * (provider, address) → session_t map, which sits idle between
+    * SMS / chat-app messages for arbitrary durations).
+    *
+    * `session_cleanup_expired` skips sessions with this flag, even if
+    * their idle time exceeds session_timeout_sec.  Without this,
+    * `session_destroy` would run, free the session_t after its 3-sec
+    * ref-count wait expires, and leave the external subsystem with a
+    * dangling pointer.
+    *
+    * Owning subsystems are responsible for their own lifetime management
+    * (the messaging engine evicts via its own LRU and calls
+    * session_destroy directly). */
+   bool idle_timeout_exempt;
    atomic_uint
        request_generation;  // Incremented on each new request, used to detect superseded requests
 
@@ -875,6 +893,46 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
  * @locks session->history_mutex
  */
 char *session_get_system_prompt(session_t *session);
+
+/**
+ * @brief Get the content of the most recent message with the given role.
+ *
+ * Walks `session->conversation_history` backwards and returns the
+ * content string of the first message whose `role` matches.  Returns
+ * NULL if no match, or if the matched message stores content as an
+ * array (multi-part vision messages) rather than a plain string.
+ *
+ * @param session Session to query.
+ * @param role    Role to match ("user" / "assistant" / "system").
+ * @return Allocated string (caller frees), or NULL.
+ *
+ * @locks session->history_mutex
+ */
+char *session_get_last_message_content(session_t *session, const char *role);
+
+/**
+ * @brief Replace the content of the most recent message with the given role.
+ *
+ * Walks `session->conversation_history` backwards, finds the first
+ * message whose `role` matches, and replaces its `content` field with
+ * `new_content`.  Used by the messaging engine to align session
+ * history with what was actually delivered when outbound truncation
+ * happens — the LLM then sees the truncated text rather than the
+ * full one when composing the next turn.
+ *
+ * No-op on multi-part (array) content; only operates on plain-string
+ * content.
+ *
+ * @param session     Session to mutate.
+ * @param role        Role to match.
+ * @param new_content Replacement content (copied).
+ * @return true if a message was found and replaced, false otherwise.
+ *
+ * @locks session->history_mutex
+ */
+bool session_replace_last_message_content(session_t *session,
+                                          const char *role,
+                                          const char *new_content);
 
 /**
  * @brief Register the structured per-user prompt builder used by the

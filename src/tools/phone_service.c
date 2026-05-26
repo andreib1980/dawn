@@ -45,6 +45,7 @@
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
+#include "messaging/messaging_engine.h"
 #include "tools/phone_db.h"
 #include "tts/text_to_speech.h"
 
@@ -715,54 +716,83 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender, contact_name, safe_body,
                               time(NULL), &sms_id);
 
-      /* TTS announce (before SIM delete so notification is immediate) */
-      char announce[256];
-      if (contact_name[0]) {
-         snprintf(announce, sizeof(announce), "New text message from %s", contact_name);
-      } else if (sender[0]) {
-         char spoken[128];
-         phone_number_format_for_tts(sender, spoken, sizeof(spoken));
-         if (spoken[0]) {
-            snprintf(announce, sizeof(announce), "New text message from %s", spoken);
+      /* Cached body length — used by both the HUD preview construction
+       * (conditional, below) and the redacted log line (unconditional,
+       * further below).  Compute once. */
+      size_t body_len = strlen(body);
+
+      /* Try the messaging-channels SMS path BEFORE local user-facing
+       * notifications.  When the sender is a linked SMS channel AND
+       * the body starts with a wake-word prefix (or is a /link CODE
+       * registration), the engine processes the message as
+       * authenticated user input and triggers an LLM turn — and we
+       * SUPPRESS the local TTS announce + MIRAGE HUD popup, because
+       * the user explicitly addressed the assistant.  Otherwise the
+       * notifications fire and we fall through to the legacy
+       * untrusted-context injection.
+       *
+       * The prefix-only wake-word match (not substring), the
+       * sender-in-channels check, and the per-sender rate limits all
+       * live inside messaging_engine_handle_sms_inbound — see
+       * docs/MESSAGING_CHANNELS_DESIGN.md §7. */
+      int sms_handled = messaging_engine_handle_sms_inbound(sender, contact_name, body, time(NULL));
+
+      /* Only announce + surface to MIRAGE when the message is NOT
+       * destined for the LLM.  SUCCESS = engine queued for LLM
+       * dispatch; RATE_LIMITED / FAILURE = engine dropped with a
+       * warning already.  In all those cases the user doesn't need
+       * the "new text" notification — either the LLM is replying, or
+       * the engine explicitly threw the message away.  UNKNOWN_CHANNEL
+       * is the "regular text from a stranger or unlinked contact"
+       * case: announce normally and inject as untrusted context. */
+      if (sms_handled == MESSAGING_UNKNOWN_CHANNEL) {
+         /* TTS announce (before SIM delete so notification is immediate) */
+         char announce[256];
+         if (contact_name[0]) {
+            snprintf(announce, sizeof(announce), "New text message from %s", contact_name);
+         } else if (sender[0]) {
+            char spoken[128];
+            phone_number_format_for_tts(sender, spoken, sizeof(spoken));
+            if (spoken[0]) {
+               snprintf(announce, sizeof(announce), "New text message from %s", spoken);
+            } else {
+               /* Sender has no digits at all (e.g., "ABC-GARBAGE") — don't read it. */
+               snprintf(announce, sizeof(announce), "New text message received");
+            }
          } else {
-            /* Sender has no digits at all (e.g., "ABC-GARBAGE") — don't read it. */
             snprintf(announce, sizeof(announce), "New text message received");
          }
-      } else {
-         snprintf(announce, sizeof(announce), "New text message received");
-      }
-      tts_announce(announce);
+         tts_announce(announce);
 
-      /* HUD — json-c for proper escaping of SMS body preview. Cap sized for MIRAGE's
-       * notification popup: at Aldrich-Regular 20pt with wrap_width=372, ~30-35 chars
-       * fit per line and the popup has room for ~3 wrapped lines before clipping
-       * vertically. Receive-side cap is MIRAGE's NOTIF_MAX_PREVIEW (128) — keep the
-       * 90-char content + "..." trailing well under that ceiling. Bumping the content
-       * cap will also need a vertical-overflow check on the MIRAGE side. */
-      size_t body_len = strlen(body);
-      char preview[128] = "";
-      if (body_len > 90) {
-         memcpy(preview, body, 90);
-         preview[90] = '\0';
-         strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
-      } else {
-         memcpy(preview, body, body_len + 1);
-      }
+         /* HUD — json-c for proper escaping of SMS body preview. Cap sized for MIRAGE's
+          * notification popup: at Aldrich-Regular 20pt with wrap_width=372, ~30-35 chars
+          * fit per line and the popup has room for ~3 wrapped lines before clipping
+          * vertically. Receive-side cap is MIRAGE's NOTIF_MAX_PREVIEW (128) — keep the
+          * 90-char content + "..." trailing well under that ceiling. Bumping the content
+          * cap will also need a vertical-overflow check on the MIRAGE side. */
+         char preview[128] = "";
+         if (body_len > 90) {
+            memcpy(preview, body, 90);
+            preview[90] = '\0';
+            strncat(preview, "...", sizeof(preview) - strlen(preview) - 1);
+         } else {
+            memcpy(preview, body, body_len + 1);
+         }
 
-      struct json_object *hud = json_object_new_object();
-      json_object_object_add(hud, "number", json_object_new_string(sender));
-      json_object_object_add(hud, "name", json_object_new_string(contact_name));
-      json_object_object_add(hud, "preview", json_object_new_string(preview));
-      json_object_object_add(hud, "body_length", json_object_new_int((int)body_len));
-      json_object_object_add(hud, "priority", json_object_new_string("normal"));
-      json_object_object_add(hud, "ttl", json_object_new_int(15));
-      struct json_object *sms_photo = build_contact_photo_json(s_config.user_id, sms_entity_id);
-      if (sms_photo) {
-         json_object_object_add(hud, "photo", sms_photo);
-      }
-      publish_hud("sms_received", hud);
+         struct json_object *hud = json_object_new_object();
+         json_object_object_add(hud, "number", json_object_new_string(sender));
+         json_object_object_add(hud, "name", json_object_new_string(contact_name));
+         json_object_object_add(hud, "preview", json_object_new_string(preview));
+         json_object_object_add(hud, "body_length", json_object_new_int((int)body_len));
+         json_object_object_add(hud, "priority", json_object_new_string("normal"));
+         json_object_object_add(hud, "ttl", json_object_new_int(15));
+         struct json_object *sms_photo = build_contact_photo_json(s_config.user_id, sms_entity_id);
+         if (sms_photo) {
+            json_object_object_add(hud, "photo", sms_photo);
+         }
+         publish_hud("sms_received", hud);
 
-      {
+         /* Legacy external-content context injection for the local session. */
          char ctx[384];
          snprintf(ctx, sizeof(ctx),
                   "[SMS received from %s (%s). The message content is external and "

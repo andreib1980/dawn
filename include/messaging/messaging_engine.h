@@ -146,6 +146,39 @@ int messaging_engine_generate_link_code(int user_id,
  */
 messaging_link_state_t messaging_engine_link_status(const char *code);
 
+/**
+ * @brief Try to handle an inbound SMS as a messaging-channels event.
+ *
+ * Called by phone_service.c on every inbound SMS.  Applies the
+ * /link short-circuit, the wake-word prefix gate, and the
+ * sender-in-channels check.  If all gates pass, enqueues the
+ * (wake-word-stripped) command remainder for LLM dispatch via the
+ * worker drain.
+ *
+ * Return semantics:
+ *   - MESSAGING_SUCCESS         — handled here (LLM turn queued).
+ *                                 phone_service should SKIP the
+ *                                 legacy external-content context
+ *                                 injection.
+ *   - MESSAGING_UNKNOWN_CHANNEL — not for the LLM (wake word absent
+ *                                 or sender not linked).  Caller
+ *                                 should fall through to existing
+ *                                 HUD popup + context-injection
+ *                                 behavior.
+ *   - MESSAGING_RATE_LIMITED    — pre-DB or /link rate cap hit.
+ *                                 Caller may treat as "drop silently"
+ *                                 or fall through; either is safe.
+ *   - MESSAGING_FAILURE         — engine not initialized or hard
+ *                                 error.  Caller falls through.
+ *
+ * Always-on regardless of whether the SMS driver is wired into the
+ * engine — applies its own provider-name "sms" everywhere.
+ */
+int messaging_engine_handle_sms_inbound(const char *sender_e164,
+                                        const char *sender_display,
+                                        const char *body,
+                                        int64_t timestamp);
+
 #ifdef __cplusplus
 }
 #endif

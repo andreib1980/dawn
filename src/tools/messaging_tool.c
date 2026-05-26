@@ -28,8 +28,10 @@
 
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_engine.h"
+#include "messaging/messaging_sms.h"
 #include "messaging/messaging_telegram.h"
 #include "tools/tool_registry.h"
 
@@ -188,25 +190,33 @@ static const treg_param_t messaging_params[] = {
 static int messaging_tool_init(void) {
    if (messaging_engine_init() != MESSAGING_SUCCESS) {
       OLOG_ERROR("messaging_tool: engine init failed");
-      return 1;
+      return FAILURE;
    }
+   /* SMS driver always registers — modem connection lifecycle belongs
+    * to ECHO, not the messaging engine.  When the modem is offline,
+    * outbound send_text fails gracefully through phone_service. */
+   if (messaging_sms_register() != SUCCESS) {
+      OLOG_WARNING("messaging_tool: SMS driver registration failed");
+   }
+
    /* Conditionally register drivers based on configured tokens.  When
     * no token is set, the engine still runs (the LLM-facing tool can
     * report "no channels linked"), but no driver listens. */
    if (g_secrets.telegram_bot_token[0] != '\0') {
-      if (messaging_telegram_register(g_secrets.telegram_bot_token) != 0) {
+      if (messaging_telegram_register(g_secrets.telegram_bot_token) != SUCCESS) {
          OLOG_WARNING("messaging_tool: Telegram driver registration failed");
       }
    } else {
       OLOG_INFO("messaging_tool: no telegram_bot_token configured; Telegram disabled");
    }
-   return 0;
+   return SUCCESS;
 }
 
 static void messaging_tool_cleanup(void) {
    if (g_secrets.telegram_bot_token[0] != '\0') {
       messaging_telegram_shutdown();
    }
+   messaging_sms_shutdown();
    messaging_engine_shutdown();
 }
 

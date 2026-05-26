@@ -84,6 +84,28 @@ char *core_text_input_dispatch(session_t *session,
     * failure; LLM dispatch is never blocked by this. */
    session_dispatch_user_turn(session, text);
 
+   /* Step 4.5: optional channel hint.  When the caller (e.g. the
+    * messaging engine for SMS) wants to give the LLM a one-turn
+    * instruction about channel constraints, we append it AFTER focus
+    * injection so the hint sits at the end of the system prompt where
+    * recency-biased LLMs are most likely to honor it.  Re-acquires the
+    * full prompt via session_get_system_prompt, appends, and writes
+    * it back with session_update_system_prompt.  Applies only to this
+    * turn — the next dispatch_user_turn call rebuilds the prompt. */
+   if (opts && opts->channel_hint && opts->channel_hint[0] != '\0') {
+      char *current = session_get_system_prompt(session);
+      if (current) {
+         size_t needed = strlen(current) + strlen(opts->channel_hint) + 8;
+         char *augmented = malloc(needed);
+         if (augmented) {
+            snprintf(augmented, needed, "%s\n\n%s", current, opts->channel_hint);
+            session_update_system_prompt(session, augmented);
+            free(augmented);
+         }
+         free(current);
+      }
+   }
+
    /* Step 5: LLM call.  Uses the no_add variant because step 1
     * already added the user message; this also ensures the message
     * survives in history if the LLM call is interrupted or cancelled. */

@@ -1011,6 +1011,17 @@ void session_cleanup_expired(void) {
 
    for (int i = 1; i < MAX_SESSIONS; i++) {  // Skip local session (i=0)
       if (sessions[i] != NULL) {
+         /* Skip sessions whose lifetime is managed by an external
+          * subsystem (e.g., the messaging engine maintains a long-lived
+          * (provider, address) → session_t map for SMS / chat-app
+          * conversations that may sit idle between messages for hours).
+          * Those subsystems destroy their sessions through their own
+          * eviction logic — destroying them here would leave them with
+          * dangling pointers after session_destroy's 3-sec ref-count
+          * wait times out. */
+         if (sessions[i]->idle_timeout_exempt) {
+            continue;
+         }
          time_t idle_time = now - sessions[i]->last_activity;
          if (idle_time > g_config.network.session_timeout_sec) {
             expired_ids[expired_count++] = sessions[i]->session_id;
@@ -1543,12 +1554,54 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
       OLOG_INFO("Session %u: Updated system prompt (%zu chars)", session->session_id,
                 strlen(system_prompt));
    } else {
-      /* No system message found - insert at beginning */
+      /* No system message found - insert at index 0.
+       *
+       * IMPORTANT: json-c 0.15 doesn't expose json_object_array_insert_idx,
+       * and json_object_array_put_idx REPLACES whatever's at the given
+       * position rather than inserting before it.  Using put_idx(0, new)
+       * on a non-empty array would silently clobber the first existing
+       * message — corrupted "Hi friend" → vanished if a user message
+       * happened to land at index 0 first.  This bit messaging-backed
+       * sessions specifically because they start with an empty history,
+       * have a user message appended on first inbound, and then this
+       * function fires for per-turn focus injection BEFORE any prior
+       * system prompt exists.  WebUI/voice sessions never tripped it
+       * because they always have a system message at index 0 from
+       * earlier turns.
+       *
+       * Two cases:
+       *   - Empty history → put_idx(0, ...) safely grows the array.
+       *   - Non-empty history (no system message anywhere) → rebuild
+       *     a new array with system at index 0 followed by the
+       *     existing messages, then swap. */
       struct json_object *new_msg = json_object_new_object();
       if (new_msg) {
          json_object_object_add(new_msg, "role", json_object_new_string("system"));
          json_object_object_add(new_msg, "content", json_object_new_string(system_prompt));
-         json_object_array_put_idx(session->conversation_history, 0, new_msg);
+
+         if (len == 0) {
+            json_object_array_put_idx(session->conversation_history, 0, new_msg);
+         } else {
+            struct json_object *rebuilt = json_object_new_array();
+            if (!rebuilt) {
+               json_object_put(new_msg);
+               OLOG_ERROR("Session %u: failed to allocate rebuilt history", session->session_id);
+               pthread_mutex_unlock(&session->history_mutex);
+               return;
+            }
+            json_object_array_add(rebuilt, new_msg);
+            for (int i = 0; i < len; i++) {
+               struct json_object *old = json_object_array_get_idx(session->conversation_history,
+                                                                   i);
+               /* Bump refcount so the message survives the array put()
+                * below; json_object_array_add doesn't increment, so the
+                * old reference is what carries through. */
+               json_object_get(old);
+               json_object_array_add(rebuilt, old);
+            }
+            json_object_put(session->conversation_history);
+            session->conversation_history = rebuilt;
+         }
          OLOG_INFO("Session %u: Inserted system prompt at start (%zu chars)", session->session_id,
                    strlen(system_prompt));
       }
@@ -1590,6 +1643,85 @@ char *session_get_system_prompt(session_t *session) {
    pthread_mutex_unlock(&session->history_mutex);
 
    return result;
+}
+
+char *session_get_last_message_content(session_t *session, const char *role) {
+   if (!session || !role) {
+      return NULL;
+   }
+
+   char *result = NULL;
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (session->conversation_history) {
+      int len = json_object_array_length(session->conversation_history);
+      for (int i = len - 1; i >= 0; i--) {
+         struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
+         struct json_object *role_obj = NULL;
+         if (!json_object_object_get_ex(msg, "role", &role_obj)) {
+            continue;
+         }
+         const char *r = json_object_get_string(role_obj);
+         if (!r || strcmp(r, role) != 0) {
+            continue;
+         }
+         /* Only handle plain-string content here.  Multi-part vision
+          * messages store an array; callers that care about those
+          * should walk the array themselves. */
+         struct json_object *content_obj = NULL;
+         if (json_object_object_get_ex(msg, "content", &content_obj) && content_obj &&
+             json_object_is_type(content_obj, json_type_string)) {
+            const char *content = json_object_get_string(content_obj);
+            if (content) {
+               result = strdup(content);
+            }
+         }
+         break;
+      }
+   }
+
+   pthread_mutex_unlock(&session->history_mutex);
+   return result;
+}
+
+bool session_replace_last_message_content(session_t *session,
+                                          const char *role,
+                                          const char *new_content) {
+   if (!session || !role || !new_content) {
+      return false;
+   }
+
+   bool replaced = false;
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (session->conversation_history) {
+      int len = json_object_array_length(session->conversation_history);
+      for (int i = len - 1; i >= 0; i--) {
+         struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
+         struct json_object *role_obj = NULL;
+         if (!json_object_object_get_ex(msg, "role", &role_obj)) {
+            continue;
+         }
+         const char *r = json_object_get_string(role_obj);
+         if (!r || strcmp(r, role) != 0) {
+            continue;
+         }
+         /* Only mutate plain-string content; refuse to overwrite
+          * multi-part array content (would silently drop attached
+          * images). */
+         struct json_object *content_obj = NULL;
+         if (json_object_object_get_ex(msg, "content", &content_obj) && content_obj &&
+             json_object_is_type(content_obj, json_type_string)) {
+            json_object_object_del(msg, "content");
+            json_object_object_add(msg, "content", json_object_new_string(new_content));
+            replaced = true;
+         }
+         break;
+      }
+   }
+
+   pthread_mutex_unlock(&session->history_mutex);
+   return replaced;
 }
 
 // =============================================================================

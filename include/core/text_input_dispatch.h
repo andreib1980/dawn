@@ -82,6 +82,15 @@ typedef struct {
     * to skip. */
    text_input_user_msg_added_fn on_user_msg_added;
    void *user_msg_added_ctx;
+
+   /* Optional per-turn channel hint appended to the system prompt
+    * AFTER per-turn focus injection has built it.  Used by the
+    * messaging engine to inform the LLM of channel-specific
+    * constraints (e.g., "Channel: SMS. Keep reply concise — aim for
+    * under 500 chars, plain text, no markdown.").  NULL = no
+    * appendage.  The hint applies only to this turn — the next call
+    * to session_dispatch_user_turn rebuilds the prompt from scratch. */
+   const char *channel_hint;
 } text_input_dispatch_opts_t;
 
 /**
