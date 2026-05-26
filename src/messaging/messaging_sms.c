@@ -35,13 +35,10 @@
 #include "messaging/messaging_engine.h"
 #include "tools/phone_service.h"
 
-/* SMS outbound runs on the user-id of whoever owns the channel row,
- * but the driver contract doesn't carry user_id through send_text().
- * For v1 we use user_id=1 (single-user/admin) — consistent with the
- * existing phone_tool's default.  TODO: thread user_id through the
- * driver contract when phone_tool gains multi-user support (already
- * filed in docs/TODO.md "Phone tool pending-state migration"). */
-#define SMS_DEFAULT_USER_ID 1
+/* Fallback user_id used only when the caller doesn't supply one
+ * (defensive — current contract requires user_id > 0).  Matches the
+ * existing phone_tool's default. */
+#define SMS_FALLBACK_USER_ID 1
 
 static int sms_extract_phone_e164(const char *address_json, char *out, size_t out_size) {
    if (!address_json || !out || out_size == 0) {
@@ -74,7 +71,10 @@ static void sms_shutdown_impl(void) {
     * down. */
 }
 
-static int sms_send_text(const char *provider_address, const char *address_json, const char *text) {
+static int sms_send_text(int user_id,
+                         const char *provider_address,
+                         const char *address_json,
+                         const char *text) {
    char e164[32];
    e164[0] = '\0';
    /* Prefer typed provider_address (the E.164 string); fall back to
@@ -92,8 +92,14 @@ static int sms_send_text(const char *provider_address, const char *address_json,
       return FAILURE;
    }
 
+   /* Use the supplied user_id so phone_service_send_sms scopes its
+    * audit log + per-user rate buckets correctly.  Falls back to the
+    * single-admin default if the caller passed 0 (older code path or
+    * a context where user_id wasn't available — should not happen on
+    * the messaging-engine path). */
+   int effective_user_id = (user_id > 0) ? user_id : SMS_FALLBACK_USER_ID;
    char result[256] = { 0 };
-   int rc = phone_service_send_sms(SMS_DEFAULT_USER_ID, e164, text, result, sizeof(result));
+   int rc = phone_service_send_sms(effective_user_id, e164, text, result, sizeof(result));
    if (rc != SUCCESS) {
       OLOG_WARNING("sms_driver: phone_service_send_sms failed (rc=%d): %s", rc, result);
       return FAILURE;

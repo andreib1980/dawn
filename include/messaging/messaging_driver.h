@@ -49,7 +49,10 @@ extern "C" {
  * @param timestamp         Unix epoch seconds when the provider claims
  *                          the message was sent (0 if unknown).
  *
- * @return 0 on success, non-zero if the engine couldn't enqueue.
+ * @return SUCCESS if the engine accepted the event, FAILURE if it
+ *         couldn't enqueue (queue full, body too long, gate rejected,
+ *         etc.).  Drivers MAY ignore the return — the engine's
+ *         response semantics are downstream of enqueue.
  */
 typedef int (*messaging_inbound_fn)(const char *provider,
                                     const char *provider_address,
@@ -89,6 +92,12 @@ typedef struct messaging_driver_s {
    /**
     * Send a plain-text message to a provider address.
     *
+    * @param user_id           The DAWN user the send is acting on
+    *                          behalf of.  Drivers that scope per-user
+    *                          state (SMS audit logs, rate-limit
+    *                          buckets in phone_service) consume this;
+    *                          drivers that don't (Telegram bot tokens
+    *                          are bot-wide) ignore it.  Must be > 0.
     * @param provider_address  Typed primary key for this driver
     *                          (chat_id / phone_e164 / channel_id).
     *                          Drivers that need ONLY this can skip
@@ -106,7 +115,10 @@ typedef struct messaging_driver_s {
     * @return SUCCESS / FAILURE.  Network errors map to FAILURE; the
     *         engine layer may retry per its rate-limit policy.
     */
-   int (*send_text)(const char *provider_address, const char *address_json, const char *text);
+   int (*send_text)(int user_id,
+                    const char *provider_address,
+                    const char *address_json,
+                    const char *text);
 
    /**
     * Build the canonical address_json blob for this driver given a

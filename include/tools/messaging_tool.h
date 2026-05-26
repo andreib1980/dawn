@@ -26,6 +26,21 @@
 extern "C" {
 #endif
 
+/**
+ * @brief Register the messaging LLM tool with the tool registry.
+ *
+ * Called from `tools_register_all()` at tool-init time.  Initializes
+ * the messaging engine via `messaging_engine_init()` and conditionally
+ * registers the Telegram driver (when `telegram_bot_token` is set in
+ * secrets.toml) and the SMS driver (always — ECHO owns the modem
+ * connection lifecycle).  See `docs/MESSAGING_CHANNELS_DESIGN.md` §3.
+ *
+ * @return SUCCESS on successful registration, FAILURE on engine init
+ *         or registry failure.  Driver registration failures are
+ *         logged but non-fatal (the LLM tool still works; absent
+ *         drivers surface as `MESSAGING_DRIVER_NOT_REGISTERED` errors
+ *         on send).
+ */
 int messaging_tool_register(void);
 
 #ifdef __cplusplus

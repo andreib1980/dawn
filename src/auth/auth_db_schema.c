@@ -2831,7 +2831,16 @@ int auth_db_create_schema(const char *db_path) {
       if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
          OLOG_ERROR("auth_db: v52 migration failed: %s", errmsg ? errmsg : "unknown");
       } else {
-         OLOG_INFO("auth_db: v52 added messaging_channels.conversation_id (forever-binding)");
+         if (rc == SQLITE_OK) {
+            OLOG_INFO("auth_db: v52 added messaging_channels.conversation_id (forever-binding)");
+         } else {
+            /* Duplicate-column path: SCHEMA_SQL already created the
+             * column at v52 shape during multi-step migration via
+             * CREATE TABLE IF NOT EXISTS.  Mark v52 ok without
+             * claiming we did the ALTER ourselves. */
+            OLOG_INFO("auth_db: v52 messaging_channels.conversation_id already present "
+                      "(applied by SCHEMA_SQL during multi-step migration)");
+         }
          v52_ok = true;
       }
       sqlite3_free(errmsg);

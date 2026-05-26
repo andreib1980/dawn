@@ -84,6 +84,20 @@ int auth_db_run_cleanup(void) {
    sqlite3_step(s_db.stmt_metrics_delete_old);
    sqlite3_reset(s_db.stmt_metrics_delete_old);
 
+   /* Messaging /link audit log (7-day retention).  Inline DELETE
+    * rather than a cached prepared statement — the table sees low
+    * write traffic (only on /link attempts, rate-limited to 5/sender/
+    * 10min) so per-call prepare overhead is negligible.  See
+    * docs/MESSAGING_CHANNELS_DESIGN.md §12. */
+   time_t link_attempt_cutoff = now - ((time_t)7 * 24 * 60 * 60);
+   sqlite3_stmt *stmt_link = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM messaging_link_attempts WHERE created_at < ?", -1,
+                          &stmt_link, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(stmt_link, 1, (int64_t)link_attempt_cutoff);
+      sqlite3_step(stmt_link);
+      sqlite3_finalize(stmt_link);
+   }
+
    s_db.last_cleanup = now;
 
    pthread_mutex_unlock(&s_db.mutex);

@@ -84,6 +84,12 @@ struct buffer {
    size_t cap;
 };
 
+/* libcurl CURLOPT_WRITEFUNCTION callback.  Return value semantics are
+ * the libcurl contract — NOT DAWN's SUCCESS/FAILURE convention.
+ * Returning the byte count signals "consumed N bytes, continue";
+ * returning 0 (or any value != size*nmemb) signals CURL to abort the
+ * transfer.  We return 0 on realloc failure, which is the documented
+ * way to cleanly abort under OOM. */
 static size_t buffer_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
    struct buffer *buf = (struct buffer *)userdata;
    size_t add = size * nmemb;
@@ -191,7 +197,13 @@ static int tg_extract_chat_id(const char *address_json, char *chat_id_out, size_
    return rc;
 }
 
-static int tg_send_text(const char *provider_address, const char *address_json, const char *text) {
+static int tg_send_text(int user_id,
+                        const char *provider_address,
+                        const char *address_json,
+                        const char *text) {
+   /* Telegram bot token is bot-wide; user_id is irrelevant to the
+    * send mechanics.  Accepted for contract uniformity. */
+   (void)user_id;
    if (!text) {
       return FAILURE;
    }
@@ -245,6 +257,12 @@ static int tg_send_text(const char *provider_address, const char *address_json, 
       curl_easy_setopt(s_send_curl, CURLOPT_USERAGENT, TG_USER_AGENT);
       curl_easy_setopt(s_send_curl, CURLOPT_TCP_KEEPALIVE, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+      /* Defense in depth — libcurl defaults already verify, but
+       * setting explicitly protects against environment-variable
+       * overrides (CURL_CA_BUNDLE etc.) and version-specific default
+       * changes.  Same pattern as oauth_client.c. */
+      curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYPEER, 1L);
+      curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYHOST, 2L);
       curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, buffer_write);
       curl_easy_setopt(s_send_curl, CURLOPT_WRITEDATA, &resp);
       curl_easy_setopt(s_send_curl, CURLOPT_TIMEOUT, 30L);
@@ -447,6 +465,11 @@ static void *tg_listener_thread(void *arg) {
    curl_easy_setopt(handle, CURLOPT_USERAGENT, TG_USER_AGENT);
    curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
    curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+   /* Defense in depth — libcurl defaults already verify, but explicit
+    * setopt protects against environment-variable overrides and
+    * version-specific default changes.  Same pattern as oauth_client.c. */
+   curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
+   curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, buffer_write);
    curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)TG_HTTP_TIMEOUT);
    curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);

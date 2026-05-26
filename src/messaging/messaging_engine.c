@@ -46,6 +46,7 @@
 #include "core/wake_word.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_history_loader.h"
 
 /* =============================================================================
  * Internal constants and types
@@ -57,6 +58,32 @@
 #define MESSAGING_MAX_BODY_LEN 4096
 #define MESSAGING_LINK_BODY_CAP 256
 #define MESSAGING_RL_KEY_SIZE 96 /* "provider:address" composite */
+
+/* Rate limiter slot counts — these MUST match the static array
+ * declarations below (s_inbound_link_entries[N] etc.).  If you change
+ * one, change both. */
+#define MESSAGING_RL_LINK_SLOTS 64
+#define MESSAGING_RL_GENERAL_SLOTS 128
+#define MESSAGING_RL_OUTBOUND_SLOTS 64
+
+/* Bounded stack buffer for the engine's async-send confirmation text
+ * (/link confirm, /new confirm).  Current callers send ~80-90-char
+ * messages; the cap is well above that with margin for future
+ * confirmation strings.  Oversize content is truncated by snprintf;
+ * callers must NOT assume arbitrary-length delivery through
+ * engine_send_async. */
+#define MESSAGING_ASYNC_SEND_TEXT_MAX 1024
+
+/* Stack buffer for per-provider address_json blob construction
+ * (build_address_json_for).  Sized for Telegram chat_id +
+ * SMS phone_e164 + Phase 3+ Discord/Slack extras (guild_id, team_id).
+ * Used at several call sites that all need to agree. */
+#define MESSAGING_ADDRESS_JSON_BUF_SIZE 256
+
+/* Per-turn channel-hint buffer (the SMS system-prompt augmentation).
+ * Holds the base hint plus an optional truncation-feedback append
+ * when the previous reply overflowed.  See provider_outbound_for. */
+#define MESSAGING_CHANNEL_HINT_BUF_SIZE 1024
 
 /* Crockford base32 alphabet — excludes I/L/O/U to avoid typing
  * confusion. */
@@ -76,6 +103,15 @@ typedef struct {
    char provider_address[128];
    session_t *session;
    time_t last_used;
+   /* Self-reset deferral flag.  Set when the LLM (running on THIS
+    * slot's session via the tool loop) calls
+    * `messaging.reset_conversation` targeting its own channel.
+    * Immediate reset would session_destroy the session out from under
+    * the worker that's still mid-dispatch.  Instead, the reset is
+    * deferred: process_inbound checks this flag after its dispatch
+    * returns + persistence completes, then performs the eviction +
+    * conv_id clear there.  Reset by the worker after processing. */
+   bool pending_reset;
 } session_slot_t;
 
 /* =============================================================================
@@ -106,10 +142,12 @@ static bool s_worker_started = false;
 static session_slot_t s_session_slots[MESSAGING_MAX_SESSIONS];
 static pthread_mutex_t s_session_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Rate limiters. */
-static rate_limit_entry_t s_inbound_link_entries[64];
-static rate_limit_entry_t s_inbound_general_entries[128];
-static rate_limit_entry_t s_outbound_per_user_entries[64];
+/* Rate limiters.  Slot counts live in MESSAGING_RL_*_SLOTS so the
+ * array decls below and the slot_count fields in the rate_limiter
+ * configs (messaging_engine_init) can't drift apart. */
+static rate_limit_entry_t s_inbound_link_entries[MESSAGING_RL_LINK_SLOTS];
+static rate_limit_entry_t s_inbound_general_entries[MESSAGING_RL_GENERAL_SLOTS];
+static rate_limit_entry_t s_outbound_per_user_entries[MESSAGING_RL_OUTBOUND_SLOTS];
 
 static rate_limiter_t s_inbound_link_limiter;
 static rate_limiter_t s_inbound_general_limiter;
@@ -141,7 +179,8 @@ static int lookup_channel_user(const char *provider,
                                size_t display_name_buf_size);
 static session_t *get_or_create_messaging_session(const char *provider,
                                                   const char *provider_address,
-                                                  int user_id);
+                                                  int user_id,
+                                                  int64_t conversation_id);
 static void process_inbound(inbound_item_t *item);
 static void link_attempt_log(const char *provider,
                              const char *sender_address,
@@ -170,9 +209,15 @@ int messaging_engine_init(void) {
    memset(s_session_slots, 0, sizeof(s_session_slots));
 
    /* Rate limiters.  Budgets per docs/MESSAGING_CHANNELS_DESIGN.md §12. */
-   rate_limiter_config_t link_cfg = { .max_count = 5, .window_sec = 600, .slot_count = 64 };
-   rate_limiter_config_t general_cfg = { .max_count = 60, .window_sec = 600, .slot_count = 128 };
-   rate_limiter_config_t outbound_cfg = { .max_count = 10, .window_sec = 60, .slot_count = 64 };
+   rate_limiter_config_t link_cfg = { .max_count = 5,
+                                      .window_sec = 600,
+                                      .slot_count = MESSAGING_RL_LINK_SLOTS };
+   rate_limiter_config_t general_cfg = { .max_count = 60,
+                                         .window_sec = 600,
+                                         .slot_count = MESSAGING_RL_GENERAL_SLOTS };
+   rate_limiter_config_t outbound_cfg = { .max_count = 10,
+                                          .window_sec = 60,
+                                          .slot_count = MESSAGING_RL_OUTBOUND_SLOTS };
 
    memset(s_inbound_link_entries, 0, sizeof(s_inbound_link_entries));
    memset(s_inbound_general_entries, 0, sizeof(s_inbound_general_entries));
@@ -627,6 +672,46 @@ static void touch_channel_last_used(const char *provider, const char *provider_a
    AUTH_DB_UNLOCK();
 }
 
+/* Try to detect that the caller is the LLM running on the same
+ * session the reset would destroy.  When this returns true, the
+ * caller MUST treat the reset as deferred (set pending_reset on the
+ * slot, return MESSAGING_SUCCESS, let process_inbound handle it after
+ * dispatch).  Synchronous reset on a self-targeting call leads to
+ * UAF: session_destroy times out waiting for the worker's retain to
+ * drop, frees the session_t anyway, worker resumes on freed memory.
+ *
+ * Detection: session_get_command_context() returns the session
+ * currently executing tool callbacks on this thread.  We compare its
+ * session_id against the slot's session for (provider, address).  A
+ * match means the LLM tool is running on THIS slot's session — exact
+ * self-reset case.  Non-match (or no command context, or no slot
+ * yet) → immediate reset is safe. */
+static bool mark_pending_reset_if_self(const char *provider, const char *provider_address) {
+   session_t *caller = session_get_command_context();
+   if (!caller) {
+      return false;
+   }
+   uint32_t caller_id = caller->session_id;
+
+   pthread_mutex_lock(&s_session_slots_mutex);
+   bool self_reset = false;
+   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
+      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, provider) == 0 &&
+          strcmp(s_session_slots[i].provider_address, provider_address) == 0) {
+         if (s_session_slots[i].session->session_id == caller_id) {
+            s_session_slots[i].pending_reset = true;
+            self_reset = true;
+            OLOG_INFO("messaging: /new on %s:%s deferred — caller IS the target session "
+                      "(session_id=%u), processing after dispatch completes",
+                      provider, provider_address, caller_id);
+         }
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_session_slots_mutex);
+   return self_reset;
+}
+
 int messaging_engine_reset_channel(const char *provider, const char *provider_address) {
    if (!provider || !provider_address) {
       return MESSAGING_FAILURE;
@@ -640,6 +725,18 @@ int messaging_engine_reset_channel(const char *provider, const char *provider_ad
    int user_id = lookup_channel_user(provider, provider_address, NULL, 0);
    if (user_id <= 0) {
       return MESSAGING_UNKNOWN_CHANNEL;
+   }
+
+   /* CRITICAL: detect self-reset and defer.  When the LLM emits
+    * messaging.reset_conversation targeting its own channel, the
+    * calling thread is the messaging worker mid-dispatch holding a
+    * retain on the very session_t we'd destroy.  Synchronous
+    * session_destroy times out after 3s and frees the session
+    * anyway → UAF on resume.  Defer via pending_reset on the slot;
+    * process_inbound checks at end-of-dispatch and performs the
+    * actual eviction + clear there. */
+   if (mark_pending_reset_if_self(provider, provider_address)) {
+      return MESSAGING_SUCCESS;
    }
 
    /* Order matters: evict FIRST (triggers extraction on the closing
@@ -748,10 +845,10 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
     * address_json.  Drivers fall back to parsing it.  Future
     * optimization: extend lookup_channel_address to also return
     * provider_address so this hot path can skip the JSON parse too. */
-   int rc = drv->send_text(NULL, address_json, text);
+   int rc = drv->send_text(user_id, NULL, address_json, text);
    free(address_json);
 
-   if (rc == 0) {
+   if (rc == SUCCESS) {
       /* Bump last_used_at. */
       AUTH_DB_LOCK_OR_RETURN(MESSAGING_SUCCESS); /* if lock fails just skip */
       sqlite3_stmt *stmt = NULL;
@@ -984,21 +1081,23 @@ messaging_link_state_t messaging_engine_link_status(const char *code) {
 
 typedef struct {
    const messaging_driver_t *drv;
+   int user_id;
    char provider_address[128];
-   char address_json[256];
-   char text[1024];
+   char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
+   char text[MESSAGING_ASYNC_SEND_TEXT_MAX];
 } async_send_item_t;
 
 static void *async_send_thread(void *arg) {
    async_send_item_t *item = (async_send_item_t *)arg;
    if (item && item->drv && item->drv->send_text) {
-      item->drv->send_text(item->provider_address, item->address_json, item->text);
+      item->drv->send_text(item->user_id, item->provider_address, item->address_json, item->text);
    }
    free(item);
    return NULL;
 }
 
 static void engine_send_async(const messaging_driver_t *drv,
+                              int user_id,
                               const char *provider_address,
                               const char *address_json,
                               const char *text) {
@@ -1016,6 +1115,7 @@ static void engine_send_async(const messaging_driver_t *drv,
       return;
    }
    item->drv = drv;
+   item->user_id = user_id;
    if (provider_address) {
       snprintf(item->provider_address, sizeof(item->provider_address), "%s", provider_address);
    }
@@ -1197,7 +1297,7 @@ static int handle_link_command(const char *provider,
 
    /* Build the per-provider address_json blob.  This is the single
     * source of truth for what shape each provider's row carries. */
-   char address_json[256];
+   char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
    build_address_json_for(provider, sender_address, address_json, sizeof(address_json));
 
    /* Insert messaging_channels row.  Validate address via the driver's
@@ -1248,7 +1348,7 @@ static int handle_link_command(const char *provider,
     * driver can skip the JSON parse. */
    if (drv) {
       engine_send_async(
-          drv, sender_address, address_json,
+          drv, user_id, sender_address, address_json,
           "Your channel has been linked. Messages here will now reach the assistant.");
    }
    return MESSAGING_SUCCESS;
@@ -1338,17 +1438,18 @@ static int engine_inbound_dispatch(const char *provider,
       /* Send confirmation through engine_send_async so callers running
        * on the mosquitto callback thread (SMS) don't deadlock waiting
        * for the echo/response that mosquitto can't deliver while the
-       * callback is blocked.  Same pattern as handle_link_command. */
+       * callback is blocked.  Same pattern as handle_link_command.
+       * user_id was resolved above by lookup_channel_user. */
       const messaging_driver_t *drv = find_driver(provider);
       if (drv && drv->send_text) {
-         char address_json[256];
+         char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
          build_address_json_for(provider, provider_address, address_json, sizeof(address_json));
          const char *msg =
              (rc == MESSAGING_SUCCESS)
                  ? "Started a new conversation. Previous context is preserved in the WebUI."
                  : "Couldn't reset the conversation (internal error). Try again or check the "
                    "WebUI.";
-         engine_send_async(drv, provider_address, address_json, msg);
+         engine_send_async(drv, user_id, provider_address, address_json, msg);
       }
       OLOG_INFO("messaging: /new from %s:%s (rc=%d)", provider, provider_address, rc);
       return rc;
@@ -1404,23 +1505,20 @@ static int enqueue_inbound(const char *provider,
  * Session map and worker thread
  * ============================================================================= */
 
-/* TODO(messaging): the create-new-session path below still holds
- * s_session_slots_mutex (per-module) while calling session_create
- * (which acquires the global session_manager_rwlock).  Per
- * ARCHITECTURE.md §"Mutex Lock Ordering", that's an inversion (global
- * locks should be taken BEFORE per-module locks).  It doesn't deadlock
- * today because nothing acquires s_session_slots_mutex while holding
- * session_manager_rwlock, but it's a footgun.  The eviction path below
- * already drops s_session_slots_mutex before calling session_destroy;
- * extend the same shape to the create branch.  Filed separately to
- * keep the eviction-path fix surgical. */
-/* NOTE: engine_shutdown now uses session_destroy for each slot, so
+/* NOTE: engine_shutdown uses session_destroy for each slot, so
  * in-flight forever-conversations get their facts extracted on
  * graceful shutdown via session_destroy's existing memory-extraction
- * hook.  See messaging_engine_shutdown above. */
+ * hook.  See messaging_engine_shutdown above.
+ *
+ * Lock ordering: this function NEVER holds s_session_slots_mutex
+ * across session_create or session_destroy.  Both global-lock-
+ * acquiring helpers are called outside the per-module mutex.  See
+ * the inline release/re-acquire dance in the eviction branch and the
+ * create-new-session branch. */
 static session_t *get_or_create_messaging_session(const char *provider,
                                                   const char *provider_address,
-                                                  int user_id) {
+                                                  int user_id,
+                                                  int64_t conversation_id) {
    pthread_mutex_lock(&s_session_slots_mutex);
 
    /* Find existing slot. */
@@ -1513,6 +1611,25 @@ static session_t *get_or_create_messaging_session(const char *provider,
       }
    }
 
+   /* Lock-order discipline: session_create acquires the GLOBAL
+    * session_manager_rwlock.  Per ARCHITECTURE.md "Mutex Lock
+    * Ordering", global locks must be acquired BEFORE per-module
+    * locks.  Holding s_session_slots_mutex across session_create
+    * would invert that order — no deadlock today (nothing else
+    * acquires slots mutex while holding session_manager_rwlock), but
+    * a real footgun if/when a future refactor adds concurrent
+    * messaging dispatchers.
+    *
+    * Drop the slots mutex BEFORE session_create.  Set up the new
+    * session (stamp user_id, restore history) while no engine locks
+    * are held — the session_t isn't yet visible to any other thread
+    * since we haven't installed it in the slot.  Re-acquire the
+    * slots mutex to install; defensive re-scan handles the case
+    * where another thread claimed `target` during the unlock window
+    * (currently impossible with a single worker, but defensive for
+    * future concurrent dispatchers). */
+   pthread_mutex_unlock(&s_session_slots_mutex);
+
    /* Create new session with SESSION_TYPE_MESSAGING.  The type itself
     * exempts the session from session_cleanup_expired (see
     * session_manager.c) — the messaging engine owns this session's
@@ -1522,16 +1639,75 @@ static session_t *get_or_create_messaging_session(const char *provider,
     * correctly excludes messaging sessions. */
    session_t *s = session_create(SESSION_TYPE_MESSAGING, -1);
    if (!s) {
-      pthread_mutex_unlock(&s_session_slots_mutex);
       return NULL;
    }
 
    /* Stamp user_id so per-turn focus injection runs against the right
     * user AND session-end memory extraction fires (gated on user_id > 0).
     * Without this, every messaging-backed session would default to
-    * user 0 and silently bypass both. */
+    * user 0 and silently bypass both.  Safe to set without locking:
+    * the session_t isn't yet visible to any other thread. */
    if (user_id > 0) {
       s->metrics.user_id = user_id;
+   }
+
+   /* Post-restart history restore.  Without this, daemon restart
+    * silently breaks the forever-conversation contract: DB still has
+    * the channel binding + conv_id, but the new in-memory session
+    * starts empty, so the LLM has zero prior context while
+    * conv_db_add_message_ex keeps appending to the same conv row.
+    * Loads the conv's full history (image markers stripped — vision
+    * blobs blow context for no benefit on a text-only channel).
+    * Empty result (fresh conv just created by
+    * resolve_channel_conversation_id) is a no-op since the array
+    * starts empty.  conv_db_get_messages also enforces ownership
+    * against user_id — defense in depth on the FK already in place.
+    * Still safe to call without engine locks: session_t is private. */
+   if (conversation_id > 0 && user_id > 0) {
+      size_t restored_chars = 0;
+      struct json_object *loaded = memory_history_load_from_db(conversation_id, user_id,
+                                                               &restored_chars);
+      if (loaded) {
+         size_t restored_count = (size_t)json_object_array_length(loaded);
+         if (restored_count > 0) {
+            pthread_mutex_lock(&s->history_mutex);
+            if (s->conversation_history) {
+               json_object_put(s->conversation_history);
+            }
+            s->conversation_history = loaded;
+            pthread_mutex_unlock(&s->history_mutex);
+            OLOG_INFO("messaging: restored %zu messages (%zu chars) into session %u from conv %lld",
+                      restored_count, restored_chars, s->session_id, (long long)conversation_id);
+         } else {
+            /* Fresh conv — nothing to restore.  Free the empty array
+             * we just allocated. */
+            json_object_put(loaded);
+         }
+      }
+   }
+
+   /* Re-acquire slots mutex and install.  Defensive re-scan against
+    * concurrent dispatchers (single-worker today means `target` will
+    * still be free, but future refactors can't trip on this). */
+   pthread_mutex_lock(&s_session_slots_mutex);
+   if (s_session_slots[target].session) {
+      target = MESSAGING_MAX_SESSIONS;
+      for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
+         if (!s_session_slots[i].session) {
+            target = i;
+            break;
+         }
+      }
+      if (target == MESSAGING_MAX_SESSIONS) {
+         /* All slots filled during the unlock window.  Tear down the
+          * just-created session and drop the inbound.  Same shape as
+          * the post-eviction race-loss path above. */
+         OLOG_WARNING("messaging: lost slot race during create for %s:%s — dropping inbound",
+                      provider, provider_address);
+         pthread_mutex_unlock(&s_session_slots_mutex);
+         session_destroy(s->session_id);
+         return NULL;
+      }
    }
 
    snprintf(s_session_slots[target].provider, sizeof(s_session_slots[target].provider), "%s",
@@ -1623,8 +1799,27 @@ static bool truncate_outbound_in_place(char *text, size_t max_chars) {
 }
 
 static void process_inbound(inbound_item_t *item) {
+   /* Forever-binding: every messaging-backed exchange persists into one
+    * conversations row per (provider, provider_address).  First inbound
+    * for a channel creates the conv; subsequent inbound reuses it.
+    * /new clears the binding and the next inbound starts a fresh conv.
+    * LCM handles in-place context compaction; the recovery worker
+    * extracts memory incrementally via last_extracted_msg_id.
+    * resolve_channel_conversation_id returns 0 on any failure — when
+    * that happens we still dispatch the turn, but messages won't
+    * persist to DB for this turn (degraded mode, logged at the
+    * resolver).
+    *
+    * Resolved BEFORE get_or_create_messaging_session so the
+    * conversation_id can flow into session creation — when the
+    * session is freshly created (e.g., daemon just restarted), the
+    * conv's full history is restored into session->conversation_history
+    * so the LLM picks up where the user left off. */
+   int64_t conv_id = resolve_channel_conversation_id(item->provider, item->provider_address,
+                                                     item->user_id);
+
    session_t *session = get_or_create_messaging_session(item->provider, item->provider_address,
-                                                        item->user_id);
+                                                        item->user_id, conv_id);
    if (!session) {
       OLOG_ERROR("messaging: failed to acquire session for %s:%s", item->provider,
                  item->provider_address);
@@ -1638,11 +1833,24 @@ static void process_inbound(inbound_item_t *item) {
     * truncation is just a substring check — no separate per-session
     * "was-truncated" state needed. */
    provider_outbound_t cfg = provider_outbound_for(item->provider);
-   char channel_hint_buf[1024] = { 0 };
+   char channel_hint_buf[MESSAGING_CHANNEL_HINT_BUF_SIZE] = { 0 };
    const char *channel_hint = cfg.channel_hint;
    if (channel_hint) {
       char *last_assistant = session_get_last_message_content(session, "assistant");
-      bool prev_truncated = (last_assistant && strstr(last_assistant, "[truncated]"));
+      /* Anchor the truncation-detect on the exact marker the
+       * truncator emits at the END of an oversized message (see
+       * truncate_outbound_in_place).  Suffix-match (not strstr) so
+       * user content containing the literal "[truncated]" mid-text
+       * doesn't trip the guardrail. */
+      static const char trunc_marker[] = " ... [truncated]";
+      bool prev_truncated = false;
+      if (last_assistant) {
+         size_t la_len = strlen(last_assistant);
+         size_t mk_len = sizeof(trunc_marker) - 1;
+         if (la_len >= mk_len && strcmp(last_assistant + la_len - mk_len, trunc_marker) == 0) {
+            prev_truncated = true;
+         }
+      }
       free(last_assistant);
       if (prev_truncated) {
          snprintf(channel_hint_buf, sizeof(channel_hint_buf),
@@ -1655,19 +1863,6 @@ static void process_inbound(inbound_item_t *item) {
          channel_hint = channel_hint_buf;
       }
    }
-
-   /* Forever-binding: every messaging-backed exchange persists into one
-    * conversations row per (provider, provider_address).  First inbound
-    * for a channel creates the conv; subsequent inbound reuses it.
-    * /new clears the binding and the next inbound starts a fresh conv.
-    * LCM handles in-place context compaction; the recovery worker
-    * extracts memory incrementally via last_extracted_msg_id.
-    * resolve_channel_conversation_id returns 0 on any failure — when
-    * that happens we still dispatch the turn, but messages won't
-    * persist to DB for this turn (degraded mode, logged at the
-    * resolver). */
-   int64_t conv_id = resolve_channel_conversation_id(item->provider, item->provider_address,
-                                                     item->user_id);
 
    text_input_dispatch_opts_t opts = {
       .conversation_id = conv_id,
@@ -1738,15 +1933,47 @@ static void process_inbound(inbound_item_t *item) {
    /* Send the (possibly truncated) response back via the originating
     * driver.  Pass provider_address natively so the driver can skip
     * the JSON parse on the hot path.  Builder still constructs the
-    * address_json blob for providers that need extras. */
+    * address_json blob for providers that need extras.  user_id flows
+    * from the inbound item so drivers that scope per-user state (SMS
+    * audit log + rate buckets in phone_service) accumulate against
+    * the correct DAWN user, not a hardcoded admin fallback. */
    const messaging_driver_t *drv = find_driver(item->provider);
    if (drv && drv->send_text) {
-      char address_json[256];
+      char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
       build_address_json_for(item->provider, item->provider_address, address_json,
                              sizeof(address_json));
-      drv->send_text(item->provider_address, address_json, response);
+      drv->send_text(item->user_id, item->provider_address, address_json, response);
    }
    free(response);
+
+   /* Deferred self-reset processing.  When the LLM's tool call
+    * targeted this very session for `/new`, mark_pending_reset_if_self
+    * set the flag instead of triggering an immediate reset (which
+    * would have UAF'd this worker thread).  Now that the response is
+    * sent and our retain on `session` is dropped, it's safe to
+    * actually reset.  Clear the flag under the slots mutex
+    * (concurrent worker access is impossible — single worker thread —
+    * but defensive against future multi-worker refactors), then
+    * perform the standard reset_channel path. */
+   bool do_deferred_reset = false;
+   pthread_mutex_lock(&s_session_slots_mutex);
+   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
+      if (s_session_slots[i].session && strcmp(s_session_slots[i].provider, item->provider) == 0 &&
+          strcmp(s_session_slots[i].provider_address, item->provider_address) == 0 &&
+          s_session_slots[i].pending_reset) {
+         s_session_slots[i].pending_reset = false;
+         do_deferred_reset = true;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_session_slots_mutex);
+
+   if (do_deferred_reset) {
+      OLOG_INFO("messaging: processing deferred self-reset for %s:%s", item->provider,
+                item->provider_address);
+      evict_session_slot(item->provider, item->provider_address);
+      clear_channel_conversation_id(item->provider, item->provider_address);
+   }
 }
 
 static void *worker_thread(void *arg) {
@@ -1850,22 +2077,25 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
        (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
        (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {
       /* Sender-in-channels guard.  Unlinked phones can't reset
-       * someone else's binding. */
-      if (lookup_channel_user("sms", sender_e164, NULL, 0) <= 0) {
+       * someone else's binding.  Capture user_id for the
+       * confirmation-send so the driver scopes its audit + rate
+       * buckets against the right user. */
+      int reset_user_id = lookup_channel_user("sms", sender_e164, NULL, 0);
+      if (reset_user_id <= 0) {
          OLOG_DEBUG("messaging: SMS /new from unlinked %s — dropping", sender_e164);
          return MESSAGING_UNKNOWN_CHANNEL;
       }
       int rc = messaging_engine_reset_channel("sms", sender_e164);
       const messaging_driver_t *drv = find_driver("sms");
       if (drv && drv->send_text) {
-         char address_json[256];
+         char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
          build_address_json_for("sms", sender_e164, address_json, sizeof(address_json));
          const char *msg =
              (rc == MESSAGING_SUCCESS)
                  ? "Started a new conversation. Previous context is preserved in the WebUI."
                  : "Couldn't reset the conversation (internal error). Try again or check the "
                    "WebUI.";
-         engine_send_async(drv, sender_e164, address_json, msg);
+         engine_send_async(drv, reset_user_id, sender_e164, address_json, msg);
       }
       OLOG_INFO("messaging: /new from sms:%s (rc=%d)", sender_e164, rc);
       return MESSAGING_SUCCESS;
