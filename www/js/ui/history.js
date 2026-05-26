@@ -641,6 +641,29 @@
       }
    }
 
+   /**
+    * Server pushed `conversation_messages_appended` — an external writer
+    * (messaging engine: SMS / Telegram / future Discord) appended new
+    * turns to a conversation.  When that conversation is the one
+    * currently open in the WebUI, re-fetch so the new turns render
+    * without the user having to reload.  Otherwise it's a no-op (the
+    * sidebar item will pick up the new last-activity timestamp on the
+    * next list refresh).
+    */
+   function handleConversationMessagesAppended(payload) {
+      if (!payload || !payload.conversation_id) return;
+      const id = Number(payload.conversation_id);
+      if (!Number.isInteger(id) || id <= 0) return;
+
+      // Only act when the affected conversation is currently being viewed.
+      if (historyState.activeConversationId !== id) return;
+
+      // Re-fetch the conversation to append the new turns.  Uses the
+      // existing load path which re-renders the message panel and
+      // restores the session-side context.
+      requestLoadConversation(id);
+   }
+
    function handleSearchConversationsResponse(payload) {
       if (!payload.success) {
          console.error('Search failed:', payload.error);
@@ -1801,6 +1824,8 @@
       handleReassignResponse: handleReassignResponse,
       // Auto-title broadcast handler
       handleConversationRenamed: handleConversationRenamed,
+      // External-writer append broadcast handler (SMS/Telegram/future Discord)
+      handleConversationMessagesAppended: handleConversationMessagesAppended,
       // Briefing support
       loadConversation: requestLoadConversation,
       refreshList: requestListConversations,

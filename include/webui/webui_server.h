@@ -595,6 +595,25 @@ int64_t webui_get_active_conversation_id(struct session *session);
 void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const char *title);
 
 /**
+ * @brief Broadcast a "new messages appended" event to a user's WebUI connections.
+ *
+ * Fires when an external writer (messaging engine — SMS/Telegram/
+ * future Discord) appends user+assistant turns to a conversation
+ * that the WebUI may be currently viewing.  Without this, the WebUI's
+ * conversation panel goes stale and the user has to manually reload
+ * to see the new turns.
+ *
+ * Thread-safe — called from the messaging worker thread.  Server
+ * broadcasts to ALL of the user's WebUI sessions; the client gates
+ * on `activeConversationId === conv_id` and reloads only when the
+ * affected conversation is the one being viewed.
+ *
+ * @param user_id Target user (the channel's owner).
+ * @param conv_id Conversation that gained new messages.
+ */
+void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
+
+/**
  * @brief Broadcast memory extraction notice to a user's WebUI connections
  *
  * @param user_id   Target user

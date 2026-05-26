@@ -761,6 +761,9 @@
             case 'conversation_renamed':
                DawnHistory.handleConversationRenamed(msg.payload);
                break;
+            case 'conversation_messages_appended':
+               DawnHistory.handleConversationMessagesAppended(msg.payload);
+               break;
             case 'always_on_state':
             case 'wake_detected':
             case 'recording_end':
