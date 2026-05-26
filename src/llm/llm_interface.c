@@ -37,13 +37,13 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_context.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tts/text_to_speech.h"
 #include "ui/metrics.h"
 #include "utils/sentence_buffer.h"

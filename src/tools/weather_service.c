@@ -32,9 +32,9 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 
 // Module state (thread-safe with mutex protection)
 static int module_initialized = 0;

@@ -55,6 +55,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/curl_buffer.h"
 #include "core/iso8601.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -805,42 +806,6 @@ static void *dc_listener_thread(void *arg) {
  * Outbound REST send
  * ============================================================================= */
 
-struct buffer {
-   char *data;
-   size_t len;
-   size_t cap;
-};
-
-/* libcurl WRITEFUNCTION contract (NOT DAWN's SUCCESS/FAILURE): returning
- * byte count = "consumed, continue"; returning anything else aborts. */
-static size_t buffer_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
-   struct buffer *buf = (struct buffer *)userdata;
-   size_t add = size * nmemb;
-   if (buf->len + add + 1 > buf->cap) {
-      size_t new_cap = buf->cap ? buf->cap * 2 : 4096;
-      while (new_cap < buf->len + add + 1) {
-         new_cap *= 2;
-      }
-      char *nd = realloc(buf->data, new_cap);
-      if (!nd) {
-         return 0;
-      }
-      buf->data = nd;
-      buf->cap = new_cap;
-   }
-   memcpy(buf->data + buf->len, ptr, add);
-   buf->len += add;
-   buf->data[buf->len] = '\0';
-   return add;
-}
-
-static void buffer_free(struct buffer *buf) {
-   free(buf->data);
-   buf->data = NULL;
-   buf->len = 0;
-   buf->cap = 0;
-}
-
 static int dc_extract_channel_id(const char *address_json, char *out, size_t out_size) {
    if (!address_json || !out || out_size == 0) {
       return FAILURE;
@@ -919,7 +884,8 @@ static int dc_send_text(int user_id,
    char auth_header[DC_BOT_TOKEN_MAX + 32];
    snprintf(auth_header, sizeof(auth_header), "Authorization: Bot %s", s_bot_token);
 
-   struct buffer resp = { 0 };
+   curl_buffer_t resp;
+   curl_buffer_init(&resp);
    int rc = FAILURE;
 
    pthread_mutex_lock(&s_send_curl_mutex);
@@ -940,7 +906,7 @@ static int dc_send_text(int user_id,
        * messaging_telegram.c + oauth_client.c. */
       curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYPEER, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYHOST, 2L);
-      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, buffer_write);
+      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
       curl_easy_setopt(s_send_curl, CURLOPT_WRITEDATA, &resp);
       curl_easy_setopt(s_send_curl, CURLOPT_TIMEOUT, 30L);
 
@@ -964,7 +930,7 @@ static int dc_send_text(int user_id,
    }
    pthread_mutex_unlock(&s_send_curl_mutex);
 
-   buffer_free(&resp);
+   curl_buffer_free(&resp);
    json_object_put(body);
    return rc;
 }

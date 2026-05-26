@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_openai_internal.h"
@@ -44,7 +45,6 @@
 #include "llm/llm_tools.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif

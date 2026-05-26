@@ -35,13 +35,13 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tts/text_to_speech.h"
 #include "utils/string_utils.h"
 #ifdef ENABLE_WEBUI

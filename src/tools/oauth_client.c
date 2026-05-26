@@ -37,8 +37,8 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "core/crypto_store.h"
+#include "core/curl_buffer.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 
 /* =============================================================================
  * Constants

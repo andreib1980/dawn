@@ -35,12 +35,12 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "image_store.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tools/tool_registry.h"
 #include "tools/url_fetcher.h"
 #include "tools/web_search.h"

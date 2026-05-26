@@ -34,10 +34,10 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "llm/llm_context.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 
 /* =============================================================================
  * Configuration Access

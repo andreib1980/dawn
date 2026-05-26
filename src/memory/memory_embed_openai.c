@@ -29,10 +29,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
-#include "tools/curl_buffer.h"
 
 /* =============================================================================
  * State

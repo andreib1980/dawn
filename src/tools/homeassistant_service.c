@@ -37,8 +37,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/curl_buffer.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 
 /* =============================================================================
  * Constants

@@ -41,8 +41,8 @@
 
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
+#include "core/curl_buffer.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tools/tavily_rate_limit.h"
 #include "tools/url_snippet_cache.h"
 #include "tools/web_search_tavily.h"

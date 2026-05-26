@@ -30,11 +30,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tools/tfidf_summarizer.h"
 #include "tts/text_to_speech.h"
 #include "ui/metrics.h"

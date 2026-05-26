@@ -36,9 +36,9 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "core/embedding_engine.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tools/document_extract.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/tool_registry.h"

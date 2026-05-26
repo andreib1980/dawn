@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "llm/llm_claude.h"
@@ -41,7 +42,6 @@
 #include "llm/llm_tools.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "ui/metrics.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"

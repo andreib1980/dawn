@@ -40,6 +40,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_driver.h"
@@ -81,46 +82,6 @@ static pthread_mutex_t s_send_curl_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* =============================================================================
  * Internal helpers
  * ============================================================================= */
-
-struct buffer {
-   char *data;
-   size_t len;
-   size_t cap;
-};
-
-/* libcurl CURLOPT_WRITEFUNCTION callback.  Return value semantics are
- * the libcurl contract — NOT DAWN's SUCCESS/FAILURE convention.
- * Returning the byte count signals "consumed N bytes, continue";
- * returning 0 (or any value != size*nmemb) signals CURL to abort the
- * transfer.  We return 0 on realloc failure, which is the documented
- * way to cleanly abort under OOM. */
-static size_t buffer_write(void *ptr, size_t size, size_t nmemb, void *userdata) {
-   struct buffer *buf = (struct buffer *)userdata;
-   size_t add = size * nmemb;
-   if (buf->len + add + 1 > buf->cap) {
-      size_t new_cap = buf->cap ? buf->cap * 2 : 4096;
-      while (new_cap < buf->len + add + 1) {
-         new_cap *= 2;
-      }
-      char *nd = realloc(buf->data, new_cap);
-      if (!nd) {
-         return 0;
-      }
-      buf->data = nd;
-      buf->cap = new_cap;
-   }
-   memcpy(buf->data + buf->len, ptr, add);
-   buf->len += add;
-   buf->data[buf->len] = '\0';
-   return add;
-}
-
-static void buffer_free(struct buffer *buf) {
-   free(buf->data);
-   buf->data = NULL;
-   buf->len = 0;
-   buf->cap = 0;
-}
 
 /* Progress callback for both the listener long-poll and the send
  * handle.  Curl invokes this periodically (~1s default cadence) during
@@ -246,7 +207,8 @@ static int tg_send_text(int user_id,
    char url[TG_BASE_URL_MAX + 32];
    snprintf(url, sizeof(url), "%s/sendMessage", s_base_url);
 
-   struct buffer resp = { 0 };
+   curl_buffer_t resp;
+   curl_buffer_init(&resp);
    int rc = FAILURE;
 
    pthread_mutex_lock(&s_send_curl_mutex);
@@ -267,7 +229,7 @@ static int tg_send_text(int user_id,
        * changes.  Same pattern as oauth_client.c. */
       curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYPEER, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYHOST, 2L);
-      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, buffer_write);
+      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
       curl_easy_setopt(s_send_curl, CURLOPT_WRITEDATA, &resp);
       curl_easy_setopt(s_send_curl, CURLOPT_TIMEOUT, 30L);
       struct curl_slist *hdrs = NULL;
@@ -298,7 +260,7 @@ static int tg_send_text(int user_id,
    }
    pthread_mutex_unlock(&s_send_curl_mutex);
 
-   buffer_free(&resp);
+   curl_buffer_free(&resp);
    json_object_put(body);
    return rc;
 }
@@ -378,7 +340,8 @@ static void tg_poll_once(CURL *handle) {
    snprintf(url, sizeof(url), "%s/getUpdates?offset=%" PRId64 "&timeout=%d", s_base_url,
             s_next_update_id, TG_LONGPOLL_TIMEOUT);
 
-   struct buffer resp = { 0 };
+   curl_buffer_t resp;
+   curl_buffer_init(&resp);
 
    /* The static setopts (USERAGENT / KEEPALIVE / HTTP_VERSION /
     * WRITEFUNCTION / TIMEOUT) are applied ONCE in tg_listener_thread
@@ -399,14 +362,14 @@ static void tg_poll_once(CURL *handle) {
        * s_running=false and the listener will return. */
       if (cc == CURLE_ABORTED_BY_CALLBACK) {
          atomic_store(&s_connected, false);
-         buffer_free(&resp);
+         curl_buffer_free(&resp);
          return;
       }
       char safe[TG_BASE_URL_MAX + 64];
       redact_url(url, safe, sizeof(safe));
       OLOG_WARNING("telegram: getUpdates failed (curl=%d http=%ld) on %s", cc, http_status, safe);
       atomic_store(&s_connected, false);
-      buffer_free(&resp);
+      curl_buffer_free(&resp);
       sleep(TG_RECONNECT_BACKOFF);
       return;
    }
@@ -414,14 +377,14 @@ static void tg_poll_once(CURL *handle) {
    atomic_store(&s_connected, true);
 
    if (!resp.data) {
-      buffer_free(&resp);
+      curl_buffer_free(&resp);
       return;
    }
 
    struct json_object *r = json_tokener_parse(resp.data);
    if (!r) {
       OLOG_WARNING("telegram: failed to parse getUpdates response");
-      buffer_free(&resp);
+      curl_buffer_free(&resp);
       return;
    }
 
@@ -446,7 +409,7 @@ static void tg_poll_once(CURL *handle) {
    }
 
    json_object_put(r);
-   buffer_free(&resp);
+   curl_buffer_free(&resp);
 }
 
 static void *tg_listener_thread(void *arg) {
@@ -474,7 +437,7 @@ static void *tg_listener_thread(void *arg) {
     * version-specific default changes.  Same pattern as oauth_client.c. */
    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
-   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, buffer_write);
+   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)TG_HTTP_TIMEOUT);
    curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
    curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, tg_progress_callback);

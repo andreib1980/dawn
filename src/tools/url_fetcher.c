@@ -36,8 +36,8 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/curl_buffer.h"
 #include "logging.h"
-#include "tools/curl_buffer.h"
 #include "tools/html_parser.h"
 #include "tools/url_fetcher_detect.h"
 #include "tools/url_fetcher_internal.h"
