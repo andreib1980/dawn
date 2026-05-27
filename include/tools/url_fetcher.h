@@ -198,6 +198,24 @@ int url_whitelist_count(void);
  */
 const char *url_fetch_error_string(int error_code);
 
+/**
+ * @brief Get LLM-actionable error message including retryability hints.
+ *
+ * Combines the error class with thread-local detail (HTTP status code,
+ * curl error text) captured during the most recent url_fetch_content()
+ * call.  Output messages tell the LLM what to do next: retry (transient
+ * 5xx/network), stop (404 / blocked), or fall back to search snippets.
+ *
+ * Returns the number of bytes written (excluding NUL).  The thread-local
+ * detail is reset at the start of every url_fetch_content() call.
+ *
+ * @param error_code Error code from url_fetch_content
+ * @param out        Caller-supplied buffer
+ * @param out_size   Buffer size (recommended >= 256)
+ * @return Bytes written (excluding NUL)
+ */
+size_t url_fetch_error_describe(int error_code, char *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

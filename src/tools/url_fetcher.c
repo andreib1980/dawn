@@ -174,6 +174,12 @@ typedef struct {
 static int module_initialized = 0;
 static pthread_mutex_t module_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Forward declarations for the thread-local error-detail helpers used at
+ * the bottom of this file.  Defined alongside the s_last_* state near
+ * url_fetch_error_describe(). */
+static void set_last_error_detail(long http_status, const char *context);
+static void reset_last_error_detail(void);
+
 static whitelist_entry_t whitelist[URL_FETCH_MAX_WHITELIST];
 static int whitelist_count = 0;
 
@@ -856,6 +862,7 @@ static int flaresolverr_fetch(const char *url, char **out_html, size_t *out_size
 
    if (http_status != 200) {
       OLOG_WARNING("url_fetcher: FlareSolverr got HTTP %d for %s", http_status, url);
+      set_last_error_detail(http_status, NULL);
       curl_buffer_free(&buffer);
       return URL_FETCH_ERROR_HTTP;
    }
@@ -1447,6 +1454,7 @@ int url_fetch_content_with_base(const char *url,
    if (res != CURLE_OK) {
       OLOG_ERROR("url_fetcher: Network error after %d retries: %s", retry_count,
                  curl_easy_strerror(res));
+      set_last_error_detail(0, curl_easy_strerror(res));
       curl_slist_free_all(headers);
       if (resolve_list)
          curl_slist_free_all(resolve_list);
@@ -1467,6 +1475,7 @@ int url_fetch_content_with_base(const char *url,
    if (http_code < 200 || http_code >= 300) {
       OLOG_WARNING("url_fetcher: HTTP error %ld for %s after %d attempts", http_code, url,
                    retry_count + 1);
+      set_last_error_detail(http_code, NULL);
       curl_buffer_free(&buffer);
       curl_slist_free_all(headers);
       if (resolve_list)
@@ -1626,7 +1635,34 @@ int url_fetch_content_with_base(const char *url,
 }
 
 int url_fetch_content(const char *url, char **out_content, size_t *out_size) {
+   reset_last_error_detail();
    return url_fetch_content_with_base(url, out_content, out_size, NULL);
+}
+
+/* Thread-local detail buffer populated by the fetch implementation at
+ * error sites; consumed by url_fetch_error_describe() to compose
+ * actionable LLM-facing messages.  Cleared at the start of each
+ * url_fetch_content() entry so stale state from a prior thread reuse
+ * cannot leak into a fresh call.  Two slots: the actual HTTP status code
+ * (0 = N/A) and a short curl-error or context string. */
+static __thread long s_last_http_status = 0;
+static __thread char s_last_error_context[128] = { 0 };
+
+/* Internal: set the thread-local detail.  Called at every URL_FETCH_ERROR_*
+ * return site that has additional context (curl error text, HTTP code,
+ * etc.). */
+static void set_last_error_detail(long http_status, const char *context) {
+   s_last_http_status = http_status;
+   if (context && context[0]) {
+      snprintf(s_last_error_context, sizeof(s_last_error_context), "%s", context);
+   } else {
+      s_last_error_context[0] = '\0';
+   }
+}
+
+static void reset_last_error_detail(void) {
+   s_last_http_status = 0;
+   s_last_error_context[0] = '\0';
 }
 
 const char *url_fetch_error_string(int error_code) {
@@ -1652,4 +1688,99 @@ const char *url_fetch_error_string(int error_code) {
       default:
          return "Unknown error";
    }
+}
+
+size_t url_fetch_error_describe(int error_code, char *out, size_t out_size) {
+   if (!out || out_size == 0) {
+      return 0;
+   }
+   int n = 0;
+   switch (error_code) {
+      case URL_FETCH_SUCCESS:
+         n = snprintf(out, out_size, "success");
+         break;
+      case URL_FETCH_ERROR_INVALID_URL:
+         n = snprintf(out, out_size,
+                      "Invalid URL. Must start with http:// or https://. Stop retrying this URL.");
+         break;
+      case URL_FETCH_ERROR_NETWORK:
+         if (s_last_error_context[0]) {
+            n = snprintf(out, out_size,
+                         "Network error (%s). Likely transient — retry once, or fall back to "
+                         "search snippets if the user's question can be answered without the "
+                         "page body.",
+                         s_last_error_context);
+         } else {
+            n = snprintf(out, out_size,
+                         "Network error. Likely transient — retry once, or fall back to "
+                         "search snippets.");
+         }
+         break;
+      case URL_FETCH_ERROR_HTTP:
+         if (s_last_http_status == 429) {
+            n = snprintf(out, out_size,
+                         "HTTP 429 (rate-limited by upstream). Wait ~60 seconds before "
+                         "retrying, or use a different URL.");
+         } else if (s_last_http_status >= 500 && s_last_http_status < 600) {
+            n = snprintf(out, out_size,
+                         "HTTP %ld (transient server error). Retry once; if persistent, the "
+                         "page is unavailable — fall back to search snippets.",
+                         s_last_http_status);
+         } else if (s_last_http_status == 404) {
+            n = snprintf(out, out_size,
+                         "HTTP 404 (page does not exist). Do NOT retry this URL — find a "
+                         "different source or use search.");
+         } else if (s_last_http_status == 401 || s_last_http_status == 403) {
+            n = snprintf(out, out_size,
+                         "HTTP %ld (access denied — likely bot protection or paywall). "
+                         "Fallback provider also failed. Use search snippets or a different "
+                         "URL.",
+                         s_last_http_status);
+         } else if (s_last_http_status >= 400 && s_last_http_status < 500) {
+            n = snprintf(out, out_size,
+                         "HTTP %ld (client error). Do not retry the same URL; try a different "
+                         "source or search.",
+                         s_last_http_status);
+         } else if (s_last_http_status > 0) {
+            n = snprintf(out, out_size,
+                         "HTTP %ld (non-success status). Try a different URL or search.",
+                         s_last_http_status);
+         } else {
+            n = snprintf(out, out_size,
+                         "HTTP error. The upstream returned an error or the FlareSolverr proxy "
+                         "rejected the request. Try a different URL or search snippets.");
+         }
+         break;
+      case URL_FETCH_ERROR_ALLOC:
+         n = snprintf(out, out_size,
+                      "Internal allocation error. Surface to user as a service error; do not "
+                      "retry.");
+         break;
+      case URL_FETCH_ERROR_EMPTY:
+         n = snprintf(out, out_size,
+                      "Empty or invalid content. The page returned no readable body. Try a "
+                      "different URL.");
+         break;
+      case URL_FETCH_ERROR_TOO_LARGE:
+         n = snprintf(out, out_size,
+                      "Page exceeds the 24 KB cap. The head was preserved but the body was "
+                      "cut; this rarely matters since articles place the lead at the top. Use "
+                      "document_index if full text retention is needed.");
+         break;
+      case URL_FETCH_ERROR_BLOCKED_URL:
+         n = snprintf(out, out_size,
+                      "URL blocked (private/internal address). Do not retry — DAWN refuses to "
+                      "fetch from private IP ranges for SSRF protection.");
+         break;
+      case URL_FETCH_ERROR_INVALID_CONTENT_TYPE:
+         n = snprintf(out, out_size,
+                      "Server returned non-HTML content (e.g. PDF, JSON, binary). url_fetch "
+                      "only handles text/HTML — use document_index for PDFs or document_search "
+                      "for other indexed content.");
+         break;
+      default:
+         n = snprintf(out, out_size, "Unknown error (code %d).", error_code);
+         break;
+   }
+   return (n > 0) ? (size_t)n : 0;
 }

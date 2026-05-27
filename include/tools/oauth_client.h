@@ -159,6 +159,26 @@ int oauth_get_access_token(const oauth_provider_config_t *provider,
                            char *token_buf,
                            size_t token_len);
 
+/**
+ * @brief Check whether the most recent token-refresh attempt on the
+ *        current thread failed with the upstream's "invalid_grant"
+ *        response (token revoked by the user at the provider).
+ *
+ * Reads a thread-local flag set inside oauth_refresh() when the OAuth
+ * server returns 400 + `{"error":"invalid_grant"}`.  Downstream tool
+ * wrappers consult this after a generic failure to substitute a more
+ * specific "re-link this account" message instead of "network error".
+ *
+ * The flag is set on each invalid_grant detection and reset on every
+ * non-revoked refresh outcome (success or other failure), so callers
+ * should query it immediately after the token fetch that failed.
+ *
+ * @param account_out  Optional output: revoked account_key.  May be NULL.
+ * @param out_size     Size of account_out buffer (ignored if NULL).
+ * @return 1 if the most recent refresh saw invalid_grant, 0 otherwise.
+ */
+int oauth_was_last_refresh_revoked(char *account_out, size_t out_size);
+
 /* ============================================================================
  * Encrypted DB Persistence (uses crypto_store)
  * ============================================================================ */

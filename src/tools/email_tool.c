@@ -36,6 +36,7 @@
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "tools/email_service.h"
+#include "tools/oauth_client.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
 
@@ -170,12 +171,27 @@ static char *email_rc_to_error(int rc, const char *op, const char *account, cons
                      "Error: invalid folder name. Valid: inbox, sent, drafts, trash, spam, "
                      "starred, important, all.");
          break;
-      default:
-         snprintf(msg, 384,
-                  "Error: email %s failed (network or upstream error). Retry once; if "
-                  "persistent, the email backend may be unreachable.",
-                  op);
+      default: {
+         /* If the underlying oauth_refresh detected invalid_grant, the
+          * tokens were revoked at the provider — a generic "network
+          * error" message is misleading and tells the LLM to retry
+          * uselessly.  Substitute a "re-link this account" message. */
+         char revoked_account[128] = { 0 };
+         if (oauth_was_last_refresh_revoked(revoked_account, sizeof(revoked_account))) {
+            snprintf(msg, 384,
+                     "Error: OAuth tokens for '%s' have been revoked at the provider. "
+                     "Tell the user to re-link this email account in WebUI Settings -> "
+                     "Email.  Do NOT retry — retrying with the same tokens will keep "
+                     "failing until the user re-authorizes.",
+                     revoked_account[0] ? revoked_account : "this account");
+         } else {
+            snprintf(msg, 384,
+                     "Error: email %s failed (network or upstream error). Retry once; if "
+                     "persistent, the email backend may be unreachable.",
+                     op);
+         }
          break;
+      }
    }
    return msg;
 }
@@ -456,7 +472,8 @@ static char *handle_confirm_send(struct json_object *details, int user_id) {
          return strdup("Error: too many failed confirmation attempts. Please wait 60 seconds "
                        "before trying again.");
       default:
-         return strdup("Error: failed to send email. Check account configuration.");
+         return strdup("Error: failed to send email (network or upstream error). Retry once; "
+                       "if persistent, the SMTP server may be unreachable.");
    }
 }
 
@@ -500,9 +517,12 @@ static char *handle_trash(struct json_object *details, int user_id) {
                                                sizeof(pending_id), subject, sizeof(subject), from,
                                                sizeof(from));
    if (rc == 2)
-      return strdup("Error: email account is read-only. Cannot trash emails.");
+      return strdup("Error: email account is read-only. Cannot trash emails. Tell the user "
+                    "to enable write access for this account in WebUI Settings -> Email.");
    if (rc != 0)
-      return strdup("Error: failed to prepare trash action. Check account configuration.");
+      return strdup("Error: failed to prepare trash action. The message_id may be invalid "
+                    "(get fresh IDs from 'recent' or 'search') or the account may be "
+                    "unreachable — retry once.");
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -535,7 +555,8 @@ static char *handle_confirm_trash(struct json_object *details, int user_id) {
          return strdup("Error: too many failed confirmation attempts. Please wait 60 seconds "
                        "before trying again.");
       default:
-         return strdup("Error: failed to trash email. Check account configuration.");
+         return strdup("Error: failed to trash email (network or upstream error). Retry "
+                       "once; if persistent, the email backend may be unreachable.");
    }
 }
 
@@ -551,9 +572,13 @@ static char *handle_archive(struct json_object *details, int user_id) {
       case 0:
          return strdup("Email archived successfully (removed from Inbox, kept in All Mail).");
       case 2:
-         return strdup("Error: email account is read-only. Cannot archive emails.");
+         return strdup("Error: email account is read-only. Cannot archive emails. Tell the "
+                       "user to enable write access for this account in WebUI Settings -> "
+                       "Email.");
       default:
-         return strdup("Error: failed to archive email. Check account configuration.");
+         return strdup("Error: failed to archive email (network or upstream error). The "
+                       "message_id may be invalid (get fresh IDs from 'recent') or the "
+                       "account may be unreachable — retry once.");
    }
 }
 

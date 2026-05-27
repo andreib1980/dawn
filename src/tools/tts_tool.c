@@ -85,7 +85,13 @@ static char *tts_tool_callback(const char *action, char *value, int *should_resp
 
    if (!value || value[0] == '\0') {
       OLOG_WARNING("TTS: empty or NULL text, ignoring");
-      return NULL;
+      /* Override the default no-respond so the LLM sees an explicit error
+       * rather than a silent NULL — otherwise it can't tell the user why
+       * nothing was spoken. */
+      if (should_respond != NULL) {
+         *should_respond = 1;
+      }
+      return strdup("TTS skipped: empty text. Provide non-empty text to speak.");
    }
 
    OLOG_INFO("TTS: \"%s\"", value);

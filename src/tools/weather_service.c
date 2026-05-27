@@ -630,7 +630,16 @@ weather_response_t *weather_get(const char *location, forecast_type_t forecast) 
    if (geocode_location(location, &latitude, &longitude, &resolved_name) != 0) {
       weather_response_t *response = calloc(1, sizeof(weather_response_t));
       if (response) {
-         response->error = strdup("Failed to find location");
+         /* Compose an LLM-actionable message: name the input that failed and
+          * suggest disambiguation strategies the model can actually try. */
+         char msg[256];
+         snprintf(msg, sizeof(msg),
+                  "Could not geocode '%s'. Try: add country/state ('%s, USA' or '%s, GA'), "
+                  "drop punctuation, or use a major city near the target. If the user said "
+                  "an ambiguous name, ask them to disambiguate.",
+                  location ? location : "(empty)", location ? location : "city",
+                  location ? location : "city");
+         response->error = strdup(msg);
       }
       return response;
    }

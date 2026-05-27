@@ -286,10 +286,14 @@ cleanup:
  * ============================================================================= */
 
 static char *sfx_callback(const char *action, char *value, int *should_respond) {
-   *should_respond = 0;
+   /* Default to responding — silent NULL on failure leaves the LLM
+    * unable to tell the user what went wrong.  Specific error branches
+    * still override *should_respond explicitly if needed. */
+   *should_respond = 1;
 
-   if (!action)
-      return NULL;
+   if (!action) {
+      return strdup("Error: sfx tool called without an action. Valid: play, stop, list.");
+   }
 
    if (strcmp(action, "list") == 0) {
       /* List available sound effect files */
@@ -349,21 +353,36 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
       return result;
    }
 
-   if (!value)
-      return NULL;
+   if (!value) {
+      return strdup("Error: sfx play/stop requires a filename. Call action='list' to see "
+                    "available files.");
+   }
 
    if (strcmp(action, "play") == 0) {
       /* Rate limit */
       uint32_t now = get_time_ms();
       if (now - atomic_load(&sfx_last_play_ms) < SFX_MIN_INTERVAL_MS) {
          OLOG_WARNING("SFX: Rate limited (<%dms since last play)", SFX_MIN_INTERVAL_MS);
-         return NULL;
+         char *msg = malloc(160);
+         if (msg)
+            snprintf(msg, 160,
+                     "Error: sfx rate-limited (less than %d ms since last play). Wait and "
+                     "retry.",
+                     SFX_MIN_INTERVAL_MS);
+         return msg ? msg : strdup("Error: sfx rate-limited.");
       }
 
       /* Validate filename */
       if (!validate_sfx_filename(value)) {
          OLOG_ERROR("SFX: Invalid filename rejected: %s", value);
-         return NULL;
+         char *msg = malloc(256);
+         if (msg)
+            snprintf(msg, 256,
+                     "Error: invalid sfx filename '%s'. Bare filename only (no path), "
+                     "extension .ogg/.wav/.flac/.mp3. Call action='list' to see available "
+                     "files.",
+                     value);
+         return msg ? msg : strdup("Error: invalid sfx filename.");
       }
 
       /* Build full path */
@@ -371,7 +390,7 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
       int n = snprintf(filepath, sizeof(filepath), "%s%s", sfx_config.sound_path, value);
       if (n < 0 || (size_t)n >= sizeof(filepath)) {
          OLOG_ERROR("SFX: Path too long");
-         return NULL;
+         return strdup("Error: sfx file path too long (internal limit exceeded).");
       }
 
       /* Verify realpath stays within sound_path.
@@ -381,15 +400,21 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
       char resolved_base[PATH_MAX];
       if (!realpath(filepath, resolved)) {
          OLOG_ERROR("SFX: File not found: %s", filepath);
-         return NULL;
+         char *msg = malloc(256);
+         if (msg)
+            snprintf(msg, 256,
+                     "Error: sfx file '%s' not found. Call action='list' to see available "
+                     "files.",
+                     value);
+         return msg ? msg : strdup("Error: sfx file not found.");
       }
       if (!realpath(sfx_config.sound_path, resolved_base)) {
          OLOG_ERROR("SFX: Sound path not found: %s", sfx_config.sound_path);
-         return NULL;
+         return strdup("Error: sfx sound directory unreachable (server config issue).");
       }
       if (strncmp(resolved, resolved_base, strlen(resolved_base)) != 0) {
          OLOG_ERROR("SFX: Path traversal blocked: %s", filepath);
-         return NULL;
+         return strdup("Error: sfx filename rejected (path traversal blocked).");
       }
 
       pthread_mutex_lock(&sfx_mutex);
@@ -411,7 +436,13 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
       if (slot_idx < 0) {
          pthread_mutex_unlock(&sfx_mutex);
          OLOG_WARNING("SFX: All %d slots busy, dropping: %s", SFX_MAX_CONCURRENT, value);
-         return NULL;
+         char *msg = malloc(160);
+         if (msg)
+            snprintf(msg, 160,
+                     "Error: all %d sfx playback slots busy. Stop a current sound with "
+                     "action='stop' before starting a new one.",
+                     SFX_MAX_CONCURRENT);
+         return msg ? msg : strdup("Error: all sfx slots busy.");
       }
 
       sfx_slot_t *slot = &sfx_slots[slot_idx];
@@ -424,7 +455,7 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          atomic_store(&slot->active, 0);
          pthread_mutex_unlock(&sfx_mutex);
          OLOG_ERROR("SFX: Failed to allocate thread args");
-         return NULL;
+         return strdup("Error: sfx playback failed (memory allocation).");
       }
 
       targs->slot_index = slot_idx;
@@ -443,27 +474,44 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
          free(targs);
          pthread_mutex_unlock(&sfx_mutex);
          OLOG_ERROR("SFX: Failed to create thread: %d", rc);
-         return NULL;
+         return strdup("Error: sfx playback failed (thread spawn failed).");
       }
 
       /* Detach not needed - we join on reuse or shutdown */
       atomic_store(&sfx_last_play_ms, now);
       pthread_mutex_unlock(&sfx_mutex);
 
+      char *msg = malloc(96);
+      if (msg)
+         snprintf(msg, 96, "Playing sfx '%s'.", value);
+      return msg ? msg : strdup("Playing sfx.");
+
    } else if (strcmp(action, "stop") == 0) {
       pthread_mutex_lock(&sfx_mutex);
 
+      int stopped = 0;
       for (int i = 0; i < SFX_MAX_CONCURRENT; i++) {
          if (atomic_load(&sfx_slots[i].active) && strcmp(sfx_slots[i].filename, value) == 0) {
             atomic_store(&sfx_slots[i].stop, 1);
             OLOG_INFO("SFX: Stopping slot %d (%s)", i, value);
+            stopped++;
          }
       }
 
       pthread_mutex_unlock(&sfx_mutex);
+
+      char *msg = malloc(96);
+      if (msg) {
+         if (stopped > 0)
+            snprintf(msg, 96, "Stopped sfx '%s' (%d slot%s).", value, stopped,
+                     stopped == 1 ? "" : "s");
+         else
+            snprintf(msg, 96, "No active sfx slot matched '%s'.", value);
+      }
+      return msg ? msg : strdup("Stop request processed.");
    }
 
-   return NULL;
+   return strdup("Error: unknown sfx action. Valid: play, stop, list.");
 }
 
 /* =============================================================================

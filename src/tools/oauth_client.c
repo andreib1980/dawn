@@ -159,6 +159,32 @@ static size_t url_encode(const char *str, char *out, size_t out_len) {
 
 #define OAUTH_MAX_RESPONSE_SIZE (1024 * 1024) /* 1 MB cap on token endpoint responses */
 
+/* Thread-local "last refresh saw invalid_grant" flag.  Set inside
+ * oauth_refresh() when the upstream returns 400 with
+ * `{"error":"invalid_grant"}` (token revoked at the provider).  Read by
+ * downstream tool wrappers via oauth_was_last_refresh_revoked() so they
+ * can substitute a "re-link this account" message instead of a generic
+ * "network error".  Reset to zero on every non-revoked refresh outcome
+ * so a stale value can't bleed into the next call on the same thread. */
+static __thread int s_last_refresh_revoked = 0;
+static __thread char s_last_revoked_account[128] = { 0 };
+
+int oauth_was_last_refresh_revoked(char *account_out, size_t out_size) {
+   if (account_out && out_size > 0) {
+      snprintf(account_out, out_size, "%s", s_last_revoked_account);
+   }
+   return s_last_refresh_revoked ? 1 : 0;
+}
+
+static void oauth_set_last_revoked(int revoked, const char *account_key) {
+   s_last_refresh_revoked = revoked ? 1 : 0;
+   if (revoked && account_key) {
+      snprintf(s_last_revoked_account, sizeof(s_last_revoked_account), "%s", account_key);
+   } else if (!revoked) {
+      s_last_revoked_account[0] = '\0';
+   }
+}
+
 /* =============================================================================
  * Provider Setup
  * ============================================================================= */
@@ -541,6 +567,11 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
  * ============================================================================= */
 
 int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *tokens) {
+   /* Clear thread-local revoked flag at entry; on the failure path we
+    * may set it back if invalid_grant is detected.  On the success path
+    * it stays cleared. */
+   oauth_set_last_revoked(0, NULL);
+
    if (!provider || !tokens || !tokens->refresh_token[0])
       return 1;
 
@@ -593,6 +624,20 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
          if (!resp.truncated) {
             OLOG_ERROR("oauth: server response: %.*s", (int)(resp.size < 512 ? resp.size : 512),
                        resp.data);
+         }
+         /* Detect "invalid_grant" — Google's response when the refresh
+          * token has been revoked at the provider (user removed access at
+          * myaccount.google.com or admin policy revoked it).  Set the
+          * thread-local flag so downstream tool wrappers can surface a
+          * "re-link this account" message to the LLM instead of a generic
+          * "network error".  Substring match is acceptable here because
+          * the token endpoint response is server-controlled JSON that
+          * we've already capped at 1 MB. */
+         if (!resp.truncated && http_code == 400 && resp.size > 0 &&
+             strstr(resp.data, "\"invalid_grant\"") != NULL) {
+            OLOG_ERROR("oauth: refresh token revoked by provider (invalid_grant). User must "
+                       "re-link account.");
+            oauth_set_last_revoked(1, NULL);
          }
          sodium_memzero(resp.data, resp.size);
       }
@@ -833,6 +878,12 @@ int oauth_get_access_token(const oauth_provider_config_t *provider,
    if (tokens.expires_at > 0 && (tokens.expires_at - now) < OAUTH_REFRESH_MARGIN_SEC) {
       if (oauth_refresh(provider, &tokens) != 0) {
          OLOG_ERROR("oauth: refresh failed for account '%s'", account_key);
+         /* If oauth_refresh detected invalid_grant, stamp the account_key
+          * onto the thread-local so downstream wrappers can quote it
+          * back to the user via oauth_was_last_refresh_revoked(). */
+         if (oauth_was_last_refresh_revoked(NULL, 0)) {
+            oauth_set_last_revoked(1, account_key);
+         }
          sodium_memzero(&tokens, sizeof(tokens));
          pthread_mutex_unlock(&s_acct_mutexes[midx]);
          return 1;

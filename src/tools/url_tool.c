@@ -139,9 +139,14 @@ static char *url_tool_callback(const char *action, char *value, int *should_resp
    if (result != URL_FETCH_SUCCESS) {
       const char *err = url_fetch_error_string(result);
       OLOG_WARNING("url_tool: Fetch failed: %s", err);
-      char *msg = malloc(256);
+      char detail[384];
+      size_t n = url_fetch_error_describe(result, detail, sizeof(detail));
+      char *msg = malloc(512);
       if (msg) {
-         snprintf(msg, 256, "Failed to fetch URL: %s", err);
+         if (n > 0)
+            snprintf(msg, 512, "Failed to fetch URL: %s", detail);
+         else
+            snprintf(msg, 512, "Failed to fetch URL: %s", err);
          return msg;
       }
       return strdup("Failed to fetch URL.");
