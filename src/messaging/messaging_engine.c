@@ -2031,6 +2031,58 @@ static bool truncate_outbound_in_place(char *text, size_t max_chars) {
    return true;
 }
 
+/* =============================================================================
+ * Typing-indicator keepalive
+ * ============================================================================= */
+
+/* Context passed to the typing-keepalive thread.  Heap-allocated by
+ * process_inbound, freed after pthread_join.  Driver pointer + the
+ * buffers are stable for the lifetime of the keepalive (the engine
+ * worker thread holds the inbound_item_t until process_inbound
+ * returns). */
+typedef struct {
+   const messaging_driver_t *drv;
+   int user_id;
+   /* Matches the inbound_item_t.provider_address sizing — chat_ids /
+    * channel_ids / E.164 numbers all fit comfortably in 128. */
+   char provider_address[128];
+   char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
+   atomic_bool stop;
+} typing_keepalive_ctx_t;
+
+#define MESSAGING_TYPING_INTERVAL_MS 4000
+#define MESSAGING_TYPING_CHUNK_MS 100
+
+static void *typing_keepalive_thread(void *arg) {
+   typing_keepalive_ctx_t *ctx = (typing_keepalive_ctx_t *)arg;
+   /* Defensive: if stop was raised between thread create and schedule,
+    * skip the first call so we don't fire a typing indicator AFTER the
+    * real reply has already gone out. */
+   if (atomic_load(&ctx->stop)) {
+      return NULL;
+   }
+   /* Fire once immediately so the indicator shows up even on sub-second
+    * LLM turns.  Then re-fire every ~4 seconds — stays under Telegram's
+    * ~5s and Discord's ~10s indicator timeouts so the icon never
+    * visibly flickers off mid-turn. */
+   ctx->drv->send_typing(ctx->user_id, ctx->provider_address, ctx->address_json);
+   while (!atomic_load(&ctx->stop)) {
+      /* 100ms-chunked sleep so the stop signal cuts in quickly when
+       * the LLM call returns. */
+      int chunks = MESSAGING_TYPING_INTERVAL_MS / MESSAGING_TYPING_CHUNK_MS;
+      for (int i = 0; i < chunks && !atomic_load(&ctx->stop); i++) {
+         struct timespec ts = { .tv_sec = 0,
+                                .tv_nsec = (long)MESSAGING_TYPING_CHUNK_MS * 1000000L };
+         nanosleep(&ts, NULL);
+      }
+      if (atomic_load(&ctx->stop)) {
+         break;
+      }
+      ctx->drv->send_typing(ctx->user_id, ctx->provider_address, ctx->address_json);
+   }
+   return NULL;
+}
+
 static void process_inbound(inbound_item_t *item) {
    /* Forever-binding: every messaging-backed exchange persists into one
     * conversations row per (provider, provider_address).  First inbound
@@ -2121,7 +2173,47 @@ static void process_inbound(inbound_item_t *item) {
       .channel_hint = channel_hint,
    };
 
+   /* Typing-indicator keepalive.  If the driver supports `send_typing`,
+    * spawn a background thread that fires the typing call once and
+    * re-fires every ~4s while the LLM is processing — so the user sees
+    * "Bot is typing..." instead of dead air during multi-second turns.
+    * Joined after dispatch returns; ctx freed here (not in the thread)
+    * for clear ownership. */
+   typing_keepalive_ctx_t *ka_ctx = NULL;
+   pthread_t ka_thread = 0;
+   bool ka_started = false;
+   const messaging_driver_t *typing_drv = find_driver(item->provider);
+   if (typing_drv && typing_drv->send_typing) {
+      ka_ctx = (typing_keepalive_ctx_t *)calloc(1, sizeof(*ka_ctx));
+      if (ka_ctx) {
+         ka_ctx->drv = typing_drv;
+         ka_ctx->user_id = item->user_id;
+         snprintf(ka_ctx->provider_address, sizeof(ka_ctx->provider_address), "%s",
+                  item->provider_address);
+         build_address_json_for(item->provider, item->provider_address, ka_ctx->address_json,
+                                sizeof(ka_ctx->address_json));
+         atomic_init(&ka_ctx->stop, false);
+         if (pthread_create(&ka_thread, NULL, typing_keepalive_thread, ka_ctx) == 0) {
+            ka_started = true;
+         } else {
+            free(ka_ctx);
+            ka_ctx = NULL;
+         }
+      }
+   }
+
    char *response = core_text_input_dispatch(session, item->body, NULL, NULL, NULL, 0, &opts);
+
+   /* Stop the typing keepalive before doing anything else with the
+    * response — including the empty-response early return below, so
+    * the keepalive doesn't continue firing after we've already given
+    * up on this turn. */
+   if (ka_started) {
+      atomic_store(&ka_ctx->stop, true);
+      pthread_join(ka_thread, NULL);
+      free(ka_ctx);
+      ka_ctx = NULL;
+   }
 
    if (!response || response[0] == '\0') {
       session_release(session);

@@ -254,6 +254,72 @@ static int tg_send_text(int user_id,
    return rc;
 }
 
+/* Typing-indicator POST.  Fire-and-forget; errors logged at DEBUG and
+ * swallowed — typing must never block real delivery.  Reuses the same
+ * send_curl handle + mutex as tg_send_text (only one of
+ * typing-or-message is in flight at a time per driver). */
+static void tg_send_typing(int user_id, const char *provider_address, const char *address_json) {
+   (void)user_id;
+   if (s_base_url[0] == '\0') {
+      return;
+   }
+   char chat_id[64];
+   chat_id[0] = '\0';
+   if (provider_address && provider_address[0] != '\0') {
+      snprintf(chat_id, sizeof(chat_id), "%s", provider_address);
+   } else if (address_json) {
+      if (tg_extract_chat_id(address_json, chat_id, sizeof(chat_id)) != SUCCESS) {
+         return;
+      }
+   } else {
+      return;
+   }
+
+   struct json_object *body = json_object_new_object();
+   if (!body) {
+      return;
+   }
+   json_object_object_add(body, "chat_id", json_object_new_string(chat_id));
+   json_object_object_add(body, "action", json_object_new_string("typing"));
+   const char *body_str = json_object_to_json_string_ext(body, JSON_C_TO_STRING_PLAIN);
+
+   char url[TG_BASE_URL_MAX + 32];
+   snprintf(url, sizeof(url), "%s/sendChatAction", s_base_url);
+
+   curl_buffer_t resp;
+   curl_buffer_init(&resp);
+
+   pthread_mutex_lock(&s_send_curl_mutex);
+   if (!s_send_curl) {
+      s_send_curl = curl_easy_init();
+   }
+   if (s_send_curl) {
+      curl_easy_reset(s_send_curl);
+      curl_easy_setopt(s_send_curl, CURLOPT_URL, url);
+      curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
+      curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, body_str);
+      /* Tighter timeout than send_text: typing is best-effort + repeats
+       * every ~4s, so a slow link shouldn't pin the keepalive thread. */
+      curl_apply_dawn_defaults(s_send_curl, TG_USER_AGENT, 5L, &resp);
+      struct curl_slist *hdrs = NULL;
+      hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+      curl_easy_setopt(s_send_curl, CURLOPT_HTTPHEADER, hdrs);
+
+      CURLcode cc = curl_easy_perform(s_send_curl);
+      long http_status = 0;
+      curl_easy_getinfo(s_send_curl, CURLINFO_RESPONSE_CODE, &http_status);
+      curl_slist_free_all(hdrs);
+
+      if (cc != CURLE_OK || http_status < 200 || http_status >= 300) {
+         OLOG_DEBUG("telegram: sendChatAction failed (curl=%d http=%ld)", cc, http_status);
+      }
+   }
+   pthread_mutex_unlock(&s_send_curl_mutex);
+
+   curl_buffer_free(&resp);
+   json_object_put(body);
+}
+
 /* =============================================================================
  * Inbound — getUpdates long-poll loop
  * ============================================================================= */
@@ -577,6 +643,7 @@ static const messaging_driver_t s_telegram_driver = {
    .validate_address = tg_validate_address,
    .is_connected = tg_is_connected,
    .reconnect = tg_reconnect,
+   .send_typing = tg_send_typing,
 };
 
 int messaging_telegram_register(const char *bot_token) {

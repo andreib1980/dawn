@@ -174,6 +174,28 @@ typedef struct messaging_driver_s {
     *         reconnect; engine should mark the driver disabled.
     */
    int (*reconnect)(void);
+
+   /**
+    * OPTIONAL — fire a "typing" indicator to the recipient so they see
+    * "Bot is typing..." while the engine processes the inbound message.
+    * Fire-and-forget: failures (network, throttling) are NOT propagated.
+    *
+    * Engine spawns a keepalive thread for the lifetime of LLM
+    * processing and re-fires this every ~4 seconds (stays under
+    * Telegram's ~5s + Discord's ~10s indicator timeouts).
+    *
+    * Drivers without a "typing" concept (SMS, future Slack via bot
+    * tokens) leave this NULL.
+    *
+    * @param user_id           DAWN user the typing is on behalf of.
+    *                          Drivers with bot-wide tokens may ignore.
+    * @param provider_address  Typed primary key (chat_id /
+    *                          channel_id).  Must be non-NULL/empty.
+    * @param address_json      Full address blob — drivers that need
+    *                          extras consult this.  May be NULL or
+    *                          "{}" otherwise.
+    */
+   void (*send_typing)(int user_id, const char *provider_address, const char *address_json);
 } messaging_driver_t;
 
 #ifdef __cplusplus

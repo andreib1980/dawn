@@ -975,6 +975,73 @@ static int dc_send_text(int user_id,
    return rc;
 }
 
+/* Typing-indicator POST.  Fire-and-forget; errors logged at DEBUG and
+ * swallowed — typing failures must never block real delivery.  Reuses
+ * the same send_curl handle + mutex as dc_send_text (only one of
+ * typing-or-message is in flight at a time per driver). */
+static void dc_send_typing(int user_id, const char *provider_address, const char *address_json) {
+   (void)user_id;
+   if (s_bot_token[0] == '\0') {
+      return;
+   }
+   char channel_id[64];
+   channel_id[0] = '\0';
+   if (provider_address && provider_address[0] != '\0') {
+      snprintf(channel_id, sizeof(channel_id), "%s", provider_address);
+   } else if (address_json) {
+      if (dc_extract_channel_id(address_json, channel_id, sizeof(channel_id)) != SUCCESS) {
+         return;
+      }
+   } else {
+      return;
+   }
+   /* Snowflake validation — same defense as dc_send_text. */
+   for (size_t i = 0; channel_id[i] != '\0'; i++) {
+      if (!isdigit((unsigned char)channel_id[i])) {
+         return;
+      }
+   }
+
+   char url[256];
+   snprintf(url, sizeof(url), "%s/channels/%s/typing", DC_REST_BASE_URL, channel_id);
+   char auth_header[DC_BOT_TOKEN_MAX + 32];
+   snprintf(auth_header, sizeof(auth_header), "Authorization: Bot %s", s_bot_token);
+
+   curl_buffer_t resp;
+   curl_buffer_init(&resp);
+
+   pthread_mutex_lock(&s_send_curl_mutex);
+   if (!s_send_curl) {
+      s_send_curl = curl_easy_init();
+   }
+   if (s_send_curl) {
+      curl_easy_reset(s_send_curl);
+      curl_easy_setopt(s_send_curl, CURLOPT_URL, url);
+      curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
+      curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, "");
+      curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDSIZE, 0L);
+      /* Tighter timeout than send_text: typing is best-effort + repeats
+       * every ~4s, so a slow link shouldn't pin the keepalive thread. */
+      curl_apply_dawn_defaults(s_send_curl, DC_USER_AGENT, 5L, &resp);
+
+      struct curl_slist *hdrs = NULL;
+      hdrs = curl_slist_append(hdrs, auth_header);
+      curl_easy_setopt(s_send_curl, CURLOPT_HTTPHEADER, hdrs);
+
+      CURLcode cc = curl_easy_perform(s_send_curl);
+      long http_status = 0;
+      curl_easy_getinfo(s_send_curl, CURLINFO_RESPONSE_CODE, &http_status);
+      curl_slist_free_all(hdrs);
+
+      if (cc != CURLE_OK || http_status < 200 || http_status >= 300) {
+         OLOG_DEBUG("discord: typing POST failed (curl=%d http=%ld)", cc, http_status);
+      }
+   }
+   pthread_mutex_unlock(&s_send_curl_mutex);
+
+   curl_buffer_free(&resp);
+}
+
 /* =============================================================================
  * Driver hooks
  * ============================================================================= */
@@ -1148,6 +1215,7 @@ static const messaging_driver_t s_discord_driver = {
    .validate_address = dc_validate_address,
    .is_connected = dc_is_connected,
    .reconnect = dc_reconnect,
+   .send_typing = dc_send_typing,
 };
 
 int messaging_discord_register(const char *bot_token) {
