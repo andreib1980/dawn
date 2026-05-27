@@ -130,6 +130,56 @@ static char *handle_accounts(int user_id) {
    return buf;
 }
 
+/**
+ * @brief Format an actionable error message for the LLM based on an
+ *        email_service rc + (when relevant) the user-supplied account/folder
+ *        names that failed validation.
+ *
+ * Caller frees.  Returns a heap-allocated string identical in lifecycle to
+ * every other error return in this file (strdup'd or malloc'd, never NULL).
+ */
+static char *email_rc_to_error(int rc, const char *op, const char *account, const char *folder) {
+   char *msg = malloc(384);
+   if (!msg)
+      return strdup("Error: memory allocation failed");
+   switch (rc) {
+      case EMAIL_RC_UNKNOWN_ACCOUNT:
+         if (account && account[0])
+            snprintf(msg, 384,
+                     "Error: no email account matches '%s'. Call action='accounts' to see "
+                     "configured account names; do not invent email addresses.",
+                     account);
+         else
+            snprintf(msg, 384,
+                     "Error: no email account matches the request. Call action='accounts' to "
+                     "enumerate.");
+         break;
+      case EMAIL_RC_NO_ACCOUNTS:
+         snprintf(msg, 384,
+                  "Error: no email accounts configured (or all are disabled). Tell the user to "
+                  "add or enable one via WebUI Settings -> Email.");
+         break;
+      case EMAIL_RC_INVALID_FOLDER:
+         if (folder && folder[0])
+            snprintf(msg, 384,
+                     "Error: invalid folder name '%s'. Valid: inbox, sent, drafts, trash, "
+                     "spam, starred, important, all.",
+                     folder);
+         else
+            snprintf(msg, 384,
+                     "Error: invalid folder name. Valid: inbox, sent, drafts, trash, spam, "
+                     "starred, important, all.");
+         break;
+      default:
+         snprintf(msg, 384,
+                  "Error: email %s failed (network or upstream error). Retry once; if "
+                  "persistent, the email backend may be unreachable.",
+                  op);
+         break;
+   }
+   return msg;
+}
+
 static bool json_get_bool(struct json_object *obj, const char *key, bool def) {
    struct json_object *val = NULL;
    if (!json_object_object_get_ex(obj, key, &val))
@@ -151,8 +201,8 @@ static char *handle_recent(struct json_object *details, int user_id) {
                                  MAX_EMAIL_RESULTS, &out_count, next_page_token,
                                  sizeof(next_page_token));
 
-   if (rc != 0)
-      return strdup("Error: failed to fetch recent emails. Check account configuration.");
+   if (rc != EMAIL_RC_OK)
+      return email_rc_to_error(rc, "recent", account, folder);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -198,8 +248,8 @@ static char *handle_read(struct json_object *details, int user_id) {
 
    email_message_t msg = { 0 };
    int rc = email_service_read(user_id, account, message_id, &msg);
-   if (rc != 0)
-      return strdup("Error: failed to read email");
+   if (rc != EMAIL_RC_OK)
+      return email_rc_to_error(rc, "read", account, NULL);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf) {
@@ -265,8 +315,8 @@ static char *handle_search(struct json_object *details, int user_id) {
    int rc = email_service_search(user_id, account, &params, emails, MAX_EMAIL_RESULTS, &out_count,
                                  next_page_token, sizeof(next_page_token));
 
-   if (rc != 0)
-      return strdup("Error: email search failed");
+   if (rc != EMAIL_RC_OK)
+      return email_rc_to_error(rc, "search", account, folder);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -415,8 +465,8 @@ static char *handle_folders(struct json_object *details, int user_id) {
 
    char buf[4096];
    int rc = email_service_list_folders(user_id, account, buf, sizeof(buf));
-   if (rc != 0)
-      return strdup("Error: failed to list folders. Check account configuration.");
+   if (rc != EMAIL_RC_OK)
+      return email_rc_to_error(rc, "folder list", account, NULL);
 
    if (!buf[0])
       return strdup("No folders found.");

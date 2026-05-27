@@ -194,25 +194,33 @@ static int find_account(int user_id, const char *account_name, email_account_t *
    email_account_t accounts[EMAIL_MAX_ACCOUNTS];
    int count = 0;
    email_db_account_list(user_id, accounts, EMAIL_MAX_ACCOUNTS, &count);
-   if (count <= 0)
-      return 1;
+   if (count <= 0) {
+      return EMAIL_RC_NO_ACCOUNTS;
+   }
 
-   int result = 1;
+   int has_enabled = 0;
+   int result = EMAIL_RC_UNKNOWN_ACCOUNT;
    for (int i = 0; i < count; i++) {
       if (!accounts[i].enabled)
          continue;
+      has_enabled = 1;
 
       if (!account_name || !account_name[0]) {
          *out = accounts[i];
-         result = 0;
+         result = EMAIL_RC_OK;
          break;
       }
       if (strcasecmp(accounts[i].name, account_name) == 0 ||
           strcasecmp(accounts[i].username, account_name) == 0) {
          *out = accounts[i];
-         result = 0;
+         result = EMAIL_RC_OK;
          break;
       }
+   }
+   /* All accounts disabled is functionally the same as having none configured —
+    * the LLM should tell the user to enable one, not search for matching names. */
+   if (result == EMAIL_RC_UNKNOWN_ACCOUNT && !has_enabled) {
+      result = EMAIL_RC_NO_ACCOUNTS;
    }
 
    sodium_memzero(accounts, sizeof(accounts));
@@ -257,7 +265,7 @@ static bool is_gmail_imap_server(const email_account_t *acct) {
  * ============================================================================= */
 
 /** Allow-list validation for folder names */
-static bool validate_folder_name(const char *folder) {
+bool email_service_validate_folder_name(const char *folder) {
    if (!folder || !folder[0])
       return true; /* Empty = default inbox, valid */
    if (strlen(folder) > 127)
@@ -273,6 +281,11 @@ static bool validate_folder_name(const char *folder) {
    }
    return true;
 }
+
+/* Internal alias matching the previous static name so the rest of this file
+ * doesn't need a sed.  The external name carries the email_service_ prefix
+ * because it lives in the public header. */
+#define validate_folder_name email_service_validate_folder_name
 
 /** Folder normalization result */
 typedef struct {
@@ -521,11 +534,12 @@ int email_service_recent(int user_id,
       next_page_token[0] = '\0';
 
    if (!validate_folder_name(folder))
-      return 1;
+      return EMAIL_RC_INVALID_FOLDER;
 
    email_account_t acct;
-   if (find_account(user_id, account_name, &acct) != 0)
-      return 1;
+   int find_rc = find_account(user_id, account_name, &acct);
+   if (find_rc != EMAIL_RC_OK)
+      return find_rc;
 
    if (count <= 0)
       count = acct.max_recent > 0 ? acct.max_recent : 10;
@@ -577,8 +591,9 @@ int email_service_read(int user_id,
    /* Specific account requested */
    if (account_name && account_name[0]) {
       email_account_t acct;
-      if (find_account(user_id, account_name, &acct) != 0)
-         return 1;
+      int find_rc = find_account(user_id, account_name, &acct);
+      if (find_rc != EMAIL_RC_OK)
+         return find_rc;
       return read_single_account(&acct, message_id, out);
    }
 
@@ -586,13 +601,19 @@ int email_service_read(int user_id,
    email_account_t accounts[16];
    int acct_count = 0;
    email_db_account_list(user_id, accounts, 16, &acct_count);
+   if (acct_count <= 0)
+      return EMAIL_RC_NO_ACCOUNTS;
+   int enabled_seen = 0;
    for (int i = 0; i < acct_count; i++) {
       if (!accounts[i].enabled)
          continue;
+      enabled_seen = 1;
       if (read_single_account(&accounts[i], message_id, out) == 0)
-         return 0;
+         return EMAIL_RC_OK;
    }
-   return 1;
+   /* Distinguish "you have accounts but they're all disabled" from generic
+    * fetch failure — the LLM should tell the user to enable one. */
+   return enabled_seen ? EMAIL_RC_FAILURE : EMAIL_RC_NO_ACCOUNTS;
 }
 
 static int read_single_account(email_account_t *acct,
@@ -716,13 +737,14 @@ int email_service_search(int user_id,
       next_page_token[0] = '\0';
 
    if (!validate_folder_name(params->folder))
-      return 1;
+      return EMAIL_RC_INVALID_FOLDER;
 
    /* Specific account requested — search just that one */
    if (account_name && account_name[0]) {
       email_account_t acct;
-      if (find_account(user_id, account_name, &acct) != 0)
-         return 1;
+      int find_rc = find_account(user_id, account_name, &acct);
+      if (find_rc != EMAIL_RC_OK)
+         return find_rc;
       return search_single_account(&acct, params, out, max, out_count, next_page_token, npt_len);
    }
 
@@ -732,12 +754,13 @@ int email_service_search(int user_id,
    int acct_count = 0;
    email_db_account_list(user_id, accounts, 16, &acct_count);
    if (acct_count <= 0)
-      return 1;
-
+      return EMAIL_RC_NO_ACCOUNTS;
+   int enabled_seen = 0;
    int total = 0;
    for (int i = 0; i < acct_count && total < max; i++) {
       if (!accounts[i].enabled)
          continue;
+      enabled_seen = 1;
 
       int this_count = 0;
       int remaining = max - total;
@@ -748,7 +771,12 @@ int email_service_search(int user_id,
    }
 
    *out_count = total;
-   return (total > 0) ? 0 : 1;
+   if (total > 0)
+      return EMAIL_RC_OK;
+   /* Zero results across all enabled accounts could mean genuine no-match OR
+    * a transport failure on every attempt — keep as generic FAILURE here.
+    * "All accounts disabled" returns NO_ACCOUNTS so the LLM can guide the user. */
+   return enabled_seen ? EMAIL_RC_FAILURE : EMAIL_RC_NO_ACCOUNTS;
 }
 
 /* =============================================================================
@@ -977,12 +1005,13 @@ int email_service_confirm_send(int user_id, const char *draft_id) {
 
 int email_service_list_folders(int user_id, const char *account_name, char *out, size_t out_len) {
    if (!out || out_len < 2)
-      return 1;
+      return EMAIL_RC_FAILURE;
    out[0] = '\0';
 
    email_account_t acct;
-   if (find_account(user_id, account_name, &acct) != 0)
-      return 1;
+   int find_rc = find_account(user_id, account_name, &acct);
+   if (find_rc != EMAIL_RC_OK)
+      return find_rc;
 
    /* Gmail API path */
    if (is_gmail_api_account(&acct)) {

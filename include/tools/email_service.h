@@ -63,12 +63,36 @@ typedef struct {
 } email_pending_trash_t;
 
 /* =============================================================================
+ * Return codes (0 = success).  Specific codes below are shared across the
+ * read paths (recent / read / search / list_folders) so the email_tool
+ * wrapper can surface actionable messages instead of a generic
+ * "search failed".  Other functions document their own per-function codes
+ * (draft creation = 2, confirm = 2/3, etc.) which are reserved at 2-3.
+ * ============================================================================= */
+#define EMAIL_RC_OK 0
+#define EMAIL_RC_FAILURE 1          /* generic — network, upstream, or unmapped */
+#define EMAIL_RC_UNKNOWN_ACCOUNT 10 /* account_name didn't match any configured account */
+#define EMAIL_RC_NO_ACCOUNTS 11     /* user has no enabled email accounts */
+#define EMAIL_RC_INVALID_FOLDER 12  /* folder name failed validation */
+
+/* =============================================================================
  * Lifecycle
  * ============================================================================= */
 
 int email_service_init(void);
 void email_service_shutdown(void);
 bool email_service_available(void);
+
+/**
+ * @brief Validate an IMAP/Gmail folder name (pre-flight check exposed to the
+ *        tool layer so it can surface the offending folder string).
+ *
+ * Empty input is valid (defaults to inbox).  Rejects strings > 127 chars,
+ * path-traversal (".."), and any character outside [A-Za-z0-9 _.\-/\[\]].
+ *
+ * @return true if folder is valid, false otherwise.
+ */
+bool email_service_validate_folder_name(const char *folder);
 
 /* =============================================================================
  * Account Management (WebUI)

@@ -121,6 +121,25 @@ typedef struct {
  */
 int plan_parse(const char *json, struct json_object **out);
 
+/**
+ * @brief Like plan_parse(), but writes a human-readable diagnostic into
+ *        `diag` on failure.
+ *
+ * For PLAN_ERR_PARSE the diagnostic includes the json-c tokener's error
+ * description, the byte offset at which parsing failed, and up to 80
+ * characters of the input near that offset.  For other error codes the
+ * diagnostic gives a brief recovery hint.  On success (PLAN_OK) the diag
+ * buffer is set to an empty string.  `diag` may be NULL (no diagnostic
+ * written).
+ *
+ * @param json       Plan JSON string (array of step objects)
+ * @param out        Output: parsed json_object array (NULL on error)
+ * @param diag       Caller-supplied diagnostic buffer, may be NULL
+ * @param diag_size  Size of `diag` in bytes (ignored when diag is NULL)
+ * @return PLAN_OK on success, error code on failure
+ */
+int plan_parse_with_diag(const char *json, struct json_object **out, char *diag, size_t diag_size);
+
 /* =============================================================================
  * Plan Execution
  * ============================================================================= */

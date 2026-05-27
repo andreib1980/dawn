@@ -158,13 +158,22 @@ static char *plan_executor_callback(const char *action, char *value, int *should
 
    OLOG_INFO("plan_executor: received plan (%zu bytes)", strlen(value));
 
-   /* Parse the plan JSON */
+   /* Parse the plan JSON.  Use the diag variant so we can surface
+    * json-c's parse-error reason + byte position + a snippet of the
+    * offending input — bare error codes don't tell weaker models how
+    * to recover. */
    struct json_object *plan = NULL;
-   int rc = plan_parse(value, &plan);
+   char diag[512];
+   int rc = plan_parse_with_diag(value, &plan, diag, sizeof(diag));
    if (rc != PLAN_OK || !plan) {
-      char err[256];
-      snprintf(err, sizeof(err), "Error: plan parse failed (code %d)", rc);
-      OLOG_WARNING("plan_executor: %s", err);
+      char err[768];
+      snprintf(err, sizeof(err),
+               "Error: plan parse failed — %s\n"
+               "Reminder: the `plan` argument must be a JSON array `[{...},{...}]`. Do NOT "
+               "wrap it in `{\"plan\":[...]}` — the top-level value IS the array.",
+               diag[0] ? diag : "no diagnostic available");
+      OLOG_WARNING("plan_executor: plan parse failed (code %d): %s", rc,
+                   diag[0] ? diag : "(no diag)");
       return strdup(err);
    }
 

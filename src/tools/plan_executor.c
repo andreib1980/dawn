@@ -640,22 +640,93 @@ static int validate_step_depth(struct json_object *step, int depth) {
    return PLAN_ERR_UNKNOWN_STEP;
 }
 
-int plan_parse(const char *json, struct json_object **out) {
+/* Append a short snippet of `json` around `offset` to the diagnostic
+ * buffer.  Used when the tokener fails mid-parse so the LLM can see
+ * which bytes the parser was looking at.  Up to 80 chars, trimmed to
+ * single-line by replacing whitespace runs with single spaces. */
+static void append_parse_context(char *diag,
+                                 size_t diag_size,
+                                 const char *json,
+                                 size_t offset,
+                                 size_t json_len) {
+   if (!diag || diag_size == 0 || !json)
+      return;
+   size_t off = strlen(diag);
+   if (off + 16 >= diag_size)
+      return;
+   size_t start = offset > 40 ? offset - 40 : 0;
+   size_t end = offset + 40;
+   if (end > json_len)
+      end = json_len;
+   off += snprintf(diag + off, diag_size - off, " near: '");
+   for (size_t i = start; i < end && off + 4 < diag_size; i++) {
+      unsigned char c = (unsigned char)json[i];
+      if (c == '\n' || c == '\r' || c == '\t')
+         diag[off++] = ' ';
+      else if (c < 0x20 || c == 0x7f)
+         diag[off++] = '?';
+      else
+         diag[off++] = (char)c;
+   }
+   if (off + 2 < diag_size) {
+      diag[off++] = '\'';
+      diag[off] = '\0';
+   } else {
+      diag[diag_size - 1] = '\0';
+   }
+}
+
+int plan_parse_with_diag(const char *json, struct json_object **out, char *diag, size_t diag_size) {
+   if (diag && diag_size > 0)
+      diag[0] = '\0';
    if (out)
       *out = NULL;
-   if (!json || !json[0] || !out)
+   if (!json || !json[0] || !out) {
+      if (diag && diag_size > 0)
+         snprintf(diag, diag_size, "empty plan input");
       return PLAN_ERR_PARSE;
+   }
 
    /* Size check before parsing */
    size_t len = strlen(json);
-   if (len > PLAN_MAX_PLAN_SIZE)
+   if (len > PLAN_MAX_PLAN_SIZE) {
+      if (diag && diag_size > 0)
+         snprintf(diag, diag_size, "plan too large (%zu bytes, max %d)", len, PLAN_MAX_PLAN_SIZE);
       return PLAN_ERR_PARSE;
+   }
 
-   struct json_object *root = json_tokener_parse(json);
-   if (!root)
+   /* Use a stateful tokener so we can recover the parse-error reason and
+    * byte position on failure.  json_tokener_parse() (the convenience
+    * one-shot) discards both. */
+   struct json_tokener *tok = json_tokener_new();
+   if (!tok) {
+      if (diag && diag_size > 0)
+         snprintf(diag, diag_size, "json_tokener_new() failed (out of memory)");
       return PLAN_ERR_PARSE;
+   }
+   struct json_object *root = json_tokener_parse_ex(tok, json, (int)len);
+   enum json_tokener_error jerr = json_tokener_get_error(tok);
+   int parse_end = json_tokener_get_parse_end(tok);
+   json_tokener_free(tok);
+
+   if (!root || jerr != json_tokener_success) {
+      if (diag && diag_size > 0) {
+         snprintf(diag, diag_size, "JSON parse error at byte %d: %s.", parse_end,
+                  json_tokener_error_desc(jerr));
+         append_parse_context(diag, diag_size, json, (size_t)parse_end, len);
+      }
+      if (root)
+         json_object_put(root);
+      return PLAN_ERR_PARSE;
+   }
 
    if (!json_object_is_type(root, json_type_array)) {
+      if (diag && diag_size > 0)
+         snprintf(diag, diag_size,
+                  "top-level value must be a JSON array `[...]`, not %s. Do NOT wrap the "
+                  "plan in `{\"plan\":[...]}` — pass the array as the value of the `plan` "
+                  "argument directly.",
+                  json_type_to_name(json_object_get_type(root)));
       json_object_put(root);
       return PLAN_ERR_PARSE;
    }
@@ -663,12 +734,41 @@ int plan_parse(const char *json, struct json_object **out) {
    /* Validate all steps */
    int rc = validate_step_array_depth(root, 0);
    if (rc != PLAN_OK) {
+      if (diag && diag_size > 0) {
+         /* The step validators don't currently report which step or which
+          * field failed (would need an out-param thread-through).  Give a
+          * code-specific recovery hint instead. */
+         switch (rc) {
+            case PLAN_ERR_UNKNOWN_STEP:
+               snprintf(diag, diag_size,
+                        "a step has an unknown `type`. Valid types: call, if, loop, set, log, "
+                        "sleep.");
+               break;
+            case PLAN_ERR_INVALID_VAR:
+               snprintf(diag, diag_size,
+                        "a step has an invalid variable name. Variable names must match "
+                        "[a-z_][a-z0-9_]* (lowercase letters, digits, underscores).");
+               break;
+            case PLAN_ERR_MAX_STEPS:
+               snprintf(diag, diag_size, "plan exceeds the maximum step count.");
+               break;
+            default:
+               snprintf(diag, diag_size,
+                        "a step is missing a required field (call/loop need `tool`, set needs "
+                        "`var` + `value`, log needs `message`, sleep needs `seconds`).");
+               break;
+         }
+      }
       json_object_put(root);
       return rc;
    }
 
    *out = root;
    return PLAN_OK;
+}
+
+int plan_parse(const char *json, struct json_object **out) {
+   return plan_parse_with_diag(json, out, NULL, 0);
 }
 
 /* =============================================================================
