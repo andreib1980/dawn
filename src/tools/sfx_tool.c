@@ -534,7 +534,9 @@ static const treg_param_t sfx_params[] = {
    {
        .name = "filename",
        .description =
-           "Sound effect filename (e.g., \"hand_rep_fire2.ogg\"). Required for play/stop.",
+           "Sound effect filename (e.g., \"hand_rep_fire2.ogg\"). Required for play/stop. "
+           "Call action='list' first to discover available files; do not invent filenames. "
+           "Bare filename only (no path), with extension .ogg/.wav/.flac/.mp3.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,

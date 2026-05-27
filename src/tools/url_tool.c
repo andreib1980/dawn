@@ -81,10 +81,13 @@ static const tool_metadata_t url_metadata = {
    .alias_count = 2,
 
    .description = "Fetch and extract readable content from a web page URL. "
-                  "Returns the page content as structured Markdown text. "
-                  "Large pages are automatically summarized. "
-                  "Use this to get full details from search result URLs when "
-                  "snippets don't provide enough information to answer the question.",
+                  "Returns the page content as structured Markdown text, capped at "
+                  "24 KB after head-truncation (article body and headlines preserved; "
+                  "footer/comments/related-links cut). "
+                  "Use this to get full details from search result URLs when the "
+                  "search snippets don't contain enough to answer. "
+                  "SKIP this tool if the search snippet already answered the question — "
+                  "only call when snippets were truncated or insufficient.",
    .params = url_params,
    .param_count = 1,
 

@@ -140,9 +140,13 @@ static const treg_param_t ha_params[] = {
    },
    {
        .name = "device",
-       .description = "Entity name or entity_id. For brightness/color_temp/temperature: "
-                      "'name value' (e.g., 'kitchen light 75', 'thermostat 72'). "
-                      "For color: 'name color' — use hex (#FF6B35) or name (red, blue, warm).",
+       .description =
+           "Entity friendly_name OR entity_id as registered in Home Assistant — call "
+           "action='list' first to discover available entities; do not invent names. "
+           "For brightness/color_temp/temperature: 'name value' (e.g., 'kitchen light 75' "
+           "where brightness is 0-100%, color_temp is 1000-12000K, temperature is "
+           "40-100°F). For color: 'name color' — color may be a name (red, blue, warm) or "
+           "hex (#FF6B35).",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,

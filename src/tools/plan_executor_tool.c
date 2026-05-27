@@ -81,11 +81,34 @@ static const treg_param_t plan_params[] = {
      .type = TOOL_PARAM_TYPE_STRING,
      .required = true,
      .description =
-         "JSON array of plan steps to execute sequentially. "
-         "Each step is an object with 'type' field: "
-         "'call' (execute tool), 'if' (conditional), "
-         "'loop' (iterate), 'set' (variable), 'log' (output), "
-         "'sleep' (pause execution, {\"type\":\"sleep\",\"seconds\":N} where N is 1-300)." },
+         "JSON ARRAY of step objects, top-level shape `[{...},{...}]`. "
+         "Do NOT wrap in `{\"plan\":[...]}` — the top-level value IS the array. "
+         "Pass as a JSON-encoded string of the array (escaped quotes inside, but the array "
+         "itself is the outer value of this `plan` argument).\n"
+         "\n"
+         "Step types and required fields:\n"
+         "  call:  {\"type\":\"call\",\"tool\":\"<name>\",\"args\":{...},\"store\":\"<var>\"}\n"
+         "  if:    {\"type\":\"if\",\"condition\":\"<expr>\",\"then\":[...],\"else\":[...]}\n"
+         "  loop:  {\"type\":\"loop\",\"over\":\"{{var}}\",\"as\":\"item\",\"steps\":[...]}\n"
+         "  set:   {\"type\":\"set\",\"var\":\"<name>\",\"value\":\"<expr or literal>\"}\n"
+         "  log:   {\"type\":\"log\",\"message\":\"<text with {{var}} interpolation>\"}\n"
+         "  sleep: {\"type\":\"sleep\",\"seconds\":N}     // N is 1-300\n"
+         "\n"
+         "Variable interpolation: `store: \"foo\"` on a `call` step saves its result; "
+         "later steps reference it as `{{foo}}` inside any string field. Variable names "
+         "must match [a-z_][a-z0-9_]* (lowercase letters, digits, underscores).\n"
+         "\n"
+         "When to use this tool: reach for it ONLY when you need conditional branching, "
+         "looping over results, or chaining where step N consumes step M's stored output. "
+         "If you just need 2-3 unrelated tool calls, call them directly — don't wrap them "
+         "in a plan.\n"
+         "\n"
+         "Example (sequential fetch + summarize):\n"
+         "  "
+         "[{\"type\":\"call\",\"tool\":\"weather\",\"args\":{\"action\":\"today\",\"value\":"
+         "\"Atlanta\"},"
+         "\"store\":\"w\"},\n"
+         "   {\"type\":\"log\",\"message\":\"Got weather: {{w}}\"}]" },
 };
 
 static const tool_metadata_t plan_executor_metadata = {

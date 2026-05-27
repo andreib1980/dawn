@@ -1063,26 +1063,26 @@ static const treg_param_t phone_params[] = {
    {
        .name = "details",
        .description =
-           "JSON: "
-           "call {target} (target: phone number or contact name), "
-           "confirm_call {} (confirms pending call), "
-           "answer {} (answers incoming call), "
-           "hang_up {} (ends current call), "
-           "send_sms {target, body} (target: number or contact name, body: message text), "
-           "confirm_sms {} (sends confirmed SMS), "
-           "read_sms {} (returns unread messages), "
-           "call_log {count?} (recent call history, default 10; entries show [id=N] for "
-           "use with delete_call), "
-           "sms_log {count?} (recent text messages, default 10; entries show [id=N] for "
-           "use with delete_sms), "
-           "delete_sms {id?, number?, older_than_days?} (exactly one; use the [id=N] "
-           "from sms_log/read_sms output; returns preview — call confirm_delete_sms "
-           "on the next turn when the user agrees), "
-           "confirm_delete_sms {} (confirms the pending SMS deletion; expires 120s after preview), "
-           "delete_call {id?, older_than_days?} (exactly one; returns preview — call "
-           "confirm_delete_call on the next turn), "
-           "confirm_delete_call {} (confirms the pending call deletion), "
-           "status {} (phone and modem status)",
+           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "call {target}, confirm_call {}, answer {}, hang_up {},\n"
+           "send_sms {target, body}, confirm_sms {}, read_sms {},\n"
+           "call_log {count?} (default 10; rows show [id=N] for delete_call),\n"
+           "sms_log {count?} (default 10; rows show [id=N] for delete_sms),\n"
+           "delete_sms {id?, number?, older_than_days?} (exactly one; returns preview — "
+           "call confirm_delete_sms on the NEXT user turn after they agree),\n"
+           "confirm_delete_sms {} (expires 120s after preview),\n"
+           "delete_call {id?, older_than_days?} (exactly one; returns preview),\n"
+           "confirm_delete_call {},\n"
+           "status {}.\n"
+           "  target: E.164 phone number ('+16785551212') OR a contact name resolvable via "
+           "the contacts system. Bare digits ('6785551212') are also accepted and normalized. "
+           "If the contact name matches multiple contacts, the tool returns a disambiguation "
+           "request — pass the user's choice back on the next turn.\n"
+           "  body: SMS message text. Concatenated SMS (multi-segment) is supported "
+           "automatically; concise messages save segments.\n"
+           "  IMPORTANT: after 'call' or 'send_sms' returns a preview, the LLM MUST stop "
+           "and wait for the user's next turn before calling confirm_call/confirm_sms. "
+           "Do not auto-confirm in the same turn.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,

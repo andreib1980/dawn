@@ -530,20 +530,28 @@ static const treg_param_t calendar_params[] = {
    {
        .name = "details",
        .description =
-           "JSON object with action-specific fields. "
-           "For 'calendars': no fields needed. "
-           "For 'today': {calendar (filter by calendar name, optional)}. "
-           "For 'range': {start (ISO 8601, required), end (ISO 8601, optional, default +24h), "
-           "calendar (filter by calendar name, optional)}. "
-           "For 'next': {calendar (filter by calendar name, optional)}. "
-           "For 'search': {query (text to search in event titles/locations), "
-           "calendar (filter by calendar name, optional)}. "
-           "For 'add': {summary (required), start (ISO 8601, required), end (ISO 8601, optional), "
-           "location (optional), description (optional), all_day (bool, optional), "
-           "calendar (target calendar name, optional), rrule (recurrence rule, optional)}. "
-           "For 'update': {uid (required, from previous query), summary, start, end, "
-           "location, description — only specified fields are changed}. "
-           "For 'delete': {uid (required)}.",
+           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "For 'calendars': no fields needed.\n"
+           "For 'today': {calendar?}.\n"
+           "For 'range': {start (ISO 8601, required), end (ISO 8601, optional, default "
+           "+24h), calendar?}.\n"
+           "For 'next': {calendar?}.\n"
+           "For 'search': {query (text to search in event titles/locations), calendar?}.\n"
+           "For 'add': {summary (required), start (ISO 8601, required), end (ISO 8601, "
+           "optional), location (optional), description (optional), all_day (bool, "
+           "optional), calendar?, rrule (RFC 5545 recurrence, optional — e.g. "
+           "'FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10')}.\n"
+           "For 'update': {uid (required, from previous query — emitted as '[UID: ...]' on "
+           "each result row), summary, start, end, location, description — only specified "
+           "fields are changed}.\n"
+           "For 'delete': {uid (required)}.\n"
+           "  calendar?: the calendar DISPLAY NAME as returned by action='calendars' (e.g. "
+           "'Family', 'Work'). NOT an account name and NOT an arbitrary guess; if "
+           "uncertain, run action='calendars' first to enumerate. Omit to search across all "
+           "calendars on all accounts.\n"
+           "  start/end ISO 8601 format: no timezone suffix = LOCAL time "
+           "('2026-05-27T14:00:00'); 'Z' = UTC; '+05:00' = explicit offset; bare date "
+           "'2026-05-27' is accepted too.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,

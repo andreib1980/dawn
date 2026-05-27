@@ -206,13 +206,20 @@ static const treg_param_t messaging_params[] = {
    },
    {
        .name = "details",
-       .description = "JSON object with action-specific fields. "
-                      "For 'send': {channel: 'telegram_main', text: 'message body'}. The 'channel' "
-                      "name must match a row in the user's linked channels (see 'list_channels'). "
-                      "For 'link_status': {code: 'DAWNA7K9PQ'}. "
-                      "For 'reset_conversation': {channel: 'telegram_main'} — equivalent to the "
-                      "user sending /new in the chat app. "
-                      "For 'list_channels': no fields required.",
+       .description =
+           "JSON object with action-specific fields (pass as JSON-encoded string).\n"
+           "For 'send': {channel: 'telegram_main', text: 'message body'}.\n"
+           "For 'link_status': {code: 'DAWNA7K9PQ'}.\n"
+           "For 'reset_conversation': {channel: 'telegram_main'} — equivalent to the user "
+           "sending /new in the chat app.\n"
+           "For 'list_channels': no fields required.\n"
+           "  channel: the display_name shown by 'list_channels' — must match EXACTLY. "
+           "Cannot be invented; if no channel by that name appears in 'list_channels' "
+           "output, the user has not linked one. Tell the user to link via WebUI Settings.\n"
+           "  text: message body. SMS-linked channels truncate to ~400 chars on outbound "
+           "(engine-enforced); Telegram/Discord allow longer. Keep concise for SMS.\n"
+           "  code: 8-character uppercase Crockford base32 (e.g. 'DAWNA7K9PQ'); generated "
+           "via the WebUI Settings → Messaging panel.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,

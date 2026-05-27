@@ -61,21 +61,27 @@ static const treg_param_t memory_params[] = {
    },
    {
        .name = "query",
-       .description = "For 'remember': the fact to store (e.g., 'User prefers dark mode'). "
-                      "For 'search': keywords to find relevant memories. "
-                      "For 'forget': numeric fact ID to delete (from search/recent results). "
-                      "For 'recent': how far back the time window reaches "
-                      "(default '7d', upper bound '10y'). Examples: '24h', '7d', '2w', "
-                      "'90d', '1y', '10y'. 'recent' returns entries created within "
-                      "[now − query, now]; widen 'query' to reach older content. "
-                      "'sort' and 'before' modify ordering and upper-bound within this "
-                      "window. "
-                      "For 'save_contact': the person's name. "
-                      "For 'find_contact': name to search for. "
-                      "For 'list_contacts': optional field_type filter (email/phone). "
-                      "For 'delete_contact': contact ID to remove. "
-                      "For 'merge_entities': the source entity name (will become an alias of "
-                      "target; source row is preserved and reversible).",
+       .description =
+           "POLYMORPHIC — the expected SHAPE of this value depends on the chosen action. "
+           "Check the action you picked before filling this in:\n"
+           "  remember:        STRING — the fact to store, e.g. 'User prefers dark mode'.\n"
+           "  search:          STRING — keywords (3-8 words work best).\n"
+           "  forget:          NUMERIC STRING — the fact ID from a prior search/recent "
+           "result, e.g. '4711'. Non-numeric input is rejected; if you don't have the ID, "
+           "run 'search' or 'recent' first.\n"
+           "  recent:          TIME WINDOW — how far back to look. Suffix-encoded: "
+           "'24h', '7d', '2w', '90d', '1y', '10y' (default '7d', upper bound '10y'). "
+           "Returns entries within [now − query, now]. Use 'sort' and 'before' params for "
+           "ordering and upper-bound.\n"
+           "  save_contact:    STRING — the person's name (e.g. 'Jane Doe').\n"
+           "  find_contact:    STRING — name (or partial name) to search for.\n"
+           "  list_contacts:   OPTIONAL STRING — field_type filter, one of 'email' or "
+           "'phone'. Omit to list all contacts.\n"
+           "  delete_contact:  NUMERIC STRING — contact ID from a prior find_contact / "
+           "list_contacts result.\n"
+           "  merge_entities:  STRING — the SOURCE entity name (will become an alias of "
+           "the entity named in 'target_name'). Both names must already exist as entities; "
+           "run 'search' first to verify.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,

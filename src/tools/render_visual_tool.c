@@ -350,11 +350,15 @@ static const treg_param_t render_visual_params[] = {
    },
    {
        .name = "details",
-       .description =
-           "JSON object with: title (short snake_case identifier, e.g. 'tcp_handshake'), "
-           "type ('svg' for static diagrams, 'html' for interactive widgets), "
-           "code (raw SVG or HTML code — SVG starts with <svg>, HTML should not "
-           "include DOCTYPE/html/head/body tags).",
+       .description = "JSON-encoded STRING (NOT a nested JSON object) with three required fields:\n"
+                      "  title: short snake_case identifier, ≤32 chars (e.g. 'tcp_handshake')\n"
+                      "  type:  'svg' for static diagrams, 'html' for interactive widgets\n"
+                      "  code:  raw SVG or HTML markup. SVG starts with <svg>; HTML should NOT "
+                      "include DOCTYPE/html/head/body tags (the renderer wraps it in a sandboxed "
+                      "iframe).\n"
+                      "Example: '{\"title\":\"tcp_handshake\",\"type\":\"svg\",\"code\":\"<svg "
+                      "...>...</svg>\"}' — note all internal quotes are escaped because the entire "
+                      "JSON object is itself a string.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,

@@ -620,19 +620,28 @@ static const treg_param_t email_params[] = {
    {
        .name = "details",
        .description =
-           "JSON: "
+           "JSON (pass as JSON-encoded string): "
            "recent {count? (up to 50), folder?, unread_only?, account?, page_token?}, "
            "read {message_id, account?}, "
            "search {from?, subject?, text?, since?, before?, folder?, unread_only?, "
-           "account?, page_token?} (dates: YYYY-MM-DD), "
+           "account?, page_token?} (dates: YYYY-MM-DD, UTC, since=inclusive, "
+           "before=exclusive), "
            "folders {account?}, "
            "send {to, subject, body} (to: email or contact name), "
            "confirm_send {draft_id}, "
            "trash {message_id, account?} (creates pending — ask user to confirm), "
            "confirm_trash {pending_id}, "
-           "archive {message_id, account?} (removes from inbox, no confirmation needed). "
-           "Results include a page_token when more results are available — "
-           "pass it in the next call to fetch the next page.",
+           "archive {message_id, account?} (removes from inbox, no confirmation needed).\n"
+           "  account?: the CONFIGURED account name OR username/email from the 'accounts' "
+           "action — must already exist. Do NOT invent an email address; if uncertain, "
+           "call action='accounts' first to enumerate. Omit to search/read across all "
+           "enabled accounts.\n"
+           "  folder?: defaults to inbox; valid values listed in the top-level tool "
+           "description.\n"
+           "  page_token: opaque cursor from a previous response; pass back verbatim, do "
+           "not parse or invent.\n"
+           "Results include a page_token when more results are available — pass it in the "
+           "next call to fetch the next page.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
