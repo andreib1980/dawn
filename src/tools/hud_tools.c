@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "logging.h"
+#include "tools/hud_discovery.h"
 #include "tools/tool_registry.h"
 
 /* ========== Forward Declarations ========== */
@@ -39,10 +40,14 @@ static char *mqtt_only_stub_callback(const char *action, char *value, int *shoul
 /* ========== Shared Stub Callback ========== */
 
 /**
- * @brief Stub callback for MQTT-only tools
+ * @brief Stub callback for MQTT-only HUD tools.
  *
- * HUD tools send commands via MQTT to external hardware. If called directly
- * (not through MQTT execution path), return an error message.
+ * HUD commands are normally routed to the helmet over MQTT by the LLM
+ * tool dispatcher (llm_tools.c).  If this fires directly, MQTT routing
+ * dropped the call — typically because the helmet hardware isn't
+ * currently connected or the MQTT broker is unreachable.  Returning a
+ * concrete-cause message lets the LLM tell the user what's actually
+ * wrong instead of opaque framework language.
  */
 static char *mqtt_only_stub_callback(const char *action, char *value, int *should_respond) {
    (void)action;
@@ -50,7 +55,8 @@ static char *mqtt_only_stub_callback(const char *action, char *value, int *shoul
 
    OLOG_WARNING("MQTT-only HUD tool callback called directly - should use MQTT execution");
    *should_respond = 1;
-   return strdup("HUD tool requires MQTT execution path. HUD hardware not directly accessible.");
+   return strdup("HUD command could not be delivered — the helmet hardware doesn't appear to "
+                 "be connected right now.  Let the user know the HUD is offline.");
 }
 
 /* =============================================================================
@@ -60,7 +66,10 @@ static char *mqtt_only_stub_callback(const char *action, char *value, int *shoul
 static const treg_param_t hud_control_params[] = {
    {
        .name = "element",
-       .description = "The HUD element to control",
+       .description = "The HUD element to control.  Valid values are discovered "
+                      "from the connected helmet/HUD at runtime — only call this "
+                      "tool when the LLM has seen a non-empty enum_values list "
+                      "in the schema (gated by is_available below).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_DEVICE,
@@ -77,6 +86,17 @@ static const treg_param_t hud_control_params[] = {
        .enum_count = 2,
    },
 };
+
+/* Hide hud_control from the LLM schema until discovery has populated
+ * the `element` enum.  Otherwise the LLM sees a tool with an empty
+ * enum array, infers no valid input exists, and either skips silently
+ * or fabricates element names ("hud", "main", etc.).  Discovery
+ * normally completes within seconds of MQTT connection; if it times
+ * out, hud_discovery_apply_defaults() seeds a baseline so the tool
+ * still surfaces. */
+static bool hud_control_is_available(void) {
+   return hud_discovery_get_element_count() > 0;
+}
 
 /* Device map not needed - element names are used directly as device strings */
 
@@ -111,6 +131,8 @@ static const tool_metadata_t hud_control_metadata = {
    .init = NULL,
    .cleanup = NULL,
    .callback = mqtt_only_stub_callback,
+
+   .is_available = hud_control_is_available,
 };
 
 int hud_control_tool_register(void) {
@@ -124,7 +146,9 @@ int hud_control_tool_register(void) {
 static const treg_param_t hud_mode_params[] = {
    {
        .name = "mode",
-       .description = "The HUD mode to switch to",
+       .description = "The HUD mode to switch to.  Valid values are discovered "
+                      "from the connected helmet at runtime; the enum below is "
+                      "the live set this user's HUD supports (not a fixed list).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -133,6 +157,17 @@ static const treg_param_t hud_mode_params[] = {
    },
 };
 
+/* Hide hud_mode until at least one mode has been discovered.  Unlike
+ * hud_control (which truly has no valid value until elements are
+ * known), hud_mode CAN always fall back to "default" — but the tool's
+ * intent is mode-switching, and a one-element enum reads as broken to
+ * the LLM ("why ask if there's only one option?").  Gate on > 1
+ * discovered modes so the tool only appears when there's a real
+ * choice to make. */
+static bool hud_mode_is_available(void) {
+   return hud_discovery_get_mode_count() > 1;
+}
+
 static const tool_metadata_t hud_mode_metadata = {
    .name = "hud_mode",
    .device_string = "hud",
@@ -140,7 +175,9 @@ static const tool_metadata_t hud_mode_metadata = {
    .aliases = { "display", "screen" },
    .alias_count = 2,
 
-   .description = "Switch the HUD display mode. Available modes: default, environmental, armor.",
+   .description = "Switch the HUD display mode.  Available modes are discovered "
+                  "from the connected helmet — see the `mode` parameter's "
+                  "enum_values for the live set.",
    .params = hud_mode_params,
    .param_count = 1,
 
@@ -160,6 +197,8 @@ static const tool_metadata_t hud_mode_metadata = {
    .init = NULL,
    .cleanup = NULL,
    .callback = mqtt_only_stub_callback,
+
+   .is_available = hud_mode_is_available,
 };
 
 int hud_mode_tool_register(void) {

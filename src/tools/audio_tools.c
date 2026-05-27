@@ -185,7 +185,13 @@ static const treg_param_t audio_device_params[] = {
    },
    {
        .name = "device",
-       .description = "Device name (e.g., 'microphone', 'headphones', 'speakers')",
+       .description = "Friendly name of a configured audio device, NOT an ALSA "
+                      "string.  Match against the names + aliases in dawn.toml "
+                      "[[audio.devices]].  Common examples: 'microphone', "
+                      "'headphones', 'speakers', 'usb headset'.  Case-"
+                      "insensitive.  ALSA-style values like 'hw:1,0' or "
+                      "'plughw:CARD=USB' will NOT match — those are the "
+                      "underlying targets the friendly name resolves to.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,

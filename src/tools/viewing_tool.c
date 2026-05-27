@@ -94,11 +94,14 @@ static bool viewing_tool_is_available(void) {
 /* ========== Callback Implementation ========== */
 
 /**
- * @brief Stub callback for viewing tool
+ * @brief Stub callback for the viewing tool.
  *
- * This callback is not normally called directly - viewing commands are processed
- * through llm_tools.c which handles the MQTT communication with the vision system.
- * If called directly, it returns an error message.
+ * Viewing commands are normally routed to the vision subsystem over
+ * MQTT by the LLM tool dispatcher (llm_tools.c).  If this fires
+ * directly, MQTT routing dropped the call — typically because the
+ * vision hardware isn't currently connected or the MQTT broker is
+ * unreachable.  Returning a concrete-cause message lets the LLM tell
+ * the user what's actually wrong instead of opaque framework language.
  */
 static char *viewing_tool_callback(const char *action, char *value, int *should_respond) {
    (void)action;
@@ -106,8 +109,9 @@ static char *viewing_tool_callback(const char *action, char *value, int *should_
 
    OLOG_WARNING("viewing_tool_callback called directly - should use MQTT execution");
    *should_respond = 1;
-   return strdup("Viewing tool requires MQTT execution path. Vision hardware not directly "
-                 "accessible.");
+   return strdup("Viewing command could not be delivered — the vision hardware doesn't appear "
+                 "to be connected right now.  Let the user know the camera/vision system is "
+                 "offline.");
 }
 
 /* ========== Public API ========== */
