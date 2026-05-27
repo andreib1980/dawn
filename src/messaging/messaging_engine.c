@@ -438,7 +438,9 @@ static int lookup_channel_user(const char *provider,
 static char *lookup_channel_address(int user_id,
                                     const char *channel_name,
                                     char *provider_out,
-                                    size_t provider_buf_size) {
+                                    size_t provider_buf_size,
+                                    char *provider_address_out,
+                                    size_t provider_address_buf_size) {
    if (user_id <= 0 || !channel_name) {
       return NULL;
    }
@@ -446,7 +448,11 @@ static char *lookup_channel_address(int user_id,
    AUTH_DB_LOCK_OR_RETURN(NULL);
    char *address_json = NULL;
    sqlite3_stmt *stmt = NULL;
-   const char *sql = "SELECT provider, address_json FROM messaging_channels "
+   /* Return provider, address_json, AND provider_address so callers
+    * can pass the typed primary key straight to drv->send_text and
+    * skip the address_json JSON parse on the hot path.  Drivers that
+    * need extras still receive address_json as the source of truth. */
+   const char *sql = "SELECT provider, address_json, provider_address FROM messaging_channels "
                      "WHERE user_id = ? AND is_enabled = 1 AND "
                      "LOWER(COALESCE(display_name,'')) = LOWER(?) LIMIT 1";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
@@ -455,11 +461,15 @@ static char *lookup_channel_address(int user_id,
       if (sqlite3_step(stmt) == SQLITE_ROW) {
          const unsigned char *p = sqlite3_column_text(stmt, 0);
          const unsigned char *a = sqlite3_column_text(stmt, 1);
+         const unsigned char *pa = sqlite3_column_text(stmt, 2);
          if (p && provider_out && provider_buf_size > 0) {
             snprintf(provider_out, provider_buf_size, "%s", (const char *)p);
          }
          if (a) {
             address_json = strdup((const char *)a);
+         }
+         if (pa && provider_address_out && provider_address_buf_size > 0) {
+            snprintf(provider_address_out, provider_address_buf_size, "%s", (const char *)pa);
          }
       }
    }
@@ -989,7 +999,9 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
    }
 
    char provider[16] = { 0 };
-   char *address_json = lookup_channel_address(user_id, channel_name, provider, sizeof(provider));
+   char provider_address[128] = { 0 };
+   char *address_json = lookup_channel_address(user_id, channel_name, provider, sizeof(provider),
+                                               provider_address, sizeof(provider_address));
    if (!address_json) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
@@ -1008,12 +1020,11 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
       return MESSAGING_DRIVER_NOT_REGISTERED;
    }
 
-   /* Pass NULL for provider_address — this code path looks the channel
-    * up by display_name (LLM tool's `send` action), so we only have
-    * address_json.  Drivers fall back to parsing it.  Future
-    * optimization: extend lookup_channel_address to also return
-    * provider_address so this hot path can skip the JSON parse too. */
-   int rc = drv->send_text(user_id, NULL, address_json, text);
+   /* Pass the typed provider_address (chat_id / channel_id / E.164)
+    * so the driver can skip the JSON parse on the hot path.  Empty
+    * string acts as NULL — driver falls back to parsing address_json. */
+   const char *pa_arg = provider_address[0] ? provider_address : NULL;
+   int rc = drv->send_text(user_id, pa_arg, address_json, text);
    free(address_json);
 
    if (rc == SUCCESS) {

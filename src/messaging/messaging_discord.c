@@ -114,12 +114,17 @@ enum {
    DC_OP_HEARTBEAT_ACK = 11,
 };
 
-/* What the next CLIENT_WRITEABLE callback should send. */
+/* What the next CLIENT_WRITEABLE callback(s) should send.  Bitmask so
+ * concurrent schedules don't clobber each other (heartbeat firing
+ * while an IDENTIFY/RESUME is pending used to OVERWRITE the pending
+ * op under the original scalar shape — bug if the writeable callback
+ * hadn't fired yet).  Drained in priority order in the writeable
+ * callback: heartbeat > identify > resume, one op per callback. */
 enum dc_pending_op {
    DC_PENDING_NONE = 0,
-   DC_PENDING_IDENTIFY,
-   DC_PENDING_RESUME,
-   DC_PENDING_HEARTBEAT,
+   DC_PENDING_IDENTIFY = 1 << 0,
+   DC_PENDING_RESUME = 1 << 1,
+   DC_PENDING_HEARTBEAT = 1 << 2,
 };
 
 /* lws callback returns -1 to close the connection — this is the lws API
@@ -135,6 +140,12 @@ static char s_bot_token[DC_BOT_TOKEN_MAX];
 
 static atomic_bool s_running = ATOMIC_VAR_INIT(false);
 static atomic_bool s_connected = ATOMIC_VAR_INIT(false);
+
+/* External-reconnect signal.  driver->reconnect() may be called from
+ * any thread; setting this flag defers the actual close to the
+ * listener thread on its next loop iteration (lws_set_timeout is not
+ * documented thread-safe). */
+static atomic_bool s_reconnect_requested = ATOMIC_VAR_INIT(false);
 
 static pthread_t s_listener_thread;
 static bool s_listener_started = false;
@@ -160,8 +171,9 @@ static size_t s_rx_buf_len = 0;
 static size_t s_rx_buf_cap = 0;
 
 /* TX state — what to send on the next CLIENT_WRITEABLE.  Owned by
- * listener thread (lws callbacks all run on the listener thread). */
-static enum dc_pending_op s_pending_op = DC_PENDING_NONE;
+ * listener thread (lws callbacks all run on the listener thread).
+ * Bitmask of DC_PENDING_* flags. */
+static unsigned int s_pending_op = DC_PENDING_NONE;
 static unsigned char s_tx_buf[LWS_PRE + DC_TX_BUF_MAX];
 static size_t s_tx_payload_len = 0;
 
@@ -325,13 +337,13 @@ static void prepare_resume_payload(void) {
  * calls).  If a future call site adds an off-thread caller,
  * s_pending_op must become atomic and s_wsi reads need a guard.
  *
- * Race note: HEARTBEAT op=1 from the server overwrites a pending
- * IDENTIFY/RESUME here.  In practice Discord doesn't send op=1 before
- * HELLO ACK, but if Slack's Socket Mode reuses this pattern the right
- * design is a bitmask drained in priority order (heartbeat > identify
- * > resume).  TODO: convert when Phase 4 lands. */
+ * Bitmask semantics: OR-in the op flag so a heartbeat scheduled while
+ * an IDENTIFY/RESUME is already pending doesn't clobber it.  The
+ * writeable callback drains one bit per dispatch in priority order
+ * (heartbeat > identify > resume), re-arming the callback if more
+ * bits remain. */
 static void schedule_writable(enum dc_pending_op op) {
-   s_pending_op = op;
+   s_pending_op |= (unsigned int)op;
    if (s_wsi) {
       lws_callback_on_writable(s_wsi);
    }
@@ -612,23 +624,27 @@ static int dc_lws_callback(struct lws *wsi,
          if (s_pending_op == DC_PENDING_NONE) {
             break;
          }
-         switch (s_pending_op) {
-            case DC_PENDING_IDENTIFY:
-               prepare_identify_payload();
-               break;
-            case DC_PENDING_RESUME:
-               prepare_resume_payload();
-               break;
-            case DC_PENDING_HEARTBEAT:
-               prepare_heartbeat_payload();
-               s_awaiting_heartbeat_ack = true;
-               break;
-            default:
-               s_pending_op = DC_PENDING_NONE;
-               return 0;
+         /* Drain one bit per dispatch in priority order.  Heartbeat
+          * first because missing one kills the connection; identify/
+          * resume happen once and tolerate a few ms of additional
+          * latency from being deferred to the next writeable callback. */
+         enum dc_pending_op sent = DC_PENDING_NONE;
+         if (s_pending_op & DC_PENDING_HEARTBEAT) {
+            prepare_heartbeat_payload();
+            s_awaiting_heartbeat_ack = true;
+            sent = DC_PENDING_HEARTBEAT;
+         } else if (s_pending_op & DC_PENDING_IDENTIFY) {
+            prepare_identify_payload();
+            sent = DC_PENDING_IDENTIFY;
+         } else if (s_pending_op & DC_PENDING_RESUME) {
+            prepare_resume_payload();
+            sent = DC_PENDING_RESUME;
+         } else {
+            /* Unknown bit — clear and bail to keep the bitmask sane. */
+            s_pending_op = DC_PENDING_NONE;
+            return 0;
          }
-         enum dc_pending_op sent = s_pending_op;
-         s_pending_op = DC_PENDING_NONE;
+         s_pending_op &= ~(unsigned int)sent;
          if (s_tx_payload_len == 0) {
             /* Builder bailed (OOM, oversized).  Force reconnect. */
             return LWS_CLOSE_CONNECTION;
@@ -638,6 +654,10 @@ static int dc_lws_callback(struct lws *wsi,
             OLOG_WARNING("discord: lws_write failed (op=%d, wrote=%d of %zu)", (int)sent, n,
                          s_tx_payload_len);
             return LWS_CLOSE_CONNECTION;
+         }
+         /* If more bits remain, re-arm — lws will dispatch us again. */
+         if (s_pending_op != DC_PENDING_NONE) {
+            lws_callback_on_writable(wsi);
          }
          break;
       }
@@ -772,13 +792,44 @@ static void *dc_listener_thread(void *arg) {
             if (hlen > 0 && hlen < sizeof(host_buf)) {
                memcpy(host_buf, p, hlen);
                host_buf[hlen] = '\0';
-               host = host_buf;
+               /* Defense in depth: only honor resume_url hostnames that
+                * end with `.discord.gg`.  The TLS cert SAN check is the
+                * practical gate today (lws verifies the cert chain
+                * against the dialed hostname), but allowlisting the
+                * suffix means a compromised READY dispatch couldn't
+                * redirect us to an attacker-controlled host even if
+                * the dialed cert somehow validated. */
+               static const char allowed_suffix[] = ".discord.gg";
+               const size_t suffix_len = sizeof(allowed_suffix) - 1;
+               bool host_allowed = (hlen >= suffix_len &&
+                                    strcmp(host_buf + hlen - suffix_len, allowed_suffix) == 0);
+               if (host_allowed) {
+                  host = host_buf;
+               } else {
+                  OLOG_WARNING(
+                      "discord: resume_url host '%s' not under .discord.gg; falling back to "
+                      "default gateway",
+                      host_buf);
+                  /* Invalidate the session so the next connect uses a
+                   * fresh IDENTIFY against the default gateway instead
+                   * of re-trying the same bad host with RESUME. */
+                  ws_reconnect_invalidate_session(&s_reconnect);
+               }
             }
          }
          if (attempt_connect(host, NULL) != SUCCESS) {
             /* Backoff already advanced; loop and retry. */
             continue;
          }
+      }
+
+      /* Honor any deferred external-reconnect request (dc_reconnect
+       * from off-thread sets the flag; we do the actual close here on
+       * the listener thread).  Test-and-clear via atomic_exchange so
+       * a re-trigger during reconnect doesn't get lost. */
+      if (atomic_exchange(&s_reconnect_requested, false)) {
+         OLOG_INFO("discord: external reconnect requested");
+         close_active_connection();
       }
 
       /* Service the lws context.  Callbacks run synchronously from
@@ -1073,17 +1124,13 @@ static void dc_build_address_json(const char *provider_address, char *buf, size_
 
 static int dc_reconnect(void) {
    /* Listener auto-reconnects on disconnect via the backoff loop.
-    * Explicit reconnect closes the current socket and lets the loop
-    * pick up.
-    *
-    * NOTE: this reads `s_wsi` (listener-owned) and calls
-    * `lws_set_timeout` from whatever thread invokes us.  As of v1 the
-    * engine never calls `driver->reconnect()` (verified by grep over
-    * src/messaging/), so no actual cross-thread access happens.  If a
-    * future engine path adds a real caller, switch this to a flag the
-    * listener loop checks between lws_service calls — `lws_set_timeout`
-    * is not documented thread-safe. */
-   close_active_connection();
+    * Explicit reconnect: set a flag the listener picks up on its next
+    * iteration — close_active_connection (lws_set_timeout) is NOT
+    * documented thread-safe, and the engine could theoretically call
+    * driver->reconnect() from any thread.  Flag-based deferral keeps
+    * the dangerous call confined to the listener thread regardless of
+    * the caller's thread. */
+   atomic_store(&s_reconnect_requested, true);
    return SUCCESS;
 }
 
