@@ -490,6 +490,24 @@
    border-bottom-color: var(--accent);
 }
 
+/* Keyboard-focus indicator — full accent rectangle around the tab,
+   drawn as four inset box-shadows.  The .active border-bottom is
+   hidden under focus (transparent) so the bottom edge is drawn by
+   the box-shadow instead, keeping all four sides geometrically
+   identical (border is part of the box model; inset shadow is not —
+   mixing them gives slight top-vs-bottom asymmetry).  Click
+   interactions don't trigger :focus-visible, so the plain underline
+   look stays for mouse-clicked active tabs. */
+.sched-popover-tab:focus-visible {
+   outline: none;
+   border-bottom-color: transparent;
+   box-shadow:
+      inset 2px 0 0 var(--accent),
+      inset -2px 0 0 var(--accent),
+      inset 0 2px 0 var(--accent),
+      inset 0 -2px 0 var(--accent);
+}
+
 /* Search */
 .sched-popover-search {
    padding: 0.625rem 1rem;
@@ -956,7 +974,12 @@
    }
 }
 
-@media (max-width: 400px) {
+/* Bottom-sheet at ≤480px to match #memory-popover and #music-panel,
+   so all three header popovers switch presentation at the same
+   viewport width.  Was ≤400px previously, which left a 401-480px
+   range where the top-anchored stretchy variant could clip off the
+   right edge on portrait phones. */
+@media (max-width: 480px) {
    #scheduler-popover {
       top: auto;
       bottom: 0;

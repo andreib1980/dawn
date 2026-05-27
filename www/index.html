@@ -578,6 +578,7 @@
             id="scheduler-popover"
             class="popover hidden"
             role="dialog"
+            aria-modal="true"
             aria-labelledby="scheduler-popover-title"
          >
             <div class="popover-arrow"></div>
@@ -2373,7 +2374,13 @@ token = "eyJ..."</pre
          </div>
 
          <!-- Music Panel (popover style) -->
-         <div id="music-panel" class="hidden" role="dialog" aria-labelledby="music-panel-title">
+         <div
+            id="music-panel"
+            class="hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="music-panel-title"
+         >
             <div class="music-popover-arrow"></div>
             <div class="music-header">
                <h2 id="music-panel-title">Music</h2>
@@ -2898,6 +2905,9 @@ token = "eyJ..."</pre
       <script defer src="/js/audio/playback.js"></script>
       <script defer src="/js/audio/music-playback.js"></script>
       <script defer src="/js/audio/visualization.js"></script>
+      <!-- Shared tablist helper — must load before any consumer
+           (music/memory/scheduler-queue/calendar-accounts). -->
+      <script defer src="/js/ui/tablist.js"></script>
       <script defer src="/js/ui/music.js"></script>
       <script defer src="/js/ui/context.js"></script>
       <script defer src="/js/ui/transcript.js"></script>

@@ -493,6 +493,7 @@
     * ============================================================================= */
 
    let editModalTriggerElement = null;
+   let editModalTrapCleanup = null;
 
    function showEditAccountModal(acct) {
       editModalTriggerElement = document.activeElement;
@@ -549,25 +550,13 @@
          modal.addEventListener('click', (e) => {
             if (e.target === modal) hideEditAccountModal();
          });
+         /* Escape closes the modal.  Tab/Shift+Tab cycling is owned
+          * by the shared DawnSettingsModals.trapFocus helper, wired
+          * at show-time (see showEditAccountModal below) so it
+          * re-queries focusables per keypress instead of caching
+          * stale references. */
          modal.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-               hideEditAccountModal();
-               return;
-            }
-            if (e.key === 'Tab') {
-               const focusable = [
-                  ...modal.querySelectorAll('input, button, [tabindex]:not([tabindex="-1"])'),
-               ].filter((el) => el.offsetParent !== null);
-               const first = focusable[0];
-               const last = focusable[focusable.length - 1];
-               if (e.shiftKey && document.activeElement === first) {
-                  e.preventDefault();
-                  last.focus();
-               } else if (!e.shiftKey && document.activeElement === last) {
-                  e.preventDefault();
-                  first.focus();
-               }
-            }
+            if (e.key === 'Escape') hideEditAccountModal();
          });
          document
             .getElementById('calendar-edit-form')
@@ -592,11 +581,21 @@
 
       modal.classList.remove('hidden');
       document.getElementById('cal-edit-name').focus();
+      /* Trap Tab within the modal.  skipInitialFocus because we
+       * focused cal-edit-name above. */
+      const M = window.DawnSettingsModals;
+      if (M && typeof M.trapFocus === 'function') {
+         editModalTrapCleanup = M.trapFocus(modal, { skipInitialFocus: true });
+      }
    }
 
    function hideEditAccountModal() {
       const modal = document.getElementById('calendar-edit-modal');
       if (modal) modal.classList.add('hidden');
+      if (editModalTrapCleanup) {
+         editModalTrapCleanup();
+         editModalTrapCleanup = null;
+      }
       if (editModalTriggerElement) {
          editModalTriggerElement.focus();
          editModalTriggerElement = null;
@@ -652,6 +651,7 @@
     * ============================================================================= */
 
    let modalTriggerElement = null;
+   let addModalTrapCleanup = null;
 
    function showAddAccountModal() {
       modalTriggerElement = document.activeElement;
@@ -760,27 +760,39 @@
             }
          });
 
-         /* Auth type selector */
-         modal.querySelectorAll('.auth-type-option').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-               modal.querySelectorAll('.auth-type-option').forEach(function (b) {
-                  b.classList.remove('active');
-                  b.setAttribute('aria-selected', 'false');
-               });
-               btn.classList.add('active');
-               btn.setAttribute('aria-selected', 'true');
-               var authType = btn.dataset.authType;
-               var pwFields = document.getElementById('cal-add-password-fields');
-               var oauthFields = document.getElementById('cal-add-oauth-fields');
-               if (authType === 'oauth') {
-                  pwFields.classList.add('oauth-field-hidden');
-                  oauthFields.classList.remove('oauth-field-hidden');
-               } else {
-                  pwFields.classList.remove('oauth-field-hidden');
-                  oauthFields.classList.add('oauth-field-hidden');
-               }
+         /* Auth type selector — shared DawnTablist helper handles
+          * click + arrow-key navigation + roving tabindex.  Local
+          * `activeAuthType` is the source of truth that getActive()
+          * reads (no global module-level state for this modal).
+          * attr='authType' because the HTML uses data-auth-type. */
+         var activeAuthType = 'password';
+         var authTabs = modal.querySelectorAll('.auth-type-option');
+         function applyAuthTypeFields() {
+            var pwFields = document.getElementById('cal-add-password-fields');
+            var oauthFields = document.getElementById('cal-add-oauth-fields');
+            if (activeAuthType === 'oauth') {
+               pwFields.classList.add('oauth-field-hidden');
+               oauthFields.classList.remove('oauth-field-hidden');
+            } else {
+               pwFields.classList.remove('oauth-field-hidden');
+               oauthFields.classList.add('oauth-field-hidden');
+            }
+         }
+         if (window.DawnTablist && authTabs.length > 0) {
+            var authTablist = window.DawnTablist.bind({
+               tabs: authTabs,
+               attr: 'authType',
+               getActive: function () {
+                  return activeAuthType;
+               },
+               onActivate: function (name) {
+                  activeAuthType = name;
+                  authTablist.sync();
+                  applyAuthTypeFields();
+               },
             });
-         });
+            authTablist.sync(); /* initial markup → matches activeAuthType */
+         }
 
          /* Google OAuth connect button */
          document
@@ -790,27 +802,13 @@
          /* OAuth save button */
          document.getElementById('cal-oauth-save').addEventListener('click', handleOAuthSave);
 
-         /* Escape to close */
+         /* Escape closes.  Tab cycling owned by Modals.trapFocus
+          * wired at show-time (showAddAccountModal below).  The
+          * `.oauth-field-hidden` class sets display:none, which the
+          * helper's getClientRects-based rendered-check filters out
+          * for free — no separate carve-out needed. */
          modal.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape') {
-               hideAddAccountModal();
-               return;
-            }
-            /* Focus trap (exclude hidden OAuth/password fields) */
-            if (e.key === 'Tab') {
-               const focusable = [
-                  ...modal.querySelectorAll('input, button, [tabindex]:not([tabindex="-1"])'),
-               ].filter((el) => !el.closest('.oauth-field-hidden') && el.offsetParent !== null);
-               const first = focusable[0];
-               const last = focusable[focusable.length - 1];
-               if (e.shiftKey && document.activeElement === first) {
-                  e.preventDefault();
-                  last.focus();
-               } else if (!e.shiftKey && document.activeElement === last) {
-                  e.preventDefault();
-                  first.focus();
-               }
-            }
+            if (e.key === 'Escape') hideAddAccountModal();
          });
 
          /* Click outside to close */
@@ -833,6 +831,12 @@
          const first = document.getElementById('cal-add-name');
          if (first) first.focus();
       }, 50);
+      /* Trap Tab cycling.  skipInitialFocus because the cal-add-name
+       * focus above (deferred via setTimeout) is the intended target. */
+      const M = window.DawnSettingsModals;
+      if (M && typeof M.trapFocus === 'function') {
+         addModalTrapCleanup = M.trapFocus(modal, { skipInitialFocus: true });
+      }
    }
 
    function hideAddAccountModal() {
@@ -840,6 +844,10 @@
       if (modal) modal.classList.add('hidden');
       resetSubmitButton();
       resetOAuthState();
+      if (addModalTrapCleanup) {
+         addModalTrapCleanup();
+         addModalTrapCleanup = null;
+      }
       /* Reset auth type selector to password */
       if (modal) {
          var pwFields = document.getElementById('cal-add-password-fields');

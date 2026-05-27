@@ -13,39 +13,80 @@
    let modalTriggerElement = null; // Track element to return focus to (M13)
 
    /**
-    * Focus trap for modals - keeps Tab key cycling within modal
+    * Focus trap for modals — keeps Tab key cycling within the modal.
+    *
+    * Focusables are queried on EACH Tab press (not cached at setup),
+    * so the trap stays correct when the modal's DOM changes while
+    * open — broadcasts updating row lists, filter-driven re-renders,
+    * conditionally-rendered buttons all work without re-installing
+    * the trap.  Filters out hidden / aria-hidden / disabled elements
+    * since querySelectorAll picks those up but they aren't actually
+    * focus targets.
+    *
     * @param {HTMLElement} modal - Modal element to trap focus in
-    * @returns {Function} Cleanup function to remove event listener
+    * @param {Object} [options]
+    * @param {boolean} [options.skipInitialFocus=false] - If true, do
+    *   NOT focus the first focusable at setup.  Use when the caller
+    *   manages initial focus itself (e.g., scheduler-queue focuses
+    *   the close button after a layout-settle setTimeout).
+    * @returns {Function} Cleanup function — removes the keydown listener.
     */
-   function trapFocus(modal) {
+   function trapFocus(modal, options) {
+      const opts = options || {};
       const focusableSelectors =
          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-      const focusableElements = modal.querySelectorAll(focusableSelectors);
-      const firstFocusable = focusableElements[0];
-      const lastFocusable = focusableElements[focusableElements.length - 1];
+
+      function getFocusables() {
+         /* Live query per keypress.  Filter out hidden and disabled
+          * elements — these match the selector but the browser
+          * skips them in Tab order, so we'd otherwise hand focus to
+          * an invisible target. */
+         const nodes = modal.querySelectorAll(focusableSelectors);
+         const out = [];
+         for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            if (el.disabled) continue;
+            if (el.getAttribute('aria-hidden') === 'true') continue;
+            /* `getClientRects().length === 0` is the most orthodox
+             * "this element renders nothing on screen" test —
+             * handles display:none ancestors, detached subtrees,
+             * hidden attribute, AND position:sticky/fixed correctly
+             * (where the older `offsetParent === null` check
+             * misreported sticky descendants as hidden).  Sub-ms on
+             * the small popover element counts we deal with. */
+            if (el.getClientRects().length === 0) continue;
+            out.push(el);
+         }
+         return out;
+      }
 
       function handleKeydown(e) {
          if (e.key !== 'Tab') return;
+         const focusables = getFocusables();
+         if (focusables.length === 0) return;
+         const first = focusables[0];
+         const last = focusables[focusables.length - 1];
 
          if (e.shiftKey) {
-            if (document.activeElement === firstFocusable) {
+            if (document.activeElement === first || !modal.contains(document.activeElement)) {
                e.preventDefault();
-               lastFocusable.focus();
+               last.focus();
             }
          } else {
-            if (document.activeElement === lastFocusable) {
+            if (document.activeElement === last || !modal.contains(document.activeElement)) {
                e.preventDefault();
-               firstFocusable.focus();
+               first.focus();
             }
          }
       }
 
       modal.addEventListener('keydown', handleKeydown);
 
-      // Focus first element
-      if (firstFocusable) firstFocusable.focus();
+      if (!opts.skipInitialFocus) {
+         const initial = getFocusables();
+         if (initial.length > 0) initial[0].focus();
+      }
 
-      // Return cleanup function
       return () => modal.removeEventListener('keydown', handleKeydown);
    }
 

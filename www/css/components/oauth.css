@@ -136,10 +136,15 @@
    display: none;
 }
 
-/* Focus states for keyboard navigation */
+/* Focus state for keyboard navigation.  Unlike the underline-style
+   tablists (memory, scheduler, music, memory-import), auth-type-
+   option's active state fills the button with the accent color, so
+   an INSIDE accent frame would be invisible.  Outside-offset
+   outline instead — draws OUTSIDE the button edge so it shows
+   against both active (filled) and inactive (transparent) states. */
 .auth-type-option:focus-visible {
    outline: 2px solid var(--accent);
-   outline-offset: -2px;
+   outline-offset: 2px;
 }
 
 .oauth-connect-btn:focus-visible {

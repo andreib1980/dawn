@@ -193,6 +193,19 @@
    border-bottom-color: var(--accent);
 }
 
+/* Keyboard-focus indicator — full accent rectangle.  See
+   scheduler.css for rationale on the four-sided box-shadow +
+   border-bottom-color: transparent. */
+.music-tab:focus-visible {
+   outline: none;
+   border-bottom-color: transparent;
+   box-shadow:
+      inset 2px 0 0 var(--accent),
+      inset -2px 0 0 var(--accent),
+      inset 0 2px 0 var(--accent),
+      inset 0 -2px 0 var(--accent);
+}
+
 /* =============================================================================
  * Content Area
  * ============================================================================= */

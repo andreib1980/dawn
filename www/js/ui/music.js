@@ -18,6 +18,10 @@
    let isOpen = false;
    let activeTab = 'playing';
    let visualizerAnimationId = null;
+   /* Cleanup fn returned by Modals.trapFocus when the panel opens;
+    * null when closed.  Keeps Tab/Shift+Tab cycling within the panel
+    * instead of escaping to the rest of the page. */
+   let focusTrapCleanup = null;
 
    // Cached DOM elements
    const elements = {
@@ -168,13 +172,15 @@
          elements.closeBtn.addEventListener('click', close);
       }
 
-      // Tabs
-      elements.tabs.forEach((tab) => {
-         tab.addEventListener('click', () => {
-            const tabName = tab.dataset.tab;
-            switchTab(tabName);
+      // Tabs — shared DawnTablist helper owns click + arrows.
+      if (window.DawnTablist && elements.tabs && elements.tabs.length > 0) {
+         tablist = window.DawnTablist.bind({
+            tabs: elements.tabs,
+            getActive: () => activeTab,
+            onActivate: (name) => switchTab(name),
          });
-      });
+         tablist.sync(); /* initial markup → matches activeTab */
+      }
 
       // Transport controls
       if (elements.playPauseBtn) {
@@ -323,9 +329,27 @@
          startVisualizer();
       }
 
-      // Focus management for accessibility
-      if (elements.closeBtn) {
-         elements.closeBtn.focus();
+      /* Focus management for accessibility.  Defer focus() via
+       * setTimeout(0) so the .hidden-removed visibility transition
+       * settles before we move focus — calling focus() on an element
+       * the browser still considers off-screen can silently fail and
+       * leave focus on the trigger button.  Same shape scheduler-
+       * queue.js uses for the same reason. */
+      setTimeout(() => {
+         if (elements.closeBtn) {
+            elements.closeBtn.focus();
+         }
+      }, 0);
+
+      /* Trap Tab/Shift+Tab within the panel.  skipInitialFocus because
+       * we focused the close button above (deferred via setTimeout).
+       * Cleanup stored at module scope and fired in close() so the
+       * listener is removed when the panel hides.  The shared helper
+       * is exposed on window.DawnSettingsModals (the `Modals` short
+       * alias is local to settings.js). */
+      const M = window.DawnSettingsModals;
+      if (M && typeof M.trapFocus === 'function') {
+         focusTrapCleanup = M.trapFocus(elements.panel, { skipInitialFocus: true });
       }
    }
 
@@ -345,6 +369,11 @@
          musicBtn.classList.remove('active');
       }
 
+      if (focusTrapCleanup) {
+         focusTrapCleanup();
+         focusTrapCleanup = null;
+      }
+
       stopVisualizer();
    }
 
@@ -359,6 +388,11 @@
       }
    }
 
+   /* Tab strip — bound to the shared DawnTablist helper in bindEvents().
+    * Click + ←/→/Home/End handled centrally; consumer just owns
+    * activeTab and re-applies DOM via tablist.sync(). */
+   let tablist = null;
+
    /**
     * Switch active tab
     * @param {string} tabName - Tab name (playing, queue, library)
@@ -366,10 +400,7 @@
    function switchTab(tabName) {
       activeTab = tabName;
 
-      // Update tab buttons
-      elements.tabs.forEach((tab) => {
-         tab.classList.toggle('active', tab.dataset.tab === tabName);
-      });
+      if (tablist) tablist.sync();
 
       // Update tab content
       elements.tabContents.forEach((content) => {
@@ -542,12 +573,11 @@
          case 'Escape':
             close();
             break;
-         case 'ArrowLeft':
-            DawnMusicPlayback.control('previous');
-            break;
-         case 'ArrowRight':
-            DawnMusicPlayback.control('next');
-            break;
+         /* ArrowLeft / ArrowRight intentionally NOT bound — they're
+          * reserved for tablist navigation (DawnTablist) when focus
+          * is on the tab strip.  Binding them here would double-fire
+          * (cycle tabs AND skip tracks) on every keypress.  Use the
+          * transport buttons for previous/next instead. */
          case 'ArrowUp':
             e.preventDefault();
             localState.volume = Math.min(1, localState.volume + 0.1);

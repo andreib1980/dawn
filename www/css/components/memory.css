@@ -217,6 +217,21 @@
    border-bottom-color: var(--accent);
 }
 
+/* Keyboard-focus indicator — full accent rectangle around the tab
+   on arrow-key nav.  See scheduler.css for rationale (box-shadow on
+   all four sides + border-bottom-color: transparent under focus to
+   keep edges geometrically identical).  Click interactions don't
+   trigger :focus-visible, so plain underline stays for mouse-active. */
+.memory-tab:focus-visible {
+   outline: none;
+   border-bottom-color: transparent;
+   box-shadow:
+      inset 2px 0 0 var(--accent),
+      inset -2px 0 0 var(--accent),
+      inset 0 2px 0 var(--accent),
+      inset 0 -2px 0 var(--accent);
+}
+
 /* Phase 2 auto-route-to-Graph flash.  When opening the memory panel
  * with pending proposals, memory.js auto-switches to the Graph tab and
  * adds .just-routed so the user's eye lands on why they're not where
@@ -1099,6 +1114,19 @@
 .memory-import-tab.active {
    color: var(--accent);
    border-bottom-color: var(--accent);
+}
+
+/* Keyboard-focus indicator — full accent rectangle.  See
+   scheduler.css for rationale on the four-sided box-shadow +
+   border-bottom-color: transparent. */
+.memory-import-tab:focus-visible {
+   outline: none;
+   border-bottom-color: transparent;
+   box-shadow:
+      inset 2px 0 0 var(--accent),
+      inset -2px 0 0 var(--accent),
+      inset 0 2px 0 var(--accent),
+      inset 0 -2px 0 var(--accent);
 }
 
 .memory-import-source {

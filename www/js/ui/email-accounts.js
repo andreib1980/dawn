@@ -498,12 +498,14 @@
       let html = '<h3 id="email-modal-title">Add Email Account</h3>';
       html += '<div class="dawn-form email-add-form">';
 
-      // Auth type selector
-      html += '<div class="auth-type-selector">';
+      // Auth type selector (WAI-ARIA tablist, bound via DawnTablist
+      // in setupFormListeners — same shape as the CalDAV add-account
+      // selector).
+      html += '<div class="auth-type-selector" role="tablist" aria-label="Authentication type">';
       html +=
-         '  <button class="btn btn-small auth-type-option active" data-auth="app_password">App Password</button>';
+         '  <button type="button" class="btn btn-small auth-type-option active" data-auth="app_password" role="tab" aria-selected="true">App Password</button>';
       html +=
-         '  <button class="btn btn-small auth-type-option" data-auth="oauth">Google OAuth</button>';
+         '  <button type="button" class="btn btn-small auth-type-option" data-auth="oauth" role="tab" aria-selected="false">Google OAuth</button>';
       html += '</div>';
 
       // App Password form
@@ -695,23 +697,35 @@
    }
 
    function setupFormListeners() {
-      // Auth type toggle
+      // Auth type toggle — shared DawnTablist owns click + arrow-key
+      // navigation + aria-selected + roving tabindex.  attr='auth'
+      // because the HTML uses data-auth (legacy naming kept to match
+      // the existing CSS / preset hook code).
       const authBtns = document.querySelectorAll('.auth-type-option');
-      authBtns.forEach(function (btn) {
-         btn.addEventListener('click', function () {
-            authBtns.forEach(function (b) {
-               b.classList.remove('active');
-            });
-            btn.classList.add('active');
-
-            const isOAuth = btn.dataset.auth === 'oauth';
-            document.getElementById('email-app-form').style.display = isOAuth ? 'none' : 'block';
-            document.getElementById('email-oauth-form').style.display = isOAuth ? 'flex' : 'none';
-            document.getElementById('email-password-actions').style.display = isOAuth
-               ? 'none'
-               : 'flex';
+      let activeAuth = 'app_password';
+      function applyAuthFields() {
+         const isOAuth = activeAuth === 'oauth';
+         document.getElementById('email-app-form').style.display = isOAuth ? 'none' : 'block';
+         document.getElementById('email-oauth-form').style.display = isOAuth ? 'flex' : 'none';
+         document.getElementById('email-password-actions').style.display = isOAuth
+            ? 'none'
+            : 'flex';
+      }
+      if (window.DawnTablist && authBtns.length > 0) {
+         const authTablist = window.DawnTablist.bind({
+            tabs: authBtns,
+            attr: 'auth',
+            getActive: function () {
+               return activeAuth;
+            },
+            onActivate: function (name) {
+               activeAuth = name;
+               authTablist.sync();
+               applyAuthFields();
+            },
          });
-      });
+         authTablist.sync(); /* initial markup → matches activeAuth */
+      }
 
       // Provider preset
       const presetSel = document.getElementById('email-provider-preset');

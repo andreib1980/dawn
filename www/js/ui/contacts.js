@@ -12,6 +12,10 @@
     * State
     * ============================================================================= */
 
+   /* Cleanup fn returned by DawnSettingsModals.trapFocus when the
+    * modal opens; null when closed. */
+   let contactModalTrapCleanup = null;
+
    let state = {
       contacts: [],
       searchQuery: '',
@@ -469,38 +473,28 @@
       } else {
          valueInput.focus();
       }
+      /* Trap Tab cycling within the modal.  skipInitialFocus
+       * because we focused name/value above based on add-vs-edit. */
+      const M = window.DawnSettingsModals;
+      if (M && typeof M.trapFocus === 'function') {
+         contactModalTrapCleanup = M.trapFocus(modal, { skipInitialFocus: true });
+      }
    }
 
+   /* Escape closes the modal.  Tab cycling owned by
+    * DawnSettingsModals.trapFocus wired in openModal. */
    function handleModalKeydown(e) {
-      if (e.key === 'Escape') {
-         closeModal();
-         return;
-      }
-      if (e.key === 'Tab') {
-         const modal = document.getElementById('contact-modal');
-         if (!modal) return;
-         const focusable = [
-            ...modal.querySelectorAll(
-               'input:not(.hidden), select, button:not(.hidden), [tabindex]:not([tabindex="-1"])'
-            ),
-         ].filter((el) => el.offsetParent !== null && !el.disabled);
-         if (focusable.length === 0) return;
-         const first = focusable[0];
-         const last = focusable[focusable.length - 1];
-         if (e.shiftKey && document.activeElement === first) {
-            e.preventDefault();
-            last.focus();
-         } else if (!e.shiftKey && document.activeElement === last) {
-            e.preventDefault();
-            first.focus();
-         }
-      }
+      if (e.key === 'Escape') closeModal();
    }
 
    function closeModal() {
       const modal = document.getElementById('contact-modal');
       if (modal) modal.classList.add('hidden');
       document.removeEventListener('keydown', handleModalKeydown);
+      if (contactModalTrapCleanup) {
+         contactModalTrapCleanup();
+         contactModalTrapCleanup = null;
+      }
       state.editingContact = null;
       state.selectedEntityId = null;
       state.typeaheadResults = [];

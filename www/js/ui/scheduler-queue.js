@@ -37,6 +37,10 @@
       docClickHandler: null,
       menuOpenForId: null,
       triggerEl: null,
+      /* Cleanup fn returned by Modals.trapFocus when the popover opens;
+       * null when closed.  Keeps Tab/Shift+Tab cycling within the
+       * popover instead of escaping to the rest of the page. */
+      focusTrapCleanup: null,
       /* event_ids of rows the user has expanded to show briefing steps.
        * Lost on broadcast refresh — acceptable since the steps don't change
        * (a briefing's step list is set at create time and cloned on
@@ -499,6 +503,15 @@
       return '<div class="sched-popover-empty-compact">No ' + escape(tabLabel) + '</div>';
    }
 
+   /* Diff-driven render keyed on data-event-id.  Compared to the
+    * previous full-innerHTML-replace shape, this preserves:
+    *   - Scroll position (parent identity unchanged, no scrollTop reset)
+    *   - Keyboard focus on rows whose HTML didn't change between renders
+    *   - Open menus / armed pills (their element instances survive)
+    * The cost is one extra string per visible row (cached HTML on the
+    * element itself for the "did anything change" check).  Falls back
+    * to full replace for the empty-state transition since there are
+    * no rows to preserve in either direction. */
    function render() {
       if (!els.list) return;
       renderStats();
@@ -513,13 +526,83 @@
          return;
       }
 
-      els.list.innerHTML = sorted.map(buildRowHTML).join('');
+      /* Index existing children by event id.  Children with no
+       * data-event-id (e.g., a leftover empty-state div) get cleaned
+       * up by the trailing remove-orphans pass. */
+      const existing = new Map();
+      for (const child of Array.from(els.list.children)) {
+         const idAttr = child.getAttribute('data-event-id');
+         const id = idAttr ? parseInt(idAttr, 10) : NaN;
+         if (!isNaN(id)) {
+            existing.set(id, child);
+         }
+      }
 
-      /* Preserve the inline-confirm pill across re-renders.  An inbound
-       * scheduler_events_changed broadcast triggers a full render() — without
-       * this, the trash icon visually reverts to its idle state while
-       * state.armedRowId still matches and the 3s timeout still ticks,
-       * leaving an inconsistent UI mid-confirm. */
+      /* Walk the new ordered set and reconcile in place.  `cursor`
+       * tracks where the next-expected element should land; matching
+       * elements advance the cursor, mismatched elements are moved
+       * via insertBefore. */
+      const keptIds = new Set();
+      let cursor = els.list.firstElementChild;
+      for (const ev of sorted) {
+         const html = buildRowHTML(ev);
+         let elem = existing.get(ev.id);
+         if (!elem) {
+            /* New row — parse HTML and let the cursor placement
+             * below insert it at the right spot. */
+            const tmpl = document.createElement('template');
+            tmpl.innerHTML = html.trim();
+            elem = tmpl.content.firstElementChild;
+            if (!elem) continue;
+         } else if (elem._sqRowHtml !== html) {
+            /* Existing row, HTML changed — replace in place.  The
+             * focused descendant (if any) is unavoidably lost on this
+             * row only; rows with unchanged HTML keep their focus. */
+            const tmpl = document.createElement('template');
+            tmpl.innerHTML = html.trim();
+            const fresh = tmpl.content.firstElementChild;
+            if (!fresh) continue;
+            elem.replaceWith(fresh);
+            elem = fresh;
+         }
+         elem._sqRowHtml = html;
+         keptIds.add(ev.id);
+
+         if (cursor === elem) {
+            /* Already in the right slot; advance. */
+            cursor = cursor.nextElementSibling;
+         } else {
+            /* Move (or insert) before the current cursor.  Doesn't
+             * advance `cursor` — the original `cursor` element is
+             * still the next-expected one in the OLD order, and we
+             * haven't visited it yet. */
+            els.list.insertBefore(elem, cursor);
+         }
+      }
+
+      /* Drop any leftover children (removed events or stale empty-
+       * state markup). */
+      while (cursor) {
+         const next = cursor.nextElementSibling;
+         const idAttr = cursor.getAttribute('data-event-id');
+         const id = idAttr ? parseInt(idAttr, 10) : NaN;
+         if (isNaN(id) || !keptIds.has(id)) {
+            cursor.remove();
+         }
+         cursor = next;
+      }
+
+      /* Re-apply the inline-confirm pill content as post-render
+       * decoration.  buildRowHTML doesn't render the "Confirm?" pill
+       * markup — that's added imperatively by applyArmedPillContent()
+       * on arm and stripped on disarm.  ANY row HTML change replaces
+       * the row element via diff-render's replaceWith path (status
+       * flip, name update, recurrence change, etc.), and the new
+       * element has no pill.  state.armedRowId persists across
+       * renders, so we re-apply unconditionally when armed.  If a
+       * future refactor moves pill content INTO buildRowHTML, this
+       * call becomes redundant but harmless (idempotent on the same
+       * row id). */
       if (state.armedRowId !== null) applyArmedPillContent();
 
       /* Track ringing IDs so we can announce transitions via aria-live. */
@@ -892,17 +975,16 @@
     * Tab + search wiring
     * ============================================================================= */
 
+   /* Tab strip — bound to the shared DawnTablist helper in init().
+    * Click + ←/→/Home/End handled centrally; consumer just owns
+    * state and re-applies DOM via tablist.sync() after state change. */
+   let tablist = null;
+
    function setTab(tab) {
       if (state.activeTab === tab) return;
       state.activeTab = tab;
       clearArm();
-      if (els.tabs) {
-         els.tabs.forEach((t) => {
-            const isActive = t.getAttribute('data-tab') === tab;
-            t.classList.toggle('active', isActive);
-            t.setAttribute('aria-selected', isActive ? 'true' : 'false');
-         });
-      }
+      if (tablist) tablist.sync();
       render();
    }
 
@@ -975,6 +1057,16 @@
       setTimeout(() => {
          if (els.closeBtn) els.closeBtn.focus();
       }, 0);
+      /* Trap Tab/Shift+Tab within the popover.  skipInitialFocus
+       * because we manage initial focus above (close button after
+       * layout settles).  Cleanup stored on state and fired in
+       * close() so the listener is removed when the popover hides.
+       * The shared helper is exposed on window.DawnSettingsModals
+       * (the `Modals` short alias is local to settings.js). */
+      const M = window.DawnSettingsModals;
+      if (M && typeof M.trapFocus === 'function') {
+         state.focusTrapCleanup = M.trapFocus(els.popover, { skipInitialFocus: true });
+      }
    }
 
    function close() {
@@ -986,6 +1078,10 @@
       disarmClearMissed();
       closeMenu();
       stopCountdown();
+      if (state.focusTrapCleanup) {
+         state.focusTrapCleanup();
+         state.focusTrapCleanup = null;
+      }
       /* Focus return: back to the trigger button if it's the canonical
        * source, otherwise leave focus where it was. */
       if (els.btn && (!state.triggerEl || state.triggerEl === document.body)) {
@@ -1036,9 +1132,17 @@
       if (els.searchInput) els.searchInput.addEventListener('input', onSearchInput);
       if (els.clearMissedBtn) els.clearMissedBtn.addEventListener('click', onClearMissedClick);
 
-      els.tabs.forEach((t) => {
-         t.addEventListener('click', () => setTab(t.getAttribute('data-tab')));
-      });
+      /* Bind tab strip via shared helper: handles click + arrow-key
+       * navigation + roving tabindex.  Consumer just owns activeTab
+       * state and calls tablist.sync() inside setTab() after updating. */
+      if (window.DawnTablist && els.tabs.length > 0) {
+         tablist = window.DawnTablist.bind({
+            tabs: els.tabs,
+            getActive: () => state.activeTab,
+            onActivate: (name) => setTab(name),
+         });
+         tablist.sync(); /* initial markup → matches state.activeTab */
+      }
 
       if (els.list) {
          els.list.addEventListener('click', onListClick);

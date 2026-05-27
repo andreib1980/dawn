@@ -48,6 +48,10 @@
    // Focus management state
    let focusTrapCleanup = null;
    let triggerElement = null;
+   /* Separate focus-trap cleanup for the import modal — it's a child
+    * dialog of the memory popover, so it needs its own trap that
+    * cycles Tab within the modal instead of the parent popover. */
+   let importFocusTrapCleanup = null;
 
    /* Phase 2 entity-merge: one-shot flag so auto-route-to-Graph fires
     * on the FIRST open per page-load when proposals are pending, then
@@ -1257,24 +1261,18 @@
     * Tab Handling
     * ============================================================================= */
 
+   /* Tab strip — bound to the shared DawnTablist helper in setupEvents().
+    * Click + ←/→/Home/End handled centrally; consumer just owns
+    * memoryState.activeTab and re-applies DOM via tablist.sync(). */
+   let tablist = null;
+
    function switchTab(tabName) {
       if (memoryState.activeTab === tabName) return;
 
       if (window.DawnMemoryAliases) DawnMemoryAliases.cancelMergeMode();
       memoryState.activeTab = tabName;
 
-      // Update tab buttons
-      if (memoryElements.tabs) {
-         memoryElements.tabs.forEach((tab) => {
-            if (tab.dataset.tab === tabName) {
-               tab.classList.add('active');
-               tab.setAttribute('aria-selected', 'true');
-            } else {
-               tab.classList.remove('active');
-               tab.setAttribute('aria-selected', 'false');
-            }
-         });
-      }
+      if (tablist) tablist.sync();
 
       // Update tabpanel aria-labelledby to point to active tab
       if (memoryElements.list) {
@@ -1496,15 +1494,30 @@
       if (!modal) return;
       modal.classList.remove('hidden');
       resetImportState();
-      // Focus the textarea for immediate input
+      /* Focus the textarea for immediate input.  Defer via
+       * setTimeout(0) so the .hidden-removed visibility transition
+       * settles before focus moves — consistent with the same
+       * pattern in music.js and scheduler-queue.js. */
       const textArea = document.getElementById('memory-import-text');
-      if (textArea) setTimeout(() => textArea.focus(), 50);
+      if (textArea) setTimeout(() => textArea.focus(), 0);
+      /* Trap Tab/Shift+Tab within the modal so it doesn't escape to
+       * the parent memory popover.  skipInitialFocus because the
+       * textarea focus above (deferred via setTimeout) is the
+       * intended initial focus target. */
+      const M = window.DawnSettingsModals;
+      if (M && typeof M.trapFocus === 'function') {
+         importFocusTrapCleanup = M.trapFocus(modal, { skipInitialFocus: true });
+      }
    }
 
    function closeImportModal() {
       const modal = document.getElementById('memory-import-modal');
       if (modal) modal.classList.add('hidden');
       resetImportState();
+      if (importFocusTrapCleanup) {
+         importFocusTrapCleanup();
+         importFocusTrapCleanup = null;
+      }
       // Return focus to trigger element
       if (memoryElements.importBtn) memoryElements.importBtn.focus();
    }
@@ -1536,10 +1549,9 @@
       const commitBtn = document.getElementById('memory-import-commit-btn');
       if (commitBtn) commitBtn.classList.add('hidden');
 
-      // Reset tab state
-      document.querySelectorAll('.memory-import-tab').forEach((t) => {
-         t.classList.toggle('active', t.dataset.source === 'paste');
-      });
+      // Reset tab state — tablist.sync() reads importState.source
+      // (just set to 'paste' above) and re-applies markup.
+      if (importTablist) importTablist.sync();
       const pastePanel = document.getElementById('memory-import-paste');
       const filePanel = document.getElementById('memory-import-file');
       const helpPanel = document.getElementById('memory-import-help');
@@ -1548,13 +1560,14 @@
       if (helpPanel) helpPanel.classList.add('hidden');
    }
 
+   /* Import-modal tab strip — bound to the shared DawnTablist helper
+    * via importTablist below.  attr='source' because the HTML uses
+    * data-source="paste|file" instead of data-tab. */
+   let importTablist = null;
+
    function switchImportSource(source) {
       importState.source = source;
-      document.querySelectorAll('.memory-import-tab').forEach((t) => {
-         const isActive = t.dataset.source === source;
-         t.classList.toggle('active', isActive);
-         t.setAttribute('aria-selected', isActive ? 'true' : 'false');
-      });
+      if (importTablist) importTablist.sync();
       const pastePanel = document.getElementById('memory-import-paste');
       const filePanel = document.getElementById('memory-import-file');
       const helpPanel = document.getElementById('memory-import-help');
@@ -1850,10 +1863,17 @@
          });
       }
 
-      // Tab switching
-      document.querySelectorAll('.memory-import-tab').forEach((tab) => {
-         tab.addEventListener('click', () => switchImportSource(tab.dataset.source));
-      });
+      // Tab switching — shared DawnTablist helper, attr='source'.
+      const importTabs = document.querySelectorAll('.memory-import-tab');
+      if (window.DawnTablist && importTabs.length > 0) {
+         importTablist = window.DawnTablist.bind({
+            tabs: importTabs,
+            attr: 'source',
+            getActive: () => importState.source,
+            onActivate: (name) => switchImportSource(name),
+         });
+         importTablist.sync(); /* initial markup → matches importState.source */
+      }
 
       // Close on overlay click
       const modal = document.getElementById('memory-import-modal');
@@ -1978,11 +1998,14 @@
          memoryElements.closeBtn.addEventListener('click', close);
       }
 
-      // Tab handlers
-      if (memoryElements.tabs) {
-         memoryElements.tabs.forEach((tab) => {
-            tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+      // Tab handlers — shared DawnTablist helper owns click + arrows.
+      if (window.DawnTablist && memoryElements.tabs && memoryElements.tabs.length > 0) {
+         tablist = window.DawnTablist.bind({
+            tabs: memoryElements.tabs,
+            getActive: () => memoryState.activeTab,
+            onActivate: (name) => switchTab(name),
          });
+         tablist.sync(); /* initial markup → matches memoryState.activeTab */
       }
 
       // Search handler
