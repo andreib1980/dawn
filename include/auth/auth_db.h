@@ -1048,7 +1048,9 @@ typedef struct {
    char thinking_mode[16];    /**< "disabled"/"auto"/"enabled" or "low"/"medium"/"high" */
    char reasoning_effort[16]; /**< "none"/"minimal"/"low"/"medium"/"high"/"xhigh" (v36) */
    bool is_private;           /**< If true, no memory extraction for this conversation (v16) */
-   char origin[16];           /**< "webui" or "voice" (v17) */
+   char origin[32];           /**< "webui" / "voice" (v17) / "briefing" /
+                                   "messaging:<provider>" (e.g. "messaging:discord",
+                                   "messaging:telegram" — needs > 16 bytes). */
 } conversation_t;
 
 /**

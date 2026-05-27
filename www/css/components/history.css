@@ -347,11 +347,9 @@
    stroke: currentColor;
 }
 
-/* Private conversation indicator */
-.history-item.private {
-   border-left: 2px solid var(--text-secondary);
-}
-
+/* Private conversation indicator.  Distinguished by the icon next to
+   the title; left-border accents reserved for `.active` so the
+   selection cue isn't competing with status decoration. */
 .history-item-private {
    display: inline-flex;
    align-items: center;
@@ -365,12 +363,7 @@
    stroke: currentColor;
 }
 
-/* Voice conversation indicator (microphone icon) */
-.history-item.voice {
-   border-left: 2px solid var(--accent);
-   transition: border-color 0.15s ease;
-}
-
+/* Voice conversation indicator (microphone icon). */
 .history-item-voice {
    display: inline-flex;
    align-items: center;
@@ -424,6 +417,61 @@
 
 .history-item.unread .history-item-title {
    font-weight: 600;
+}
+
+/* Messaging-channel conversations (SMS, Telegram, Discord, Slack).
+   Inline icon next to the title carries the channel identity; the
+   colored variant is the brand cue (iMessage green / Telegram blue /
+   Discord blurple / Slack pink).  No left-border stripe — icons
+   stack with voice/private/archived/chain icons in the title row. */
+.history-item-messaging {
+   display: inline-flex;
+   align-items: center;
+   margin-right: 6px;
+   color: var(--text-secondary);
+   transition: color 0.15s ease;
+   vertical-align: middle;
+   flex-shrink: 0;
+}
+
+.history-item-messaging svg {
+   display: block;
+}
+
+/* Per-provider brand-accent colorways.  Chosen for legibility on
+   both light and dark themes; Slack uses their pink/red accent
+   (#E01E5A) rather than their darker aubergine so the icon doesn't
+   disappear in dark mode. */
+.history-item-messaging.messaging-sms {
+   color: #34c759;
+}
+.history-item-messaging.messaging-sms:hover,
+.history-item.active .history-item-messaging.messaging-sms {
+   color: #5fd87f;
+}
+
+.history-item-messaging.messaging-telegram {
+   color: #229ed9;
+}
+.history-item-messaging.messaging-telegram:hover,
+.history-item.active .history-item-messaging.messaging-telegram {
+   color: #4cb4e0;
+}
+
+.history-item-messaging.messaging-discord {
+   color: #5865f2;
+}
+.history-item-messaging.messaging-discord:hover,
+.history-item.active .history-item-messaging.messaging-discord {
+   color: #7983f5;
+}
+
+.history-item-messaging.messaging-slack {
+   color: #e01e5a;
+}
+.history-item-messaging.messaging-slack:hover,
+.history-item.active .history-item-messaging.messaging-slack {
+   color: #e84a7c;
 }
 
 /* Conversation Chain Groups - collapsible accordion */

@@ -67,6 +67,54 @@
       </svg>
    </span>`;
 
+   /* Providers we have explicit colorways + tooltips for.  Conversations
+    * with an `origin` of "messaging:<provider>" outside this list still
+    * render the generic messaging icon but fall back to neutral coloring
+    * (so a future Slack add lights up automatically once it's listed
+    * here, and an unknown provider still gets the speech-bubble cue). */
+   const KNOWN_MESSAGING_PROVIDERS = ['sms', 'telegram', 'discord', 'slack'];
+
+   const MESSAGING_ICON_LABELS = {
+      sms: 'SMS conversation',
+      telegram: 'Telegram conversation',
+      discord: 'Discord conversation',
+      slack: 'Slack conversation',
+   };
+
+   /* Per-provider inline SVG (12x12, fill="currentColor" so the CSS
+    * colorway controls hue).  Shapes are generic chat / send glyphs —
+    * the provider identity is conveyed by the colored left border + the
+    * title tooltip, not by mimicking each platform's logo. */
+   const MESSAGING_ICON_SVG = {
+      // SMS: rounded speech bubble with three dots
+      sms: `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM7 11c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm5 0c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm5 0c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></svg>`,
+      // Telegram: paper plane (their iconic send glyph)
+      telegram: `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>`,
+      // Discord: chat bubble with offset eyes (Discord-ish silhouette)
+      discord: `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09a.09.09 0 0 0-.07-.03c-1.5.26-2.93.71-4.27 1.33a.07.07 0 0 0-.03.03C2.4 9.3 1.74 13.16 2.07 16.96a.08.08 0 0 0 .03.05c1.79 1.32 3.52 2.12 5.22 2.65a.09.09 0 0 0 .1-.03c.4-.55.76-1.14 1.07-1.75a.08.08 0 0 0-.04-.11 11.7 11.7 0 0 1-1.66-.79.08.08 0 0 1-.01-.13c.11-.08.22-.17.33-.25a.09.09 0 0 1 .09-.01c3.48 1.59 7.25 1.59 10.69 0a.08.08 0 0 1 .09.01c.11.09.22.17.33.26.06.04.06.13-.01.13-.53.31-1.08.57-1.66.79a.08.08 0 0 0-.04.11c.32.61.68 1.19 1.07 1.74a.09.09 0 0 0 .1.04c1.7-.53 3.43-1.33 5.22-2.65a.09.09 0 0 0 .03-.05c.4-4.4-.67-8.23-2.85-11.6a.07.07 0 0 0-.03-.03zM8.52 14.65c-1 0-1.83-.92-1.83-2.05 0-1.13.81-2.05 1.83-2.05 1.03 0 1.85.93 1.83 2.05 0 1.13-.81 2.05-1.83 2.05zm6.97 0c-1 0-1.83-.92-1.83-2.05 0-1.13.81-2.05 1.83-2.05 1.03 0 1.85.93 1.83 2.05 0 1.13-.8 2.05-1.83 2.05z"/></svg>`,
+      // Slack: hash symbol (#channel)
+      slack: `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4h-1l-1 4H5v2h2.5L7 14H4v2h2.5L6 20h2l.5-4h3l-.5 4h2l.5-4H17v-2h-3.5l1-4H18V8h-2.5L16 4h-2l-.5 4h-3l.5-4zm-.5 6h3l-1 4h-3l1-4z"/></svg>`,
+      // Generic fallback for unknown messaging:<provider> values
+      generic: `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>`,
+   };
+
+   /* Renders the inline-SVG span for a messaging-channel conversation.
+    * Provider class on the span lets the CSS colorway hit currentColor;
+    * unknown providers fall through to the generic speech-bubble icon. */
+   function renderMessagingIcon(provider) {
+      const known = KNOWN_MESSAGING_PROVIDERS.includes(provider);
+      const label =
+         (known && MESSAGING_ICON_LABELS[provider]) ||
+         (provider ? `${provider} conversation` : 'Messaging conversation');
+      const providerClass = known ? ` messaging-${provider}` : '';
+      const svg = (known && MESSAGING_ICON_SVG[provider]) || MESSAGING_ICON_SVG.generic;
+      return `
+      <span class="history-item-messaging${providerClass}" title="${DawnFormat.escapeAttr(label)}" aria-label="${DawnFormat.escapeAttr(label)}" role="img">
+        ${svg}
+      </span>
+    `;
+   }
+
    /* =============================================================================
     * Elements
     * ============================================================================= */
@@ -869,6 +917,12 @@
     `
          : '';
 
+      // Messaging-channel origin (sms, telegram, discord, slack, ...).
+      // Origin format from messaging_engine.c:505 is "messaging:<provider>".
+      const isMessaging = typeof conv.origin === 'string' && conv.origin.startsWith('messaging:');
+      const messagingProvider = isMessaging ? conv.origin.substring('messaging:'.length) : '';
+      const messagingIcon = isMessaging ? renderMessagingIcon(messagingProvider) : '';
+
       // Reassign button (voice conversations + admin only)
       const isAdmin =
          typeof DawnState !== 'undefined' && DawnState.authState && DawnState.authState.isAdmin;
@@ -892,13 +946,18 @@
       if (isPrivate) classes.push('private');
       if (isVoice) classes.push('voice');
       if (isBriefing) classes.push('briefing');
+      // Messaging-channel conversations are identified solely by the
+      // inline icon next to the title — no parent `.messaging` class
+      // pushed since there's no row-level styling that depends on it.
+      // Provider colorway lives on the icon span's modifier class
+      // (see renderMessagingIcon).
       if (isUnread) classes.push('unread');
       if (isChainChild) classes.push('chain-child');
 
       return `
       <div class="${classes.join(' ')}" data-conv-id="${conv.id}">
         <div class="history-item-content">
-          <div class="history-item-title">${privateIcon}${voiceIcon}${briefingIcon}${archivedIcon}${chainIcon}${DawnFormat.escapeHtml(conv.title)}</div>
+          <div class="history-item-title">${privateIcon}${voiceIcon}${briefingIcon}${messagingIcon}${archivedIcon}${chainIcon}${DawnFormat.escapeHtml(conv.title)}</div>
           <div class="history-item-meta">
             <span class="history-item-time">${time}</span>
             <span class="history-item-count">${conv.message_count} messages</span>
