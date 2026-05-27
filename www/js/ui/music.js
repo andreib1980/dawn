@@ -96,10 +96,46 @@
       cacheElements();
       bindEvents();
       setupCallbacks();
+      setupMediaSession();
       restoreLocalState();
       restorePanelState();
 
       console.log('Music UI: Initialized');
+   }
+
+   /* OS media-session integration — registers DAWN as the active
+    * media player so hardware media keys (Play/Pause/Next/Prev),
+    * lock-screen widgets, and OS notification controls all route to
+    * DAWN's transport.  See www/js/audio/media-session.js for the
+    * silent-audio mechanism that keeps the media-session slot held
+    * while DAWN streams audio server-side. */
+   function setupMediaSession() {
+      if (!window.DawnMediaSession) return;
+      DawnMediaSession.init({
+         onPlay: function () {
+            const s = DawnMusicPlayback.getState();
+            if (s.paused) {
+               DawnMusicPlayback.control('play');
+            } else if (s.queueLength > 0) {
+               DawnMusicPlayback.control('play_index', { index: s.queueIndex });
+            }
+         },
+         onPause: function () {
+            DawnMusicPlayback.control('pause');
+         },
+         onPrevious: function () {
+            DawnMusicPlayback.control('previous');
+         },
+         onNext: function () {
+            DawnMusicPlayback.control('next');
+         },
+         onStop: function () {
+            DawnMusicPlayback.control('stop');
+         },
+         onSeekTo: function (e) {
+            DawnMusicPlayback.control('seek', { position_sec: e.time });
+         },
+      });
    }
 
    /**
@@ -306,6 +342,11 @@
    function open() {
       if (!elements.panel) return;
 
+      /* Panel-open is a user gesture — prime the OS media-session
+       * sink here so it's ready before the user clicks Play.  No-op
+       * after the first successful prime. */
+      if (window.DawnMediaSession) DawnMediaSession.primeOnGesture();
+
       isOpen = true;
       elements.panel.classList.remove('hidden');
       localStorage.setItem('dawn_music_panel_open', 'true');
@@ -423,6 +464,11 @@
     * Handle play/pause button
     */
    function handlePlayPause() {
+      /* Prime the OS media-session sink on this user gesture so the
+       * silent audio's .play() doesn't get autoplay-rejected.  No-op
+       * after the first successful prime. */
+      if (window.DawnMediaSession) DawnMediaSession.primeOnGesture();
+
       const state = DawnMusicPlayback.getState();
 
       if (state.playing && !state.paused) {
@@ -622,6 +668,43 @@
          if (elements.trackTitle) elements.trackTitle.textContent = 'No track playing';
          if (elements.trackArtist) elements.trackArtist.textContent = '';
          if (elements.trackAlbum) elements.trackAlbum.textContent = '';
+      }
+
+      /* OS media-session sync.  Three-state dispatch:
+       *
+       *  1. Track present + playing/paused → setMetadata + setPlaying
+       *     (OS widget shows current track in correct play/pause state).
+       *  2. Track present + stopped (playing=false AND paused=false)
+       *     → clearMetadata (release the slot rather than leave a
+       *     dangling "paused on track X" with no resume path).
+       *  3. No track (queue cleared, unsubscribed, never-played)
+       *     → clearMetadata.
+       *
+       * Artwork omitted intentionally — DAWN's music DB doesn't yet
+       * store per-track cover art.  Live-tested on Chrome+Windows:
+       * the Chrome toolbar media icon, Win+A Action Center widget,
+       * and lock-screen panel ALL surface DAWN cleanly with no
+       * artwork — they fall back to a neutral generic-media glyph.
+       * Adding artwork is a future feature once the music DB grows
+       * a cover_art column (local file scan / Plex passthrough);
+       * the setMetadata API accepts an artwork:[] array for that. */
+      if (window.DawnMediaSession) {
+         const isStopped = state.track && !state.playing && !state.paused;
+         if (state.track && !isStopped) {
+            DawnMediaSession.setMetadata({
+               title: state.track.title || 'Unknown Track',
+               artist: state.track.artist || 'Unknown Artist',
+               album: state.track.album || '',
+               duration:
+                  typeof state.durationSec === 'number' && state.durationSec > 0
+                     ? state.durationSec
+                     : undefined,
+               position: typeof state.positionSec === 'number' ? state.positionSec : 0,
+            });
+            DawnMediaSession.setPlaying(state.playing && !state.paused);
+         } else {
+            DawnMediaSession.clearMetadata();
+         }
       }
 
       // Update play/pause button

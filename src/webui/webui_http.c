@@ -138,11 +138,28 @@ static rate_limiter_t s_service_rate = RATE_LIMITER_STATIC_INIT(s_service_rate_e
 static char s_static_security_headers[1024];
 static int s_static_security_headers_len = 0;
 
-/* CSP policy shared between add_security_headers() and the static string */
+/* CSP policy — shared between add_security_headers() and the static
+ * string assembled in webui_security_headers_init().  Per-directive
+ * audit (kept here so when a consumer goes away, the corresponding
+ * directive permission can be tightened without spelunking):
+ *
+ *   default-src 'self'           — fallback for any directive not below
+ *   script-src 'wasm-unsafe-eval'  — Opus decoder WebAssembly
+ *   script-src 'unsafe-inline'   — small inline bootstrap blocks in index.html
+ *   style-src 'unsafe-inline'    — inline style attributes set by JS modules
+ *   connect-src wss: ws:         — WebSocket to webui_server.c
+ *   img-src data:                — inline thumbnails, DawnFormat fallbacks
+ *   img-src blob:                — image-store generated blob previews
+ *   media-src blob:              — silent-audio bridge in www/js/audio/media-session.js
+ *   manifest-src 'self'          — manifest.json
+ *   worker-src blob:             — AudioWorklet + Opus decoder workers
+ *
+ * If a directive's listed consumer is removed, drop the permission. */
 static const char s_csp_policy[] = "default-src 'self'; "
                                    "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; "
                                    "style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; "
                                    "img-src 'self' data: blob:; "
+                                   "media-src 'self' blob:; "
                                    "manifest-src 'self'; worker-src 'self' blob:";
 
 int webui_add_security_headers(struct lws *wsi, unsigned char **p, unsigned char *end) {

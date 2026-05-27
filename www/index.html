@@ -2905,6 +2905,10 @@ token = "eyJ..."</pre
       <script defer src="/js/audio/playback.js"></script>
       <script defer src="/js/audio/music-playback.js"></script>
       <script defer src="/js/audio/visualization.js"></script>
+      <!-- Bridges DAWN's server-side playback to navigator.mediaSession
+           for OS media-key + lock-screen integration.  Must load before
+           music.js (consumer). -->
+      <script defer src="/js/audio/media-session.js"></script>
       <!-- Shared tablist helper — must load before any consumer
            (music/memory/scheduler-queue/calendar-accounts). -->
       <script defer src="/js/ui/tablist.js"></script>

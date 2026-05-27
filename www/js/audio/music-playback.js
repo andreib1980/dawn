@@ -13,6 +13,42 @@
 (function (global) {
    'use strict';
 
+   /**
+    * @typedef {Object} DawnMusicTrack
+    * @property {string} [path]          - File path (server-relative).
+    * @property {string} [title]         - Track title; may be empty for files without metadata.
+    * @property {string} [artist]        - Track artist; may be empty.
+    * @property {string} [album]         - Track album; may be empty.
+    * @property {number} [duration_sec]  - Track duration in seconds (server-reported).
+    */
+
+   /**
+    * @typedef {Object} DawnMusicPlaybackState
+    * Snapshot returned by getState() and passed to onStateChange.  Stable
+    * shape consumed across the WebUI (music.js, media-session.js, etc.) —
+    * field renames break those consumers silently; if you change any of
+    * these names, update every reader.
+    *
+    * @property {boolean} playing         - True while actively playing audio.
+    * @property {boolean} paused          - True while paused mid-track.
+    * @property {boolean} buffering       - True while initial buffer fills.
+    * @property {DawnMusicTrack|null} track - Current track (or null when none).
+    * @property {number} positionSec      - Current playback position (seconds).
+    * @property {number} durationSec      - Track duration (seconds).
+    * @property {number} queueLength      - Total tracks queued.
+    * @property {number} queueIndex       - Index of current track in queue.
+    * @property {string} sourceFormat     - Source codec/container (e.g., 'flac').
+    * @property {number} sourceRate       - Source sample rate (Hz).
+    * @property {string} quality          - Streaming quality preset.
+    * @property {number} bitrate          - Streaming bitrate (bps).
+    * @property {string} bitrateMode      - 'cbr' / 'vbr' / etc.
+    * @property {boolean} shuffle         - Shuffle mode on/off.
+    * @property {number} repeatMode       - 0=none, 1=all, 2=one.
+    * @property {boolean} subscribed      - Subscribed to the music stream socket.
+    * @property {number} volume           - 0..1 client-side gain.
+    * @property {number} bufferPercent    - 0..100.
+    */
+
    // Playback state
    const state = {
       // Playback
