@@ -57,13 +57,13 @@
 
 /* ============================================================================
  * Internal: curl response buffer
+ *
+ * Uses the shared curl_buffer_t (include/core/curl_buffer.h) with a 4 MB
+ * cap on CalDAV responses (large calendars with many events).  The
+ * shared helper truncates with a flag instead of aborting mid-transfer
+ * — callers MUST check `resp.truncated` after curl_easy_perform and
+ * reject the response.
  * ============================================================================ */
-
-typedef struct {
-   char *data;
-   size_t size;
-   size_t capacity;
-} curl_buf_t;
 
 /** Capture ETag from response headers */
 typedef struct {
@@ -93,56 +93,16 @@ static size_t header_etag_cb(char *buf, size_t size, size_t nmemb, void *userdat
    return total;
 }
 
-static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
-   curl_buf_t *buf = userdata;
-   size_t total = size * nmemb;
-
-   if (buf->size + total > CALDAV_MAX_RESPONSE_SIZE) {
-      return 0; /* abort */
-   }
-
-   if (buf->size + total >= buf->capacity) {
-      size_t new_cap = buf->capacity * 2;
-      if (new_cap < buf->size + total + 1)
-         new_cap = buf->size + total + 1;
-      char *tmp = realloc(buf->data, new_cap);
-      if (!tmp)
-         return 0;
-      buf->data = tmp;
-      buf->capacity = new_cap;
-   }
-
-   memcpy(buf->data + buf->size, ptr, total);
-   buf->size += total;
-   buf->data[buf->size] = '\0';
-   return total;
-}
-
-static void curl_buf_init(curl_buf_t *buf) {
-   buf->capacity = 4096;
-   buf->data = malloc(buf->capacity);
-   buf->size = 0;
-   if (buf->data)
-      buf->data[0] = '\0';
-}
-
-static void curl_buf_free(curl_buf_t *buf) {
-   free(buf->data);
-   buf->data = NULL;
-   buf->size = 0;
-   buf->capacity = 0;
-}
-
 /* ============================================================================
  * Internal: curl setup helpers
  * ============================================================================ */
 
-static CURL *caldav_curl_init(const caldav_auth_t *auth, curl_buf_t *resp) {
+static CURL *caldav_curl_init(const caldav_auth_t *auth, curl_buffer_t *resp) {
    CURL *curl = curl_easy_init();
    if (!curl)
       return NULL;
 
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)CALDAV_TIMEOUT_SEC);
    /* Disable redirects to prevent credential leakage to third-party hosts */
@@ -188,10 +148,8 @@ static caldav_error_t do_propfind(CURL *curl,
                                   const char *url,
                                   const char *depth,
                                   const char *xml_body,
-                                  curl_buf_t *resp) {
-   resp->size = 0;
-   if (resp->data)
-      resp->data[0] = '\0';
+                                  curl_buffer_t *resp) {
+   curl_buffer_reset(resp);
 
    curl_easy_setopt(curl, CURLOPT_URL, url);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PROPFIND");
@@ -210,6 +168,12 @@ static caldav_error_t do_propfind(CURL *curl,
 
    if (res != CURLE_OK) {
       OLOG_ERROR("caldav: PROPFIND %s failed: %s", url, curl_easy_strerror(res));
+      return CALDAV_ERR_NETWORK;
+   }
+
+   if (resp->truncated) {
+      OLOG_ERROR("caldav: PROPFIND %s response exceeded %d byte cap; rejecting", url,
+                 CALDAV_MAX_RESPONSE_SIZE);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -334,7 +298,7 @@ static const char *PROPFIND_PRINCIPAL_XML = "<?xml version=\"1.0\" encoding=\"UT
 
 static caldav_error_t discover_principal(CURL *curl,
                                          const char *base_url,
-                                         curl_buf_t *resp,
+                                         curl_buffer_t *resp,
                                          char *principal_out,
                                          size_t principal_len) {
    principal_out[0] = '\0';
@@ -380,7 +344,7 @@ static const char *PROPFIND_CALHOME_XML =
 
 static caldav_error_t discover_calendar_home(CURL *curl,
                                              const char *principal_url,
-                                             curl_buf_t *resp,
+                                             curl_buffer_t *resp,
                                              char *home_out,
                                              size_t home_len) {
    home_out[0] = '\0';
@@ -432,7 +396,7 @@ static const char *PROPFIND_COLLECTIONS_XML =
 
 static caldav_error_t discover_collections(CURL *curl,
                                            const char *home_url,
-                                           curl_buf_t *resp,
+                                           curl_buffer_t *resp,
                                            caldav_calendar_info_t **out,
                                            int *out_count) {
    *out = NULL;
@@ -536,14 +500,12 @@ caldav_error_t caldav_discover(const char *base_url,
                                caldav_discovery_result_t *result) {
    memset(result, 0, sizeof(*result));
 
-   curl_buf_t resp;
-   curl_buf_init(&resp);
-   if (!resp.data)
-      return CALDAV_ERR_ALLOC;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -562,7 +524,7 @@ caldav_error_t caldav_discover(const char *base_url,
          snprintf(result->calendar_home_url, sizeof(result->calendar_home_url), "%s", base_url);
       }
       curl_easy_cleanup(curl);
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return err;
    }
 
@@ -573,7 +535,7 @@ caldav_error_t caldav_discover(const char *base_url,
    err = discover_calendar_home(curl, principal_url, &resp, home_url, sizeof(home_url));
    if (err != CALDAV_OK) {
       curl_easy_cleanup(curl);
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return err;
    }
 
@@ -583,7 +545,7 @@ caldav_error_t caldav_discover(const char *base_url,
    err = discover_collections(curl, home_url, &resp, &result->calendars, &result->calendar_count);
 
    curl_easy_cleanup(curl);
-   curl_buf_free(&resp);
+   curl_buffer_free(&resp);
    return err;
 }
 
@@ -609,14 +571,12 @@ caldav_error_t caldav_get_ctag(const char *calendar_url,
                                size_t ctag_len) {
    ctag_out[0] = '\0';
 
-   curl_buf_t resp;
-   curl_buf_init(&resp);
-   if (!resp.data)
-      return CALDAV_ERR_ALLOC;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -624,13 +584,13 @@ caldav_error_t caldav_get_ctag(const char *calendar_url,
    curl_easy_cleanup(curl);
 
    if (err != CALDAV_OK) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return err;
    }
 
    xmlDocPtr doc = xmlReadMemory(resp.data, (int)resp.size, NULL, NULL,
                                  XML_PARSE_NONET | XML_PARSE_NOBLANKS);
-   curl_buf_free(&resp);
+   curl_buffer_free(&resp);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -673,19 +633,17 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
             ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday, te.tm_year + 1900, te.tm_mon + 1,
             te.tm_mday);
 
-   curl_buf_t resp;
-   curl_buf_init(&resp);
-   if (!resp.data)
-      return CALDAV_ERR_ALLOC;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
    /* REPORT method */
-   resp.size = 0;
+   curl_buffer_reset(&resp);
    curl_easy_setopt(curl, CURLOPT_URL, calendar_url);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "REPORT");
    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, xml);
@@ -702,7 +660,15 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
    if (cres != CURLE_OK) {
       OLOG_ERROR("caldav: REPORT %s failed: %s", calendar_url, curl_easy_strerror(cres));
       curl_easy_cleanup(curl);
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
+      return CALDAV_ERR_NETWORK;
+   }
+
+   if (resp.truncated) {
+      OLOG_ERROR("caldav: REPORT %s response exceeded %d byte cap; rejecting", calendar_url,
+                 CALDAV_MAX_RESPONSE_SIZE);
+      curl_easy_cleanup(curl);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -712,14 +678,14 @@ caldav_error_t caldav_fetch_events(const char *calendar_url,
 
    caldav_error_t err = http_status_to_error(status);
    if (err != CALDAV_OK) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return err;
    }
 
    /* Parse multistatus response */
    xmlDocPtr doc = xmlReadMemory(resp.data, (int)resp.size, NULL, NULL,
                                  XML_PARSE_NONET | XML_PARSE_NOBLANKS);
-   curl_buf_free(&resp);
+   curl_buffer_free(&resp);
    if (!doc)
       return CALDAV_ERR_PARSE;
 
@@ -923,14 +889,12 @@ caldav_error_t caldav_create_event(const char *calendar_url,
    const char *sep = (cal_len > 0 && calendar_url[cal_len - 1] == '/') ? "" : "/";
    snprintf(url, sizeof(url), "%s%s%s.ics", calendar_url, sep, uid);
 
-   curl_buf_t resp;
-   curl_buf_init(&resp);
-   if (!resp.data)
-      return CALDAV_ERR_ALLOC;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -954,7 +918,7 @@ caldav_error_t caldav_create_event(const char *calendar_url,
    if (cres != CURLE_OK) {
       OLOG_ERROR("caldav: PUT create %s failed: %s", url, curl_easy_strerror(cres));
       curl_easy_cleanup(curl);
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -966,7 +930,7 @@ caldav_error_t caldav_create_event(const char *calendar_url,
       snprintf(etag_out, etag_len, "%s", etag_cap.etag);
 
    curl_easy_cleanup(curl);
-   curl_buf_free(&resp);
+   curl_buffer_free(&resp);
    return http_status_to_error(status);
 }
 
@@ -983,14 +947,12 @@ caldav_error_t caldav_update_event(const char *href,
    if (etag_out && etag_len > 0)
       etag_out[0] = '\0';
 
-   curl_buf_t resp;
-   curl_buf_init(&resp);
-   if (!resp.data)
-      return CALDAV_ERR_ALLOC;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -1018,7 +980,7 @@ caldav_error_t caldav_update_event(const char *href,
    if (cres != CURLE_OK) {
       OLOG_ERROR("caldav: PUT update %s failed: %s", href, curl_easy_strerror(cres));
       curl_easy_cleanup(curl);
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -1030,7 +992,7 @@ caldav_error_t caldav_update_event(const char *href,
       snprintf(etag_out, etag_len, "%s", etag_cap.etag);
 
    curl_easy_cleanup(curl);
-   curl_buf_free(&resp);
+   curl_buffer_free(&resp);
    return http_status_to_error(status);
 }
 
@@ -1039,14 +1001,12 @@ caldav_error_t caldav_update_event(const char *href,
  * ============================================================================ */
 
 caldav_error_t caldav_delete_event(const char *href, const caldav_auth_t *auth, const char *etag) {
-   curl_buf_t resp;
-   curl_buf_init(&resp);
-   if (!resp.data)
-      return CALDAV_ERR_ALLOC;
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, CALDAV_MAX_RESPONSE_SIZE);
 
    CURL *curl = caldav_curl_init(auth, &resp);
    if (!curl) {
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
@@ -1067,14 +1027,14 @@ caldav_error_t caldav_delete_event(const char *href, const caldav_auth_t *auth, 
    if (cres != CURLE_OK) {
       OLOG_ERROR("caldav: DELETE %s failed: %s", href, curl_easy_strerror(cres));
       curl_easy_cleanup(curl);
-      curl_buf_free(&resp);
+      curl_buffer_free(&resp);
       return CALDAV_ERR_NETWORK;
    }
 
    long status = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
    curl_easy_cleanup(curl);
-   curl_buf_free(&resp);
+   curl_buffer_free(&resp);
    return http_status_to_error(status);
 }
 

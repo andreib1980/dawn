@@ -69,21 +69,21 @@ static bool is_current_session_remote(void) {
 typedef struct {
    sse_parser_t *sse_parser;
    llm_stream_context_t *stream_ctx;
-   char *raw_buffer;
-   size_t raw_size;
-   size_t raw_capacity;
+   curl_buffer_t raw_response; /**< Raw response for error diagnostics (cap 4KB) */
 } openai_streaming_context_t;
+
+#define OPENAI_RAW_BUFFER_CAP 4096
 
 static size_t streaming_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
    size_t realsize = size * nmemb;
    openai_streaming_context_t *ctx = (openai_streaming_context_t *)userp;
 
-   if (ctx->raw_buffer && ctx->raw_size < ctx->raw_capacity - 1) {
-      size_t space_left = ctx->raw_capacity - ctx->raw_size - 1;
-      size_t to_copy = realsize < space_left ? realsize : space_left;
-      memcpy(ctx->raw_buffer + ctx->raw_size, contents, to_copy);
-      ctx->raw_size += to_copy;
-      ctx->raw_buffer[ctx->raw_size] = '\0';
+   /* Capture raw response for error diagnostics (cap at OPENAI_RAW_BUFFER_CAP).
+    * Matches Claude's streaming context pattern (see llm_claude.c). */
+   if (ctx->raw_response.size < OPENAI_RAW_BUFFER_CAP) {
+      size_t space = OPENAI_RAW_BUFFER_CAP - ctx->raw_response.size;
+      size_t to_copy = realsize < space ? realsize : space;
+      curl_buffer_write_callback(contents, 1, to_copy, &ctx->raw_response);
    }
 
    sse_parser_feed(ctx->sse_parser, contents, realsize);
@@ -715,12 +715,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    streaming_ctx.sse_parser = sse_parser;
    streaming_ctx.stream_ctx = stream_ctx;
-   streaming_ctx.raw_capacity = 4096;
-   streaming_ctx.raw_buffer = malloc(streaming_ctx.raw_capacity);
-   streaming_ctx.raw_size = 0;
-   if (streaming_ctx.raw_buffer) {
-      streaming_ctx.raw_buffer[0] = '\0';
-   }
+   curl_buffer_init_with_max(&streaming_ctx.raw_response, OPENAI_RAW_BUFFER_CAP);
 
    curl_handle = curl_easy_init();
    if (curl_handle) {
@@ -774,7 +769,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
-         free(streaming_ctx.raw_buffer);
+         curl_buffer_free(&streaming_ctx.raw_response);
          return NULL;
       }
 
@@ -802,14 +797,14 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             error_code = "LLM_ERROR";
          }
 
-         if (streaming_ctx.raw_buffer && streaming_ctx.raw_size > 0) {
-            OLOG_ERROR("OpenAI API error response: %s", streaming_ctx.raw_buffer);
+         if (streaming_ctx.raw_response.data && streaming_ctx.raw_response.size > 0) {
+            OLOG_ERROR("OpenAI API error response: %s", streaming_ctx.raw_response.data);
          }
 
 #ifdef ENABLE_WEBUI
          session_t *session = session_get_command_context();
          if (session && session->type == SESSION_TYPE_WEBUI) {
-            const char *err_msg = llm_openai_parse_error_message(streaming_ctx.raw_buffer,
+            const char *err_msg = llm_openai_parse_error_message(streaming_ctx.raw_response.data,
                                                                  http_code);
             webui_send_error(session, error_code, err_msg);
          }
@@ -820,7 +815,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
-         free(streaming_ctx.raw_buffer);
+         curl_buffer_free(&streaming_ctx.raw_response);
          return NULL;
       }
 
@@ -856,7 +851,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             sse_parser_free(sse_parser);
             llm_stream_free(stream_ctx);
             json_object_put(root);
-            free(streaming_ctx.raw_buffer);
+            curl_buffer_free(&streaming_ctx.raw_response);
 
             OLOG_INFO("OpenAI streaming: Making final call without tools to force text response");
 
@@ -882,7 +877,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
             sse_parser_free(sse_parser);
             llm_stream_free(stream_ctx);
             json_object_put(root);
-            free(streaming_ctx.raw_buffer);
+            curl_buffer_free(&streaming_ctx.raw_response);
             return NULL;
          }
          llm_tools_execute_all(tool_calls, results);
@@ -923,7 +918,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
-         free(streaming_ctx.raw_buffer);
+         curl_buffer_free(&streaming_ctx.raw_response);
 
          if (llm_tools_should_skip_followup(results)) {
             OLOG_INFO("OpenAI streaming: Skipping follow-up call (tool requested no follow-up)");
@@ -1069,7 +1064,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
    sse_parser_free(sse_parser);
    llm_stream_free(stream_ctx);
    json_object_put(root);
-   free(streaming_ctx.raw_buffer);
+   curl_buffer_free(&streaming_ctx.raw_response);
 
    return response;
 }
@@ -1267,12 +1262,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    streaming_ctx.sse_parser = sse_parser;
    streaming_ctx.stream_ctx = stream_ctx;
-   streaming_ctx.raw_capacity = 4096;
-   streaming_ctx.raw_buffer = malloc(streaming_ctx.raw_capacity);
-   streaming_ctx.raw_size = 0;
-   if (streaming_ctx.raw_buffer) {
-      streaming_ctx.raw_buffer[0] = '\0';
-   }
+   curl_buffer_init_with_max(&streaming_ctx.raw_response, OPENAI_RAW_BUFFER_CAP);
 
    int max_attempts = 2;
    for (int attempt = 0; attempt < max_attempts; attempt++) {
@@ -1282,7 +1272,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
-         free(streaming_ctx.raw_buffer);
+         curl_buffer_free(&streaming_ctx.raw_response);
          return 1;
       }
 
@@ -1311,7 +1301,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       res = curl_easy_perform(curl_handle);
       if (res != CURLE_OK) {
          bool retryable = (res == CURLE_COULDNT_CONNECT || res == CURLE_COULDNT_RESOLVE_HOST);
-         if (res == CURLE_OPERATION_TIMEDOUT && streaming_ctx.raw_size == 0) {
+         if (res == CURLE_OPERATION_TIMEDOUT && streaming_ctx.raw_response.size == 0) {
             retryable = true;
          }
 
@@ -1322,9 +1312,9 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
             curl_slist_free_all(headers);
             curl_handle = NULL;
             headers = NULL;
-            streaming_ctx.raw_size = 0;
-            if (streaming_ctx.raw_buffer) {
-               streaming_ctx.raw_buffer[0] = '\0';
+            curl_buffer_reset(&streaming_ctx.raw_response);
+            if (streaming_ctx.raw_response.data) {
+               streaming_ctx.raw_response.data[0] = '\0';
             }
             sse_parser_reset(sse_parser);
             for (int ms = 0; ms < 1000; ms += 100) {
@@ -1355,7 +1345,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
          sse_parser_free(sse_parser);
          llm_stream_free(stream_ctx);
          json_object_put(root);
-         free(streaming_ctx.raw_buffer);
+         curl_buffer_free(&streaming_ctx.raw_response);
          return 1;
       }
 
@@ -1373,7 +1363,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
       if (session && session->type == SESSION_TYPE_WEBUI) {
-         const char *err_msg = llm_openai_parse_error_message(streaming_ctx.raw_buffer, http_code);
+         const char *err_msg = llm_openai_parse_error_message(streaming_ctx.raw_response.data,
+                                                              http_code);
          webui_send_error(session, "LLM_ERROR", err_msg);
       }
 #endif
@@ -1382,7 +1373,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       sse_parser_free(sse_parser);
       llm_stream_free(stream_ctx);
       json_object_put(root);
-      free(streaming_ctx.raw_buffer);
+      curl_buffer_free(&streaming_ctx.raw_response);
       return 1;
    }
 
@@ -1416,7 +1407,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    sse_parser_free(sse_parser);
    llm_stream_free(stream_ctx);
    json_object_put(root);
-   free(streaming_ctx.raw_buffer);
+   curl_buffer_free(&streaming_ctx.raw_response);
 
    return 0;
 }

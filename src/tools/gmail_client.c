@@ -62,56 +62,13 @@
 
 /* =============================================================================
  * Response Buffer
+ *
+ * Uses the shared curl_buffer_t (include/core/curl_buffer.h) with a 4 MB
+ * cap on Gmail REST responses (large mailbox listings, full message
+ * bodies).  The shared helper truncates with a flag instead of aborting
+ * mid-transfer — gmail_api_get/post check `resp->truncated` after
+ * curl_easy_perform and reject the response.
  * ============================================================================= */
-
-typedef struct {
-   char *data;
-   size_t len;
-   size_t cap;
-} gmail_response_t;
-
-static size_t gmail_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-   gmail_response_t *resp = (gmail_response_t *)userdata;
-
-   /* Overflow guard for size * nmemb */
-   if (size != 0 && nmemb > SIZE_MAX / size)
-      return 0;
-   size_t total = size * nmemb;
-
-   if (resp->len + total > GMAIL_MAX_RESPONSE_SIZE)
-      return 0; /* Abort — response too large */
-
-   if (resp->len + total >= resp->cap) {
-      size_t new_cap = resp->cap ? resp->cap * 2 : 4096;
-      while (new_cap < resp->len + total + 1)
-         new_cap *= 2;
-      if (new_cap > GMAIL_MAX_RESPONSE_SIZE)
-         new_cap = GMAIL_MAX_RESPONSE_SIZE + 1;
-      char *new_data = realloc(resp->data, new_cap);
-      if (!new_data)
-         return 0;
-      resp->data = new_data;
-      resp->cap = new_cap;
-   }
-
-   memcpy(resp->data + resp->len, ptr, total);
-   resp->len += total;
-   resp->data[resp->len] = '\0';
-   return total;
-}
-
-static void gmail_response_init(gmail_response_t *resp) {
-   resp->data = NULL;
-   resp->len = 0;
-   resp->cap = 0;
-}
-
-static void gmail_response_free(gmail_response_t *resp) {
-   free(resp->data);
-   resp->data = NULL;
-   resp->len = 0;
-   resp->cap = 0;
-}
 
 /* =============================================================================
  * Message ID Validation
@@ -146,13 +103,13 @@ static CURL *gmail_create_curl(void) {
    DAWN_CURL_SET_PROTOCOLS(curl, "https");
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, gmail_write_cb);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
 
    return curl;
 }
 
-static int gmail_api_get(CURL *curl, const char *token, const char *url, gmail_response_t *resp) {
-   gmail_response_init(resp);
+static int gmail_api_get(CURL *curl, const char *token, const char *url, curl_buffer_t *resp) {
+   curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
 
    char auth_header[2112];
    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", token);
@@ -172,7 +129,13 @@ static int gmail_api_get(CURL *curl, const char *token, const char *url, gmail_r
 
    if (res != CURLE_OK) {
       OLOG_ERROR("gmail: API request failed: %s", curl_easy_strerror(res));
-      gmail_response_free(resp);
+      curl_buffer_free(resp);
+      return 1;
+   }
+
+   if (resp->truncated) {
+      OLOG_ERROR("gmail: API response exceeded %d byte cap; rejecting", GMAIL_MAX_RESPONSE_SIZE);
+      curl_buffer_free(resp);
       return 1;
    }
 
@@ -180,7 +143,7 @@ static int gmail_api_get(CURL *curl, const char *token, const char *url, gmail_r
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
    if (http_code < 200 || http_code >= 300) {
       OLOG_ERROR("gmail: API request returned HTTP %ld", http_code);
-      gmail_response_free(resp);
+      curl_buffer_free(resp);
       return 1;
    }
 
@@ -192,8 +155,8 @@ static int gmail_api_post(CURL *curl,
                           const char *url,
                           const char *content_type,
                           const char *body,
-                          gmail_response_t *resp) {
-   gmail_response_init(resp);
+                          curl_buffer_t *resp) {
+   curl_buffer_init_with_max(resp, GMAIL_MAX_RESPONSE_SIZE);
 
    char auth_header[2112];
    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", token);
@@ -217,7 +180,14 @@ static int gmail_api_post(CURL *curl,
 
    if (res != CURLE_OK) {
       OLOG_ERROR("gmail: API POST failed: %s", curl_easy_strerror(res));
-      gmail_response_free(resp);
+      curl_buffer_free(resp);
+      return 1;
+   }
+
+   if (resp->truncated) {
+      OLOG_ERROR("gmail: API POST response exceeded %d byte cap; rejecting",
+                 GMAIL_MAX_RESPONSE_SIZE);
+      curl_buffer_free(resp);
       return 1;
    }
 
@@ -225,7 +195,7 @@ static int gmail_api_post(CURL *curl,
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
    if (http_code < 200 || http_code >= 300) {
       OLOG_ERROR("gmail: API POST returned HTTP %ld", http_code);
-      gmail_response_free(resp);
+      curl_buffer_free(resp);
       return 1;
    }
 
@@ -769,12 +739,12 @@ static int fetch_message_ids(CURL *curl,
       snprintf(url + url_pos, sizeof(url) - url_pos, "&pageToken=%s", encoded_pt);
    }
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    if (gmail_api_get(curl, token, url, &resp) != 0)
       return 1;
 
    struct json_object *root = json_tokener_parse(resp.data);
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    if (!root)
       return 1;
 
@@ -1019,7 +989,7 @@ static int gmail_batch_fetch_metadata(CURL *curl,
    snprintf(content_type, sizeof(content_type), "multipart/mixed; boundary=%s",
             GMAIL_BATCH_BOUNDARY);
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    int rc = gmail_api_post(curl, token, GMAIL_BATCH_URL, content_type, batch_body, &resp);
    free(batch_body);
 
@@ -1033,13 +1003,13 @@ static int gmail_batch_fetch_metadata(CURL *curl,
    char resp_boundary[256];
    if (extract_boundary(resp_ct, resp_boundary, sizeof(resp_boundary)) != 0) {
       OLOG_ERROR("gmail: batch response missing boundary");
-      gmail_response_free(&resp);
+      curl_buffer_free(&resp);
       return 1;
    }
 
    /* Parse batch response */
    rc = parse_batch_response(resp.data, resp_boundary, out, max_out, out_count);
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    return rc;
 }
 
@@ -1126,7 +1096,7 @@ int gmail_read_message(const char *token,
    char url[512];
    snprintf(url, sizeof(url), GMAIL_API_BASE "/messages/%s?format=full", message_id);
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    if (gmail_api_get(curl, token, url, &resp) != 0) {
       curl_easy_cleanup(curl);
       return 1;
@@ -1135,7 +1105,7 @@ int gmail_read_message(const char *token,
    curl_easy_cleanup(curl);
 
    struct json_object *root = json_tokener_parse(resp.data);
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    if (!root)
       return 1;
 
@@ -1328,11 +1298,11 @@ int gmail_send(const char *token,
       return 1;
    }
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    int rc = gmail_api_post(curl, token, GMAIL_API_BASE "/messages/send", "application/json",
                            json_str, &resp);
 
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    curl_easy_cleanup(curl);
    json_object_put(json_payload);
    free(b64_msg);
@@ -1358,7 +1328,7 @@ int gmail_test_connection(const char *token, char *email_out, size_t email_len) 
    if (!curl)
       return 1;
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    int rc = gmail_api_get(curl, token, GMAIL_API_BASE "/profile", &resp);
    curl_easy_cleanup(curl);
 
@@ -1380,7 +1350,7 @@ int gmail_test_connection(const char *token, char *email_out, size_t email_len) 
       }
    }
 
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    return 0;
 }
 
@@ -1427,7 +1397,7 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
    if (!curl)
       return 1;
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    int rc = gmail_api_get(curl, token, GMAIL_API_BASE "/labels", &resp);
    curl_easy_cleanup(curl);
 
@@ -1435,7 +1405,7 @@ int gmail_list_labels(const char *token, char *out, size_t out_len) {
       return 1;
 
    struct json_object *root = json_tokener_parse(resp.data);
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    if (!root)
       return 1;
 
@@ -1510,9 +1480,9 @@ int gmail_trash_message(const char *token, const char *message_id) {
    if (!curl)
       return 1;
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    int rc = gmail_api_post(curl, token, url, "application/json", "{}", &resp);
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    curl_easy_cleanup(curl);
 
    if (rc == 0)
@@ -1536,10 +1506,10 @@ int gmail_archive_message(const char *token, const char *message_id) {
    if (!curl)
       return 1;
 
-   gmail_response_t resp;
+   curl_buffer_t resp;
    int rc = gmail_api_post(curl, token, url, "application/json",
                            "{\"removeLabelIds\": [\"INBOX\"]}", &resp);
-   gmail_response_free(&resp);
+   curl_buffer_free(&resp);
    curl_easy_cleanup(curl);
 
    if (rc == 0)

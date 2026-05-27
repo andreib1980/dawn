@@ -149,30 +149,15 @@ static size_t url_encode(const char *str, char *out, size_t out_len) {
 }
 
 /* =============================================================================
- * curl Write Callback
+ * curl Response Buffer
+ *
+ * Uses the shared curl_buffer_t (include/core/curl_buffer.h) with a 1 MB
+ * cap on token endpoint responses.  The shared helper truncates with a
+ * flag instead of aborting mid-transfer — callers MUST check
+ * `resp.truncated` after curl_easy_perform and reject the response.
  * ============================================================================= */
 
-typedef struct {
-   char *data;
-   size_t size;
-} curl_response_t;
-
 #define OAUTH_MAX_RESPONSE_SIZE (1024 * 1024) /* 1 MB cap on token endpoint responses */
-
-static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
-   curl_response_t *resp = (curl_response_t *)userp;
-   size_t total = size * nmemb;
-   if (total > OAUTH_MAX_RESPONSE_SIZE - resp->size)
-      return 0; /* reject oversized response */
-   char *ptr = realloc(resp->data, resp->size + total + 1);
-   if (!ptr)
-      return 0;
-   resp->data = ptr;
-   memcpy(resp->data + resp->size, contents, total);
-   resp->size += total;
-   resp->data[resp->size] = '\0';
-   return total;
-}
 
 /* =============================================================================
  * Provider Setup
@@ -355,9 +340,10 @@ static void oauth_fetch_google_email(const char *access_token, char *email_out, 
    if (!curl)
       return;
 
-   curl_response_t resp = { 0 };
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, OAUTH_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_URL, "https://www.googleapis.com/oauth2/v2/userinfo");
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -377,18 +363,23 @@ static void oauth_fetch_google_email(const char *access_token, char *email_out, 
    curl_easy_cleanup(curl);
    sodium_memzero(auth_header, sizeof(auth_header));
 
-   if (cres != CURLE_OK || http_code != 200) {
-      OLOG_WARNING("oauth: failed to fetch Google userinfo (HTTP %ld)", http_code);
+   if (cres != CURLE_OK || http_code != 200 || resp.truncated) {
+      if (resp.truncated) {
+         OLOG_WARNING("oauth: userinfo response exceeded %d byte cap; rejecting",
+                      OAUTH_MAX_RESPONSE_SIZE);
+      } else {
+         OLOG_WARNING("oauth: failed to fetch Google userinfo (HTTP %ld)", http_code);
+      }
       if (resp.data) {
          sodium_memzero(resp.data, resp.size);
-         free(resp.data);
       }
+      curl_buffer_free(&resp);
       return;
    }
 
    json_object *root = json_tokener_parse(resp.data);
    sodium_memzero(resp.data, resp.size);
-   free(resp.data);
+   curl_buffer_free(&resp);
    if (!root)
       return;
 
@@ -469,10 +460,11 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
       return 1;
    }
 
-   curl_response_t resp = { 0 };
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, OAUTH_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_URL, provider->token_endpoint);
    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -489,19 +481,24 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
    sodium_memzero(enc_code, sizeof(enc_code));
    sodium_memzero(enc_verifier, sizeof(enc_verifier));
 
-   if (cres != CURLE_OK || http_code != 200) {
-      OLOG_ERROR("oauth: token exchange failed (HTTP %ld, curl %d)", http_code, cres);
+   if (cres != CURLE_OK || http_code != 200 || resp.truncated) {
+      if (resp.truncated) {
+         OLOG_ERROR("oauth: token exchange response exceeded %d byte cap; rejecting",
+                    OAUTH_MAX_RESPONSE_SIZE);
+      } else {
+         OLOG_ERROR("oauth: token exchange failed (HTTP %ld, curl %d)", http_code, cres);
+      }
       if (resp.data) {
          sodium_memzero(resp.data, resp.size);
-         free(resp.data);
       }
+      curl_buffer_free(&resp);
       return 1;
    }
 
    /* Parse JSON response */
    json_object *root = json_tokener_parse(resp.data);
    sodium_memzero(resp.data, resp.size);
-   free(resp.data);
+   curl_buffer_free(&resp);
    if (!root) {
       OLOG_ERROR("oauth: failed to parse token response JSON");
       return 1;
@@ -563,10 +560,11 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
    if (!curl)
       return 1;
 
-   curl_response_t resp = { 0 };
+   curl_buffer_t resp;
+   curl_buffer_init_with_max(&resp, OAUTH_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_URL, provider->token_endpoint);
    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -582,20 +580,29 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
    sodium_memzero(enc_client_secret, sizeof(enc_client_secret));
    sodium_memzero(enc_refresh, sizeof(enc_refresh));
 
-   if (cres != CURLE_OK || http_code != 200) {
-      OLOG_ERROR("oauth: refresh failed (HTTP %ld, curl %d)", http_code, cres);
-      if (resp.data) {
-         OLOG_ERROR("oauth: server response: %.*s", (int)(resp.size < 512 ? resp.size : 512),
-                    resp.data);
-         sodium_memzero(resp.data, resp.size);
-         free(resp.data);
+   if (cres != CURLE_OK || http_code != 200 || resp.truncated) {
+      if (resp.truncated) {
+         OLOG_ERROR("oauth: refresh response exceeded %d byte cap; rejecting",
+                    OAUTH_MAX_RESPONSE_SIZE);
+      } else {
+         OLOG_ERROR("oauth: refresh failed (HTTP %ld, curl %d)", http_code, cres);
       }
+      if (resp.data) {
+         /* Log up to 512 bytes for diagnostics on HTTP failure (skip on
+          * truncated: payload may be a corrupted partial response). */
+         if (!resp.truncated) {
+            OLOG_ERROR("oauth: server response: %.*s", (int)(resp.size < 512 ? resp.size : 512),
+                       resp.data);
+         }
+         sodium_memzero(resp.data, resp.size);
+      }
+      curl_buffer_free(&resp);
       return 1;
    }
 
    json_object *root = json_tokener_parse(resp.data);
    sodium_memzero(resp.data, resp.size);
-   free(resp.data);
+   curl_buffer_free(&resp);
    if (!root) {
       OLOG_ERROR("oauth: failed to parse refresh response");
       return 1;
@@ -867,10 +874,11 @@ int oauth_revoke_and_delete(const oauth_provider_config_t *provider,
 
       CURL *curl = curl_easy_init();
       if (curl) {
-         curl_response_t resp = { 0 };
+         curl_buffer_t resp;
+         curl_buffer_init_with_max(&resp, OAUTH_MAX_RESPONSE_SIZE);
          curl_easy_setopt(curl, CURLOPT_URL, provider->revoke_endpoint);
          curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body);
-         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
          curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
          curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
          curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -883,9 +891,13 @@ int oauth_revoke_and_delete(const oauth_provider_config_t *provider,
          curl_easy_cleanup(curl);
          if (resp.data) {
             sodium_memzero(resp.data, resp.size);
-            free(resp.data);
          }
+         curl_buffer_free(&resp);
 
+         /* Revocation responses are bodyless on success — no need to
+          * gate on resp.truncated for diagnostics here.  We log the
+          * outcome based on HTTP status only and always proceed to
+          * local deletion. */
          if (cres != CURLE_OK || http_code != 200) {
             OLOG_WARNING("oauth: revocation failed (HTTP %ld) — delete locally anyway. "
                          "User can revoke manually at myaccount.google.com/permissions",

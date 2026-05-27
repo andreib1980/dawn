@@ -87,10 +87,10 @@ typedef struct {
    sse_parser_t *sse_parser;
    llm_stream_context_t *stream_ctx;
 
-   /* Raw response capture for error message extraction on non-200 */
-   char *raw_buffer;
-   size_t raw_size;
-   size_t raw_capacity;
+   /* Raw response capture for error message extraction on non-200.  Cap
+    * at RESPONSES_RAW_BUFFER_MAX (8 KB) — matches Claude's streaming
+    * context pattern (see llm_claude.c). */
+   curl_buffer_t raw_response;
 
    /* Per-function-call state. item_ids parallel stream_ctx->tool_calls[].
     * fc_args_len tracks the running argument-buffer length so per-delta append
@@ -955,26 +955,13 @@ static size_t responses_write_callback(void *contents, size_t size, size_t nmemb
    size_t total = size * nmemb;
    const char *data = (const char *)contents;
 
-   /* Capture raw response for error message extraction (bounded). */
-   if (rctx->raw_buffer && rctx->raw_size + total + 1 <= RESPONSES_RAW_BUFFER_MAX) {
-      if (rctx->raw_size + total + 1 > rctx->raw_capacity) {
-         size_t new_cap = rctx->raw_capacity * 2;
-         while (new_cap < rctx->raw_size + total + 1) {
-            new_cap *= 2;
-         }
-         if (new_cap > RESPONSES_RAW_BUFFER_MAX)
-            new_cap = RESPONSES_RAW_BUFFER_MAX;
-         char *new_buf = realloc(rctx->raw_buffer, new_cap);
-         if (new_buf) {
-            rctx->raw_buffer = new_buf;
-            rctx->raw_capacity = new_cap;
-         }
-      }
-      if (rctx->raw_size + total + 1 <= rctx->raw_capacity) {
-         memcpy(rctx->raw_buffer + rctx->raw_size, data, total);
-         rctx->raw_size += total;
-         rctx->raw_buffer[rctx->raw_size] = '\0';
-      }
+   /* Capture raw response for error message extraction (cap at
+    * RESPONSES_RAW_BUFFER_MAX).  Matches Claude's streaming context
+    * pattern (see llm_claude.c). */
+   if (rctx->raw_response.size < RESPONSES_RAW_BUFFER_MAX) {
+      size_t space = RESPONSES_RAW_BUFFER_MAX - rctx->raw_response.size;
+      size_t to_copy = total < space ? total : space;
+      curl_buffer_write_callback(contents, 1, to_copy, &rctx->raw_response);
    }
 
    sse_parser_feed(rctx->sse_parser, data, total);
@@ -1032,17 +1019,14 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    responses_stream_ctx_t rctx;
    memset(&rctx, 0, sizeof(rctx));
    rctx.active_fc_index = -1;
-   rctx.raw_capacity = 4096;
-   rctx.raw_buffer = malloc(rctx.raw_capacity);
-   if (rctx.raw_buffer)
-      rctx.raw_buffer[0] = '\0';
+   curl_buffer_init_with_max(&rctx.raw_response, RESPONSES_RAW_BUFFER_MAX);
 
    rctx.stream_ctx = llm_stream_create(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, chunk_callback,
                                        callback_userdata);
    if (!rctx.stream_ctx) {
       OLOG_ERROR("Responses: failed to create stream context");
       json_object_put(root);
-      free(rctx.raw_buffer);
+      curl_buffer_free(&rctx.raw_response);
       return 1;
    }
 
@@ -1051,7 +1035,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       OLOG_ERROR("Responses: failed to create SSE parser");
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
-      free(rctx.raw_buffer);
+      curl_buffer_free(&rctx.raw_response);
       return 1;
    }
 
@@ -1069,7 +1053,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          sse_parser_free(rctx.sse_parser);
          llm_stream_free(rctx.stream_ctx);
          json_object_put(root);
-         free(rctx.raw_buffer);
+         curl_buffer_free(&rctx.raw_response);
          if (rctx.reasoning_items)
             json_object_put(rctx.reasoning_items);
          return 1;
@@ -1103,7 +1087,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          break;
 
       bool retryable = (res == CURLE_COULDNT_CONNECT || res == CURLE_COULDNT_RESOLVE_HOST);
-      if (res == CURLE_OPERATION_TIMEDOUT && rctx.raw_size == 0) {
+      if (res == CURLE_OPERATION_TIMEDOUT && rctx.raw_response.size == 0) {
          retryable = true;
       }
       if (retryable && attempt < max_attempts - 1) {
@@ -1112,9 +1096,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          curl_slist_free_all(headers);
          curl = NULL;
          headers = NULL;
-         rctx.raw_size = 0;
-         if (rctx.raw_buffer)
-            rctx.raw_buffer[0] = '\0';
+         curl_buffer_reset(&rctx.raw_response);
          sse_parser_reset(rctx.sse_parser);
          for (int ms = 0; ms < 1000; ms += 100) {
             if (llm_is_interrupt_requested())
@@ -1143,7 +1125,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       sse_parser_free(rctx.sse_parser);
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
-      free(rctx.raw_buffer);
+      curl_buffer_free(&rctx.raw_response);
       if (rctx.reasoning_items)
          json_object_put(rctx.reasoning_items);
       return 1;
@@ -1152,7 +1134,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    long http_code = 0;
    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
    if (http_code != 200) {
-      const char *err_msg = llm_openai_parse_error_message(rctx.raw_buffer, http_code);
+      const char *err_msg = llm_openai_parse_error_message(rctx.raw_response.data, http_code);
       OLOG_ERROR("Responses: HTTP %ld: %s", http_code, err_msg);
       if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
          llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
@@ -1168,7 +1150,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       sse_parser_free(rctx.sse_parser);
       llm_stream_free(rctx.stream_ctx);
       json_object_put(root);
-      free(rctx.raw_buffer);
+      curl_buffer_free(&rctx.raw_response);
       if (rctx.reasoning_items)
          json_object_put(rctx.reasoning_items);
       return 1;
@@ -1222,7 +1204,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    if (rctx.reasoning_items)
       json_object_put(rctx.reasoning_items);
    json_object_put(root);
-   free(rctx.raw_buffer);
+   curl_buffer_free(&rctx.raw_response);
 
    return 0;
 }

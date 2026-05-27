@@ -46,49 +46,14 @@
 
 /* =============================================================================
  * Buffer for CURL responses
+ *
+ * Uses the shared curl_buffer_t (include/core/curl_buffer.h) with a 1 MB
+ * cap on IMAP/SMTP responses.  The shared helper truncates with a flag
+ * instead of aborting mid-transfer — callers MUST check `buf.truncated`
+ * after curl_easy_perform and reject the response.
  * ============================================================================= */
 
-typedef struct {
-   char *data;
-   size_t len;
-   size_t cap;
-} curl_buf_t;
-
-static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
-   curl_buf_t *buf = (curl_buf_t *)userdata;
-   if (size && nmemb > SIZE_MAX / size)
-      return 0; /* overflow check */
-   size_t total = size * nmemb;
-   if (buf->len + total >= buf->cap) {
-      size_t new_cap = (buf->len + total) * 2 + 1;
-      if (new_cap > 1024 * 1024)
-         return 0; /* 1MB limit */
-      char *new_data = realloc(buf->data, new_cap);
-      if (!new_data)
-         return 0;
-      buf->data = new_data;
-      buf->cap = new_cap;
-   }
-   memcpy(buf->data + buf->len, ptr, total);
-   buf->len += total;
-   buf->data[buf->len] = '\0';
-   return total;
-}
-
-static void buf_init(curl_buf_t *buf) {
-   buf->data = malloc(4096);
-   buf->len = 0;
-   buf->cap = buf->data ? 4096 : 0;
-   if (buf->data)
-      buf->data[0] = '\0';
-}
-
-static void buf_free(curl_buf_t *buf) {
-   free(buf->data);
-   buf->data = NULL;
-   buf->len = 0;
-   buf->cap = 0;
-}
+#define EMAIL_MAX_RESPONSE_SIZE (1024 * 1024) /* 1 MB cap on IMAP/SMTP responses */
 
 /* =============================================================================
  * SMTP Upload Buffer for email_send
@@ -665,17 +630,21 @@ static int batch_fetch_headers(CURL *curl,
    snprintf(fetch_cmd, sizeof(fetch_cmd), "UID FETCH %s BODY.PEEK[HEADER]", uid_list);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, fetch_cmd);
 
-   curl_buf_t buf;
-   buf_init(&buf);
-   if (!buf.data)
-      return 1;
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_buffer_t buf;
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
    CURLcode res = curl_easy_perform(curl);
    if (res != CURLE_OK) {
       OLOG_WARNING("email: batch UID FETCH failed: %s", curl_easy_strerror(res));
-      buf_free(&buf);
+      curl_buffer_free(&buf);
+      return 1;
+   }
+   if (buf.truncated) {
+      OLOG_WARNING("email: batch UID FETCH response exceeded %d byte cap; rejecting",
+                   EMAIL_MAX_RESPONSE_SIZE);
+      curl_buffer_free(&buf);
       return 1;
    }
 
@@ -725,7 +694,7 @@ static int batch_fetch_headers(CURL *curl,
       hdr_start++; /* skip \n */
 
       /* Bounds check */
-      if (hdr_start + octets > buf.data + buf.len)
+      if (hdr_start + octets > buf.data + buf.size)
          break;
 
       /* Copy header data into a temporary null-terminated buffer */
@@ -743,7 +712,7 @@ static int batch_fetch_headers(CURL *curl,
       p = hdr_start + octets;
    }
 
-   buf_free(&buf);
+   curl_buffer_free(&buf);
    return 0;
 }
 
@@ -806,19 +775,22 @@ int email_fetch_recent(const email_conn_t *conn,
    snprintf(search_cmd, sizeof(search_cmd), "SEARCH %s", unread_only ? "UNSEEN" : "ALL");
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, search_cmd);
 
-   curl_buf_t buf;
-   buf_init(&buf);
-   if (!buf.data) {
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_buffer_t buf;
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
    CURLcode res = curl_easy_perform(curl);
    if (res != CURLE_OK) {
       OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
-      buf_free(&buf);
+      curl_buffer_free(&buf);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
+   if (buf.truncated) {
+      OLOG_ERROR("email: IMAP SEARCH response exceeded %d byte cap; rejecting",
+                 EMAIL_MAX_RESPONSE_SIZE);
+      curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
    }
@@ -826,7 +798,7 @@ int email_fetch_recent(const email_conn_t *conn,
    /* Parse last N UIDs (highest = newest) from SEARCH response */
    uint32_t tail_uids[EMAIL_MAX_FETCH_RESULTS];
    int total = parse_tail_uids(buf.data, tail_uids, count);
-   buf_free(&buf);
+   curl_buffer_free(&buf);
 
    /* Step 2: Batch-fetch headers (single round trip) in reverse order (newest first) */
    uint32_t rev_uids[EMAIL_MAX_FETCH_RESULTS];
@@ -865,17 +837,18 @@ int email_read_message(const email_conn_t *conn,
    snprintf(url, sizeof(url), "%s/%s/;UID=%u", conn->imap_url, encoded_folder, uid);
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
-   curl_buf_t buf;
-   buf_init(&buf);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_buffer_t buf;
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
    CURLcode res = curl_easy_perform(curl);
    curl_easy_cleanup(curl);
 
-   if (res != CURLE_OK || !buf.data) {
-      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s", uid, curl_easy_strerror(res));
-      buf_free(&buf);
+   if (res != CURLE_OK || !buf.data || buf.truncated) {
+      OLOG_ERROR("email: IMAP FETCH uid=%u failed: %s%s", uid, curl_easy_strerror(res),
+                 buf.truncated ? " (response exceeded cap)" : "");
+      curl_buffer_free(&buf);
       return 1;
    }
 
@@ -912,7 +885,7 @@ int email_read_message(const email_conn_t *conn,
       p += 30;
    }
 
-   buf_free(&buf);
+   curl_buffer_free(&buf);
    return 0;
 }
 
@@ -988,26 +961,29 @@ int email_search(const email_conn_t *conn,
    curl_easy_setopt(curl, CURLOPT_URL, url);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, search_cmd);
 
-   curl_buf_t buf;
-   buf_init(&buf);
-   if (!buf.data) {
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_buffer_t buf;
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
    CURLcode res = curl_easy_perform(curl);
    if (res != CURLE_OK) {
       OLOG_ERROR("email: IMAP SEARCH failed: %s", curl_easy_strerror(res));
-      buf_free(&buf);
+      curl_buffer_free(&buf);
+      curl_easy_cleanup(curl);
+      return 1;
+   }
+   if (buf.truncated) {
+      OLOG_ERROR("email: IMAP SEARCH response exceeded %d byte cap; rejecting",
+                 EMAIL_MAX_RESPONSE_SIZE);
+      curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
       return 1;
    }
 
    uint32_t tail_uids[EMAIL_MAX_FETCH_RESULTS];
    int total = parse_tail_uids(buf.data, tail_uids, max_out);
-   buf_free(&buf);
+   curl_buffer_free(&buf);
 
    /* Batch-fetch headers (single round trip) in reverse order (newest first) */
    uint32_t rev_uids[EMAIL_MAX_FETCH_RESULTS];
@@ -1144,13 +1120,9 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       curl_easy_setopt(curl, CURLOPT_URL, url);
       curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "SEARCH RECENT");
 
-      curl_buf_t buf;
-      buf_init(&buf);
-      if (!buf.data) {
-         curl_easy_cleanup(curl);
-         goto test_smtp;
-      }
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+      curl_buffer_t buf;
+      curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
       CURLcode res = curl_easy_perform(curl);
@@ -1158,7 +1130,7 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       if (!*imap_ok) {
          OLOG_WARNING("email: IMAP test failed: %s", curl_easy_strerror(res));
       }
-      buf_free(&buf);
+      curl_buffer_free(&buf);
       curl_easy_cleanup(curl);
    }
 
@@ -1286,21 +1258,18 @@ int email_list_folders(const email_conn_t *conn, char *out, size_t out_len) {
    curl_easy_setopt(curl, CURLOPT_URL, url);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST \"\" *");
 
-   curl_buf_t buf;
-   buf_init(&buf);
-   if (!buf.data) {
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_buffer_t buf;
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
 
    CURLcode res = curl_easy_perform(curl);
    curl_easy_cleanup(curl);
 
-   if (res != CURLE_OK || !buf.data) {
-      OLOG_ERROR("email: IMAP LIST failed: %s", curl_easy_strerror(res));
-      buf_free(&buf);
+   if (res != CURLE_OK || !buf.data || buf.truncated) {
+      OLOG_ERROR("email: IMAP LIST failed: %s%s", curl_easy_strerror(res),
+                 buf.truncated ? " (response exceeded cap)" : "");
+      curl_buffer_free(&buf);
       return 1;
    }
 
@@ -1327,7 +1296,7 @@ int email_list_folders(const email_conn_t *conn, char *out, size_t out_len) {
       if (*line == '\n')
          line++;
    }
-   buf_free(&buf);
+   curl_buffer_free(&buf);
 
    /* Format output: System folders first, then custom */
    int pos = 0;
@@ -1407,7 +1376,7 @@ static int imap_move_message(const email_conn_t *conn,
    snprintf(url, sizeof(url), "%s/%s", conn->imap_url, encoded_folder);
    curl_easy_setopt(curl, CURLOPT_URL, url);
 
-   curl_buf_t buf;
+   curl_buffer_t buf;
    int rc = 1;
 
    /* Step 1: COPY to destination */
@@ -1415,11 +1384,11 @@ static int imap_move_message(const email_conn_t *conn,
    snprintf(copy_cmd, sizeof(copy_cmd), "UID COPY %u \"%s\"", uid, dest_folder);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, copy_cmd);
 
-   buf_init(&buf);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
    CURLcode res = curl_easy_perform(curl);
-   buf_free(&buf);
+   curl_buffer_free(&buf);
 
    if (res != CURLE_OK) {
       OLOG_ERROR("email_imap: COPY failed for UID %u: %s", uid, curl_easy_strerror(res));
@@ -1431,10 +1400,10 @@ static int imap_move_message(const email_conn_t *conn,
    snprintf(store_cmd, sizeof(store_cmd), "UID STORE %u +FLAGS (\\Deleted)", uid);
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, store_cmd);
 
-   buf_init(&buf);
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
    res = curl_easy_perform(curl);
-   buf_free(&buf);
+   curl_buffer_free(&buf);
 
    if (res != CURLE_OK) {
       OLOG_WARNING("email_imap: STORE \\Deleted failed for UID %u (message copied to %s): %s", uid,
@@ -1447,10 +1416,10 @@ static int imap_move_message(const email_conn_t *conn,
    /* Step 3: EXPUNGE to remove from source */
    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "EXPUNGE");
 
-   buf_init(&buf);
+   curl_buffer_init_with_max(&buf, EMAIL_MAX_RESPONSE_SIZE);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
    res = curl_easy_perform(curl);
-   buf_free(&buf);
+   curl_buffer_free(&buf);
 
    if (res != CURLE_OK) {
       OLOG_WARNING("email_imap: EXPUNGE failed for UID %u (flagged but not removed): %s", uid,
