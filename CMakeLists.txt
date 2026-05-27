@@ -620,6 +620,7 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_telegram.c
         src/messaging/messaging_sms.c
         src/messaging/messaging_discord.c
+        src/messaging/messaging_split.c
         src/messaging/ws_reconnect.c
         src/tools/messaging_tool.c
     )

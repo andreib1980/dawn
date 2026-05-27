@@ -47,6 +47,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
+#include "messaging/messaging_split.h"
 
 /* =============================================================================
  * Internal constants and types
@@ -1915,6 +1916,8 @@ static session_t *get_or_create_messaging_session(const char *provider,
  * close enough to WebUI/voice that we don't constrain). */
 typedef struct {
    size_t max_outbound_chars; /* 0 = no engine-side cap */
+   bool split_oversize;       /* true = route oversize through splitter, false = hard-truncate */
+   int max_parts;             /* 0 = unlimited; >0 = reject if splitter produces more chunks */
    const char *channel_hint;
 } provider_outbound_t;
 
@@ -1924,16 +1927,22 @@ static provider_outbound_t provider_outbound_for(const char *provider) {
        *   PDU_MAX_SEGMENTS       = 10
        *   PDU_UCS2_CHARS_PER_SEG = 67   (140 octets − 6 UDH ÷ 2 bytes)
        *   v1 is UCS-2-only even for ASCII bodies — see the pdu.h
-       *   block comment.  So 10 × 67 = 670 chars hard cap, regardless
-       *   of content.
+       *   block comment.  So 10 × 67 = 670 chars hard cap per SEND,
+       *   regardless of content.
        *
        * Using 670 BYTES (strlen) is safe because UTF-8 byte length is
        * always ≥ UCS-2 code-unit count: 1-byte ASCII → 1 UCS-2;
        * 2- or 3-byte UTF-8 → 1 UCS-2; 4-byte UTF-8 (emoji supplementary
        * plane) → 2 UCS-2.  strlen ≤ 670 guarantees the encoded UCS-2
-       * fits in 10 segments. */
+       * fits in 10 segments.
+       *
+       * SMS uses split-with-cap: 670-char cap per part (one ECHO send),
+       * max_parts=3 to bound segment-billing worst case for users on
+       * metered plans (~30 segments worst case vs ~10 today). */
       return (provider_outbound_t){
          .max_outbound_chars = 670,
+         .split_oversize = true,
+         .max_parts = 3,
          .channel_hint =
              "[Delivery channel: SMS.  Your reply is being sent as a text message, NOT to a "
              "voice or web client.  HARD CONSTRAINTS for this reply, regardless of what the "
@@ -1945,12 +1954,46 @@ static provider_outbound_t provider_outbound_for(const char *provider) {
              "items, or anything that naturally wants a long answer, give a 1-2 sentence "
              "summary and offer the WebUI for the full version (e.g. \"Quick version: X.  Want "
              "the full breakdown?  I can pull it up in the WebUI.\"). "
-             "Anything you write over 670 characters will be hard-truncated mid-sentence "
-             "before delivery, leaving the user with a cut-off message.]",
+             "Anything you write that doesn't fit in 3 SMS messages will be dropped entirely "
+             "— the user gets a short 'open the WebUI' note instead.  Keep replies short.]",
       };
    }
-   /* Telegram and future Discord / Slack — no engine-side cap for v1. */
-   return (provider_outbound_t){ .max_outbound_chars = 0, .channel_hint = NULL };
+   if (provider && strcmp(provider, "discord") == 0) {
+      /* Discord caps `content` at 2000 chars per message.  1980 leaves
+       * 20-byte headroom for the optional "(NN/NN) " prefix when a
+       * reply splits into multiple posts. */
+      return (provider_outbound_t){
+         .max_outbound_chars = 1980,
+         .split_oversize = true,
+         .max_parts = 0,
+         .channel_hint = NULL,
+      };
+   }
+   if (provider && strcmp(provider, "telegram") == 0) {
+      /* Telegram caps `text` at 4096 chars after entities parsing.
+       * 4076 leaves room for the "(NN/NN) " prefix. */
+      return (provider_outbound_t){
+         .max_outbound_chars = 4076,
+         .split_oversize = true,
+         .max_parts = 0,
+         .channel_hint = NULL,
+      };
+   }
+   if (provider && strcmp(provider, "slack") == 0) {
+      /* Slack recommends ≤ 4000 chars for chat.postMessage `text`
+       * (40000 hard cap, but truncation/UX degrades past 4000). */
+      return (provider_outbound_t){
+         .max_outbound_chars = 3980,
+         .split_oversize = true,
+         .max_parts = 0,
+         .channel_hint = NULL,
+      };
+   }
+   /* Unknown provider — no cap.  Driver enforces if it has its own. */
+   return (provider_outbound_t){ .max_outbound_chars = 0,
+                                 .split_oversize = false,
+                                 .max_parts = 0,
+                                 .channel_hint = NULL };
 }
 
 /* Truncate `text` in place to fit within `max_chars`, appending the
@@ -2075,13 +2118,24 @@ static void process_inbound(inbound_item_t *item) {
       return;
    }
 
-   /* Provider-side truncation safety net.  If the LLM ignored the
-    * channel hint and produced an oversized reply, cap it here.  When
-    * we truncate, we also REPLACE the assistant message in session
-    * history with the truncated version — so the LLM "sees" what the
-    * user actually received on subsequent turns and can correctly
-    * reference what was (and wasn't) delivered. */
-   if (cfg.max_outbound_chars > 0) {
+   /* Provider-side truncation safety net for any provider that opts
+    * into hard-truncate semantics (split_oversize=false).  No v1
+    * provider uses this path — all four are split_oversize=true and
+    * fall through to the split block at the driver-send site below.
+    * Kept available for any future provider where hard-truncate is
+    * the right failure mode.
+    *
+    * History-vs-delivery state on this turn:
+    *   (A) Hard-truncate (HERE): history rewritten to the truncated
+    *       text — user got exactly that; LLM next turn sees what was
+    *       sent and the prev_truncated cue above kicks in.
+    *   (B) Multi-part split (driver-send block below): history holds
+    *       the FULL response — split is a transport detail, user
+    *       received the whole thing across N posts.
+    *   (C) Split rejected (also driver-send block): history holds
+    *       the FULL response (the LLM's actual output); user got
+    *       only the err_msg pointing them at the WebUI. */
+   if (cfg.max_outbound_chars > 0 && !cfg.split_oversize) {
       size_t original_len = strlen(response);
       if (truncate_outbound_in_place(response, cfg.max_outbound_chars)) {
          OLOG_WARNING("messaging: truncated %s outbound %zu→%zu chars for %s:%s", item->provider,
@@ -2142,19 +2196,123 @@ static void process_inbound(inbound_item_t *item) {
 
    session_release(session);
 
-   /* Send the (possibly truncated) response back via the originating
-    * driver.  Pass provider_address natively so the driver can skip
-    * the JSON parse on the hot path.  Builder still constructs the
-    * address_json blob for providers that need extras.  user_id flows
-    * from the inbound item so drivers that scope per-user state (SMS
-    * audit log + rate buckets in phone_service) accumulate against
-    * the correct DAWN user, not a hardcoded admin fallback. */
+   /* Send the response back via the originating driver.  Pass
+    * provider_address natively so the driver can skip the JSON parse
+    * on the hot path.  Builder still constructs the address_json blob
+    * for providers that need extras.  user_id flows from the inbound
+    * item so drivers that scope per-user state (SMS audit log + rate
+    * buckets in phone_service) accumulate against the correct DAWN
+    * user, not a hardcoded admin fallback.
+    *
+    * Split path: when the response exceeds the provider's per-message
+    * cap and split_oversize=true, carve the text at natural break
+    * points (paragraphs → sentences → reject) and deliver as multiple
+    * posts with 100ms pacing.  When the splitter rejects (no break in
+    * window) or the engine rejects (parts > max_parts), deliver the
+    * err_msg as a single short message — user sees "open the WebUI"
+    * rather than silent loss.  See messaging_split.h for the
+    * algorithm; see state machine A/B/C above the truncate block for
+    * how delivery interacts with conversation history. */
    const messaging_driver_t *drv = find_driver(item->provider);
    if (drv && drv->send_text) {
       char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
       build_address_json_for(item->provider, item->provider_address, address_json,
                              sizeof(address_json));
-      drv->send_text(item->user_id, item->provider_address, address_json, response);
+
+      size_t response_len = strlen(response);
+      if (cfg.split_oversize && cfg.max_outbound_chars > 0 &&
+          response_len > cfg.max_outbound_chars) {
+         char **parts = NULL;
+         size_t parts_count = 0;
+         char err_msg[256] = { 0 };
+         int split_rc = messaging_split_at_breaks(response, cfg.max_outbound_chars, &parts,
+                                                  &parts_count, err_msg, sizeof(err_msg));
+
+         /* Post-split parts-cap check.  SMS sets max_parts=3 to bound
+          * segment-billing worst case.  Treating "too many parts" as
+          * a reject (rather than truncating to N parts) keeps the user
+          * signal honest — either they get the FULL reply across N
+          * posts, or they get the explicit "open the WebUI" note;
+          * never silent loss. */
+         if (split_rc == SUCCESS && cfg.max_parts > 0 && parts_count > (size_t)cfg.max_parts) {
+            OLOG_WARNING("messaging: split exceeded max_parts for %s:%s (%zu > %d), rejecting",
+                         item->provider, item->provider_address, parts_count, cfg.max_parts);
+            snprintf(err_msg, sizeof(err_msg),
+                     "This reply is too long for %s (would take %zu messages, limit %d).  "
+                     "Open the WebUI to see the full response.",
+                     item->provider, parts_count, cfg.max_parts);
+            for (size_t i = 0; i < parts_count; i++) {
+               free(parts[i]);
+            }
+            free(parts);
+            parts = NULL;
+            parts_count = 0;
+            split_rc = FAILURE;
+         }
+
+         if (split_rc == SUCCESS) {
+            /* Deliver each part.  (N/M) prefix when more than one
+             * part, computed into a stack buffer that holds prefix +
+             * part text.  The 20-char engine-cap headroom sizes for
+             * "(NN/NN) " plus margin; if a degenerate case (100+
+             * parts) overflowed the headroom, send the part WITHOUT
+             * the prefix to stay under the provider hard limit.
+             *
+             * Pacing: 100ms between sends.  Worker thread is single
+             * and synchronous here; inbound queue absorbs the
+             * (parts_count - 1) × 100ms blocking — depth 32 is well
+             * above realistic chat rates.  If pacing ever needs to
+             * exceed ~250ms per part (stricter per-channel limit),
+             * migrate remaining-parts tail to an async enqueue. */
+            for (size_t i = 0; i < parts_count; i++) {
+               char prefix[16] = { 0 };
+               if (parts_count > 1) {
+                  snprintf(prefix, sizeof(prefix), "(%zu/%zu) ", i + 1, parts_count);
+               }
+               size_t prefix_len = strlen(prefix);
+               size_t part_len = strlen(parts[i]);
+               char *send_buf = NULL;
+               char *to_send = parts[i];
+               if (prefix_len > 0) {
+                  /* Prefix clamp: keep prefix + part ≤ engine cap +
+                   * the 20-byte headroom we left for this prefix.
+                   * If somehow combined > provider hard limit, send
+                   * the part without the prefix (rare; degraded
+                   * legibility, but content is preserved). */
+                  if (prefix_len + part_len <= cfg.max_outbound_chars + 20) {
+                     send_buf = (char *)malloc(prefix_len + part_len + 1);
+                     if (send_buf) {
+                        memcpy(send_buf, prefix, prefix_len);
+                        memcpy(send_buf + prefix_len, parts[i], part_len);
+                        send_buf[prefix_len + part_len] = '\0';
+                        to_send = send_buf;
+                     }
+                  } else {
+                     OLOG_DEBUG("messaging: split prefix dropped on %s:%s part %zu (would "
+                                "overflow provider cap)",
+                                item->provider, item->provider_address, i + 1);
+                  }
+               }
+               drv->send_text(item->user_id, item->provider_address, address_json, to_send);
+               free(send_buf);
+               if (i + 1 < parts_count) {
+                  usleep(MESSAGING_SPLIT_INTER_PART_USEC);
+               }
+               free(parts[i]);
+            }
+            free(parts);
+         } else {
+            /* Splitter rejected (either no break or parts cap).  Send
+             * err_msg as a single short message so the user has
+             * actionable feedback.  Logged at WARNING for operator
+             * visibility. */
+            OLOG_WARNING("messaging: split rejected for %s:%s — %s", item->provider,
+                         item->provider_address, err_msg);
+            drv->send_text(item->user_id, item->provider_address, address_json, err_msg);
+         }
+      } else {
+         drv->send_text(item->user_id, item->provider_address, address_json, response);
+      }
    }
    free(response);
 

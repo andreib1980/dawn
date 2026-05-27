@@ -299,6 +299,14 @@ dawn_add_unit_test(test_wake_word
    LIBS    dawn_common unity
    LABEL   ci)
 
+# Messaging outbound splitter (paragraph / sentence / reject) — pure
+# function with no DAWN deps, links only the .c file under test.
+dawn_add_unit_test(test_messaging_split
+   SOURCES test_messaging_split.c
+           ${SRC_ROOT}/src/messaging/messaging_split.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_instruction_loader
    SOURCES test_instruction_loader.c
            ${SRC_ROOT}/src/tools/instruction_loader.c
