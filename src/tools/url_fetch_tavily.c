@@ -364,14 +364,10 @@ int url_fetch_tavily(const char *url, char **out_content, size_t *out_size) {
    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-   curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)timeout);
+   /* SEC-M1: explicit TLS + protocol pinning + KEEPALIVE/HTTP2 via
+    * curl_apply_dawn_defaults; protocol pin stays site-specific. */
+   curl_apply_dawn_defaults(curl, "DAWN/1.0", (long)timeout, &buf);
    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)TAVILY_EXTRACT_CONNECT_TIMEOUT_SEC);
-   curl_easy_setopt(curl, CURLOPT_USERAGENT, "DAWN/1.0");
-   /* SEC-M1: explicit TLS + protocol pinning. */
-   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
    DAWN_CURL_SET_PROTOCOLS(curl, "https");
 #if LIBCURL_VERSION_NUM >= 0x075500
    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");

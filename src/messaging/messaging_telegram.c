@@ -220,18 +220,7 @@ static int tg_send_text(int user_id,
       curl_easy_setopt(s_send_curl, CURLOPT_URL, url);
       curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, body_str);
-      curl_easy_setopt(s_send_curl, CURLOPT_USERAGENT, TG_USER_AGENT);
-      curl_easy_setopt(s_send_curl, CURLOPT_TCP_KEEPALIVE, 1L);
-      curl_easy_setopt(s_send_curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
-      /* Defense in depth — libcurl defaults already verify, but
-       * setting explicitly protects against environment-variable
-       * overrides (CURL_CA_BUNDLE etc.) and version-specific default
-       * changes.  Same pattern as oauth_client.c. */
-      curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYPEER, 1L);
-      curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYHOST, 2L);
-      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-      curl_easy_setopt(s_send_curl, CURLOPT_WRITEDATA, &resp);
-      curl_easy_setopt(s_send_curl, CURLOPT_TIMEOUT, 30L);
+      curl_apply_dawn_defaults(s_send_curl, TG_USER_AGENT, 30L, &resp);
       struct curl_slist *hdrs = NULL;
       hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
       curl_easy_setopt(s_send_curl, CURLOPT_HTTPHEADER, hdrs);
@@ -426,19 +415,14 @@ static void *tg_listener_thread(void *arg) {
     * out of tg_poll_once saves the per-cycle curl_easy_reset that
     * was wiping connection-reuse hints.
     *
+    * WRITEDATA is set per-cycle in tg_poll_once (resp buffer is a
+    * stack-local in each poll), so pass NULL here — the helper still
+    * applies WRITEFUNCTION + all other defenses.
+    *
     * Progress callback lets shutdown abort the in-flight long-poll
     * promptly — without it, pthread_join on this thread can wait the
     * full TG_HTTP_TIMEOUT for the current cycle to finish. */
-   curl_easy_setopt(handle, CURLOPT_USERAGENT, TG_USER_AGENT);
-   curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);
-   curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
-   /* Defense in depth — libcurl defaults already verify, but explicit
-    * setopt protects against environment-variable overrides and
-    * version-specific default changes.  Same pattern as oauth_client.c. */
-   curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
-   curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
-   curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)TG_HTTP_TIMEOUT);
+   curl_apply_dawn_defaults(handle, TG_USER_AGENT, (long)TG_HTTP_TIMEOUT, NULL);
    curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
    curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, tg_progress_callback);
 

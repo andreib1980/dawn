@@ -897,18 +897,7 @@ static int dc_send_text(int user_id,
       curl_easy_setopt(s_send_curl, CURLOPT_URL, url);
       curl_easy_setopt(s_send_curl, CURLOPT_POST, 1L);
       curl_easy_setopt(s_send_curl, CURLOPT_POSTFIELDS, body_str);
-      curl_easy_setopt(s_send_curl, CURLOPT_USERAGENT, DC_USER_AGENT);
-      curl_easy_setopt(s_send_curl, CURLOPT_TCP_KEEPALIVE, 1L);
-      curl_easy_setopt(s_send_curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
-      /* Defense in depth — libcurl defaults verify, but explicit
-       * setopts protect against environment-variable overrides and
-       * version-specific default changes.  Same pattern as
-       * messaging_telegram.c + oauth_client.c. */
-      curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYPEER, 1L);
-      curl_easy_setopt(s_send_curl, CURLOPT_SSL_VERIFYHOST, 2L);
-      curl_easy_setopt(s_send_curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-      curl_easy_setopt(s_send_curl, CURLOPT_WRITEDATA, &resp);
-      curl_easy_setopt(s_send_curl, CURLOPT_TIMEOUT, 30L);
+      curl_apply_dawn_defaults(s_send_curl, DC_USER_AGENT, 30L, &resp);
 
       struct curl_slist *hdrs = NULL;
       hdrs = curl_slist_append(hdrs, "Content-Type: application/json");

@@ -219,4 +219,57 @@ static inline void curl_buffer_free(curl_buffer_t *buf) {
    // Preserve max_capacity setting for potential reinitialization
 }
 
+/**
+ * Apply DAWN's standard defense-in-depth setopts to a CURL handle.
+ *
+ * Sets: TCP_KEEPALIVE, HTTP_VERSION_2, SSL_VERIFYPEER=1, SSL_VERIFYHOST=2,
+ *       USERAGENT (caller-supplied, only if non-NULL/non-empty),
+ *       TIMEOUT (caller-supplied, only if > 0),
+ *       WRITEFUNCTION (curl_buffer_write_callback),
+ *       WRITEDATA (caller-supplied buffer, only if non-NULL).
+ *
+ * Caller still owns: URL, POST/POSTFIELDS, HTTPHEADER, CUSTOMREQUEST,
+ * any provider-specific options (FOLLOWLOCATION, REDIR_PROTOCOLS, etc.).
+ *
+ * Rationale: every cloud-facing libcurl handle in DAWN needs these
+ * setopts.  Centralizing prevents drift if a future libcurl regresses
+ * a default and prevents new code from accidentally omitting one of
+ * the security setopts.  Same defense-in-depth pattern documented in
+ * oauth_client.c — explicit setopts protect against environment-variable
+ * overrides (CURL_CA_BUNDLE etc.) and version-specific default changes.
+ *
+ * HTTP/2 with TLS gracefully falls back to HTTP/1.1 if the server
+ * doesn't support h2, so it's safe to set unconditionally on any
+ * HTTPS endpoint.  Do NOT use this helper for IMAP/SMTP handles —
+ * USERAGENT and HTTP_VERSION don't apply to those protocols.
+ *
+ * @param curl        CURL handle (must be non-NULL; no-op if NULL)
+ * @param user_agent  User-Agent header value (skip if NULL or empty)
+ * @param timeout_sec Overall transfer timeout in seconds (skip if <= 0)
+ * @param resp        WRITEDATA pointer, typically `curl_buffer_t *`
+ *                    (WRITEDATA skipped if NULL; WRITEFUNCTION still set)
+ */
+static inline void curl_apply_dawn_defaults(CURL *curl,
+                                            const char *user_agent,
+                                            long timeout_sec,
+                                            void *resp) {
+   if (!curl) {
+      return;
+   }
+   curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+   curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+   if (user_agent && user_agent[0]) {
+      curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent);
+   }
+   if (timeout_sec > 0) {
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_sec);
+   }
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+   if (resp != NULL) {
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
+   }
+}
+
 #endif  // CURL_BUFFER_H
