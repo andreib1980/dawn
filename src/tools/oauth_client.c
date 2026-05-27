@@ -862,6 +862,17 @@ int oauth_get_access_token(const oauth_provider_config_t *provider,
    if (!provider || !account_key || !token_buf)
       return 1;
 
+   /* Defense in depth: clear the per-thread revoked flag at entry.
+    * oauth_refresh() already resets it on every refresh attempt, but
+    * this function may return successfully via the cached-token path
+    * WITHOUT calling oauth_refresh — in which case a stale "revoked"
+    * stamp from a prior account's failure could linger on the thread
+    * and trip a re-link prompt on a subsequent unrelated failure for
+    * a different account.  Not currently exploitable (success paths
+    * already clear it), but the cost is two writes and the safety is
+    * absolute. */
+   oauth_set_last_revoked(0, NULL);
+
    /* Per-account lock to avoid thundering herd */
    unsigned int midx = acct_mutex_index(account_key);
    pthread_mutex_lock(&s_acct_mutexes[midx]);
