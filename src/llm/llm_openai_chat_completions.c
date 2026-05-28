@@ -433,7 +433,19 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                                        &cached_tokens_obj)) {
             cached_tokens = json_object_get_int(cached_tokens_obj);
             if (cached_tokens > 0) {
-               OLOG_INFO("OpenAI cache hit: %d tokens cached (50%% savings)", cached_tokens);
+               /* Both OpenAI and Gemini-2.5+ surface implicit prompt caching
+                * via the same prompt_tokens_details.cached_tokens field
+                * (Gemini routes through our OpenAI-compat shim).  Detect
+                * which upstream we hit so the log line labels the provider
+                * correctly.  Dropped the explicit savings percentage —
+                * OpenAI's discount and Gemini's discount differ AND drift
+                * with provider pricing changes; the "X tokens cached" count
+                * is the unambiguous operator signal. */
+               const char *provider_label = (base_url &&
+                                             strstr(base_url, "generativelanguage.googleapis.com"))
+                                                ? "Gemini"
+                                                : "OpenAI";
+               OLOG_INFO("%s cache hit: %d tokens cached", provider_label, cached_tokens);
             }
          }
       }

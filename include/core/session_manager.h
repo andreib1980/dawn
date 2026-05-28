@@ -351,6 +351,17 @@ typedef struct session {
    // history_mutex (set under it from session_stamp_last_message_id;
    // read via session_get_last_user_msg_id which acquires the lock).
    int64_t last_user_msg_id;
+
+   /* Prompt-cache split drift detection.  FNV-1a hash of the stable
+    * prefix from the last per-turn refresh; recomputed each turn and
+    * compared.  When it differs the Anthropic cache is invalidated;
+    * we log OLOG_INFO once per session so the operator notices silent
+    * cache regressions (a settings edit or a future code change that
+    * accidentally leaks volatile content into the stable builder).
+    * Protected by history_mutex (read+written under it from
+    * session_update_system_messages).  See the prompt-cache design doc. */
+   uint32_t stable_prefix_hash;
+   bool stable_prefix_drift_logged;
 } session_t;
 
 // =============================================================================
@@ -393,45 +404,50 @@ typedef enum {
  * the block is NULL or empty so pre-1e output is byte-identical with
  * the feature off.
  */
-/* Field order matches the future Claude system-array shape — when we
- * split this from a flattened string into a typed array with
- * cache_control on the stable prefix only, the array layout will be:
+/* Two typed segments, matching the Claude system-array shape pushed to
+ * conversation history per turn:
  *
- *   [base_prompt]   ← cache_control: ephemeral (STABLE across turns)
- *   [now_block]     ← volatile per-turn
- *   [memory_block]  ← volatile per-turn
- *   [focus_block]   ← volatile per-turn
+ *   [0] stable_prefix   ← cache_control: ephemeral (STABLE across turns)
+ *                          persona + rules + tool availability
+ *                          + User Context + User Identity
+ *                          + memory instructions footer
+ *   [1] volatile_block  ← per-turn (NO cache_control)
+ *                          memory body (preferences/summaries) +
+ *                          focus block ([system_time] + retrievals)
  *
- * Keep the struct in this order so the future split is a 1-to-1 lift
- * into the array.  Do NOT reorder without also reshaping that planned
- * commit.
+ * Anthropic charges 90% less for cache-hit input tokens.  The stable
+ * prefix is byte-identical across turns of a session (changes only on
+ * settings edits, which we log via the drift counter in session_t),
+ * so the cache attaches to it.  The volatile block changes every turn
+ * and is never cache-eligible.
  *
- * SIZE INVARIANT (see _Static_assert below): every field add MUST update
- * both `composed_prompt_free` impls (prompt_compose.c out-of-line + the
- * static-inline fallback in this header below for !ENABLE_MULTI_CLIENT).
- * The sizeof assert forces a build break at the new field add site so
- * the parallel-impl drift surfaces loudly at compile time. */
+ * Claude's formatter (`llm_claude_format.c`) and OpenAI's Responses-API
+ * `extract_system_instructions` both iterate over multiple consecutive
+ * `role: "system"` messages and handle the two-segment shape correctly.
+ * The legacy `prompt_compose_to_string()` flattens them with `\n\n`
+ * separator for callers that want a single string (settings refresh,
+ * WebUI system-prompt inspector).
+ *
+ * SIZE INVARIANT (see _Static_assert below): adding a field requires
+ * updating both `composed_prompt_free` impls (prompt_compose.c
+ * out-of-line + the static-inline fallback in this header below for
+ * !ENABLE_MULTI_CLIENT).  The sizeof assert forces a build break at
+ * the new field add site so the parallel-impl drift surfaces loudly. */
 typedef struct {
-   char *base_prompt;  /* L4 builds; session_manager owns/frees */
-   char *now_block;    /* L4 builds via prompt_compose_build_now_block —
-                          current date+time, fresh on every PER_TURN
-                          refresh, NULL on builder OOM (LLM gracefully
-                          falls back to the time tool).  Lives in the
-                          non-cacheable per-turn zone of the prompt
-                          (sibling to focus); keeping it out of the
-                          system-prompt prefix avoids cache-vs-
-                          staleness trade-offs entirely. */
-   char *memory_block; /* L4 builds via memory_build_context */
-   char *focus_block;  /* L4 builds via focus_compose render; NULL when
-                          disabled, on empty result, or on failure */
+   char *stable_prefix;  /* Cacheable segment — persona/rules/identity/
+                            footer.  Byte-identical across turns absent
+                            settings change.  Anthropic cache_control
+                            attaches here. */
+   char *volatile_block; /* Per-turn segment — memory body + focus block.
+                            Rebuilt every turn; never cache-eligible. */
 } composed_prompt_t;
 
 /* Pin field count so a future add forces both composed_prompt_free
- * implementations to update in lockstep.  Four char* fields → 32 bytes
+ * implementations to update in lockstep.  Two char* fields → 16 bytes
  * on LP64.  If you bump this, also update the static-inline
  * composed_prompt_free below AND prompt_compose_free in
  * src/core/prompt_compose.c. */
-_Static_assert(sizeof(composed_prompt_t) == 4 * sizeof(char *),
+_Static_assert(sizeof(composed_prompt_t) == 2 * sizeof(char *),
                "composed_prompt_t field add detected — update BOTH "
                "composed_prompt_free (this header) AND prompt_compose_free "
                "(src/core/prompt_compose.c) to release the new field, then "
@@ -923,6 +939,61 @@ void session_append_satellite_context(session_t *session, const char *room, cons
 void session_update_system_prompt(session_t *session, const char *system_prompt);
 
 /**
+ * @brief Update the session's system messages as two segments.
+ *
+ * Rebuilds the conversation history so message[0] is a `role: "system"`
+ * carrying @p stable_prefix and message[1] is a `role: "system"`
+ * carrying @p volatile_block, followed by all existing non-system
+ * messages in original order.  The two-segment shape is what lets
+ * Anthropic attach `cache_control: ephemeral` to the (byte-identical
+ * across turns) stable prefix and skip the per-turn volatile block.
+ *
+ * Either segment may be NULL or empty — that segment is omitted (no
+ * empty system message is pushed).  Refusing to push BOTH-NULL means
+ * the system prompt is unchanged; caller is responsible for passing
+ * at least one segment.
+ *
+ * Also computes the FNV-1a hash of @p stable_prefix and compares to
+ * the prior turn's hash on @p session.  If they differ AND drift has
+ * not yet been logged this session, emits OLOG_INFO once.  The first
+ * call on a fresh session always "drifts" (prior hash is 0); the
+ * helper suppresses that boot-time log line.
+ *
+ * @param session         Session to update.
+ * @param stable_prefix   Cacheable segment (may be NULL/empty).
+ * @param volatile_block  Per-turn segment (may be NULL/empty).
+ *
+ * @locks session->history_mutex
+ */
+void session_update_system_messages(session_t *session,
+                                    const char *stable_prefix,
+                                    const char *volatile_block);
+
+/**
+ * @brief Append a per-turn hint string to the LAST system message.
+ *
+ * Used by callers that want to attach a one-turn instruction (e.g.
+ * the messaging engine's SMS channel hint about outbound truncation)
+ * to the volatile segment rather than the stable cached prefix.
+ * Appends `\n\n<hint>` to the content of the last system message
+ * found in the conversation history.
+ *
+ * In the two-segment shape (post `session_update_system_messages`)
+ * the last system message is the volatile block; legacy single-
+ * message sessions just see the hint appended to their lone system
+ * message.  Either way the cacheable stable prefix is untouched.
+ *
+ * No-op on NULL session, NULL/empty text, or when no system message
+ * exists.
+ *
+ * @param session Session to update.
+ * @param text    Hint text (NUL-terminated, may be NULL/empty).
+ *
+ * @locks session->history_mutex
+ */
+void session_append_to_volatile_segment(session_t *session, const char *text);
+
+/**
  * @brief Get the system prompt from a session
  *
  * Returns the content of the first "system" role message in the conversation
@@ -934,6 +1005,27 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
  * @locks session->history_mutex
  */
 char *session_get_system_prompt(session_t *session);
+
+/**
+ * @brief Concatenate every role:"system" message into a single string.
+ *
+ * The two-segment shape introduced by `session_update_system_messages`
+ * stores stable + volatile as separate system messages so Anthropic
+ * cache_control can attach to the stable one only.  `session_get_
+ * system_prompt` returns the FIRST system message (stable only) to
+ * preserve the legacy single-message semantics used by
+ * `session_append_room_context` / `session_append_satellite_context`
+ * — they read-modify-write the stable segment.
+ *
+ * This helper exists for callers that want the FULL view (debug
+ * inspectors, system-prompt UI panels).  Returns stable + "\n\n" +
+ * volatile in two-segment sessions, or just the lone system message
+ * in legacy single-message sessions.  NULL when no system message
+ * exists.  Caller frees.
+ *
+ * @locks session->history_mutex
+ */
+char *session_get_full_system_prompt(session_t *session);
 
 /**
  * @brief Get the content of the most recent message with the given role.
@@ -1523,21 +1615,15 @@ static inline void session_manager_refresh_all_prompts(void) {
 
 static inline void composed_prompt_free(composed_prompt_t *p) {
    /* Inlined free — non-MULTI_CLIENT builds still release any heap
-    * allocations a builder may have produced.  The prior no-op
-    * variant silently leaked all three blocks if a builder ever ran
-    * under !ENABLE_MULTI_CLIENT.  Cannot delegate to
-    * prompt_compose_free (its header includes session_manager.h, so a
-    * back-include would be circular). */
+    * allocations a builder may have produced.  Cannot delegate to
+    * prompt_compose_free (its header includes session_manager.h, so
+    * a back-include would be circular). */
    if (p == NULL)
       return;
-   free(p->base_prompt);
-   p->base_prompt = NULL;
-   free(p->now_block);
-   p->now_block = NULL;
-   free(p->memory_block);
-   p->memory_block = NULL;
-   free(p->focus_block);
-   p->focus_block = NULL;
+   free(p->stable_prefix);
+   p->stable_prefix = NULL;
+   free(p->volatile_block);
+   p->volatile_block = NULL;
 }
 
 static inline char *session_manager_compose_prompt_string(const composed_prompt_t *blocks) {
@@ -1554,6 +1640,29 @@ static inline int session_dispatch_user_turn(session_t *session, const char *use
    (void)session;
    (void)user_turn_text;
    return 0;
+}
+
+static inline void session_update_system_messages(session_t *session,
+                                                  const char *stable_prefix,
+                                                  const char *volatile_block) {
+   (void)session;
+   (void)stable_prefix;
+   (void)volatile_block;
+}
+
+static inline void session_append_to_volatile_segment(session_t *session, const char *text) {
+   (void)session;
+   (void)text;
+}
+
+static inline char *session_get_system_prompt(session_t *session) {
+   (void)session;
+   return NULL;
+}
+
+static inline char *session_get_full_system_prompt(session_t *session) {
+   (void)session;
+   return NULL;
 }
 
 /* Phase 1f stubs — local-only build never has multi-session dedup state. */

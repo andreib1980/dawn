@@ -39,9 +39,6 @@
 #include "webui/webui_server.h"
 #endif
 
-/* Enable prompt caching for Claude API calls (~90% cost reduction on cached tokens) */
-#define CLAUDE_ENABLE_PROMPT_CACHING 1
-
 /**
  * @brief Check if current session is remote (WebSocket or DAP)
  */
@@ -675,6 +672,30 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          json_object_object_add(claude_request, "tools", tools);
          OLOG_INFO("Claude: Added %d tools to request (%s session)",
                    llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
+
+         /* Attach cache_control to the LAST tool so the entire tools
+          * array is cacheable as its own prefix.  Anthropic caches
+          * "everything up to and including the block that carries the
+          * cache_control marker"; placing it on the final tool means
+          * the full tools list becomes a single cache breakpoint
+          * independent of the system block's cache breakpoint below.
+          *
+          * Tool schemas (~3-5 KB JSON across 27 tools today) change
+          * only on tool registry / capability edits — settings-stable
+          * across a session.  This saves another ~700-1300 tokens at
+          * the 90% read discount per turn, on top of the system-block
+          * cache.  Anthropic permits up to 4 cache_control blocks per
+          * request; we use 2 (last tool + first system block).  Two
+          * slots remain for future use. */
+         int tool_count = json_object_array_length(tools);
+         if (tool_count > 0) {
+            json_object *last_tool = json_object_array_get_idx(tools, tool_count - 1);
+            if (last_tool != NULL && json_object_is_type(last_tool, json_type_object)) {
+               json_object *cache_control = json_object_new_object();
+               json_object_object_add(cache_control, "type", json_object_new_string("ephemeral"));
+               json_object_object_add(last_tool, "cache_control", cache_control);
+            }
+         }
       }
    }
 
@@ -963,7 +984,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
          json_object_object_add(system_block, "type", json_object_new_string("text"));
          json_object_object_add(system_block, "text", json_object_get(content_obj));
 
-#if CLAUDE_ENABLE_PROMPT_CACHING
          // Cache control on first system block only (main prompt).
          // Claude allows max 4 cache_control blocks per request — injected
          // context messages (phone events, etc.) don't need caching.
@@ -972,7 +992,6 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
             json_object_object_add(cache_control, "type", json_object_new_string("ephemeral"));
             json_object_object_add(system_block, "cache_control", cache_control);
          }
-#endif
 
          json_object_array_add(system_array, system_block);
       } else {

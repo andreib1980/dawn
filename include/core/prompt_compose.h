@@ -16,28 +16,29 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Pure-function prompt composer — Phase 1e of Dynamic Context Injection.
+ * Pure-function prompt composer — composes the two-segment
+ * composed_prompt_t (stable_prefix + volatile_block) into either:
+ *   (a) a flattened string for legacy callers that want one blob, or
+ *   (b) one or two role:"system" messages pushed into a json-c history
+ *       array — the shape the per-turn LLM dispatch uses so Anthropic
+ *       can attach `cache_control` to the stable prefix only.
  *
  * Lifted out of session_manager.c so the composer logic can be unit-
  * tested without dragging the full session-manager runtime (auth_db,
- * conv_db, satellite_db, json-c, ...) into the test link.  The
- * functions declared here are still re-exposed via session_manager.h
- * with the public names `composed_prompt_free` and
+ * conv_db, satellite_db, json-c init...) into the test link.  The
+ * functions declared here are re-exposed via session_manager.h with
+ * the public names `composed_prompt_free` and
  * `session_manager_compose_prompt_string` — production callers SHOULD
- * use those.  This header is effectively internal (used only by the
- * extracted .c, the session_manager.c wrappers, and tests/test_prompt_builder*).
- * Future-proofing note: keep the call set narrow so the L1 layer cut
- * stays clean.  If a 1f optimization wants block-level access (e.g.,
- * caching base_prompt across PER_TURN refreshes), thread the access
- * through the structured `session_prompt_builder_t` registration
- * instead of growing this header's surface.
+ * use those.
  *
- * Layer: 1.  Depends only on libc + composed_prompt_t (declared in
- * session_manager.h).
+ * Layer: 1.  Depends only on libc + json-c + composed_prompt_t (declared
+ * in session_manager.h).
  */
 
 #ifndef CORE_PROMPT_COMPOSE_H
 #define CORE_PROMPT_COMPOSE_H
+
+#include <stdint.h>
 
 #include "core/session_manager.h"
 
@@ -49,7 +50,7 @@ extern "C" {
  * @brief Free the heap allocations inside a composed_prompt_t.
  *
  * Idempotent on a zeroed / already-freed struct; no-op on NULL.
- * Resets all three pointers to NULL so the struct is safe to reuse.
+ * Resets both pointers to NULL so the struct is safe to reuse.
  *
  * Public alias: `composed_prompt_free` in session_manager.h.
  *
@@ -60,43 +61,32 @@ void prompt_compose_free(composed_prompt_t *p);
 /**
  * @brief Flatten a composed_prompt_t into a single allocated string.
  *
- * Concatenates `base_prompt + memory_block + focus_block` with the
- * existing `--- USER MEMORY ---` framing identity for the memory
- * section (which arrives pre-framed from `memory_build_context`)
- * and a parallel `--- TURN CONTEXT ---` framing for the focus
- * section.  NULL or empty `focus_block` omits the focus section
- * entirely (preserves byte-identical pre-1e output when the
- * feature is disabled).
+ * Concatenates `stable_prefix + volatile_block`.  Either segment may
+ * be NULL or empty — the omitted segment contributes nothing (no
+ * separator, no marker).  Used by legacy callers that need a single
+ * `char *` (capability-refresh paths, WebUI system-prompt inspector).
+ *
+ * Returns NULL when BOTH segments are NULL/empty, or on OOM.
  *
  * Public alias: `session_manager_compose_prompt_string` in
  * session_manager.h.
  *
- * @param blocks Composed prompt; NULL or NULL `base_prompt` → NULL.
+ * @param blocks Composed prompt; NULL → NULL.
  * @return Caller-owned string; NULL on bad input or OOM.
  */
 char *prompt_compose_to_string(const composed_prompt_t *blocks);
 
 /**
- * @brief Allocate a fresh "Current time: ..." block for the per-turn refresh.
+ * @brief FNV-1a hash of @p s.
  *
- * Reads the current wall clock + local timezone via time()/localtime_r and
- * emits a single paragraph the composer renders right after `base_prompt`.
- * Format is dual: human-readable (day name + local time) AND ISO 8601 with
- * an explicit timezone offset (the form `iso8601_parse` round-trips against
- * for tool args like `fire_at`).  Ends with a one-line nudge telling the
- * LLM the value is fresh per-turn and authoritative — eliminates the
- * "first emit garbage fire_at, hit past-time error, call time tool, retry"
- * round-trip the scheduler-create flow used to need.
+ * Exposed for session_manager's drift detection on the stable prefix.
+ * Cheap (~5 ns/byte on Jetson) so calling on each per-turn refresh
+ * adds no measurable cost.  Empty / NULL input → FNV-1a basis.
  *
- * Returns a heap-allocated string the caller frees, NULL on strftime/alloc
- * failure (caller treats NULL the same as a no-op refresh — LLM falls back
- * to the time tool, last-good system prompt stays in place).
- *
- * Pure of session state; safe to call from any thread.
- *
- * @return Caller-owned string, or NULL on failure.
+ * @param s NUL-terminated string (NULL safe).
+ * @return 32-bit FNV-1a hash.
  */
-char *prompt_compose_build_now_block(void);
+uint32_t prompt_compose_fnv1a(const char *s);
 
 #ifdef __cplusplus
 }

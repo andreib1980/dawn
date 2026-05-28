@@ -16,8 +16,10 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Per-turn focus-block builder — Phase 1e of Dynamic Context Injection.
- * See header for the full contract.
+ * Per-turn focus-block builder.  See header for the full contract.
+ * Prepends a synthetic `[system_time]` candidate when a real dispatch
+ * session is published; replaces the retired prompt_compose_build_now_block
+ * surface from before the prompt-cache split.
  */
 
 #include "webui/build_focus_block.h"
@@ -362,9 +364,50 @@ int build_focus_block(int user_id,
       /* Render survivors.  Format: one line per candidate, opening with
        * the source_id in brackets so the LLM can attribute relevance.
        * Text content is reproduced verbatim from the candidate (already
-       * truncated to FOCUS_TEXT_MAX_BYTES inside the framework). */
+       * truncated to FOCUS_TEXT_MAX_BYTES inside the framework).
+       *
+       * `[system_time]` synthetic entry sits at the top of the block on
+       * every PER_TURN refresh — moved here from the retired now_block
+       * when the prompt-cache split landed.  Cheap (single strftime);
+       * shape tracks the legacy now_block contract: human-readable +
+       * ISO 8601 + freshness nudge so the LLM trusts it over a `time`
+       * tool call.  Gated on `dedup_session != NULL` (only real per-
+       * turn dispatch should see fresh time; SESSION_START and
+       * standalone callers leave the slot NULL) and `!empty_result`
+       * (preserves the legacy "all suppressed → NULL block"
+       * invariant — quiet turns fall back to the time tool same as
+       * pre-split). */
       strbuf_t sb;
       strbuf_init_with_max(&sb, FOCUS_BLOCK_INIT_BYTES, FOCUS_BLOCK_MAX_BYTES);
+      if (dedup_session != NULL) {
+         time_t now_t = time(NULL);
+         struct tm tm_storage;
+         struct tm *tm_info = localtime_r(&now_t, &tm_storage);
+         if (tm_info != NULL) {
+            char human[64];
+            char iso_local[32];
+            char iso_offset[8];
+            if (strftime(human, sizeof(human), "%A, %Y-%m-%d %H:%M %Z", tm_info) > 0 &&
+                strftime(iso_local, sizeof(iso_local), "%Y-%m-%dT%H:%M:%S", tm_info) > 0 &&
+                strftime(iso_offset, sizeof(iso_offset), "%z", tm_info) > 0) {
+               char iso_offset_colon[8];
+               if (iso_offset[0] != '\0' && (iso_offset[0] == '+' || iso_offset[0] == '-') &&
+                   iso_offset[1] != '\0' && iso_offset[2] != '\0' && iso_offset[3] != '\0' &&
+                   iso_offset[4] != '\0') {
+                  snprintf(iso_offset_colon, sizeof(iso_offset_colon), "%c%c%c:%c%c", iso_offset[0],
+                           iso_offset[1], iso_offset[2], iso_offset[3], iso_offset[4]);
+               } else {
+                  snprintf(iso_offset_colon, sizeof(iso_offset_colon), "Z");
+               }
+               strbuf_appendf(&sb,
+                              "[system_time] Current time: %s (ISO: %s%s).  This timestamp is "
+                              "fresh as of this turn; use it for relative-time computations and "
+                              "tool args like `fire_at`.  The `time` tool is only needed for "
+                              "sub-second precision.\n",
+                              human, iso_local, iso_offset_colon);
+            }
+         }
+      }
       for (int i = 0; i < result.candidate_count; i++) {
          const focus_candidate_t *c = &result.candidates[i];
          if (c->text == NULL || c->text[0] == '\0')

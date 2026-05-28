@@ -664,12 +664,53 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
          output_tokens = json_object_get_int(completion_tokens_obj);
       }
 
-      // Check for cached tokens in prompt_tokens_details
+      // Check for cached tokens in prompt_tokens_details.  Both OpenAI
+      // and Gemini-2.5+ surface implicit caching through this field
+      // (Gemini routes through our /v1beta/openai shim).  Provider
+      // label can't be derived from the streaming context (cloud_provider
+      // is CLOUD_PROVIDER_OPENAI for both), so check the active session's
+      // model string — "gemini-*" → Gemini, otherwise OpenAI.  Falls
+      // back to "OpenAI" when no session context is available.
+      //
+      // Gemini caching footnote (investigated 2026-05-28): if cached_tokens
+      // stays at 0 across many turns on Gemini, that is upstream behavior,
+      // not a parsing bug.  Three documented Google issues compound on the
+      // OpenAI-compat shim path DAWN uses:
+      //   1. Tools defined → caching blocked.  Server returns
+      //      "CachedContent cannot be used with GenerateContent request
+      //      setting system_instruction, tools or tool_config" (per
+      //      vercel/ai#11513).  DAWN sends 27 tools per request.
+      //   2. gemini-3-flash-preview has a 9K-17K-token dead zone where
+      //      cached_content_token_count drops to 0 even on cacheable
+      //      prefixes (googleapis/python-genai#2064, filed 2026-02-16,
+      //      P2, unresolved as of 2026-05-28).  DAWN's typical prompt
+      //      lands in this zone.
+      //   3. Gemini 3.x does not pay out cost savings even when it
+      //      caches — discount is 2.5-family-only per Google's blog.
+      // Gemini 2.5 Flash engages caching occasionally (observed 8793
+      // cached_tokens on a tool-loop iter 1) but inconsistently.  Full
+      // analysis: docs/TODO.md §1.  Claude + OpenAI are the reliable
+      // cache surfaces; Gemini caching is "sometimes-bonus."
       json_object *prompt_details;
       if (json_object_object_get_ex(usage_obj, "prompt_tokens_details", &prompt_details)) {
          json_object *cached_obj;
          if (json_object_object_get_ex(prompt_details, "cached_tokens", &cached_obj)) {
             cached_tokens = json_object_get_int(cached_obj);
+            if (cached_tokens > 0) {
+               /* llm_config.model is protected by llm_config_mutex (per session
+                * lock-ordering rules in session_manager.h); copy the
+                * provider-prefix bytes under the lock then release before the
+                * OLOG_INFO so we never hold a leaf lock across I/O. */
+               char model_prefix[8] = { 0 };
+               if (ws_session != NULL) {
+                  pthread_mutex_lock(&ws_session->llm_config_mutex);
+                  strncpy(model_prefix, ws_session->llm_config.model, sizeof(model_prefix) - 1);
+                  pthread_mutex_unlock(&ws_session->llm_config_mutex);
+               }
+               const char *provider_label = (strncmp(model_prefix, "gemini-", 7) == 0) ? "Gemini"
+                                                                                       : "OpenAI";
+               OLOG_INFO("%s cache hit: %d tokens cached", provider_label, cached_tokens);
+            }
          }
       }
 
@@ -754,12 +795,30 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
    if (strcmp(type, "message_start") == 0) {
       ctx->provider.claude.message_started = 1;
 
-      // Extract input_tokens from message.usage
-      json_object *message_obj, *usage_obj, *input_tokens_obj;
+      // Extract input_tokens + cache stats from message.usage.
+      // cache_creation_input_tokens / cache_read_input_tokens are present
+      // only when cache_control:ephemeral was honored on this request.
+      // We log them with the same wording as the non-streaming path
+      // (llm_claude.c) so operators get a consistent grep target.
+      json_object *message_obj, *usage_obj, *tok_obj;
+      ctx->provider.claude.cache_creation_input_tokens = 0;
+      ctx->provider.claude.cache_read_input_tokens = 0;
       if (json_object_object_get_ex(event, "message", &message_obj)) {
          if (json_object_object_get_ex(message_obj, "usage", &usage_obj)) {
-            if (json_object_object_get_ex(usage_obj, "input_tokens", &input_tokens_obj)) {
-               ctx->provider.claude.input_tokens = json_object_get_int(input_tokens_obj);
+            if (json_object_object_get_ex(usage_obj, "input_tokens", &tok_obj)) {
+               ctx->provider.claude.input_tokens = json_object_get_int(tok_obj);
+            }
+            if (json_object_object_get_ex(usage_obj, "cache_creation_input_tokens", &tok_obj)) {
+               int v = json_object_get_int(tok_obj);
+               ctx->provider.claude.cache_creation_input_tokens = v;
+               if (v > 0)
+                  OLOG_INFO("Claude cache created: %d tokens", v);
+            }
+            if (json_object_object_get_ex(usage_obj, "cache_read_input_tokens", &tok_obj)) {
+               int v = json_object_get_int(tok_obj);
+               ctx->provider.claude.cache_read_input_tokens = v;
+               if (v > 0)
+                  OLOG_INFO("Claude cache hit: %d tokens (90%% cost savings!)", v);
             }
          }
       }
@@ -1003,14 +1062,17 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
       if (json_object_object_get_ex(event, "usage", &usage_obj)) {
          if (json_object_object_get_ex(usage_obj, "output_tokens", &output_tokens_obj)) {
             int output_tokens = json_object_get_int(output_tokens_obj);
-            // Record token metrics (input was captured in message_start)
+            // Cached tokens were captured in message_start; pass through
+            // so metrics + per-session usage tracking reflect the cache
+            // discount (90% off on read tokens).
+            int cached = ctx->provider.claude.cache_read_input_tokens;
             metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_CLAUDE,
-                                      ctx->provider.claude.input_tokens, output_tokens, 0);
+                                      ctx->provider.claude.input_tokens, output_tokens, cached);
 
             // Update context usage tracking with actual session ID
             uint32_t session_id = ws_session ? ws_session->session_id : 0;
             llm_context_update_usage(session_id, ctx->provider.claude.input_tokens, output_tokens,
-                                     0);
+                                     cached);
 
             // Calculate accurate token rate from actual output tokens
             if (output_tokens > 0 && has_ws_session) {

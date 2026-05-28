@@ -1616,6 +1616,185 @@ void session_update_system_prompt(session_t *session, const char *system_prompt)
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+/* Helper: scan the conversation history under @p session->history_mutex
+ * (CALLER holds it) and rebuild the array so the leading system
+ * messages match @p stable + @p volatile.  Existing non-system
+ * messages keep their relative order, just sit at indexes 2+ (or 1+
+ * if only stable is present).  Either input may be NULL/empty to
+ * omit that segment.
+ *
+ * Returns SUCCESS / FAILURE; on FAILURE the existing history is left
+ * intact (no partial mutation). */
+static int rebuild_history_with_two_system_messages_locked(session_t *session,
+                                                           const char *stable_prefix,
+                                                           const char *volatile_block) {
+   if (session == NULL || session->conversation_history == NULL)
+      return FAILURE;
+
+   const bool have_stable = stable_prefix != NULL && stable_prefix[0] != '\0';
+   const bool have_volatile = volatile_block != NULL && volatile_block[0] != '\0';
+   if (!have_stable && !have_volatile)
+      return FAILURE;
+
+   struct json_object *rebuilt = json_object_new_array();
+   if (rebuilt == NULL)
+      return FAILURE;
+
+   if (have_stable) {
+      struct json_object *msg = json_object_new_object();
+      if (msg == NULL) {
+         json_object_put(rebuilt);
+         return FAILURE;
+      }
+      json_object_object_add(msg, "role", json_object_new_string("system"));
+      json_object_object_add(msg, "content", json_object_new_string(stable_prefix));
+      json_object_array_add(rebuilt, msg);
+   }
+   if (have_volatile) {
+      struct json_object *msg = json_object_new_object();
+      if (msg == NULL) {
+         json_object_put(rebuilt);
+         return FAILURE;
+      }
+      json_object_object_add(msg, "role", json_object_new_string("system"));
+      json_object_object_add(msg, "content", json_object_new_string(volatile_block));
+      json_object_array_add(rebuilt, msg);
+   }
+
+   /* Preserve every non-system message in original order. */
+   const int len = json_object_array_length(session->conversation_history);
+   for (int i = 0; i < len; i++) {
+      struct json_object *old = json_object_array_get_idx(session->conversation_history, i);
+      struct json_object *role_obj = NULL;
+      const char *role = NULL;
+      if (json_object_object_get_ex(old, "role", &role_obj))
+         role = json_object_get_string(role_obj);
+      if (role != NULL && strcmp(role, "system") == 0)
+         continue;
+      /* Refcount bump: json_object_array_add takes ownership but old
+       * is still referenced by conversation_history until we put it. */
+      json_object_get(old);
+      json_object_array_add(rebuilt, old);
+   }
+
+   json_object_put(session->conversation_history);
+   session->conversation_history = rebuilt;
+   return SUCCESS;
+}
+
+void session_update_system_messages(session_t *session,
+                                    const char *stable_prefix,
+                                    const char *volatile_block) {
+   if (session == NULL)
+      return;
+   const bool have_stable = stable_prefix != NULL && stable_prefix[0] != '\0';
+   const bool have_volatile = volatile_block != NULL && volatile_block[0] != '\0';
+   if (!have_stable && !have_volatile)
+      return; /* nothing to push — leave system messages as-is */
+
+   pthread_mutex_lock(&session->history_mutex);
+   if (session->conversation_history == NULL) {
+      session->conversation_history = json_object_new_array();
+      if (session->conversation_history == NULL) {
+         pthread_mutex_unlock(&session->history_mutex);
+         return;
+      }
+   }
+
+   if (rebuild_history_with_two_system_messages_locked(session, stable_prefix, volatile_block) !=
+       SUCCESS) {
+      OLOG_ERROR("Session %u: failed to rebuild history with two-system-messages shape",
+                 session->session_id);
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+
+   /* Drift detection.  Hash the stable prefix and compare to the
+    * session's last-known value.  First call post-init (prior hash 0)
+    * always "drifts"; the drift_logged gate suppresses that boot-time
+    * log so the operator only sees genuine cache-busting events
+    * (settings edits, code regressions that leak volatile into stable).
+    * Cheap — FNV-1a over ~3.7 KB takes microseconds. */
+   const uint32_t new_hash = have_stable ? prompt_compose_fnv1a(stable_prefix) : 0u;
+   const uint32_t prev_hash = session->stable_prefix_hash;
+   if (prev_hash != 0u && prev_hash != new_hash && !session->stable_prefix_drift_logged) {
+      OLOG_INFO("Session %u: stable prefix drifted (was %08x, now %08x) — Anthropic cache "
+                "invalidated for one turn",
+                session->session_id, prev_hash, new_hash);
+      session->stable_prefix_drift_logged = true;
+   }
+   session->stable_prefix_hash = new_hash;
+
+   pthread_mutex_unlock(&session->history_mutex);
+
+   OLOG_INFO("Session %u: Updated system messages (stable=%zu, volatile=%zu chars)",
+             session->session_id, have_stable ? strlen(stable_prefix) : 0,
+             have_volatile ? strlen(volatile_block) : 0);
+}
+
+void session_append_to_volatile_segment(session_t *session, const char *text) {
+   if (session == NULL || text == NULL || text[0] == '\0')
+      return;
+
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (session->conversation_history == NULL) {
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+
+   /* Walk backward to find the LAST role:"system" message.  In the
+    * two-segment shape that's the volatile block; in legacy single-
+    * message sessions it's the lone system message.  Either way the
+    * cacheable stable prefix at messages[0] is untouched whenever the
+    * two-message shape applies. */
+   const int len = json_object_array_length(session->conversation_history);
+   struct json_object *target = NULL;
+   for (int i = len - 1; i >= 0; i--) {
+      struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
+      struct json_object *role_obj = NULL;
+      if (!json_object_object_get_ex(msg, "role", &role_obj))
+         continue;
+      const char *role = json_object_get_string(role_obj);
+      if (role != NULL && strcmp(role, "system") == 0) {
+         target = msg;
+         break;
+      }
+   }
+   if (target == NULL) {
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+
+   struct json_object *content_obj = NULL;
+   if (!json_object_object_get_ex(target, "content", &content_obj)) {
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+   const char *current = json_object_get_string(content_obj);
+   if (current == NULL)
+      current = "";
+
+   const size_t cur_len = strlen(current);
+   const size_t hint_len = strlen(text);
+   char *augmented = malloc(cur_len + hint_len + 3);
+   if (augmented == NULL) {
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
+   memcpy(augmented, current, cur_len);
+   augmented[cur_len] = '\n';
+   augmented[cur_len + 1] = '\n';
+   memcpy(augmented + cur_len + 2, text, hint_len);
+   augmented[cur_len + 2 + hint_len] = '\0';
+
+   json_object_object_del(target, "content");
+   json_object_object_add(target, "content", json_object_new_string(augmented));
+   free(augmented);
+
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
 char *session_get_system_prompt(session_t *session) {
    if (!session) {
       return NULL;
@@ -1642,6 +1821,80 @@ char *session_get_system_prompt(session_t *session) {
                }
                break;
             }
+         }
+      }
+   }
+
+   pthread_mutex_unlock(&session->history_mutex);
+
+   return result;
+}
+
+char *session_get_full_system_prompt(session_t *session) {
+   if (session == NULL)
+      return NULL;
+
+   char *result = NULL;
+
+   pthread_mutex_lock(&session->history_mutex);
+
+   if (session->conversation_history != NULL) {
+      /* First pass: count system messages + total content bytes so we
+       * can size one allocation. */
+      const int len = json_object_array_length(session->conversation_history);
+      int sys_count = 0;
+      size_t total_bytes = 0;
+      for (int i = 0; i < len; i++) {
+         struct json_object *msg = json_object_array_get_idx(session->conversation_history, i);
+         struct json_object *role_obj = NULL;
+         if (!json_object_object_get_ex(msg, "role", &role_obj))
+            continue;
+         const char *r = json_object_get_string(role_obj);
+         if (r == NULL || strcmp(r, "system") != 0)
+            continue;
+         struct json_object *content_obj = NULL;
+         if (!json_object_object_get_ex(msg, "content", &content_obj))
+            continue;
+         const char *content = json_object_get_string(content_obj);
+         if (content == NULL)
+            continue;
+         total_bytes += strlen(content);
+         /* Add a "\n\n" separator between adjacent system messages. */
+         if (sys_count > 0)
+            total_bytes += 2;
+         sys_count++;
+      }
+
+      if (sys_count > 0) {
+         result = malloc(total_bytes + 1);
+         if (result != NULL) {
+            size_t off = 0;
+            int written = 0;
+            for (int i = 0; i < len; i++) {
+               struct json_object *msg = json_object_array_get_idx(session->conversation_history,
+                                                                   i);
+               struct json_object *role_obj = NULL;
+               if (!json_object_object_get_ex(msg, "role", &role_obj))
+                  continue;
+               const char *r = json_object_get_string(role_obj);
+               if (r == NULL || strcmp(r, "system") != 0)
+                  continue;
+               struct json_object *content_obj = NULL;
+               if (!json_object_object_get_ex(msg, "content", &content_obj))
+                  continue;
+               const char *content = json_object_get_string(content_obj);
+               if (content == NULL)
+                  continue;
+               if (written > 0) {
+                  result[off++] = '\n';
+                  result[off++] = '\n';
+               }
+               const size_t clen = strlen(content);
+               memcpy(result + off, content, clen);
+               off += clen;
+               written++;
+            }
+            result[off] = '\0';
          }
       }
    }
@@ -1794,6 +2047,11 @@ char *session_manager_build_system_prompt_string(int user_id) {
       composed_prompt_free(&cp);
       return NULL;
    }
+   /* Capability-change refresh path wants a single flattened string —
+    * its callers go through the legacy `session_update_system_prompt`
+    * single-message API.  The cache-eligible per-turn path uses
+    * `session_update_system_messages` instead so messages[0] stays
+    * stable across turns. */
    char *flat = session_manager_compose_prompt_string(&cp);
    composed_prompt_free(&cp);
    return flat;
@@ -1860,28 +2118,23 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
       return SUCCESS; /* LLM dispatch never blocked by focus errors. */
    }
 
-   char *flat = session_manager_compose_prompt_string(&cp);
+   /* Push the two-segment shape: messages[0]=stable, messages[1]=volatile.
+    * Anthropic attaches cache_control to messages[0] in llm_claude_format;
+    * the volatile message[1] is never cached.  OpenAI Responses
+    * concatenates the two via extract_system_instructions; chat-completions
+    * tolerates two consecutive system messages.
+    *
+    * DAP2 Room/HomeAssistant_Area suffix has already been baked INTO
+    * cp.stable_prefix by dawn_build_prompt (via append_satellite_
+    * context_to_stable, gated on the dispatch session's type).  No
+    * post-rebuild append here — doing so would mutate the cached
+    * prefix after the drift hash was computed, hiding mid-session
+    * ha_area changes from the drift-log signal (architecture review
+    * 2026-05-28).  Session-START / refresh-all-prompts paths still
+    * use session_append_satellite_context directly; only the per-turn
+    * dispatch path now relies on the in-builder append. */
+   session_update_system_messages(session, cp.stable_prefix, cp.volatile_block);
    composed_prompt_free(&cp);
-   if (flat == NULL) {
-      OLOG_WARNING("session_dispatch_user_turn: compose flatten failed (user_id=%d, kind=PER_TURN) "
-                   "— skipping system-prompt swap",
-                   user_id);
-      session_set_dispatch_session(NULL);
-      return SUCCESS;
-   }
-
-   session_update_system_prompt(session, flat);
-   free(flat);
-
-   /* Re-apply DAP2 satellite area suffix if applicable — mirrors the
-    * refresh_all_prompts pattern at session_manager.c:1728-1736. */
-   if (session->type == SESSION_TYPE_DAP2 && session->identity.uuid[0] != '\0') {
-      satellite_mapping_t mapping;
-      if (satellite_db_get(session->identity.uuid, &mapping) == 0)
-         session_append_satellite_context(session, session->identity.location, mapping.ha_area);
-      else
-         session_append_satellite_context(session, session->identity.location, NULL);
-   }
 
    session_set_dispatch_session(NULL);
    return SUCCESS;

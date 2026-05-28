@@ -31,28 +31,28 @@ extern "C" {
 #endif
 
 /**
- * @brief Build memory context for a user.
+ * @brief Build the USER MEMORY block for the cached stable prefix.
  *
- * Constructs a formatted string containing the user's preferences, known
- * facts, and recent conversation summaries.  Designed to be injected into
- * the LLM system prompt for personalization.
+ * Constructs a formatted string containing the user's preferences and
+ * recent conversation summaries — both session-stable (preferences
+ * change only on explicit edits; summaries are fixed once written and
+ * the [today]/[yesterday]/[this week] label is constant within a
+ * session).  Designed to be appended into the stable_prefix segment so
+ * the Anthropic prompt cache attaches.
  *
  * Sections:
- * - USER PREFERENCES: category: value (from memory_preferences)
- * - KNOWN FACTS: bullet points (from memory_facts, confidence >= 0.5)
+ * - USER PREFERENCES: category: value (from memory_preferences, up to
+ *   MAX_CONTEXT_PREFS entries)
  * - RECENT CONVERSATIONS: summaries with topics (from memory_summaries,
- *   <= 30 days old)
+ *   <= 30 days old, up to MAX_CONTEXT_SUMMARIES entries)
  *
- * Output uses an internal growable buffer (strbuf) bounded only by the
- * @p token_budget — never silently truncates rows mid-section the way the
- * earlier fixed-buffer API could.  When @p token_budget is exhausted
- * mid-section, an "[N more …]" elision marker is appended so the LLM
- * knows the listing was clipped.
+ * Output is bounded by per-item caps internal to the implementation;
+ * no per-character budget truncation (the cached prefix has no
+ * per-turn token cost).
  *
- * @param user_id User ID to build context for
- * @param token_budget Approximate token budget (chars / 4, default ~800).
- *                     Hard upper bound on total output size in characters
- *                     (= token_budget * 4).  Pass 0 to use a sane default.
+ * @param user_id User ID to build context for.
+ * @param token_budget Deprecated — kept for API stability only.  Ignored
+ *                     internally; size is bounded by the per-item caps.
  * @return Heap-allocated NUL-terminated string on success (caller must
  *         `free()`).  Returns NULL when there are no memories to surface
  *         or on allocation failure.  Empty user → NULL (callers can

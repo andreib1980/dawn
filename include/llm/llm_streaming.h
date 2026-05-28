@@ -91,9 +91,14 @@ typedef void (*llm_chunk_callback)(llm_chunk_type_t type, const char *text, void
  * This struct tracks the current position in that state machine.
  */
 typedef struct {
-   int message_started;      /**< message_start event received */
-   int content_block_active; /**< Currently inside a content block */
-   int input_tokens;         /**< Input tokens from message_start usage */
+   int message_started;             /**< message_start event received */
+   int content_block_active;        /**< Currently inside a content block */
+   int input_tokens;                /**< Input tokens from message_start usage */
+   int cache_creation_input_tokens; /**< Tokens written to the prompt cache this turn (non-zero
+                                         when cache_control: ephemeral is honored and a fresh
+                                         entry was created).  Populated from message_start.usage. */
+   int cache_read_input_tokens;     /**< Tokens served from cache (90% discount on these).
+                                         Populated from message_start.usage. */
 
    /* Tool use block tracking */
    int tool_block_active;              /**< Currently in a tool_use block */

@@ -39,12 +39,14 @@
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
 #include "core/session_manager.h"
+#include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_streaming.h"
 #include "llm/llm_tools.h"
 #include "llm/sse_parser.h"
 #include "logging.h"
+#include "ui/metrics.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
@@ -902,6 +904,38 @@ static void responses_handle_event(const char *event_type, const char *event_dat
             }
          }
          if (json_object_object_get_ex(resp, "usage", &usage_obj)) {
+            /* Responses-API usage shape:
+             *   { "input_tokens": N,
+             *     "input_tokens_details": { "cached_tokens": M },
+             *     "output_tokens": N,
+             *     "output_tokens_details": { "reasoning_tokens": M },
+             *     "total_tokens": N }
+             *
+             * Up to this commit only reasoning_tokens was extracted — input/
+             * output/cached_tokens were silently dropped, so per-session metrics
+             * for gpt-5.4* (the only Responses-routed family today) reported
+             * zeros across the board and OpenAI cache activity was invisible.
+             * Mirror the chat-completions parser at llm_openai_chat_completions.c
+             * so the two paths feed metrics identically. */
+            int input_tokens = 0;
+            int output_tokens = 0;
+            int cached_tokens = 0;
+
+            struct json_object *tok_obj;
+            if (json_object_object_get_ex(usage_obj, "input_tokens", &tok_obj))
+               input_tokens = json_object_get_int(tok_obj);
+            if (json_object_object_get_ex(usage_obj, "output_tokens", &tok_obj))
+               output_tokens = json_object_get_int(tok_obj);
+
+            struct json_object *in_details;
+            if (json_object_object_get_ex(usage_obj, "input_tokens_details", &in_details)) {
+               if (json_object_object_get_ex(in_details, "cached_tokens", &tok_obj)) {
+                  cached_tokens = json_object_get_int(tok_obj);
+                  if (cached_tokens > 0)
+                     OLOG_INFO("OpenAI Responses cache hit: %d tokens cached", cached_tokens);
+               }
+            }
+
             struct json_object *out_details;
             if (json_object_object_get_ex(usage_obj, "output_tokens_details", &out_details)) {
                struct json_object *r_tokens;
@@ -909,6 +943,19 @@ static void responses_handle_event(const char *event_type, const char *event_dat
                   rctx->reasoning_tokens = json_object_get_int(r_tokens);
                   rctx->stream_ctx->reasoning_tokens = rctx->reasoning_tokens;
                }
+            }
+
+            if (input_tokens > 0 || output_tokens > 0) {
+               metrics_record_llm_tokens(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, input_tokens,
+                                         output_tokens, cached_tokens);
+#ifdef ENABLE_WEBUI
+               uint32_t session_id = (ws != NULL) ? ws->session_id : 0;
+#else
+               uint32_t session_id = 0;
+#endif
+               llm_context_update_usage(session_id, input_tokens, output_tokens, cached_tokens);
+               OLOG_INFO("Responses usage: %d input, %d output, %d cached tokens", input_tokens,
+                         output_tokens, cached_tokens);
             }
          }
       }

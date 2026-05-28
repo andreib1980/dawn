@@ -25,6 +25,14 @@
 #ifndef LLM_COMMAND_PARSER_H
 #define LLM_COMMAND_PARSER_H
 
+/* Header text for the TOOL DEFAULTS line emitted by get_localization_context()
+ * and consumed by webui_auth_helpers.c::strip_tool_defaults() when User Context
+ * supersedes it.  Producer and consumer share this single source of truth so a
+ * future edit to the wording doesn't silently break the strip-on-authenticated
+ * path. */
+#define TOOL_DEFAULTS_HEADER_TEXT \
+   "TOOL DEFAULTS (for tool calls only, do not mention in conversation):"
+
 // Function to build local command prompt from commands_config_nuevo.json
 // For local microphone interface - includes all commands (HUD, helmet, general)
 const char *get_local_command_prompt(void);

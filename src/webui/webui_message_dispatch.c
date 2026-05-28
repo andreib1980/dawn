@@ -179,13 +179,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       /* Request current configuration */
       handle_get_config(conn);
    } else if (strcmp(type, "get_system_prompt") == 0) {
-      /* Request current system prompt for debugging */
+      /* Request current system prompt for debugging.  Uses the FULL
+       * variant so the inspector renders both segments of the two-
+       * message shape (stable prefix + volatile block joined by
+       * "\n\n").  session_get_system_prompt would show only the
+       * cached stable prefix — useful elsewhere but misleading for
+       * "what does the LLM actually see this turn?". */
       struct json_object *response = json_object_new_object();
       json_object_object_add(response, "type", json_object_new_string("system_prompt_response"));
       struct json_object *resp_payload = json_object_new_object();
 
       if (conn->session) {
-         char *prompt = session_get_system_prompt(conn->session);
+         char *prompt = session_get_full_system_prompt(conn->session);
          if (prompt) {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
             json_object_object_add(resp_payload, "prompt", json_object_new_string(prompt));

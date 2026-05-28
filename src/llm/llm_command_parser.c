@@ -24,13 +24,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* Local */
 #include "config/dawn_config.h"
 #include "core/command_executor.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -568,8 +568,8 @@ static const char *get_localization_context(void) {
    // Check if any localization fields are set
    if (g_config.localization.location[0] != '\0' || g_config.localization.units[0] != '\0' ||
        g_config.localization.timezone[0] != '\0' || g_config.general.room[0] != '\0') {
-      offset = snprintf(localization_context, LOCALIZATION_BUFFER_SIZE,
-                        "TOOL DEFAULTS (for tool calls only, do not mention in conversation):");
+      offset = snprintf(localization_context, LOCALIZATION_BUFFER_SIZE, "%s",
+                        TOOL_DEFAULTS_HEADER_TEXT);
       has_context = 1;
    }
 
@@ -593,25 +593,13 @@ static const char *get_localization_context(void) {
                          " TZ=%s.", g_config.localization.timezone);
    }
 
-   // Always include current date so model knows what "today" means
-   // This is critical for models with older training data cutoffs
-   time_t now = time(NULL);
-   struct tm tm_storage;
-   struct tm *tm_info = localtime_r(&now, &tm_storage);
-   if (tm_info) {
-      char date_str[32];
-      size_t date_len = strftime(date_str, sizeof(date_str), "%B %d, %Y", tm_info);
-      if (date_len > 0) {
-         if (!has_context) {
-            offset = snprintf(
-                localization_context, LOCALIZATION_BUFFER_SIZE,
-                "TOOL DEFAULTS (for tool calls only, do not mention in conversation):");
-            has_context = 1;
-         }
-         offset += snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset,
-                            " Today=%s.", date_str);
-      }
-   }
+   /* `Today=` used to land here so models with stale training cutoffs
+    * knew the current date.  The two-segment prompt-cache split moves
+    * the per-turn time into the volatile focus block as a synthetic
+    * `[system_time]` candidate — keeping a stale process-lifetime
+    * `Today=` cached here would defeat the cache (re-emit at midnight)
+    * AND duplicate the focus-block entry.  See the prompt-cache split
+    * design doc. */
 
    if (has_context) {
       snprintf(localization_context + offset, LOCALIZATION_BUFFER_SIZE - offset, "\n\n");

@@ -51,9 +51,6 @@ struct llm_tool_response;
 /* API endpoint path */
 #define CLAUDE_MESSAGES_ENDPOINT "/v1/messages"
 
-/* Prompt caching settings (1 = enabled, 0 = disabled) */
-#define CLAUDE_ENABLE_PROMPT_CACHING 1
-
 /**
  * @brief Callback function type for streaming text chunks
  */
