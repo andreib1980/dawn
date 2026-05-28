@@ -473,12 +473,6 @@ static weather_response_t *fetch_weather(double latitude,
       response->location_name = strdup(location_name);
    }
 
-   CURL *curl = curl_easy_init();
-   if (!curl) {
-      response->error = strdup("Failed to initialize curl");
-      return response;
-   }
-
    curl_buffer_t buffer;
    curl_buffer_init_with_max(&buffer, CURL_BUFFER_MAX_WEB_SEARCH);
 
@@ -510,13 +504,66 @@ static weather_response_t *fetch_weather(double latitude,
             "&timezone=auto&forecast_days=%d",
             OPEN_METEO_FORECAST_URL, latitude, longitude, forecast_days);
 
-   curl_easy_setopt(curl, CURLOPT_URL, url);
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+   // Try once, retry once on transient-looking failure.  Open-Meteo
+   // occasionally serves HTML error pages or empty bodies during load
+   // spikes (often at the top of the hour when scheduled briefings
+   // fire); a single retry with a brief backoff catches the common
+   // case without burning much latency on persistent failures.
+   //
+   // Retry triggers:
+   //   - CURLcode != OK (network failure)
+   //   - HTTP 5xx (upstream server error)
+   //   - JSON parse failure (HTML error page, truncated body, etc.)
+   //
+   // Diagnostic logging on terminal parse failure (body snippet + HTTP
+   // status) is what unblocks future investigation — the prior code
+   // surfaced only "Failed to parse weather response" with no context.
+   // Open-Meteo doesn't require auth and the weather endpoint takes no
+   // user-identifiable data, so logging body excerpts is privacy-safe.
+   struct json_object *root = NULL;
+   CURLcode res = CURLE_OK;
+   long http_code = 0;
+   const int max_attempts = 2;
 
-   CURLcode res = curl_easy_perform(curl);
-   curl_easy_cleanup(curl);
+   for (int attempt = 0; attempt < max_attempts; attempt++) {
+      if (attempt > 0) {
+         OLOG_INFO("Weather: retrying after transient error (HTTP=%ld curl=%s, attempt %d/%d)",
+                   http_code, (res != CURLE_OK) ? curl_easy_strerror(res) : "OK", attempt + 1,
+                   max_attempts);
+         curl_buffer_reset(&buffer);
+         struct timespec ts = { .tv_sec = 0, .tv_nsec = 500 * 1000000L };
+         nanosleep(&ts, NULL);
+      }
+
+      CURL *curl = curl_easy_init();
+      if (!curl) {
+         response->error = strdup("Failed to initialize curl");
+         curl_buffer_free(&buffer);
+         return response;
+      }
+
+      curl_easy_setopt(curl, CURLOPT_URL, url);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+      res = curl_easy_perform(curl);
+      http_code = 0;
+      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+      curl_easy_cleanup(curl);
+
+      if (res != CURLE_OK) {
+         continue;  // Network failure — retry if attempts remain
+      }
+      if (http_code >= 500 && http_code < 600) {
+         continue;  // Upstream 5xx — retry
+      }
+      // Try to parse.  Success → break; failure → retry (or fall through).
+      root = json_tokener_parse(buffer.data);
+      if (root != NULL) {
+         break;
+      }
+   }
 
    if (res != CURLE_OK) {
       response->error = strdup(curl_easy_strerror(res));
@@ -524,14 +571,46 @@ static weather_response_t *fetch_weather(double latitude,
       return response;
    }
 
-   // Parse JSON response
-   struct json_object *root = json_tokener_parse(buffer.data);
-   curl_buffer_free(&buffer);
-
    if (!root) {
-      response->error = strdup("Failed to parse weather response");
+      // Capture diagnostic on terminal parse failure: HTTP status, body
+      // size, first 200 bytes of body (control chars sanitized for log
+      // readability).  Body excerpt is privacy-safe per the comment
+      // above the retry loop.
+      const size_t snippet_cap = 200;
+      char snippet[201] = { 0 };
+      size_t snippet_len = 0;
+      if (buffer.data != NULL && buffer.size > 0) {
+         snippet_len = buffer.size < snippet_cap ? buffer.size : snippet_cap;
+         memcpy(snippet, buffer.data, snippet_len);
+         for (size_t i = 0; i < snippet_len; i++) {
+            unsigned char c = (unsigned char)snippet[i];
+            if (c == '\n' || c == '\r' || c == '\t')
+               snippet[i] = ' ';
+            else if (c < 32 || c == 127)
+               snippet[i] = '?';
+         }
+      }
+      OLOG_WARNING("Weather parse failed: HTTP=%ld body_size=%zu body[0:%zu]=\"%s%s\"", http_code,
+                   buffer.size, snippet_len, snippet, buffer.size > snippet_cap ? "..." : "");
+
+      // Surface HTTP status to the caller so the LLM (and operator) can
+      // distinguish upstream error from parse failure.
+      char err_buf[160];
+      if (http_code >= 400) {
+         snprintf(err_buf, sizeof(err_buf), "Weather upstream HTTP %ld", http_code);
+      } else if (buffer.size == 0) {
+         snprintf(err_buf, sizeof(err_buf), "Weather upstream returned empty body (HTTP %ld)",
+                  http_code);
+      } else {
+         snprintf(err_buf, sizeof(err_buf),
+                  "Failed to parse weather response (HTTP %ld, %zu bytes)", http_code, buffer.size);
+      }
+      response->error = strdup(err_buf);
+      curl_buffer_free(&buffer);
       return response;
    }
+
+   curl_buffer_free(&buffer);
 
    // Parse current weather
    struct json_object *current;
