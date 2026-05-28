@@ -773,7 +773,19 @@ static void *briefing_thread_func(void *arg) {
          conv_db_add_message(conv_id, event->user_id, "assistant", final_text);
       }
 
-      /* Step 6: TTS announcement (cap only if using raw tool result fallback).
+      /* Step 6: WebUI visual notification — fire BEFORE the TTS stream
+       * starts so the popup card appears at briefing-fire time, not after
+       * the audio finishes.  scheduler_send_tts_to_session now paces
+       * sentence-by-sentence (long-briefing truncation fix) which means
+       * the audio path blocks the briefing thread for the full briefing
+       * duration; if the broadcast fires AFTER that, the user sees the
+       * popup ~60s late on long briefings.  The broadcast is queued and
+       * non-blocking, so doing it first is free. */
+#ifdef ENABLE_WEBUI
+      scheduler_broadcast_briefing_notification(event, final_text, conv_created ? conv_id : 0);
+#endif
+
+      /* Step 7: TTS announcement (cap only if using raw tool result fallback).
        * Source-gated — see briefing_should_speak: voice-created briefings
        * speak, WebUI-created stay silent unless config opts in.  Per-row
        * say_aloud override (schema v53) wins outright on either side. */
@@ -793,11 +805,6 @@ static void *briefing_thread_func(void *arg) {
          }
          OLOG_INFO("scheduler: briefing %lld silent (%s)", (long long)event->id, reason);
       }
-
-      /* Step 7: WebUI notification */
-#ifdef ENABLE_WEBUI
-      scheduler_broadcast_briefing_notification(event, final_text, conv_created ? conv_id : 0);
-#endif
    }
 
    /* Step 8: Mark as fired and schedule next */

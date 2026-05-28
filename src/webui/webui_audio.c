@@ -40,6 +40,7 @@
 #include "logging.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
+#include "utils/sentence_buffer.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -951,15 +952,81 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
    free(cleaned);
 }
 
+/* Per-sentence TTS dispatch for scheduler/briefing audio.  Mirrors the
+ * inline-LLM-streaming callback (webui_sentence_audio_callback) but
+ * deliberately bypasses the tts_enabled gate — scheduler notifications
+ * are operator-scheduled actions whose audio routing was already
+ * decided by briefing_should_speak() before we got here.  Pacing uses
+ * the same conn->tts_pace_* fields the inline path uses; we reset
+ * them at the top of scheduler_send_tts_to_session so a briefing fired
+ * during a recent LLM stream doesn't share that stream's elapsed clock. */
+typedef struct {
+   session_t *session;
+   ws_connection_t *conn;
+} scheduler_tts_ctx_t;
+
+static void scheduler_tts_sentence_callback(const char *sentence, void *userdata) {
+   scheduler_tts_ctx_t *ctx = (scheduler_tts_ctx_t *)userdata;
+   if (!ctx || !ctx->session || ctx->session->disconnected)
+      return;
+   if (!sentence || !sentence[0])
+      return;
+
+   session_t *session = ctx->session;
+   ws_connection_t *conn = ctx->conn;
+
+   if (conn->use_opus) {
+      uint8_t *opus = NULL;
+      size_t opus_len = 0;
+      size_t frame_count = 0;
+      int ret = webui_audio_text_to_opus(sentence, &opus, &opus_len, &frame_count);
+      if (ret == WEBUI_AUDIO_SUCCESS && opus && opus_len > 0) {
+         if (!session->disconnected) {
+            webui_send_audio(session, opus, opus_len);
+            webui_send_audio_end(session, true);
+            webui_tts_pace_after_send(conn, session,
+                                      (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL);
+         }
+         free(opus);
+      }
+   } else {
+      int16_t *pcm = NULL;
+      size_t samples = 0;
+      int ret = webui_audio_text_to_pcm(sentence, &pcm, &samples);
+      if (ret == WEBUI_AUDIO_SUCCESS && pcm && samples > 0) {
+         if (!session->disconnected) {
+            size_t bytes = samples * sizeof(int16_t);
+            webui_send_audio(session, (const uint8_t *)pcm, bytes);
+            webui_send_audio_end(session, false);
+            webui_tts_pace_after_send(conn, session,
+                                      (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE);
+         }
+         free(pcm);
+      }
+   }
+}
+
 /**
  * Send TTS audio for a scheduler notification to a specific WebUI session.
  *
- * Unlike webui_sentence_audio_callback, this bypasses the tts_enabled check
- * (scheduler notifications are unsolicited) and brackets the audio with
- * speaking/idle state transitions for the browser state machine.
+ * Streams sentence-by-sentence to match the inline-LLM-TTS path instead
+ * of TTSing + Opus-encoding the entire briefing as one segment.  The
+ * single-segment shape ran into a documented opus-worker desync at ~12s
+ * into long-briefing (>60s) audio — the browser's frame-length validator
+ * fired mid-stream, truncating the rest.  Per-sentence segments cap the
+ * worst case at one sentence (~5-15s) AND let playback start ~1-2s after
+ * fire instead of waiting ~20s for the full encode (Jetson at RTF 0.12
+ * for a 77s briefing).  Pacing through conn->tts_pace_* throttles the
+ * response queue on chatty multi-paragraph summaries.
  *
- * No TTS pacing is applied here — scheduler notifications are single-sentence
- * by design (the briefing summarizer produces one consolidated sentence).
+ * Bypasses the tts_enabled check (scheduler notifications are unsolicited)
+ * and brackets the audio with speaking/idle state transitions.
+ *
+ * The opus-worker root cause is filed separately in docs/TODO.md
+ * ("long-briefing TTS truncation"); this fix makes the pipeline robust
+ * to it regardless of where the corruption originates — even if a single
+ * sentence's segment hits the bug, the briefing degrades to "missing one
+ * sentence" instead of "truncated mid-summary, rest silently lost."
  */
 void scheduler_send_tts_to_session(session_t *session, const char *text) {
    if (!session || !text || !text[0] || session->disconnected)
@@ -969,38 +1036,36 @@ void scheduler_send_tts_to_session(session_t *session, const char *text) {
    if (!conn)
       return;
 
-   bool use_opus = conn->use_opus;
-
-   OLOG_INFO("WebUI: Scheduler TTS to session %u (%s): %.60s%s", session->session_id,
-             use_opus ? "opus" : "pcm", text, strlen(text) > 60 ? "..." : "");
+   OLOG_INFO("WebUI: Scheduler TTS to session %u (%s, sentence-streaming): %.60s%s",
+             session->session_id, conn->use_opus ? "opus" : "pcm", text,
+             strlen(text) > 60 ? "..." : "");
 
    webui_send_state(session, "speaking");
 
-   if (use_opus) {
-      uint8_t *opus = NULL;
-      size_t opus_len = 0;
-      int ret = webui_audio_text_to_opus(text, &opus, &opus_len, NULL);
+   /* Reset pacing state for the briefing burst.  The inline-LLM-stream
+    * pace_start/sent fields may carry leftover values from a recent
+    * conversation; treat the briefing as a fresh stream so the first
+    * sentence starts playing immediately and subsequent sentences pace
+    * against the briefing's own audio clock. */
+   conn->tts_pace_start_us = 0;
+   conn->tts_audio_sent_us = 0;
+   conn->tts_pace_stream_id = atomic_load(&session->current_stream_id);
 
-      if (ret == WEBUI_AUDIO_SUCCESS && opus && opus_len > 0) {
-         if (!session->disconnected) {
-            webui_send_audio(session, opus, opus_len);
-            webui_send_audio_end(session, true);
-         }
-         free(opus);
-      }
+   scheduler_tts_ctx_t ctx = { .session = session, .conn = conn };
+   sentence_buffer_t *sb = sentence_buffer_create(scheduler_tts_sentence_callback, &ctx);
+   if (sb) {
+      sentence_buffer_feed(sb, text);
+      sentence_buffer_flush(sb);
+      sentence_buffer_free(sb);
    } else {
-      int16_t *pcm = NULL;
-      size_t samples = 0;
-      int ret = webui_audio_text_to_pcm(text, &pcm, &samples);
-
-      if (ret == WEBUI_AUDIO_SUCCESS && pcm && samples > 0) {
-         if (!session->disconnected) {
-            size_t bytes = samples * sizeof(int16_t);
-            webui_send_audio(session, (const uint8_t *)pcm, bytes);
-            webui_send_audio_end(session, false);
-         }
-         free(pcm);
-      }
+      /* sentence_buffer alloc failure — fall back to one-shot send so the
+       * briefing still plays (degrades to the old single-segment behavior
+       * which may truncate on >60s briefings, but at least the user gets
+       * SOMETHING).  Same TTS+send shape as the per-sentence callback
+       * above, but operates on the entire text in one pass. */
+      OLOG_WARNING("WebUI: sentence_buffer alloc failed for briefing; "
+                   "falling back to single-segment send (may truncate on >60s briefings)");
+      scheduler_tts_sentence_callback(text, &ctx);
    }
 
    webui_send_state(session, "idle");
