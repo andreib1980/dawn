@@ -120,6 +120,13 @@ static void print_usage(const char *prog) {
            "  memory entity link-user-self --user <u> [--dry-run]\n"
            "                                       Path B backfill: seed user-self + link\n"
            "                                       matching entities (dry-run by default)\n");
+   fprintf(stderr, "\nMessaging Channels:\n");
+   fprintf(stderr,
+           "  messaging generate-link-code --user <u>\n"
+           "                               [--provider telegram|discord|slack|sms]\n"
+           "                                       Issue a one-time link code; the user sends\n"
+           "                                       '/link <CODE>' from the chat client to bind\n"
+           "                                       it to their DAWN account.\n");
    fprintf(stderr, "\n");
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  --yes, -y    Skip confirmation prompts\n");
@@ -1966,6 +1973,63 @@ int main(int argc, char *argv[]) {
 
       fprintf(stderr, "Error: Unknown memory subcommand: %s\n", subcmd);
       fprintf(stderr, "Available: recategorize-all, reextract, reextract-status, entity\n");
+      return 1;
+   }
+
+   /* === Messaging Channels === */
+   if (strcmp(cmd, "messaging") == 0) {
+      if (argc < 3) {
+         fprintf(stderr, "Error: Missing messaging subcommand\n");
+         fprintf(stderr,
+                 "Usage: %s messaging generate-link-code --user <username> "
+                 "[--provider telegram|discord|slack|sms]\n",
+                 argv[0]);
+         return 1;
+      }
+      const char *subcmd = argv[2];
+
+      if (strcmp(subcmd, "generate-link-code") == 0) {
+         const char *username = NULL;
+         const char *provider = NULL;
+         for (int i = 3; i < argc; i++) {
+            const char *arg = argv[i];
+            if (strcmp(arg, "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (strcmp(arg, "--provider") == 0 && i + 1 < argc) {
+               provider = argv[++i];
+            } else {
+               fprintf(stderr, "Error: Unknown option for messaging generate-link-code: %s\n", arg);
+               return 1;
+            }
+         }
+         if (!username || !username[0]) {
+            fprintf(stderr, "Error: --user <username> is required\n");
+            fprintf(stderr,
+                    "Usage: %s messaging generate-link-code --user <username> "
+                    "[--provider telegram|discord|slack|sms]\n",
+                    argv[0]);
+            return 1;
+         }
+
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = admin_client_messaging_generate_link_code(fd, username, provider,
+                                                                            response,
+                                                                            sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      fprintf(stderr, "Error: Unknown messaging subcommand: %s\n", subcmd);
+      fprintf(stderr, "Available: generate-link-code\n");
       return 1;
    }
 

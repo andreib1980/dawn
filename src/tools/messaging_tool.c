@@ -32,6 +32,7 @@
 #include "logging.h"
 #include "messaging/messaging_discord.h"
 #include "messaging/messaging_engine.h"
+#include "messaging/messaging_slack.h"
 #include "messaging/messaging_sms.h"
 #include "messaging/messaging_telegram.h"
 #include "tools/tool_registry.h"
@@ -256,10 +257,22 @@ static int messaging_tool_init(void) {
    } else {
       OLOG_INFO("messaging_tool: no discord_bot_token configured; Discord disabled");
    }
+
+   if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
+      if (messaging_slack_register(g_secrets.slack_app_token, g_secrets.slack_bot_token) !=
+          SUCCESS) {
+         OLOG_WARNING("messaging_tool: Slack driver registration failed");
+      }
+   } else {
+      OLOG_INFO("messaging_tool: no slack_app_token/slack_bot_token configured; Slack disabled");
+   }
    return SUCCESS;
 }
 
 static void messaging_tool_cleanup(void) {
+   if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
+      messaging_slack_shutdown();
+   }
    if (g_secrets.discord_bot_token[0] != '\0') {
       messaging_discord_shutdown();
    }

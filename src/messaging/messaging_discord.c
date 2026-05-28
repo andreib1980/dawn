@@ -874,6 +874,24 @@ static void *dc_listener_thread(void *arg) {
  * Outbound REST send
  * ============================================================================= */
 
+/* Discord channel IDs are snowflakes — decimal digits only (always
+ * positive).  Shared between validate_address, build_address_json, and
+ * the inline checks in send_text / send_typing so a single canonical
+ * shape gates every wire-touching surface.  Matches the Slack driver's
+ * defense-in-depth pattern (sk_build_address_json calls
+ * is_valid_slack_channel). */
+static bool is_valid_snowflake(const char *s) {
+   if (!s || !s[0]) {
+      return false;
+   }
+   for (size_t i = 0; s[i] != '\0'; i++) {
+      if (!isdigit((unsigned char)s[i])) {
+         return false;
+      }
+   }
+   return true;
+}
+
 static int dc_extract_channel_id(const char *address_json, char *out, size_t out_size) {
    if (!address_json || !out || out_size == 0) {
       return FAILURE;
@@ -928,11 +946,9 @@ static int dc_send_text(int user_id,
     * this at /link time, but if a malformed row ever reached us (manual
     * DB edit, future channel-resolution bug), an attacker-controlled
     * string with `../` or `?` could otherwise land in the REST URL. */
-   for (size_t i = 0; channel_id[i] != '\0'; i++) {
-      if (!isdigit((unsigned char)channel_id[i])) {
-         OLOG_WARNING("discord: send failed — channel_id not a valid snowflake");
-         return FAILURE;
-      }
+   if (!is_valid_snowflake(channel_id)) {
+      OLOG_WARNING("discord: send failed — channel_id not a valid snowflake");
+      return FAILURE;
    }
 
    /* Build JSON body: {"content": "<text>"}.  Discord caps content at
@@ -1013,10 +1029,8 @@ static void dc_send_typing(int user_id, const char *provider_address, const char
       return;
    }
    /* Snowflake validation — same defense as dc_send_text. */
-   for (size_t i = 0; channel_id[i] != '\0'; i++) {
-      if (!isdigit((unsigned char)channel_id[i])) {
-         return;
-      }
+   if (!is_valid_snowflake(channel_id)) {
+      return;
    }
 
    char url[256];
@@ -1172,19 +1186,8 @@ static int dc_validate_address(const char *address_json) {
    int rc = FAILURE;
    if (json_object_object_get_ex(obj, "channel_id", &cid) && cid) {
       const char *s = json_object_get_string(cid);
-      if (s && s[0]) {
-         /* Discord channel IDs are snowflakes — decimal digits only
-          * (always positive). */
-         bool valid = true;
-         for (size_t i = 0; s[i] != '\0'; i++) {
-            if (!isdigit((unsigned char)s[i])) {
-               valid = false;
-               break;
-            }
-         }
-         if (valid) {
-            rc = SUCCESS;
-         }
+      if (is_valid_snowflake(s)) {
+         rc = SUCCESS;
       }
    }
    json_object_put(obj);
@@ -1199,7 +1202,11 @@ static void dc_build_address_json(const char *provider_address, char *buf, size_
    if (!buf || buf_size == 0) {
       return;
    }
-   if (!provider_address || provider_address[0] == '\0') {
+   /* Re-validate even though all current callers pre-validate.  Defense
+    * in depth on the driver's public surface — a future caller bypassing
+    * validate_address would otherwise emit malformed JSON via snprintf
+    * below.  is_valid_snowflake rejects '"' and '\\' (digits-only). */
+   if (!provider_address || !is_valid_snowflake(provider_address)) {
       snprintf(buf, buf_size, "{}");
       return;
    }
@@ -1248,17 +1255,27 @@ int messaging_discord_register(const char *bot_token) {
     * engine's inbound_cb is theoretical — the Gateway handshake (TLS +
     * HELLO + IDENTIFY + READY) takes seconds, register_driver completes
     * in microseconds. */
-   char creds[DC_BOT_TOKEN_MAX + 32];
-   snprintf(creds, sizeof(creds), "{\"bot_token\":\"%s\"}", bot_token);
-   if (dc_init(creds) != SUCCESS) {
+   /* Build the credentials envelope through json-c so a token containing
+    * '"' or '\\' is escaped correctly.  Naive snprintf would substitute
+    * one token for another on malformed input — defense-in-depth at the
+    * auth boundary. */
+   int rc = FAILURE;
+   struct json_object *obj = json_object_new_object();
+   if (!obj) {
       return FAILURE;
    }
-   if (messaging_engine_register_driver(&s_discord_driver) != MESSAGING_SUCCESS) {
-      OLOG_ERROR("discord: driver registration with engine failed");
-      dc_shutdown(); /* roll back the listener we just spawned */
-      return FAILURE;
+   json_object_object_add(obj, "bot_token", json_object_new_string(bot_token));
+   const char *creds_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
+   if (creds_str && dc_init(creds_str) == SUCCESS) {
+      if (messaging_engine_register_driver(&s_discord_driver) == MESSAGING_SUCCESS) {
+         rc = SUCCESS;
+      } else {
+         OLOG_ERROR("discord: driver registration with engine failed");
+         dc_shutdown(); /* roll back the listener we just spawned */
+      }
    }
-   return SUCCESS;
+   json_object_put(obj);
+   return rc;
 }
 
 void messaging_discord_shutdown(void) {

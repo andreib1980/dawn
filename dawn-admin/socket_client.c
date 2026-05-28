@@ -1640,3 +1640,36 @@ admin_resp_code_t admin_client_memory_entity_link_user_self(int fd,
    return entity_send_recv(fd, ADMIN_MSG_MEMORY_ENTITY_LINK_USER_SELF, flags, 0, 0, username, NULL,
                            response, resp_len);
 }
+
+admin_resp_code_t admin_client_messaging_generate_link_code(int fd,
+                                                            const char *username,
+                                                            const char *provider_hint,
+                                                            char *response,
+                                                            size_t resp_len) {
+   if (!username || !username[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ulen = strlen(username);
+   if (ulen == 0 || ulen >= ADMIN_MESSAGING_USERNAME_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t hlen = (provider_hint && provider_hint[0]) ? strlen(provider_hint) : 0;
+   if (hlen > ADMIN_MESSAGING_PROVIDER_HINT_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+
+   /* Wire format: byte 0 = provider_hint_len, bytes 1..1+H = hint,
+    * bytes 1+H..end = username. */
+   uint8_t buf[1 + ADMIN_MESSAGING_PROVIDER_HINT_MAX + ADMIN_MESSAGING_USERNAME_MAX];
+   buf[0] = (uint8_t)hlen;
+   if (hlen > 0) {
+      memcpy(buf + 1, provider_hint, hlen);
+   }
+   memcpy(buf + 1 + hlen, username, ulen);
+   uint16_t total = (uint16_t)(1 + hlen + ulen);
+
+   if (send_message(fd, ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}

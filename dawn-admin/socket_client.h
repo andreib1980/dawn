@@ -731,4 +731,30 @@ admin_resp_code_t admin_client_memory_entity_link_user_self(int fd,
                                                             char *response,
                                                             size_t resp_len);
 
+/* =============================================================================
+ * Messaging channels (dawn-admin messaging *)
+ * ============================================================================= */
+
+/**
+ * @brief Generate a one-time link code on behalf of a user.
+ *
+ * The daemon issues the code via messaging_engine_generate_link_code(),
+ * persisting to messaging_link_codes with the standard 10-minute TTL.
+ * On success the response text contains the issued code on the first
+ * line and an "Expires in N seconds" line below it.
+ *
+ * @param fd             Connected socket FD.
+ * @param username       Target user (1..ADMIN_MESSAGING_USERNAME_MAX bytes).
+ * @param provider_hint  NULL or "" for no hint; one of
+ *                       "telegram"/"discord"/"slack"/"sms" otherwise.
+ * @param response       Output buffer for daemon response text.
+ * @param resp_len       Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_messaging_generate_link_code(int fd,
+                                                            const char *username,
+                                                            const char *provider_hint,
+                                                            char *response,
+                                                            size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

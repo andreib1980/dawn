@@ -193,6 +193,18 @@ typedef enum {
    ADMIN_MSG_MEMORY_SUMMARIZE_MISSING = 0x90,
 
    /* Next free memory opcode: 0x91. */
+
+   /* Phase 7: Messaging channels (Phase 4 + Phase 6 operator commands).
+    * Opcode range 0xA0..0xAF is reserved for messaging — Phase 6 will
+    * add list-channels, unbind, link-attempts in this band.
+    *
+    * Generates a one-time link code on behalf of a user so they can
+    * complete the /link flow from their chat client.  Issued via
+    * messaging_engine_generate_link_code(); persists into
+    * messaging_link_codes with the standard 10-minute TTL. */
+   ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE = 0xA0,
+
+   /* Next free messaging opcode: 0xA1.  (Range ends 0xAF.) */
 } admin_msg_type_t;
 
 /**
@@ -407,6 +419,21 @@ typedef struct __attribute__((packed)) {
 
 /* ADMIN_MSG_MEMORY_SUMMARIZE_MISSING flags (byte 0 of payload). */
 #define ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN 0x01
+
+/*
+ * =============================================================================
+ * ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE payload (variable-length, ≤96 bytes)
+ * =============================================================================
+ *
+ * Wire format (little-endian):
+ *   Byte 0:        provider_hint_len  (0..ADMIN_MESSAGING_PROVIDER_HINT_MAX)
+ *   Byte 1..1+H:   provider_hint      (no NUL; may be empty)
+ *   Byte 1+H..:    username           (no NUL; payload_len - 1 - provider_hint_len bytes)
+ *
+ * Total max: 1 + 16 + 32 = 49 bytes (well within ADMIN_MSG_MAX_PAYLOAD = 256).
+ */
+#define ADMIN_MESSAGING_PROVIDER_HINT_MAX 16
+#define ADMIN_MESSAGING_USERNAME_MAX 32
 
 /*
  * =============================================================================

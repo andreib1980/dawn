@@ -125,6 +125,8 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_SECRET("TAVILY_API_KEY", secrets->tavily_api_key);
    ENV_SECRET("TELEGRAM_BOT_TOKEN", secrets->telegram_bot_token);
    ENV_SECRET("DISCORD_BOT_TOKEN", secrets->discord_bot_token);
+   ENV_SECRET("SLACK_APP_TOKEN", secrets->slack_app_token);
+   ENV_SECRET("SLACK_BOT_TOKEN", secrets->slack_bot_token);
 
    /* DAWN_ prefixed environment variables */
 

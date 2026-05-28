@@ -615,11 +615,12 @@ if(ENABLE_WEBUI)
         src/core/text_filter.c
         src/core/rate_limiter.c
         src/core/embedding_engine.c
-        # Messaging channels (Telegram, SMS, Discord / future Slack)
+        # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_sms.c
         src/messaging/messaging_discord.c
+        src/messaging/messaging_slack.c
         src/messaging/messaging_split.c
         src/messaging/ws_reconnect.c
         src/tools/messaging_tool.c
@@ -713,6 +714,7 @@ if(ENABLE_AUTH)
         src/auth/admin_socket.c
         src/auth/admin_socket_memory.c
         src/auth/admin_socket_memory_entity.c
+        src/auth/admin_socket_messaging.c
         src/auth/auth_db_user.c
         src/auth/auth_db_settings.c
         src/auth/auth_db_session.c

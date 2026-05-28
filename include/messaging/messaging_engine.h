@@ -184,6 +184,20 @@ int messaging_engine_reset_channel(const char *provider, const char *provider_ad
 int messaging_engine_reset_by_name(int user_id, const char *channel_name);
 
 /**
+ * @brief Return true if `name` is a provider name the engine recognizes.
+ *
+ * Single source of truth for the set of known provider names — call
+ * from operator-facing surfaces (admin opcodes, /link confirmations)
+ * that need to reject typos before they reach the registry.  Phase 4+
+ * additions (Mattermost, Matrix, ...) only need to update the
+ * implementation; callers stay unchanged.
+ *
+ * Case-sensitive match against the canonical lowercase names the
+ * drivers register with.  NULL or empty input returns false.
+ */
+bool messaging_engine_provider_known(const char *name);
+
+/**
  * @brief Try to handle an inbound SMS as a messaging-channels event.
  *
  * Called by phone_service.c on every inbound SMS.  Applies the

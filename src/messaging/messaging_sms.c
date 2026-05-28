@@ -26,6 +26,7 @@
 
 #include <ctype.h>
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +40,27 @@
  * (defensive — current contract requires user_id > 0).  Matches the
  * existing phone_tool's default. */
 #define SMS_FALLBACK_USER_ID 1
+
+/* Strict E.164: leading '+', then 8-15 decimal digits.  Tighter than
+ * what arbitrary modems sometimes report; relax only if real-world
+ * traffic surfaces edge cases (short codes, unformatted senders).
+ * Shared between validate_address and build_address_json so the public
+ * driver surface emits well-formed JSON even if a future caller skipped
+ * validate_address.  Matches the Slack driver's defense-in-depth
+ * pattern (sk_build_address_json calls is_valid_slack_channel). */
+static bool is_valid_e164(const char *s) {
+   if (!s || s[0] != '+') {
+      return false;
+   }
+   size_t digits = 0;
+   for (size_t i = 1; s[i] != '\0'; i++) {
+      if (!isdigit((unsigned char)s[i])) {
+         return false;
+      }
+      digits++;
+   }
+   return (digits >= 8 && digits <= 15);
+}
 
 static int sms_extract_phone_e164(const char *address_json, char *out, size_t out_size) {
    if (!address_json || !out || out_size == 0) {
@@ -84,11 +106,11 @@ static int sms_send_text(int user_id,
       snprintf(e164, sizeof(e164), "%s", provider_address);
    } else if (address_json) {
       if (sms_extract_phone_e164(address_json, e164, sizeof(e164)) != SUCCESS) {
-         OLOG_WARNING("sms_driver: send_text — no phone_e164 in provider_address or address_json");
+         OLOG_WARNING("sms: send_text — no phone_e164 in provider_address or address_json");
          return FAILURE;
       }
    } else {
-      OLOG_WARNING("sms_driver: send_text — no provider_address or address_json");
+      OLOG_WARNING("sms: send_text — no provider_address or address_json");
       return FAILURE;
    }
 
@@ -96,12 +118,20 @@ static int sms_send_text(int user_id,
     * audit log + per-user rate buckets correctly.  Falls back to the
     * single-admin default if the caller passed 0 (older code path or
     * a context where user_id wasn't available — should not happen on
-    * the messaging-engine path). */
-   int effective_user_id = (user_id > 0) ? user_id : SMS_FALLBACK_USER_ID;
+    * the messaging-engine path, so log loudly if it does so a future
+    * misconfiguration doesn't silently misroute audit entries). */
+   int effective_user_id;
+   if (user_id > 0) {
+      effective_user_id = user_id;
+   } else {
+      OLOG_WARNING("sms: send_text with user_id=%d; falling back to user %d (caller bug)", user_id,
+                   SMS_FALLBACK_USER_ID);
+      effective_user_id = SMS_FALLBACK_USER_ID;
+   }
    char result[256] = { 0 };
    int rc = phone_service_send_sms(effective_user_id, e164, text, result, sizeof(result));
    if (rc != SUCCESS) {
-      OLOG_WARNING("sms_driver: phone_service_send_sms failed (rc=%d): %s", rc, result);
+      OLOG_WARNING("sms: phone_service_send_sms failed (rc=%d): %s", rc, result);
       return FAILURE;
    }
    return SUCCESS;
@@ -111,7 +141,12 @@ static void sms_build_address_json(const char *provider_address, char *buf, size
    if (!buf || buf_size == 0) {
       return;
    }
-   if (!provider_address || provider_address[0] == '\0') {
+   /* Re-validate even though all current callers pre-validate.  Defense
+    * in depth on the driver's public surface — a future caller bypassing
+    * validate_address would otherwise emit malformed JSON via snprintf
+    * below.  is_valid_e164 rejects '"' and '\\' (digits-only after '+')
+    * so the snprintf can't be tricked. */
+   if (!provider_address || !is_valid_e164(provider_address)) {
       snprintf(buf, buf_size, "{}");
       return;
    }
@@ -132,24 +167,7 @@ static int sms_validate_address(const char *address_json) {
    if (sms_extract_phone_e164(address_json, e164, sizeof(e164)) != SUCCESS) {
       return FAILURE;
    }
-   /* Strict E.164: leading '+', then 8-15 decimal digits.  Tighter
-    * than what arbitrary modems sometimes report; if real-world
-    * traffic surfaces edge cases (short codes, unformatted senders)
-    * we can relax. */
-   if (e164[0] != '+') {
-      return FAILURE;
-   }
-   size_t digits = 0;
-   for (size_t i = 1; e164[i] != '\0'; i++) {
-      if (!isdigit((unsigned char)e164[i])) {
-         return FAILURE;
-      }
-      digits++;
-   }
-   if (digits < 8 || digits > 15) {
-      return FAILURE;
-   }
-   return SUCCESS;
+   return is_valid_e164(e164) ? SUCCESS : FAILURE;
 }
 
 static int sms_is_connected(void) {
@@ -176,14 +194,21 @@ static const messaging_driver_t s_sms_driver = {
 };
 
 int messaging_sms_register(void) {
-   if (messaging_engine_register_driver(&s_sms_driver) != MESSAGING_SUCCESS) {
-      OLOG_ERROR("sms_driver: registration with engine failed");
-      return FAILURE;
-   }
+   /* Init BEFORE engine registration to match the canonical order shared
+    * by Telegram/Discord/Slack — init failure shouldn't leave a dead
+    * driver in the engine's registry.  sms_init is a no-op today, but
+    * the symmetric shape is a trap-avoidance pattern for whoever adds
+    * real init work to the SMS driver later. */
    if (sms_init(NULL) != SUCCESS) {
+      OLOG_ERROR("sms: driver init failed");
       return FAILURE;
    }
-   OLOG_INFO("sms_driver: registered (outbound via phone_service, inbound via "
+   if (messaging_engine_register_driver(&s_sms_driver) != MESSAGING_SUCCESS) {
+      OLOG_ERROR("sms: registration with engine failed");
+      sms_shutdown_impl();
+      return FAILURE;
+   }
+   OLOG_INFO("sms: registered (outbound via phone_service, inbound via "
              "messaging_engine_handle_sms_inbound)");
    return SUCCESS;
 }

@@ -879,6 +879,18 @@ typedef struct {
     * requires the privileged MESSAGE_CONTENT intent.  See
     * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Discord). */
    char discord_bot_token[CONFIG_API_KEY_MAX];
+
+   /* Slack App-level token (xapp-...) used by the Socket Mode driver to
+    * open the outbound WebSocket via apps.connections.open.  When empty
+    * (or slack_bot_token empty), the Slack messaging driver is not
+    * registered.  v1 is DM-only, single-workspace install.  See
+    * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Slack). */
+   char slack_app_token[CONFIG_API_KEY_MAX];
+
+   /* Slack Bot User OAuth token (xoxb-...) used for chat.postMessage
+    * REST sends.  Required alongside slack_app_token.  Scopes required:
+    * chat:write, im:history, im:read, app_mentions:read. */
+   char slack_bot_token[CONFIG_API_KEY_MAX];
 } secrets_config_t;
 
 /* =============================================================================

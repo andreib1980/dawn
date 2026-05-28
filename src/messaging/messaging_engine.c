@@ -1149,6 +1149,27 @@ static void purge_expired_link_codes(void) {
    AUTH_DB_UNLOCK();
 }
 
+bool messaging_engine_provider_known(const char *name) {
+   if (!name || name[0] == '\0') {
+      return false;
+   }
+   /* Single source of truth for the recognized driver names.  Update
+    * here AND in dawn-admin/main.c help text when adding a provider. */
+   static const char *const k_known_providers[] = {
+      "telegram",
+      "discord",
+      "slack",
+      "sms",
+   };
+   const size_t n = sizeof(k_known_providers) / sizeof(k_known_providers[0]);
+   for (size_t i = 0; i < n; i++) {
+      if (strcmp(name, k_known_providers[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 int messaging_engine_generate_link_code(int user_id,
                                         const char *provider_hint,
                                         char *code_out,
@@ -1560,8 +1581,18 @@ static int engine_inbound_dispatch(const char *provider,
       return MESSAGING_RATE_LIMITED;
    }
 
-   /* /link short-circuit (own stricter rate limit, body cap). */
+   /* /link short-circuit (own stricter rate limit, body cap).  Accept
+    * both "/link CODE" and "link CODE" — Slack intercepts any '/' as a
+    * slash command and rejects unregistered ones, so users on that
+    * provider need the slashless form.  Telegram/Discord users see
+    * either form work; the slashed form stays the documented default. */
+   const char *link_args = NULL;
    if (body_len >= 6 && strncmp(body, "/link ", 6) == 0) {
+      link_args = body + 6;
+   } else if (body_len >= 5 && strncmp(body, "link ", 5) == 0) {
+      link_args = body + 5;
+   }
+   if (link_args) {
       if (body_len > MESSAGING_LINK_BODY_CAP) {
          OLOG_WARNING("messaging: oversized /link body from %s:%s (%zu bytes)", provider,
                       provider_address, body_len);
@@ -1573,7 +1604,7 @@ static int engine_inbound_dispatch(const char *provider,
          link_attempt_log(provider, provider_address, NULL, "rate_limited");
          return MESSAGING_RATE_LIMITED;
       }
-      return handle_link_command(provider, provider_address, body + 6);
+      return handle_link_command(provider, provider_address, link_args);
    }
 
    /* Body length cap — protects the worker queue and the LLM from
@@ -1608,8 +1639,12 @@ static int engine_inbound_dispatch(const char *provider,
     * unlinked senders can't trigger a reset on someone else's channel.
     * Recognized as case-insensitive "/new" followed by EOF or
     * whitespace; trailing content is tolerated and ignored (so "/new
-    * conversation please" works as expected).  See
-    * docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+    * conversation please" works as expected).  The leading '/' is
+    * REQUIRED — a slashless "new" would too easily false-positive on
+    * normal sentences ("New idea:", "new question:", ...).  Slack
+    * users intercept '/' as a slash-command, so they reset by asking
+    * the assistant to start a new conversation rather than via this
+    * shortcut.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
    if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
        (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
        (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {

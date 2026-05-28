@@ -1722,6 +1722,10 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
 
       /* Discord bot token (messaging channels driver) */
       PARSE_STRING(secrets_section, "discord_bot_token", secrets->discord_bot_token);
+
+      /* Slack Socket Mode tokens (messaging channels driver) */
+      PARSE_STRING(secrets_section, "slack_app_token", secrets->slack_app_token);
+      PARSE_STRING(secrets_section, "slack_bot_token", secrets->slack_bot_token);
    }
 
    /* Legacy: Parse [api_keys] section (old format) */

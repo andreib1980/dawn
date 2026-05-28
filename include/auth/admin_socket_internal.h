@@ -61,6 +61,10 @@ int handle_memory_summarize_missing(int client_fd, const char *payload, uint16_t
 int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
 
+/* Messaging-channels handlers (admin_socket_messaging.c).  Dispatched from
+ * handle_client() in admin_socket.c against ADMIN_MSG_MESSAGING_* opcodes. */
+int handle_messaging_generate_link_code(int client_fd, const char *payload, uint16_t payload_len);
+
 #ifdef __cplusplus
 }
 #endif

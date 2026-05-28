@@ -1,0 +1,123 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Messaging-channels admin opcode handlers.  Sibling of
+ * admin_socket_memory.c.  Currently hosts the operator path to issue
+ * link codes; Phase 6 will add list-channels / unbind / link-attempts
+ * here too.
+ */
+
+#define ADMIN_SOCKET_INTERNAL_ALLOWED
+#define AUTH_DB_INTERNAL_ALLOWED
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "auth/admin_socket_internal.h"
+#include "auth/auth_db.h"
+#include "auth/auth_db_internal.h"
+#include "dawn_error.h"
+#include "logging.h"
+#include "messaging/messaging_engine.h"
+
+/* =============================================================================
+ * Messaging: generate-link-code
+ *
+ * Payload wire format (matches the design-doc-style admin layouts):
+ *   Byte 0:        provider_hint_len  (0..ADMIN_MESSAGING_PROVIDER_HINT_MAX)
+ *   Byte 1..1+H:   provider_hint      ("slack" / "telegram" / etc., no NUL)
+ *   Byte 1+H..:    username           (no NUL, length = payload_len - 1 - H)
+ *
+ * Response: text-style.  On success, the body is the issued code on the
+ * first line plus a "Expires in N seconds" hint on the second.
+ * ============================================================================= */
+
+int handle_messaging_generate_link_code(int client_fd, const char *payload, uint16_t payload_len) {
+   /* Top-bound check: hint (≤16) + username (<32) + 1 prefix byte = 48 max.
+    * Below the wire-format minimum (1 + 1 = 2) is also a hard reject.
+    * Bounds-checking the total up front makes the parse chain trivially
+    * sound without depending on per-field bounds executing in order. */
+   if (payload_len < 2 ||
+       payload_len > 1 + ADMIN_MESSAGING_PROVIDER_HINT_MAX + ADMIN_MESSAGING_USERNAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "Invalid generate-link-code payload");
+   }
+   uint8_t hint_len = (uint8_t)payload[0];
+   if (hint_len > ADMIN_MESSAGING_PROVIDER_HINT_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "provider_hint too long");
+   }
+   if ((size_t)1 + hint_len >= payload_len) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Missing username");
+   }
+
+   char hint[ADMIN_MESSAGING_PROVIDER_HINT_MAX + 1] = { 0 };
+   if (hint_len > 0) {
+      memcpy(hint, payload + 1, hint_len);
+      /* Sanity-check the hint against the engine's known driver names so
+       * a fat-fingered subcommand doesn't pollute the DB hint column.
+       * The engine accepts any string; this is operator-friendliness. */
+      if (!messaging_engine_provider_known(hint)) {
+         return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                   "Unknown provider hint (use telegram|discord|slack|sms)");
+      }
+   }
+
+   uint16_t uname_len = (uint16_t)(payload_len - 1 - hint_len);
+   if (uname_len == 0 || uname_len >= ADMIN_MESSAGING_USERNAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[ADMIN_MESSAGING_USERNAME_MAX];
+   memcpy(username, payload + 1 + hint_len, uname_len);
+   username[uname_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "User not found");
+   }
+
+   char code[MESSAGING_LINK_CODE_BUF_SIZE];
+   const char *hint_arg = (hint_len > 0) ? hint : NULL;
+   int rc = messaging_engine_generate_link_code(user.id, hint_arg, code, sizeof(code));
+   if (rc != MESSAGING_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "messaging_engine_generate_link_code failed");
+   }
+
+   /* Slack intercepts any '/' as a slash command, so Slack users must
+    * send the slashless form ("link CODE").  All other providers accept
+    * either form; the slashed form stays the documented default for
+    * Telegram/Discord/SMS discoverability. */
+   const bool slack_hint = (hint_arg && strcmp(hint_arg, "slack") == 0);
+   const char *prefix = slack_hint ? "link" : "/link";
+   char msg[256];
+   if (hint_arg) {
+      snprintf(msg, sizeof(msg),
+               "Link code for user '%s' (%s): %s\n"
+               "Expires in %d seconds.  Send '%s %s' from the linked %s client to claim.",
+               username, hint_arg, code, MESSAGING_LINK_TTL_SECONDS, prefix, code, hint_arg);
+   } else {
+      snprintf(msg, sizeof(msg),
+               "Link code for user '%s': %s\n"
+               "Expires in %d seconds.  Send '/link %s' (or 'link %s' on Slack) from the desired "
+               "chat client to claim.",
+               username, code, MESSAGING_LINK_TTL_SECONDS, code, code);
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}

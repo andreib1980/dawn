@@ -2387,6 +2387,10 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_MEMORY_SUMMARIZE_MISSING:
          return handle_memory_summarize_missing(client_fd, payload, header.payload_len);
 
+      /* Phase 7: Messaging-channels operator commands */
+      case ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE:
+         return handle_messaging_generate_link_code(client_fd, payload, header.payload_len);
+
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);
          send_response(client_fd, ADMIN_RESP_FAILURE);

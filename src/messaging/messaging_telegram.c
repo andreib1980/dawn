@@ -572,6 +572,28 @@ static int tg_register_inbound_cb(messaging_inbound_fn cb) {
    return SUCCESS;
 }
 
+/* Telegram chat IDs: all digits with optional leading '-' (private
+ * chats positive, supergroups/channels negative).  Shared between
+ * validate_address and build_address_json so the public driver surface
+ * emits well-formed JSON even if a future caller skipped
+ * validate_address.  Matches the Slack driver's defense-in-depth
+ * pattern (sk_build_address_json calls is_valid_slack_channel). */
+static bool is_valid_chat_id(const char *s) {
+   if (!s || !s[0]) {
+      return false;
+   }
+   size_t i = (s[0] == '-') ? 1 : 0;
+   if (s[i] == '\0') {
+      return false;
+   }
+   for (; s[i] != '\0'; i++) {
+      if (!isdigit((unsigned char)s[i])) {
+         return false;
+      }
+   }
+   return true;
+}
+
 static int tg_validate_address(const char *address_json) {
    if (!address_json || address_json[0] == '\0') {
       return FAILURE;
@@ -584,23 +606,8 @@ static int tg_validate_address(const char *address_json) {
    int rc = FAILURE;
    if (json_object_object_get_ex(obj, "chat_id", &cid) && cid) {
       const char *s = json_object_get_string(cid);
-      if (s && s[0]) {
-         /* All chars must be digits or leading '-' (private chats are
-          * positive, supergroups/channels are negative). */
-         size_t i = 0;
-         if (s[0] == '-') {
-            i = 1;
-         }
-         bool valid = (s[i] != '\0');
-         for (; s[i] != '\0'; i++) {
-            if (!isdigit((unsigned char)s[i])) {
-               valid = false;
-               break;
-            }
-         }
-         if (valid) {
-            rc = SUCCESS;
-         }
+      if (is_valid_chat_id(s)) {
+         rc = SUCCESS;
       }
    }
    json_object_put(obj);
@@ -615,7 +622,11 @@ static void tg_build_address_json(const char *provider_address, char *buf, size_
    if (!buf || buf_size == 0) {
       return;
    }
-   if (!provider_address || provider_address[0] == '\0') {
+   /* Re-validate even though all current callers pre-validate.  Defense
+    * in depth on the driver's public surface — a future caller bypassing
+    * validate_address would otherwise emit malformed JSON via snprintf
+    * below.  is_valid_chat_id rejects '"' and '\\'. */
+   if (!provider_address || !is_valid_chat_id(provider_address)) {
       snprintf(buf, buf_size, "{}");
       return;
    }
@@ -658,17 +669,27 @@ int messaging_telegram_register(const char *bot_token) {
     * register_driver wires up the engine's inbound_cb is theoretical —
     * the long-poll cycle takes ~30 s while register_driver completes in
     * microseconds. */
-   char creds[TG_BOT_TOKEN_MAX + 32];
-   snprintf(creds, sizeof(creds), "{\"bot_token\":\"%s\"}", bot_token);
-   if (tg_init(creds) != SUCCESS) {
+   /* Build the credentials envelope through json-c so a token containing
+    * '"' or '\\' is escaped correctly.  Naive snprintf would substitute
+    * one token for another on malformed input — same defense-in-depth
+    * shape as Slack + Discord registration. */
+   int rc = FAILURE;
+   struct json_object *obj = json_object_new_object();
+   if (!obj) {
       return FAILURE;
    }
-   if (messaging_engine_register_driver(&s_telegram_driver) != MESSAGING_SUCCESS) {
-      OLOG_ERROR("telegram: driver registration with engine failed");
-      tg_shutdown(); /* roll back the listener we just spawned */
-      return FAILURE;
+   json_object_object_add(obj, "bot_token", json_object_new_string(bot_token));
+   const char *creds_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
+   if (creds_str && tg_init(creds_str) == SUCCESS) {
+      if (messaging_engine_register_driver(&s_telegram_driver) == MESSAGING_SUCCESS) {
+         rc = SUCCESS;
+      } else {
+         OLOG_ERROR("telegram: driver registration with engine failed");
+         tg_shutdown(); /* roll back the listener we just spawned */
+      }
    }
-   return SUCCESS;
+   json_object_put(obj);
+   return rc;
 }
 
 void messaging_telegram_shutdown(void) {
