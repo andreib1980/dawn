@@ -141,10 +141,22 @@ static char s_bot_token[DC_BOT_TOKEN_MAX];
 static atomic_bool s_running = ATOMIC_VAR_INIT(false);
 static atomic_bool s_connected = ATOMIC_VAR_INIT(false);
 
-/* External-reconnect signal.  driver->reconnect() may be called from
- * any thread; setting this flag defers the actual close to the
- * listener thread on its next loop iteration (lws_set_timeout is not
- * documented thread-safe). */
+/* Deferred-close signal.  Set whenever something inside a libwebsockets
+ * callback (CLIENT_RECEIVE → handle_gateway_frame → server-driven
+ * RECONNECT / INVALID_SESSION) decides we should close, or when an
+ * off-thread driver->reconnect() fires.  The listener loop drains
+ * the flag with atomic_exchange and runs close_active_connection()
+ * — i.e. lws_set_timeout(LWS_TO_KILL_SYNC) — only from OUTSIDE the
+ * callback dispatch chain.
+ *
+ * Why: calling lws_set_timeout(LWS_TO_KILL_SYNC) from inside a
+ * callback for the same wsi is a use-after-free footgun.  The sync-
+ * kill runs CLIENT_CLOSED, frees the wsi struct, and returns — but
+ * the outer callback dispatcher (the one that drove us here) still
+ * holds a wsi pointer on its stack and dereferences it on return.
+ * Observed segfault 2026-05-29 immediately after a server-initiated
+ * RECONNECT.  lws_set_timeout is ALSO not documented as thread-safe,
+ * so the off-thread caller path uses the same flag for symmetry. */
 static atomic_bool s_reconnect_requested = ATOMIC_VAR_INIT(false);
 
 static pthread_t s_listener_thread;
@@ -526,10 +538,12 @@ static void handle_invalid_session(struct json_object *root) {
    } else {
       OLOG_INFO("discord: INVALID_SESSION (resumable); will reconnect");
    }
-   /* Close socket to drive reconnect via main loop. */
-   if (s_wsi) {
-      lws_set_timeout(s_wsi, PENDING_TIMEOUT_USER_OK, LWS_TO_KILL_SYNC);
-   }
+   /* Close socket to drive reconnect via main loop.  Defer to the
+    * listener thread via s_reconnect_requested — sync-killing from
+    * inside this callback chain would free the wsi while the outer
+    * CLIENT_RECEIVE dispatcher still holds a reference on its
+    * stack (see s_reconnect_requested comment). */
+   atomic_store(&s_reconnect_requested, true);
 }
 
 static void handle_gateway_frame(const char *json_text, size_t len) {
@@ -565,9 +579,12 @@ static void handle_gateway_frame(const char *json_text, size_t len) {
          break;
       case DC_OP_RECONNECT:
          OLOG_INFO("discord: server requested RECONNECT");
-         if (s_wsi) {
-            lws_set_timeout(s_wsi, PENDING_TIMEOUT_USER_OK, LWS_TO_KILL_SYNC);
-         }
+         /* Defer the close to the listener thread.  Sync-killing
+          * here frees the wsi while the outer CLIENT_RECEIVE
+          * dispatcher still holds a stack reference → use-after-
+          * free segfault (observed 2026-05-29).  See the
+          * s_reconnect_requested comment for the full rationale. */
+         atomic_store(&s_reconnect_requested, true);
          break;
       case DC_OP_INVALID_SESSION:
          handle_invalid_session(root);
