@@ -15,7 +15,7 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
 - **Feedback before implementation.** When the developer asks a question, provide analysis, trade-offs, and a recommendation *first*. Wait for explicit confirmation ("go ahead", "do it", "yes") before coding.
 - **Format before committing.** Every change must pass `./format_code.sh --check`. The pre-commit hook enforces this.
 - **GPL header on every new `.c`/`.cpp`/`.h`.** Template at the bottom of this file.
-- **Never commit `docs/TODO.md`** — developer-maintained.
+- **Never commit `docs/TODO.md` or `docs/DONE.md`** — both developer-maintained. TODO.md is the active list; DONE.md is the shipped/completed archive (moved 2026-05-28). When an item ships, move its `~~strikethrough~~` row from TODO.md into DONE.md under the matching section.
 - **Design doc commit policy**: commit design docs only when they describe shipped or in-flight code (implementation matches the doc substantially). Docs for planned-but-unstarted work and working/scratch docs stay untracked — the developer uses them as a local unimplemented-work reminder. When unsure, ask.
 
 ## Build & Test
@@ -134,7 +134,7 @@ LOG_ERROR("I2C communication failed: %d", error);
 3. **Review** — run relevant review agents in parallel on the diff. Consolidate findings, triage (fix / skip / ask), apply fixes, re-verify.
 4. **Test** — developer tests manually and reports. Fix issues found; adjacent bugs may warrant their own mini cycle.
 5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/`) for significant features. Memory-subsystem docs land under `atlas/dawn/memory/`; everything else flat under `atlas/dawn/archive/`. Have architecture-reviewer verify the doc against code.
-6. **Update planning docs** — move the item from `docs/TODO.md` active to shipped; remove any `§N` detail section.
+6. **Update planning docs** — cut the item's row from `docs/TODO.md` and paste it into `docs/DONE.md` under the matching section, with the `~~strikethrough~~` SHIPPED tag including the commit hash; remove any `§N` detail section from TODO.md.
 7. **Commit** — run `./format_code.sh --check` once more. Provide a single `git add` command and a commit message. **Developer runs `git add`/`commit`/`push`.** Wait for confirmation.
 
 ## Code Review Workflow
@@ -160,7 +160,8 @@ When writing a number for an external audience (atlas, X post, paper, README), c
 
 ## Design Docs
 
-- **Active planning**: @docs/TODO.md (master), plus per-feature docs in `docs/` (e.g., `PHONE_SMS_DESIGN.md`, `SPEAKER_IDENTIFICATION_PLAN.md`).
+- **Active planning**: @docs/TODO.md (master, untracked), plus per-feature docs in `docs/` (e.g., `PHONE_SMS_DESIGN.md`, `SPEAKER_IDENTIFICATION_PLAN.md`).
+- **Shipped/completed archive**: `docs/DONE.md` (untracked, sibling to TODO.md). Migrated 2026-05-28 when TODO.md outgrew its own length. Section structure mirrors TODO.md so cross-reference back stays trivial.
 - **Archived designs**: [atlas/dawn](https://github.com/The-OASIS-Project/atlas/tree/main/dawn) — shipped-feature design docs kept for historical reference. Memory subsystem under [`memory/`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory) (system design, injection filter, cat-2 temporal, reranker investigation, LoCoMo cat-3 profiling). Everything else flat under [`archive/`](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive) — RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.
 
 ## License
