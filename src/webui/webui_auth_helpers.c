@@ -37,6 +37,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
+#include "core/prompt_compose.h"
 #include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
 #include "logging.h"
@@ -383,6 +384,7 @@ int dawn_build_prompt(int user_id,
    /* Initialize output so the caller can safely composed_prompt_free
     * on either SUCCESS or FAILURE return. */
    out->base_prompt = NULL;
+   out->now_block = NULL;
    out->memory_block = NULL;
    out->focus_block = NULL;
 
@@ -397,6 +399,13 @@ int dawn_build_prompt(int user_id,
    out->base_prompt = build_base_block(user_id);
    if (out->base_prompt == NULL)
       return FAILURE;
+
+   /* Block 1.5: current date+time, fresh per turn.  NULL on strftime/
+    * alloc failure — composer omits the section, LLM falls back to the
+    * time tool (last-good behavior pre-this-commit).  Cheap (~5µs) and
+    * lives in the non-cacheable per-turn zone alongside memory + focus
+    * so the cached system-prompt prefix stays stable across turns. */
+   out->now_block = prompt_compose_build_now_block();
 
    /* Block 2: memory context (existing logic).  NULL when memory is
     * disabled or has nothing to surface — composer omits the marker

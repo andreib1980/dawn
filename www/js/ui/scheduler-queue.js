@@ -321,6 +321,22 @@
       return html;
    }
 
+   /* State-coupled HTML fields — when render() reconciles existing rows
+    * against the new state.events list, it compares the cached row HTML
+    * against a freshly-built one to decide whether to keep the existing
+    * DOM node or replace it.  These fields leak from `state.*` (NOT from
+    * `event.*`) into the row HTML, which means a state flip OUTSIDE the
+    * events list still produces fresh HTML for one row → triggers the
+    * replaceWith branch in render() → which MUST keep cursor valid (the
+    * 2026-05-28 delete-button regression was the cursor going stale on
+    * this exact path).  Any future state field added here must be
+    * audited against the cursor-safe-replaceWith invariant in render().
+    *
+    * Currently state-coupled fields:
+    *   - state.armedRowId  →  `is-armed` class on the matching row
+    *
+    * If the list grows, also update the block comment in render() at
+    * the cursor-fix site to keep both surfaces honest. */
    function buildRowHTML(event) {
       const type = event.event_type || 'timer';
       const icon = TYPE_ICON_SVG[type] || '';
@@ -511,11 +527,59 @@
     * The cost is one extra string per visible row (cached HTML on the
     * element itself for the "did anything change" check).  Falls back
     * to full replace for the empty-state transition since there are
-    * no rows to preserve in either direction. */
+    * no rows to preserve in either direction.
+    *
+    * Recovery layer: the entire reconciliation runs inside try/catch.
+    * Any uncaught DOM exception (cursor staleness, missing parent
+    * pointer, etc.) silently falls back to a full innerHTML rebuild
+    * from state.events — one-time flicker but the UI never lies about
+    * its state.  Errors are console-logged for the next bisect. */
    function render() {
       if (!els.list) return;
       renderStats();
+      try {
+         renderInternal();
+      } catch (err) {
+         /* Diff-render fell over — likely an invariant the algorithm
+          * depends on (cursor staleness, parent-pointer mismatch) that
+          * isn't caught by the cursor-fix.  Rebuild from scratch so
+          * the row state matches state.events; lose scroll/focus this
+          * one render but never strand the user with a row whose click
+          * handlers won't fire. */
+         console.error('scheduler-queue diff-render failed; falling back to full rebuild', err);
+         fullRebuild();
+      }
+   }
 
+   function fullRebuild() {
+      if (!els.list) return;
+      const filtered = state.events.filter(
+         (e) => eventMatchesTab(e, state.activeTab) && eventMatchesSearch(e, state.searchQuery)
+      );
+      const sorted = sortForTab(filtered, state.activeTab);
+      if (sorted.length === 0) {
+         els.list.innerHTML = renderEmpty(state.activeTab, state.searchQuery);
+         return;
+      }
+      let html = '';
+      for (const ev of sorted) {
+         html += buildRowHTML(ev);
+      }
+      els.list.innerHTML = html;
+      /* Re-cache _sqRowHtml on each fresh row so the next diff-render
+       * has the same per-element cache invariant the diff path uses. */
+      for (const child of Array.from(els.list.children)) {
+         const idAttr = child.getAttribute('data-event-id');
+         const id = idAttr ? parseInt(idAttr, 10) : NaN;
+         if (!isNaN(id)) {
+            const ev = state.events.find((e) => e.id === id);
+            if (ev) child._sqRowHtml = buildRowHTML(ev);
+         }
+      }
+      if (state.armedRowId !== null) applyArmedPillContent();
+   }
+
+   function renderInternal() {
       const filtered = state.events.filter(
          (e) => eventMatchesTab(e, state.activeTab) && eventMatchesSearch(e, state.searchQuery)
       );
@@ -541,7 +605,18 @@
       /* Walk the new ordered set and reconcile in place.  `cursor`
        * tracks where the next-expected element should land; matching
        * elements advance the cursor, mismatched elements are moved
-       * via insertBefore. */
+       * via insertBefore.
+       *
+       * Cursor invariant: cursor MUST point at a node that is currently
+       * a child of els.list (or null).  When replaceWith below detaches
+       * an old node, we MUST advance cursor first if cursor was that
+       * old node — otherwise the subsequent insertBefore(elem, cursor)
+       * throws NotFoundError because the cursor's reference node is no
+       * longer a child of the list.  This bug surfaced on the delete-
+       * pill click path: buildRowHTML embeds state.armedRowId into the
+       * row's `is-armed` class, so arming a row produces fresh HTML for
+       * that row, replaceWith fires, and cursor would have pointed at
+       * the now-detached old element. */
       const keptIds = new Set();
       let cursor = els.list.firstElementChild;
       for (const ev of sorted) {
@@ -562,6 +637,11 @@
             tmpl.innerHTML = html.trim();
             const fresh = tmpl.content.firstElementChild;
             if (!fresh) continue;
+            /* CURSOR FIX: if cursor was the node we're about to detach,
+             * advance it to fresh first — fresh will take old elem's
+             * exact slot in the list after replaceWith.  This keeps
+             * cursor pointing at a live child of els.list. */
+            if (cursor === elem) cursor = fresh;
             elem.replaceWith(fresh);
             elem = fresh;
          }
@@ -575,14 +655,22 @@
             /* Move (or insert) before the current cursor.  Doesn't
              * advance `cursor` — the original `cursor` element is
              * still the next-expected one in the OLD order, and we
-             * haven't visited it yet. */
+             * haven't visited it yet.  `cursor` may be null here
+             * (we walked off the end); insertBefore(elem, null) is
+             * equivalent to appendChild — also valid. */
             els.list.insertBefore(elem, cursor);
          }
       }
 
       /* Drop any leftover children (removed events or stale empty-
-       * state markup). */
+       * state markup).  Defensive guard at loop top: if a future change
+       * inside the reconciliation above ever detaches cursor without
+       * advancing it (the documented hazard the CURSOR FIX prevents on
+       * the replaceWith path), `cursor.nextElementSibling` would throw
+       * NotFoundError here too.  Bail cleanly — anything we haven't
+       * cleaned up gets caught by the fullRebuild fallback in render(). */
       while (cursor) {
+         if (!cursor.parentNode || cursor.parentNode !== els.list) break;
          const next = cursor.nextElementSibling;
          const idAttr = cursor.getAttribute('data-event-id');
          const id = idAttr ? parseInt(idAttr, 10) : NaN;

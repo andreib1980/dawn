@@ -393,12 +393,49 @@ typedef enum {
  * the block is NULL or empty so pre-1e output is byte-identical with
  * the feature off.
  */
+/* Field order matches the future Claude system-array shape — when we
+ * split this from a flattened string into a typed array with
+ * cache_control on the stable prefix only, the array layout will be:
+ *
+ *   [base_prompt]   ← cache_control: ephemeral (STABLE across turns)
+ *   [now_block]     ← volatile per-turn
+ *   [memory_block]  ← volatile per-turn
+ *   [focus_block]   ← volatile per-turn
+ *
+ * Keep the struct in this order so the future split is a 1-to-1 lift
+ * into the array.  Do NOT reorder without also reshaping that planned
+ * commit.
+ *
+ * SIZE INVARIANT (see _Static_assert below): every field add MUST update
+ * both `composed_prompt_free` impls (prompt_compose.c out-of-line + the
+ * static-inline fallback in this header below for !ENABLE_MULTI_CLIENT).
+ * The sizeof assert forces a build break at the new field add site so
+ * the parallel-impl drift surfaces loudly at compile time. */
 typedef struct {
    char *base_prompt;  /* L4 builds; session_manager owns/frees */
+   char *now_block;    /* L4 builds via prompt_compose_build_now_block —
+                          current date+time, fresh on every PER_TURN
+                          refresh, NULL on builder OOM (LLM gracefully
+                          falls back to the time tool).  Lives in the
+                          non-cacheable per-turn zone of the prompt
+                          (sibling to focus); keeping it out of the
+                          system-prompt prefix avoids cache-vs-
+                          staleness trade-offs entirely. */
    char *memory_block; /* L4 builds via memory_build_context */
    char *focus_block;  /* L4 builds via focus_compose render; NULL when
                           disabled, on empty result, or on failure */
 } composed_prompt_t;
+
+/* Pin field count so a future add forces both composed_prompt_free
+ * implementations to update in lockstep.  Four char* fields → 32 bytes
+ * on LP64.  If you bump this, also update the static-inline
+ * composed_prompt_free below AND prompt_compose_free in
+ * src/core/prompt_compose.c. */
+_Static_assert(sizeof(composed_prompt_t) == 4 * sizeof(char *),
+               "composed_prompt_t field add detected — update BOTH "
+               "composed_prompt_free (this header) AND prompt_compose_free "
+               "(src/core/prompt_compose.c) to release the new field, then "
+               "bump this assertion.");
 
 /**
  * Per-user prompt builder — replaces the legacy
@@ -1495,6 +1532,8 @@ static inline void composed_prompt_free(composed_prompt_t *p) {
       return;
    free(p->base_prompt);
    p->base_prompt = NULL;
+   free(p->now_block);
+   p->now_block = NULL;
    free(p->memory_block);
    p->memory_block = NULL;
    free(p->focus_block);

@@ -132,6 +132,10 @@ static dawn_chime_buf_t alarm_tone_buf;
 
 /* Forward declarations */
 static void schedule_next_occurrence(const sched_event_t *fired_event);
+static time_t calculate_next_recurrence(const sched_event_t *event);
+static void prepare_next_occurrence_row(const sched_event_t *src,
+                                        time_t next_fire,
+                                        sched_event_t *next_out);
 
 /* =============================================================================
  * Announcement Generation
@@ -440,14 +444,27 @@ static char *strip_markdown_images(const char *src) {
 /**
  * Should this briefing speak its result via TTS?
  *
- * Voice-created briefings (LOCAL mic, DAP2 satellite) always speak — the user
- * asked aloud, they expect to hear it back.  WebUI-created briefings (typed or
- * browser-voiced) are silent by default: the conversation IS the artifact, and
- * audio playing through the same browser tab the user is reading from is
- * jarring.  Operators who want WebUI briefings to speak anyway can set
- * [scheduler] briefing_speak_aloud_on_webui_source = true.
+ * Per-row override (schema v53) wins outright:
+ *   - SCHED_SAY_ALOUD_ALWAYS  → speak, regardless of source/config.
+ *   - SCHED_SAY_ALOUD_NEVER   → silent, regardless of source/config.
+ *   - SCHED_SAY_ALOUD_DEFAULT → fall through to the source heuristic below.
+ *
+ * Source heuristic (legacy default behavior, preserved on pre-v53 rows whose
+ * say_aloud column backfilled to DEFAULT):
+ *   - Voice-created briefings (LOCAL mic, DAP2 satellite) always speak — the
+ *     user asked aloud, they expect to hear it back.
+ *   - WebUI-created briefings (typed or browser-voiced) are silent: the
+ *     conversation IS the artifact, and audio playing through the same
+ *     browser tab the user is reading from is jarring.  Operators who want
+ *     WebUI briefings to speak anyway can set
+ *     [scheduler] briefing_speak_aloud_on_webui_source = true.
  */
 static bool briefing_should_speak(const sched_event_t *event) {
+   if (event->say_aloud == SCHED_SAY_ALOUD_ALWAYS)
+      return true;
+   if (event->say_aloud == SCHED_SAY_ALOUD_NEVER)
+      return false;
+   /* SCHED_SAY_ALOUD_DEFAULT: legacy source heuristic. */
    if (event->source_client_type == SCHED_SOURCE_WEBUI) {
       return config_get()->scheduler.briefing_speak_aloud_on_webui_source;
    }
@@ -758,12 +775,23 @@ static void *briefing_thread_func(void *arg) {
 
       /* Step 6: TTS announcement (cap only if using raw tool result fallback).
        * Source-gated — see briefing_should_speak: voice-created briefings
-       * speak, WebUI-created stay silent unless config opts in. */
+       * speak, WebUI-created stay silent unless config opts in.  Per-row
+       * say_aloud override (schema v53) wins outright on either side. */
       if (briefing_should_speak(event)) {
          announce_briefing(event, final_text, !llm_ok);
       } else {
-         OLOG_INFO("scheduler: briefing %lld silent (source=webui, audio opt-out)",
-                   (long long)event->id);
+         /* Name the reason so a future operator grepping for "silent" can
+          * tell at-a-glance which gate fired: the per-row NEVER override,
+          * the WebUI source default, or (defensively) some future path. */
+         const char *reason;
+         if (event->say_aloud == SCHED_SAY_ALOUD_NEVER) {
+            reason = "say_aloud=NEVER override";
+         } else if (event->source_client_type == SCHED_SOURCE_WEBUI) {
+            reason = "source=webui default (no override)";
+         } else {
+            reason = "source heuristic";
+         }
+         OLOG_INFO("scheduler: briefing %lld silent (%s)", (long long)event->id, reason);
       }
 
       /* Step 7: WebUI notification */
@@ -1119,6 +1147,34 @@ static time_t calculate_next_recurrence(const sched_event_t *event) {
    return 0;
 }
 
+/* Pure builder for the next-occurrence row.  Shared by schedule_next_occurrence
+ * (fire-time path) and scheduler_cancel_occurrence (atomic cancel+insert path)
+ * so both pipelines stamp identical row shapes from the same source event.
+ *
+ * Fields reset on the new row: id (DB assigns), status, fire_at, fired_at,
+ * and the snooze counters.  Everything else inherits via the leading struct
+ * copy — most notably:
+ *   - say_aloud (schema v53): INTENTIONALLY carried through.  A user who set
+ *     a recurring briefing to NEVER speak expects every occurrence to stay
+ *     silent; a daily ALWAYS-speak briefing keeps speaking.  If a future
+ *     field needs "reset on recurrence" semantics (counter that should not
+ *     roll over, one-shot flag, etc.), add an explicit reset below.  Do NOT
+ *     add fields to the reset block above unless the recurrence semantic is
+ *     "fresh start every occurrence."
+ *   - event_type, name, message, recurrence/recurrence_days, source_*,
+ *     tool_* all carry through by design. */
+static void prepare_next_occurrence_row(const sched_event_t *src,
+                                        time_t next_fire,
+                                        sched_event_t *next_out) {
+   *next_out = *src;
+   next_out->id = 0;
+   next_out->status = SCHED_STATUS_PENDING;
+   next_out->fire_at = next_fire;
+   next_out->fired_at = 0;
+   next_out->snooze_count = 0;
+   next_out->snoozed_until = 0;
+}
+
 /**
  * @brief Schedule the next occurrence of a recurring event
  *
@@ -1134,13 +1190,8 @@ static void schedule_next_occurrence(const sched_event_t *fired_event) {
       return;
 
    /* Create new event as a copy with updated fire time */
-   sched_event_t next = *fired_event;
-   next.id = 0;
-   next.status = SCHED_STATUS_PENDING;
-   next.fire_at = next_fire;
-   next.fired_at = 0;
-   next.snooze_count = 0;
-   next.snoozed_until = 0;
+   sched_event_t next;
+   prepare_next_occurrence_row(fired_event, next_fire, &next);
 
    int64_t new_id = 0;
    /* Briefings carry steps in the briefing_steps table; clone them
@@ -1493,23 +1544,60 @@ int scheduler_get_ringing(sched_event_t *event) {
 
 int scheduler_cancel_occurrence(int64_t id) {
    /* Loads the row, cancels it, and — if recurring — schedules the next
-    * occurrence so the daily/weekly chain stays alive.  Each underlying call
-    * acquires the auth_db mutex separately; the worst-case interleaving here
-    * (insert succeeds but a concurrent fire-event sweep also schedules a
-    * duplicate next-occurrence row) is excluded structurally because a row
-    * must be pending/snoozed for scheduler_db_cancel to flip it to cancelled,
-    * which means it isn't in the fire path at the same time. */
+    * occurrence so the daily/weekly chain stays alive.
+    *
+    * Atomicity: when the row recurs AND the next-occurrence calc yields a
+    * fire time, the cancel + insert + (briefing) step-clone all run inside
+    * a single scheduler_db_cancel_and_insert_next BEGIN IMMEDIATE so the
+    * chain can't silently break (insert failure rolls back the cancel,
+    * surfacing a clean retry).  Non-recurring rows and chain-exhausted
+    * cases skip the combined helper and just cancel.
+    *
+    * The status-precondition predicate in the cancel UPDATE
+    * (`WHERE status IN ('pending','snoozed')`) keeps the worst-case
+    * interleaving with the fire path excluded structurally: a row must be
+    * pending or snoozed for the cancel to flip it, which means it isn't
+    * in the fire path's ringing/fired transition at the same time.
+    *
+    * TOCTOU note: the GET below runs OUTSIDE the atomic helper's
+    * transaction so we can compute the next-fire time without holding
+    * the auth_db lock.  A concurrent fire-path sweep could flip the row
+    * between the GET and the cancel-UPDATE.  Safe because of the
+    * status-predicate above — the UPDATE then no-ops and the helper
+    * returns FAILURE, leaving the chain intact.  Do NOT remove the
+    * predicate without also moving this GET inside the transaction. */
    sched_event_t ev;
    if (scheduler_db_get(id, &ev) != SUCCESS)
       return FAILURE;
 
-   if (scheduler_db_cancel(id) != SUCCESS)
-      return FAILURE;
+   /* Non-recurring or chain-exhausted: just cancel; no successor to insert. */
+   if (ev.recurrence == SCHED_RECUR_ONCE)
+      return scheduler_db_cancel(id);
 
-   if (ev.recurrence != SCHED_RECUR_ONCE)
-      schedule_next_occurrence(&ev);
+   time_t next_fire = calculate_next_recurrence(&ev);
+   if (next_fire == 0)
+      return scheduler_db_cancel(id);
 
-   return SUCCESS;
+   /* Build next-occurrence row using the shared builder so this path stamps
+    * the same shape schedule_next_occurrence does at fire time. */
+   sched_event_t next;
+   prepare_next_occurrence_row(&ev, next_fire, &next);
+
+   bool clone_steps = (ev.event_type == SCHED_EVENT_BRIEFING);
+   int64_t new_id = 0;
+   int rc = scheduler_db_cancel_and_insert_next(id, &next, ev.id, clone_steps, &new_id);
+   if (rc == SCHED_DB_SUCCESS) {
+      struct tm tm_next;
+      localtime_r(&next_fire, &tm_next);
+      OLOG_INFO("scheduler: cancel-and-rolled '%s' to %04d-%02d-%02d %02d:%02d (new id=%lld)",
+                next.name, tm_next.tm_year + 1900, tm_next.tm_mon + 1, tm_next.tm_mday,
+                tm_next.tm_hour, tm_next.tm_min, (long long)new_id);
+      scheduler_notify_new_event();
+      /* No separate cancel-row broadcast — the panel will pick up both the
+       * cancelled row's status change and the new pending row from the
+       * caller's scheduler_cancel_occurrence_and_broadcast wrapper. */
+   }
+   return rc;
 }
 
 int scheduler_cancel_and_broadcast(int64_t id, int user_id) {

@@ -63,6 +63,19 @@ extern "C" {
  * duration becomes user-hostile. */
 #define SCHED_BRIEFING_STEPS_MAX 8
 
+/* Tripwire: list / batched-lister call sites stack-allocate an
+ * `int64_t ids[SCHED_MAX_RESULTS]` array (400 bytes at 50) and
+ * `sched_event_t active[SCHED_MAX_RESULTS]` / `missed[]` (~3 KB each at 50,
+ * so ~294 KB total for both arrays at the WebUI panel path).  If
+ * SCHED_MAX_RESULTS bumps past this ceiling, those call sites need to move
+ * to heap allocation alongside the step table they already do.  Pinning
+ * here so the ceiling can't drift without a build-break review.  See
+ * src/tools/scheduler_tool.c::handle_list and
+ * src/webui/webui_scheduler.c::handle_scheduler_list_events. */
+_Static_assert(SCHED_MAX_RESULTS <= 256,
+               "Bumping SCHED_MAX_RESULTS past 256 requires moving the ids[] + active[]/missed[] "
+               "stack arrays in handle_list / handle_scheduler_list_events to heap.");
+
 /* =============================================================================
  * Enums (C enums, convert at DB boundary)
  * ============================================================================= */
@@ -101,6 +114,15 @@ typedef enum {
    SCHED_SOURCE_DAP2 = 2,  /**< DAP2 satellite */
 } sched_source_type_t;
 
+/* Per-briefing TTS override.  Tri-state because a missing field needs to fall
+ * back to the source heuristic, NOT to a hard yes/no.  Stored in
+ * scheduled_events.say_aloud as the underlying int (schema v53). */
+typedef enum {
+   SCHED_SAY_ALOUD_DEFAULT = 0, /**< Use source heuristic (voice=speak, webui=config-gated) */
+   SCHED_SAY_ALOUD_ALWAYS = 1,  /**< Force TTS regardless of source */
+   SCHED_SAY_ALOUD_NEVER = 2,   /**< Suppress TTS regardless of source */
+} sched_say_aloud_t;
+
 /* =============================================================================
  * Event Structure
  * ============================================================================= */
@@ -133,6 +155,12 @@ typedef struct {
    char tool_value[SCHED_TOOL_VALUE_MAX];
    time_t fired_at;
    int snooze_count;
+   /* Per-briefing TTS override (schema v53).  Tri-state — DEFAULT falls back
+    * to source heuristic + the [scheduler] briefing_speak_aloud_on_webui_source
+    * config flag.  Only meaningful for SCHED_EVENT_BRIEFING; harmless on
+    * other types (read but ignored at fire time).  Default 0 preserves
+    * pre-v53 behavior on existing rows after migration. */
+   sched_say_aloud_t say_aloud;
 } sched_event_t;
 
 /* Single step within a multi-step briefing.  Schema v50+. */
@@ -408,6 +436,67 @@ int scheduler_db_briefing_steps_list(int64_t event_id,
 int scheduler_db_insert_with_step_clone(sched_event_t *next,
                                         int64_t src_event_id,
                                         int64_t *new_id_out);
+
+/**
+ * @brief Atomically cancel a pending/snoozed row AND insert its next-occurrence
+ *        successor in a single BEGIN IMMEDIATE transaction.
+ *
+ * Closes the chain-break window between scheduler_db_cancel and the follow-up
+ * insert_with_step_clone / insert (caller's previous two-call pattern left a
+ * window where cancel succeeded but insert failed, silently breaking the
+ * recurrence chain).  Under this entry point either both succeed or neither
+ * does.
+ *
+ * If the cancel UPDATE matches 0 rows (row already fired/cancelled/missed),
+ * the function returns FAILURE without inserting — avoids scheduling a phantom
+ * successor for a row that was already handled by the fire path or another
+ * cancel.
+ *
+ * When clone_steps is true the caller is expected to be cancelling a briefing;
+ * the function reads briefing_steps for src_event_id and clones them onto the
+ * new row's id inside the same transaction.  Step-clone failure rolls back the
+ * whole operation.
+ *
+ * @param cancel_id Event id to cancel (must be pending/snoozed)
+ * @param next Event template for the successor row (id + created_at set on success)
+ * @param src_event_id Event id to read briefing_steps from when clone_steps=true
+ * @param clone_steps When true, copy briefing_steps from src_event_id to the new row
+ * @param new_id_out Output: id of the inserted successor on success, 0 on failure
+ * @return SCHED_DB_SUCCESS only when cancel AND insert (AND step-clone if asked) succeeded
+ */
+int scheduler_db_cancel_and_insert_next(int64_t cancel_id,
+                                        sched_event_t *next,
+                                        int64_t src_event_id,
+                                        bool clone_steps,
+                                        int64_t *new_id_out);
+
+/**
+ * @brief Batched variant of scheduler_db_briefing_steps_list — looks up steps
+ *        for n_events ids under a single auth_db lock acquisition.
+ *
+ * The single-row helper acquires the auth_db mutex once per call, so a panel
+ * render that walks N events with embedded multi-step briefings pays N+1 lock
+ * cycles.  This variant collapses that to 1.  At SCHED_MAX_RESULTS=50 the
+ * difference is dominant on Pi-class hardware where the mutex backs an NFS or
+ * SD-card-resident SQLite file.
+ *
+ * out_steps must be sized exactly n_events * SCHED_BRIEFING_STEPS_MAX slots
+ * (a flat 2D array indexed as `out_steps[i * SCHED_BRIEFING_STEPS_MAX + j]`).
+ * out_counts must be sized n_events; written with the per-event step count.
+ * Non-briefing event_ids yield count=0 with no error — callers should still
+ * filter their array by event_type before calling for clarity, but this is a
+ * graceful no-op.
+ *
+ * @param event_ids Array of event ids to query (length n_events)
+ * @param n_events Number of ids in event_ids (> 0)
+ * @param out_steps Flat output array sized [n_events][SCHED_BRIEFING_STEPS_MAX]
+ * @param out_counts Per-event step count, length n_events
+ * @return SCHED_DB_SUCCESS or SCHED_DB_FAILURE
+ */
+int scheduler_db_briefing_steps_list_many(const int64_t *event_ids,
+                                          int n_events,
+                                          sched_briefing_step_t *out_steps,
+                                          int *out_counts);
 
 #ifdef __cplusplus
 }

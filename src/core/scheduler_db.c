@@ -175,6 +175,16 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
 
    event->fired_at = (time_t)sqlite3_column_int64(stmt, 20);
    event->snooze_count = sqlite3_column_int(stmt, 21);
+   /* v53: say_aloud is the 22nd column.  Implicit assumption — this read is
+    * unconditional, so any DB at schema_version < 53 would fail the row
+    * extraction.  The migration policy (auth_db_schema.c:2867-2891) gates
+    * the v53 ALTER on `current_version >= 18 && < 53` and the fresh-install
+    * SCHEMA_SQL path always creates the column.  So by the time
+    * scheduler_db reads here, either the column exists (post-migration) or
+    * the daemon refused to start (auth_db init aborts on a failed bump).
+    * Do NOT add columns to extract_event_row without the same migration
+    * guarantee. */
+   event->say_aloud = (sched_say_aloud_t)sqlite3_column_int(stmt, 22);
 }
 
 /* Select all columns in consistent order */
@@ -182,7 +192,7 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
    "id, user_id, event_type, status, name, message, fire_at, created_at, "     \
    "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, " \
    "source_uuid, source_location, source_client_type, announce_all, "          \
-   "tool_name, tool_action, tool_value, fired_at, snooze_count"
+   "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud"
 
 /* =============================================================================
  * CRUD Operations
@@ -199,8 +209,8 @@ static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
                      "(user_id, event_type, status, name, message, fire_at, created_at, "
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
-                     "tool_name, tool_action, tool_value, fired_at, snooze_count) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                     "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -234,6 +244,7 @@ static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
                      SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, 20, 0);
    sqlite3_bind_int(stmt, 21, 0);
+   sqlite3_bind_int(stmt, 22, (int)event->say_aloud);
 
    rc = sqlite3_step(stmt);
    int result = SCHED_DB_FAILURE;
@@ -306,8 +317,8 @@ int scheduler_db_insert_checked(sched_event_t *event,
                      "(user_id, event_type, status, name, message, fire_at, created_at, "
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
-                     "tool_name, tool_action, tool_value, fired_at, snooze_count) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                     "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -342,6 +353,7 @@ int scheduler_db_insert_checked(sched_event_t *event,
                      SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, 20, 0);
    sqlite3_bind_int(stmt, 21, 0);
+   sqlite3_bind_int(stmt, 22, (int)event->say_aloud);
 
    rc = sqlite3_step(stmt);
    int result = SCHED_DB_FAILURE;
@@ -949,6 +961,136 @@ int scheduler_db_insert_with_step_clone(sched_event_t *next,
 
    AUTH_DB_UNLOCK();
    return rc;
+}
+
+int scheduler_db_cancel_and_insert_next(int64_t cancel_id,
+                                        sched_event_t *next,
+                                        int64_t src_event_id,
+                                        bool clone_steps,
+                                        int64_t *new_id_out) {
+   if (!next)
+      return SCHED_DB_FAILURE;
+   if (new_id_out)
+      *new_id_out = 0;
+
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
+
+   /* Single transaction wrapping (optional) source-steps SELECT + cancel +
+    * insert + (optional) step clone.  Pulling the SELECT inside BEGIN
+    * IMMEDIATE makes the clone read consistent with the rest of the
+    * operation — a concurrent briefing_steps_set on src_event_id can't
+    * race against the snapshot we're cloning from.  If the cancel UPDATE
+    * matches 0 rows (row already terminal) we ROLLBACK without inserting,
+    * avoiding a phantom successor for a row another actor (fire path,
+    * prior cancel) already handled. */
+   sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+
+   sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
+   int step_count = 0;
+   if (clone_steps) {
+      const char *sel_sql = "SELECT tool_name, COALESCE(tool_action,''), COALESCE(tool_value,'') "
+                            "FROM briefing_steps WHERE event_id = ? ORDER BY seq ASC LIMIT ?";
+      sqlite3_stmt *sel = NULL;
+      if (sqlite3_prepare_v2(s_db.db, sel_sql, -1, &sel, NULL) == SQLITE_OK) {
+         sqlite3_bind_int64(sel, 1, src_event_id);
+         sqlite3_bind_int(sel, 2, SCHED_BRIEFING_STEPS_MAX);
+         while (sqlite3_step(sel) == SQLITE_ROW && step_count < SCHED_BRIEFING_STEPS_MAX) {
+            memset(&steps[step_count], 0, sizeof(steps[step_count]));
+            const unsigned char *tname = sqlite3_column_text(sel, 0);
+            const unsigned char *tact = sqlite3_column_text(sel, 1);
+            const unsigned char *tval = sqlite3_column_text(sel, 2);
+            if (tname)
+               strncpy(steps[step_count].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+            if (tact)
+               strncpy(steps[step_count].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+            if (tval)
+               strncpy(steps[step_count].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+            step_count++;
+         }
+      }
+      sqlite3_finalize(sel);
+   }
+
+   const char *cancel_sql = "UPDATE scheduled_events SET status = 'cancelled' "
+                            "WHERE id = ? AND status IN ('pending', 'snoozed')";
+   sqlite3_stmt *cstmt = NULL;
+   int rc = SCHED_DB_FAILURE;
+   if (sqlite3_prepare_v2(s_db.db, cancel_sql, -1, &cstmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(cstmt, 1, cancel_id);
+      int sq = sqlite3_step(cstmt);
+      int changes = sqlite3_changes(s_db.db);
+      sqlite3_finalize(cstmt);
+      if (sq == SQLITE_DONE && changes > 0) {
+         rc = insert_event_unlocked(next, new_id_out);
+         if (rc == SCHED_DB_SUCCESS && clone_steps && step_count > 0) {
+            int64_t new_id = new_id_out ? *new_id_out : next->id;
+            rc = briefing_steps_insert_unlocked(new_id, steps, step_count);
+         }
+      }
+   }
+
+   if (rc == SCHED_DB_SUCCESS) {
+      sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+   } else {
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      if (new_id_out)
+         *new_id_out = 0;
+   }
+
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
+int scheduler_db_briefing_steps_list_many(const int64_t *event_ids,
+                                          int n_events,
+                                          sched_briefing_step_t *out_steps,
+                                          int *out_counts) {
+   if (!event_ids || !out_steps || !out_counts || n_events <= 0)
+      return SCHED_DB_FAILURE;
+   for (int i = 0; i < n_events; i++)
+      out_counts[i] = 0;
+
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
+
+   /* Single lock acquisition + one prepared statement reused across all
+    * event_ids.  Eliminates the N+1 auth_db_mutex cycles the per-event
+    * caller path (handle_list / handle_scheduler_list_events) used to
+    * incur — at SCHED_MAX_RESULTS=50 that's 1 lock instead of 50. */
+   const char *sql = "SELECT tool_name, COALESCE(tool_action,''), COALESCE(tool_value,'') "
+                     "FROM briefing_steps WHERE event_id = ? ORDER BY seq ASC LIMIT ?";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return SCHED_DB_FAILURE;
+   }
+
+   for (int i = 0; i < n_events; i++) {
+      sqlite3_reset(stmt);
+      sqlite3_clear_bindings(stmt);
+      sqlite3_bind_int64(stmt, 1, event_ids[i]);
+      sqlite3_bind_int(stmt, 2, SCHED_BRIEFING_STEPS_MAX);
+
+      sched_briefing_step_t *base = &out_steps[(size_t)i * SCHED_BRIEFING_STEPS_MAX];
+      int n = 0;
+      while (sqlite3_step(stmt) == SQLITE_ROW && n < SCHED_BRIEFING_STEPS_MAX) {
+         memset(&base[n], 0, sizeof(base[n]));
+         const unsigned char *tname = sqlite3_column_text(stmt, 0);
+         const unsigned char *tact = sqlite3_column_text(stmt, 1);
+         const unsigned char *tval = sqlite3_column_text(stmt, 2);
+         if (tname)
+            strncpy(base[n].tool_name, (const char *)tname, SCHED_TOOL_NAME_MAX - 1);
+         if (tact)
+            strncpy(base[n].tool_action, (const char *)tact, SCHED_TOOL_NAME_MAX - 1);
+         if (tval)
+            strncpy(base[n].tool_value, (const char *)tval, SCHED_TOOL_VALUE_MAX - 1);
+         n++;
+      }
+      out_counts[i] = n;
+   }
+   sqlite3_finalize(stmt);
+
+   AUTH_DB_UNLOCK();
+   return SCHED_DB_SUCCESS;
 }
 
 int scheduler_db_cleanup_old_events(int retention_days, int *deleted_out) {

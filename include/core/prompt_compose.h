@@ -76,6 +76,28 @@ void prompt_compose_free(composed_prompt_t *p);
  */
 char *prompt_compose_to_string(const composed_prompt_t *blocks);
 
+/**
+ * @brief Allocate a fresh "Current time: ..." block for the per-turn refresh.
+ *
+ * Reads the current wall clock + local timezone via time()/localtime_r and
+ * emits a single paragraph the composer renders right after `base_prompt`.
+ * Format is dual: human-readable (day name + local time) AND ISO 8601 with
+ * an explicit timezone offset (the form `iso8601_parse` round-trips against
+ * for tool args like `fire_at`).  Ends with a one-line nudge telling the
+ * LLM the value is fresh per-turn and authoritative — eliminates the
+ * "first emit garbage fire_at, hit past-time error, call time tool, retry"
+ * round-trip the scheduler-create flow used to need.
+ *
+ * Returns a heap-allocated string the caller frees, NULL on strftime/alloc
+ * failure (caller treats NULL the same as a no-op refresh — LLM falls back
+ * to the time tool, last-good system prompt stays in place).
+ *
+ * Pure of session state; safe to call from any thread.
+ *
+ * @return Caller-owned string, or NULL on failure.
+ */
+char *prompt_compose_build_now_block(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -509,6 +509,7 @@ static const char *SCHEMA_SQL =
     "  tool_value TEXT,"
     "  fired_at INTEGER DEFAULT 0,"
     "  snooze_count INTEGER DEFAULT 0,"
+    "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 — tri-state TTS override (briefings) */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire ON scheduled_events(status, fire_at);"
@@ -2847,6 +2848,39 @@ int auth_db_create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v53 — scheduled_events.say_aloud (per-briefing TTS override).  Tri-state
+    * INTEGER column with literal-zero default → SQLite O(1) ALTER fast path.
+    * Backfill is implicit: every existing row reads 0 = SCHED_SAY_ALOUD_DEFAULT
+    * which delegates to the source heuristic, so behavior is byte-identical
+    * pre/post migration.  Only NEW briefings created via the LLM tool (or
+    * future WebUI surface) opt into ALWAYS=1 / NEVER=2.
+    *
+    * Duplicate-column handling mirrors the v47/v52 pattern: SCHEMA_SQL
+    * (executed before this block on a multi-step migration from pre-v18) may
+    * have already created scheduled_events at the v53 shape via CREATE TABLE
+    * IF NOT EXISTS, leaving no work for the ALTER.  Treat "duplicate column"
+    * as success in that case. */
+   bool v53_ok = (current_version >= 53) || (current_version == 0);
+   if (current_version >= 18 && current_version < 53) {
+      const char *v53_sql = "ALTER TABLE scheduled_events ADD COLUMN "
+                            "say_aloud INTEGER NOT NULL DEFAULT 0";
+      rc = sqlite3_exec(s_db.db, v53_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_ERROR("auth_db: v53 migration failed: %s", errmsg ? errmsg : "unknown");
+      } else {
+         if (rc == SQLITE_OK) {
+            OLOG_INFO("auth_db: v53 added scheduled_events.say_aloud "
+                      "(per-briefing TTS override)");
+         } else {
+            OLOG_INFO("auth_db: v53 scheduled_events.say_aloud already present "
+                      "(applied by SCHEMA_SQL during multi-step migration)");
+         }
+         v53_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2983,7 +3017,7 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok;
+   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

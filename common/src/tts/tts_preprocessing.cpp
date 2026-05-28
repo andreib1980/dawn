@@ -814,6 +814,19 @@ template<PassMode mode> static size_t process_text_impl(const char *src, size_t 
             continue;
          }
 
+         // Collapse runs of 2+ '#' to nothing.  The leading-markdown scrubber
+         // above this loop already handles `# heading` at line start, but
+         // inline runs like `### heading mid-sentence` or `##` without a
+         // trailing space slip through and Piper reads each as "hash"
+         // ("hash hash hash heading").  Single '#' is preserved so C#,
+         // hashtags, and "#1" still read naturally.
+         if (byte == '#' && i + 1 < len && src[i + 1] == '#') {
+            while (i < len && src[i] == '#') {
+               i++;
+            }
+            continue;
+         }
+
          // Check for state abbreviation (2 uppercase letters at boundary)
          if (std::isupper(byte) && i + 1 < len &&
              std::isupper(static_cast<unsigned char>(src[i + 1]))) {

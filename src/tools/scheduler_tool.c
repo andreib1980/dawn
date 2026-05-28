@@ -243,6 +243,26 @@ static char *handle_create(struct json_object *details,
    /* Announce all */
    event.announce_all = json_get_bool(details, "announce_all", false);
 
+   /* Per-briefing TTS override (schema v53).  Tri-state — must distinguish
+    * "absent" (use source heuristic) from "false" (force-silent).
+    * json_get_bool collapses absent→default to a single bool, so use the
+    * raw json_object_object_get_ex here.  Silently ignored when type !=
+    * briefing because the field is briefing-only at the LLM surface; we
+    * don't error out so the LLM can pass it speculatively (e.g. as part
+    * of a generic briefing template) without rejection. */
+   if (type == SCHED_EVENT_BRIEFING) {
+      struct json_object *jsa = NULL;
+      if (json_object_object_get_ex(details, "say_aloud", &jsa) && jsa &&
+          json_object_is_type(jsa, json_type_boolean)) {
+         event.say_aloud = json_object_get_boolean(jsa) ? SCHED_SAY_ALOUD_ALWAYS
+                                                        : SCHED_SAY_ALOUD_NEVER;
+      } else {
+         event.say_aloud = SCHED_SAY_ALOUD_DEFAULT;
+      }
+   } else {
+      event.say_aloud = SCHED_SAY_ALOUD_DEFAULT;
+   }
+
    /* Tool scheduling — supports both legacy single-tool (top-level
     * tool_name/tool_action/tool_value) AND multi-step briefings (a `steps`
     * JSON array).  If `steps` is present, it wins; top-level tool_* is
@@ -438,6 +458,34 @@ static char *handle_list(struct json_object *details, int user_id) {
       return strdup("No active timers, alarms, or reminders.");
    }
 
+   /* Batch-load briefing steps for ALL events at once — one auth_db mutex
+    * acquisition instead of `count` separate ones (was N+1; on the panel
+    * path at SCHED_MAX_RESULTS=50 that's 51 lock cycles per list).  Steps
+    * memory is significant (count × 8 × ~2 KB) so heap-alloc rather than
+    * burn the LLM-worker stack; callocs at most ~870 KB at SCHED_MAX_RESULTS
+    * = 50, freed before return.  Falls back to per-row lookup if the alloc
+    * fails (correctness preserved, performance regresses to the old N+1
+    * pattern only on OOM). */
+   sched_briefing_step_t *step_table = NULL;
+   int *step_counts = NULL;
+   if (count > 0) {
+      step_table = calloc((size_t)count * SCHED_BRIEFING_STEPS_MAX, sizeof(sched_briefing_step_t));
+      step_counts = calloc((size_t)count, sizeof(int));
+      if (step_table && step_counts) {
+         int64_t ids[SCHED_MAX_RESULTS];
+         for (int i = 0; i < count; i++)
+            ids[i] = events[i].id;
+         scheduler_db_briefing_steps_list_many(ids, count, step_table, step_counts);
+      } else {
+         /* OOM — release whichever side allocated and let the inline
+          * fallback inside the loop do per-row lookups. */
+         free(step_table);
+         free(step_counts);
+         step_table = NULL;
+         step_counts = NULL;
+      }
+   }
+
    /* Build response — strbuf so a long event list cannot silently truncate
     * mid-row the way the prior fixed 2KB stack buffer did. */
    strbuf_t sb;
@@ -471,9 +519,18 @@ static char *handle_list(struct json_object *details, int user_id) {
           * actually do without waiting for it to fire.  Briefings may have
           * multi-step rows in briefing_steps; tasks always single-tool. */
          if (e->event_type == SCHED_EVENT_BRIEFING) {
-            sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
-            int step_count = 0;
-            scheduler_db_briefing_steps_list(e->id, steps, SCHED_BRIEFING_STEPS_MAX, &step_count);
+            sched_briefing_step_t steps_fallback[SCHED_BRIEFING_STEPS_MAX];
+            sched_briefing_step_t *steps;
+            int step_count;
+            if (step_table) {
+               steps = &step_table[(size_t)i * SCHED_BRIEFING_STEPS_MAX];
+               step_count = step_counts[i];
+            } else {
+               step_count = 0;
+               scheduler_db_briefing_steps_list(e->id, steps_fallback, SCHED_BRIEFING_STEPS_MAX,
+                                                &step_count);
+               steps = steps_fallback;
+            }
             if (step_count > 0) {
                strbuf_append(&sb, " — runs ");
                for (int s = 0; s < step_count; s++) {
@@ -503,6 +560,9 @@ static char *handle_list(struct json_object *details, int user_id) {
          strbuf_append(&sb, "\n");
       }
    }
+
+   free(step_table);
+   free(step_counts);
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
@@ -778,7 +838,9 @@ static const treg_param_t scheduler_params[] = {
            "fire_at, duration_minutes (1-43200, relative offset — use for timers or "
            "'in X minutes'), message (reminders, ≤512 chars), recurrence "
            "(once|daily|weekdays|weekends|weekly|custom), recurrence_days "
-           "(csv: mon,tue,...), announce_all (bool)}.\n"
+           "(csv: mon,tue,...), announce_all (bool — multi-user fan-out, NOT "
+           "audio control), say_aloud (briefing-only bool — TTS override; see "
+           "AUDIO section)}.\n"
            "  fire_at: ISO 8601. No timezone suffix = the user's LOCAL timezone "
            "('2026-03-19T07:00:00' = 7 AM local). 'Z' suffix = UTC. '+05:00' = explicit "
            "offset. For user-said times like 'set an alarm for 7am', use NO suffix.\n"
@@ -830,12 +892,23 @@ static const tool_metadata_t scheduler_metadata = {
        "arguments the tool receives (for `search`, that's the query string).  Empty "
        "tool_value for tools that require it (search, url_fetch) is rejected at create "
        "time.  Maximum 8 steps per briefing.\n\n"
-       "AUDIO: briefings created via voice (local mic / satellite) speak their summary "
-       "aloud when they fire.  Briefings created via text in the WebUI are SILENT by "
-       "default — the conversation is the artifact.  If the user explicitly asks to "
-       "hear the briefing out loud, either schedule it via voice or note that the "
-       "operator can flip [scheduler] briefing_speak_aloud_on_webui_source in dawn.toml.\n\n"
-       "Example: "
+       "AUDIO (briefings only): controlled by `say_aloud` in `details` — NOT "
+       "`announce_all` (which is multi-user fan-out, unrelated to TTS).  "
+       "Default behavior: briefings created via voice (local mic / satellite) speak "
+       "their summary aloud when they fire; briefings created via text in the WebUI "
+       "are SILENT.  Override with `say_aloud`: set to `true` when the user asks for "
+       "audio explicitly ('read it to me out loud' from a WebUI-text user), set to "
+       "`false` when the user asks for silence ('don't say this one aloud', 'keep it "
+       "quiet', 'silent briefing' — even from a voice user).  When in doubt — if the "
+       "user mentioned audio/quiet/silent/aloud at all — set `say_aloud` explicitly "
+       "rather than relying on the default.  Omit the field only when the user "
+       "didn't reference audio at all.\n\n"
+       "Example with explicit silent override (voice user said 'don't say this aloud'): "
+       "{\"type\":\"briefing\",\"name\":\"Iran War News\","
+       "\"duration_minutes\":2,\"say_aloud\":false,"
+       "\"steps\":[{\"tool_name\":\"search\",\"tool_action\":\"query\","
+       "\"tool_value\":\"Iran War news today\"}]}\n"
+       "Example with default audio (recurring morning briefing, no explicit override): "
        "{\"type\":\"briefing\",\"name\":\"Morning Briefing\","
        "\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\","
        "\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\","

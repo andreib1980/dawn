@@ -100,6 +100,38 @@ static const tool_metadata_t mock_tool_aliased = {
    .default_remote = true,
 };
 
+/* Schedulable mock without TOOL_CAP_REQUIRES_VALUE — empty/missing tool_value
+ * must pass.  Mirrors the shape of e.g. `weather` whose tool_value can be
+ * legitimately empty when the user has a configured default location. */
+static const tool_metadata_t mock_schedulable_no_value = {
+   .name = "sched_tool",
+   .device_string = "sched device",
+   .description = "Schedulable tool with no value requirement",
+   .callback = mock_callback,
+   .device_type = TOOL_DEVICE_TYPE_TRIGGER,
+   .capabilities = TOOL_CAP_SCHEDULABLE,
+   .params = NULL,
+   .param_count = 0,
+   .default_local = true,
+   .default_remote = true,
+};
+
+/* Schedulable mock that REQUIRES a non-empty tool_value.  Mirrors `search` /
+ * `url_fetch` — the briefing fire path can't proceed without a query. */
+static const tool_metadata_t mock_schedulable_with_value = {
+   .name = "sched_val_tool",
+   .device_string = "sched val device",
+   .description = "Schedulable tool that requires a value",
+   .callback = mock_callback,
+   .device_type = TOOL_DEVICE_TYPE_TRIGGER,
+   .capabilities = TOOL_CAP_SCHEDULABLE | TOOL_CAP_REQUIRES_VALUE,
+   .params = NULL,
+   .param_count = 0,
+   .default_local = true,
+   .default_remote = true,
+};
+
+
 /* ============================================================================
  * setUp / tearDown — fresh registry for each test
  * ============================================================================ */
@@ -302,6 +334,102 @@ static void test_cache_invalidation(void) {
 }
 
 /* ============================================================================
+ * validate_schedulable — exhaustive branch coverage.  This helper is the
+ * single source of truth for "is this tool safe to fire from the scheduler",
+ * called from both create-time (LLM tool) and fire-time (briefing thread).
+ * Drift between the two paths historically caused legitimate briefings to
+ * fail validation at fire — pinning every branch keeps the contract stable.
+ * ============================================================================ */
+
+static void test_validate_unknown_tool(void) {
+   char err[160] = { 0 };
+   int rc = tool_registry_validate_schedulable("not_a_tool", "anything", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "unknown tool name returns FAILURE");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "unknown tool"),
+                                "error message names the unknown-tool branch");
+}
+
+static void test_validate_null_tool_name(void) {
+   char err[160] = { 0 };
+   int rc = tool_registry_validate_schedulable(NULL, "anything", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "NULL tool_name returns FAILURE");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "tool_name is required"),
+                                "error names the missing-tool-name branch");
+
+   rc = tool_registry_validate_schedulable("", "anything", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "empty tool_name returns FAILURE");
+}
+
+static void test_validate_not_schedulable(void) {
+   tool_registry_register(&mock_tool); /* TOOL_CAP_NONE — not schedulable */
+
+   char err[160] = { 0 };
+   int rc = tool_registry_validate_schedulable("test_tool", "anything", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "non-schedulable tool returns FAILURE");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "not schedulable"),
+                                "error names the not-schedulable branch");
+}
+
+static void test_validate_schedulable_no_value_pass(void) {
+   tool_registry_register(&mock_schedulable_no_value);
+
+   char err[160] = { 0 };
+   /* Empty value OK for tools that don't require one. */
+   int rc = tool_registry_validate_schedulable("sched_tool", "", err, sizeof(err));
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + no-requires-value + empty value passes");
+
+   /* NULL value OK too. */
+   rc = tool_registry_validate_schedulable("sched_tool", NULL, err, sizeof(err));
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + no-requires-value + NULL value passes");
+
+   /* Populated value also passes (no requirement either way). */
+   rc = tool_registry_validate_schedulable("sched_tool", "Atlanta", err, sizeof(err));
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + populated value passes");
+}
+
+static void test_validate_requires_value_empty_fails(void) {
+   tool_registry_register(&mock_schedulable_with_value);
+
+   char err[160] = { 0 };
+   int rc = tool_registry_validate_schedulable("sched_val_tool", "", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "requires_value + empty value returns FAILURE");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "requires"),
+                                "error message names the requires-value branch");
+
+   rc = tool_registry_validate_schedulable("sched_val_tool", NULL, err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "requires_value + NULL value returns FAILURE");
+}
+
+static void test_validate_requires_value_populated_passes(void) {
+   tool_registry_register(&mock_schedulable_with_value);
+
+   char err[160] = { 0 };
+   int rc = tool_registry_validate_schedulable("sched_val_tool", "today's news", err, sizeof(err));
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "requires_value + populated value passes");
+}
+
+/* Note: the "disabled" branch of validate_schedulable
+ * (`!tool_registry_is_enabled(name)` between the SCHEDULABLE check and the
+ * REQUIRES_VALUE check) is structurally unreachable from this test
+ * harness — registered tools default to enabled=true and the registry
+ * exposes no public toggle.  Unregistered tools hit the unknown-tool
+ * branch in find() first.  In production it fires when an operator sets
+ * `[tool.foo] enabled = false` via dawn.toml; that path is config-driven
+ * and out of scope here. */
+
+static void test_validate_null_err_buf_safe(void) {
+   tool_registry_register(&mock_schedulable_no_value);
+
+   /* Caller passing NULL err_buf is allowed — function must not deref. */
+   int rc = tool_registry_validate_schedulable("sched_tool", "ok", NULL, 0);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "NULL err_buf with valid input returns SUCCESS");
+
+   /* And on the failure path the NULL err_buf must still be safe. */
+   rc = tool_registry_validate_schedulable("not_real", "ok", NULL, 0);
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "NULL err_buf with unknown tool returns FAILURE");
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -329,6 +457,15 @@ int main(void) {
    RUN_TEST(test_count_tool_variations_with_aliases);
    RUN_TEST(test_foreach_iterates_all);
    RUN_TEST(test_cache_invalidation);
+
+   /* validate_schedulable branch pins */
+   RUN_TEST(test_validate_unknown_tool);
+   RUN_TEST(test_validate_null_tool_name);
+   RUN_TEST(test_validate_not_schedulable);
+   RUN_TEST(test_validate_schedulable_no_value_pass);
+   RUN_TEST(test_validate_requires_value_empty_fails);
+   RUN_TEST(test_validate_requires_value_populated_passes);
+   RUN_TEST(test_validate_null_err_buf_safe);
 
    return UNITY_END();
 }

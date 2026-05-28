@@ -182,6 +182,57 @@ static void test_preprocess_strips_asterisks(void) {
    TEST_ASSERT_EQUAL_STRING("bold text", out);
 }
 
+/* Multi-hash runs (`##`, `###`, etc.) inline must be stripped so Piper doesn't
+ * read "hash hash hash" out loud.  Single '#' is preserved so C#, hashtags,
+ * and "#1" still vocalize naturally.  The leading-markdown scrubber upstream
+ * of the per-char loop already handles `# heading` at line start; these
+ * cases pin the inline branch. */
+static void test_preprocess_collapses_inline_double_hash(void) {
+   char out[64];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("see section ## 3 here", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_EQUAL_STRING("see section  3 here", out);
+}
+
+static void test_preprocess_collapses_inline_triple_hash(void) {
+   char out[64];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("foo ### heading inline", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_EQUAL_STRING("foo  heading inline", out);
+}
+
+static void test_preprocess_collapses_long_hash_run(void) {
+   char out[64];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("a ######## b", out, sizeof(out), &written));
+   TEST_ASSERT_EQUAL_STRING("a  b", out);
+}
+
+static void test_preprocess_preserves_single_hash(void) {
+   char out[64];
+   int written = 0;
+   /* C#, hashtags, and "#1" must vocalize naturally — single '#' stays. */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("I write C# code", out, sizeof(out), &written));
+   TEST_ASSERT_EQUAL_STRING("I write C# code", out);
+
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("#trending now", out, sizeof(out), &written));
+   TEST_ASSERT_EQUAL_STRING("#trending now", out);
+}
+
+static void test_preprocess_leading_header_still_stripped(void) {
+   char out[64];
+   int written = 0;
+   /* The line-start scrubber already handled "## heading" at the very start —
+    * the per-char loop never sees these '#'s.  Pinning this so the new inline
+    * rule doesn't accidentally double-strip and consume content. */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("## Heading line", out, sizeof(out), &written));
+   TEST_ASSERT_EQUAL_STRING("Heading line", out);
+}
+
 static void test_preprocess_strips_emoji(void) {
    char out[64];
    int written = 0;
@@ -318,6 +369,11 @@ int main(void) {
 
    /* preprocess: transformations */
    RUN_TEST(test_preprocess_strips_asterisks);
+   RUN_TEST(test_preprocess_collapses_inline_double_hash);
+   RUN_TEST(test_preprocess_collapses_inline_triple_hash);
+   RUN_TEST(test_preprocess_collapses_long_hash_run);
+   RUN_TEST(test_preprocess_preserves_single_hash);
+   RUN_TEST(test_preprocess_leading_header_still_stripped);
    RUN_TEST(test_preprocess_strips_emoji);
    RUN_TEST(test_preprocess_em_dash_to_comma);
    RUN_TEST(test_preprocess_temperature_fahrenheit);

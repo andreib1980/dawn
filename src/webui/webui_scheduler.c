@@ -72,7 +72,14 @@ static void truncate_to_display(const char *src, char *dst, size_t dst_size) {
    }
 }
 
-static json_object *serialize_event(const sched_event_t *e) {
+/* Per-event payload builder.  prebatched_steps + prebatched_count may be
+ * NULL/0 for non-briefing rows or when the caller didn't pre-batch the
+ * steps table (in which case we fall back to the legacy per-row lookup).
+ * Passing pre-batched values from the caller eliminates the per-event
+ * auth_db_mutex acquisition the old code paid for every briefing row. */
+static json_object *serialize_event(const sched_event_t *e,
+                                    const sched_briefing_step_t *prebatched_steps,
+                                    int prebatched_count) {
    json_object *obj = json_object_new_object();
    json_object_object_add(obj, "id", json_object_new_int64(e->id));
    json_object_object_add(obj, "event_type",
@@ -85,6 +92,7 @@ static json_object *serialize_event(const sched_event_t *e) {
    json_object_object_add(obj, "duration_sec", json_object_new_int(e->duration_sec));
    json_object_object_add(obj, "snoozed_until", json_object_new_int64((int64_t)e->snoozed_until));
    json_object_object_add(obj, "snooze_count", json_object_new_int(e->snooze_count));
+   json_object_object_add(obj, "say_aloud", json_object_new_int((int)e->say_aloud));
    json_object_object_add(obj, "recurrence",
                           json_object_new_string(sched_recurrence_to_str(e->recurrence)));
    json_object_object_add(obj, "recurrence_days", json_object_new_string(e->recurrence_days));
@@ -103,9 +111,18 @@ static json_object *serialize_event(const sched_event_t *e) {
     * limits XSS surface in the panel.  Tasks/timers/alarms/reminders skip
     * this query path. */
    if (e->event_type == SCHED_EVENT_BRIEFING) {
-      sched_briefing_step_t steps[SCHED_BRIEFING_STEPS_MAX];
-      int step_count = 0;
-      scheduler_db_briefing_steps_list(e->id, steps, SCHED_BRIEFING_STEPS_MAX, &step_count);
+      sched_briefing_step_t local_steps[SCHED_BRIEFING_STEPS_MAX];
+      const sched_briefing_step_t *steps;
+      int step_count;
+      if (prebatched_steps) {
+         steps = prebatched_steps;
+         step_count = prebatched_count;
+      } else {
+         step_count = 0;
+         scheduler_db_briefing_steps_list(e->id, local_steps, SCHED_BRIEFING_STEPS_MAX,
+                                          &step_count);
+         steps = local_steps;
+      }
       if (step_count > 0) {
          json_object *arr = json_object_new_array();
          for (int i = 0; i < step_count; i++) {
@@ -153,12 +170,66 @@ void handle_scheduler_list_events(ws_connection_t *conn) {
       int missed_count = scheduler_db_list_user_missed(conn->auth_user_id, missed,
                                                        SCHED_MAX_RESULTS);
 
+      /* Batch-load briefing steps for both arrays under a single lock
+       * acquisition each — old path acquired the auth_db mutex per briefing
+       * row inside serialize_event (up to 2 × 50 = 100 cycles per panel
+       * open).  Heap-alloc the step tables; ~870 KB per side at
+       * SCHED_MAX_RESULTS=50 doesn't fit comfortably on the libws stack
+       * alongside the existing 294 KB of event arrays.  Falls back to
+       * per-row lookup on OOM (correctness preserved). */
+      sched_briefing_step_t *active_steps = NULL;
+      int *active_counts = NULL;
+      sched_briefing_step_t *missed_steps = NULL;
+      int *missed_counts = NULL;
+      if (active_count > 0) {
+         active_steps = calloc((size_t)active_count * SCHED_BRIEFING_STEPS_MAX,
+                               sizeof(sched_briefing_step_t));
+         active_counts = calloc((size_t)active_count, sizeof(int));
+         if (active_steps && active_counts) {
+            int64_t ids[SCHED_MAX_RESULTS];
+            for (int i = 0; i < active_count; i++)
+               ids[i] = active[i].id;
+            scheduler_db_briefing_steps_list_many(ids, active_count, active_steps, active_counts);
+         } else {
+            free(active_steps);
+            free(active_counts);
+            active_steps = NULL;
+            active_counts = NULL;
+         }
+      }
+      if (missed_count > 0) {
+         missed_steps = calloc((size_t)missed_count * SCHED_BRIEFING_STEPS_MAX,
+                               sizeof(sched_briefing_step_t));
+         missed_counts = calloc((size_t)missed_count, sizeof(int));
+         if (missed_steps && missed_counts) {
+            int64_t ids[SCHED_MAX_RESULTS];
+            for (int i = 0; i < missed_count; i++)
+               ids[i] = missed[i].id;
+            scheduler_db_briefing_steps_list_many(ids, missed_count, missed_steps, missed_counts);
+         } else {
+            free(missed_steps);
+            free(missed_counts);
+            missed_steps = NULL;
+            missed_counts = NULL;
+         }
+      }
+
       for (int i = 0; i < active_count; i++) {
-         json_object_array_add(events_array, serialize_event(&active[i]));
+         const sched_briefing_step_t *ev_steps =
+             active_steps ? &active_steps[(size_t)i * SCHED_BRIEFING_STEPS_MAX] : NULL;
+         int ev_count = active_counts ? active_counts[i] : 0;
+         json_object_array_add(events_array, serialize_event(&active[i], ev_steps, ev_count));
       }
       for (int i = 0; i < missed_count; i++) {
-         json_object_array_add(events_array, serialize_event(&missed[i]));
+         const sched_briefing_step_t *ev_steps =
+             missed_steps ? &missed_steps[(size_t)i * SCHED_BRIEFING_STEPS_MAX] : NULL;
+         int ev_count = missed_counts ? missed_counts[i] : 0;
+         json_object_array_add(events_array, serialize_event(&missed[i], ev_steps, ev_count));
       }
+      free(active_steps);
+      free(active_counts);
+      free(missed_steps);
+      free(missed_counts);
    }
    /* For unassigned satellites (auth_user_id <= 0) the events array stays
     * empty — quieter than an error frame, and matches how the dispatcher

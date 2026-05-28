@@ -68,6 +68,7 @@ static const char *DDL =
     "  tool_value TEXT,"
     "  fired_at INTEGER DEFAULT 0,"
     "  snooze_count INTEGER DEFAULT 0,"
+    "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 tri-state TTS override */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
@@ -898,6 +899,193 @@ static void test_insert_with_step_clone_no_source_steps(void) {
 }
 
 /* ============================================================================
+ * Test: scheduler_db_cancel_and_insert_next — recurring chain stays atomic
+ * ============================================================================ */
+
+static void test_cancel_and_insert_next_briefing(void) {
+   /* Recurring briefing with 2 steps — the cancel path needs to clone steps. */
+   sched_event_t src = make_event();
+   src.event_type = SCHED_EVENT_BRIEFING;
+   src.recurrence = SCHED_RECUR_DAILY;
+   int64_t src_id = 0;
+   scheduler_db_insert(&src, &src_id);
+   sched_briefing_step_t steps[2];
+   memset(steps, 0, sizeof(steps));
+   strncpy(steps[0].tool_name, "weather", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[1].tool_name, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(steps[1].tool_value, "AI news", SCHED_TOOL_VALUE_MAX - 1);
+   scheduler_db_briefing_steps_set(src_id, steps, 2);
+
+   sched_event_t next = src;
+   next.id = 0;
+   next.status = SCHED_STATUS_PENDING;
+   next.fire_at = src.fire_at + 86400;
+   next.fired_at = 0;
+
+   int64_t new_id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_cancel_and_insert_next(src_id, &next, src_id,
+                                                             /*clone_steps=*/true, &new_id));
+   TEST_ASSERT_TRUE(new_id > src_id);
+
+   /* Source now cancelled */
+   sched_event_t verify;
+   scheduler_db_get(src_id, &verify);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_CANCELLED, verify.status);
+
+   /* New row pending + steps cloned */
+   scheduler_db_get(new_id, &verify);
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_PENDING, verify.status);
+   sched_briefing_step_t out[SCHED_BRIEFING_STEPS_MAX];
+   int count = 0;
+   scheduler_db_briefing_steps_list(new_id, out, SCHED_BRIEFING_STEPS_MAX, &count);
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("weather", out[0].tool_name);
+   TEST_ASSERT_EQUAL_STRING("AI news", out[1].tool_value);
+}
+
+static void test_cancel_and_insert_next_already_cancelled_aborts(void) {
+   /* Row already in a terminal state — cancel-and-insert must NOT silently
+    * insert a phantom successor.  Pre-fix the two-call sequence happily
+    * scheduled a next row even when the cancel was a no-op. */
+   sched_event_t src = make_event();
+   src.event_type = SCHED_EVENT_TIMER;
+   src.recurrence = SCHED_RECUR_DAILY;
+   int64_t src_id = 0;
+   scheduler_db_insert(&src, &src_id);
+   /* Move row out of pending/snoozed (fire it). */
+   scheduler_db_update_status(src_id, SCHED_STATUS_FIRED);
+
+   sched_event_t next = src;
+   next.id = 0;
+   next.status = SCHED_STATUS_PENDING;
+   next.fire_at = src.fire_at + 86400;
+   next.fired_at = 0;
+
+   int64_t new_id = 12345; /* sentinel value — must be cleared to 0 on failure */
+   int rc = scheduler_db_cancel_and_insert_next(src_id, &next, src_id, /*clone_steps=*/false,
+                                                &new_id);
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE, rc);
+   TEST_ASSERT_EQUAL_INT64(0, new_id);
+
+   /* Source row is still FIRED — the failed cancel did NOT silently flip it. */
+   sched_event_t verify;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, scheduler_db_get(src_id, &verify));
+   TEST_ASSERT_EQUAL_INT(SCHED_STATUS_FIRED, verify.status);
+
+   /* No phantom successor row inserted — count rows via direct SQL since
+    * list_user_events filters to pending/snoozed/ringing only. */
+   sqlite3_stmt *cnt = NULL;
+   int row_count = -1;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM scheduled_events WHERE user_id = 1", -1,
+                          &cnt, NULL) == SQLITE_OK) {
+      if (sqlite3_step(cnt) == SQLITE_ROW)
+         row_count = sqlite3_column_int(cnt, 0);
+   }
+   sqlite3_finalize(cnt);
+   TEST_ASSERT_EQUAL_INT(1, row_count);
+}
+
+/* ============================================================================
+ * Test: scheduler_db_briefing_steps_list_many returns identical results to
+ * the single-row helper across a mixed batch of briefings + non-briefings.
+ * ============================================================================ */
+
+static void test_briefing_steps_list_many_mixed(void) {
+   /* Three briefings with varying step counts, one timer (no steps). */
+   int64_t b1_id = 0, b2_id = 0, b3_id = 0, t_id = 0;
+   sched_event_t b = make_event();
+   b.event_type = SCHED_EVENT_BRIEFING;
+   scheduler_db_insert(&b, &b1_id);
+   scheduler_db_insert(&b, &b2_id);
+   scheduler_db_insert(&b, &b3_id);
+   sched_event_t t = make_event();
+   t.event_type = SCHED_EVENT_TIMER;
+   scheduler_db_insert(&t, &t_id);
+
+   sched_briefing_step_t s1[2];
+   memset(s1, 0, sizeof(s1));
+   strncpy(s1[0].tool_name, "weather", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(s1[0].tool_value, "Atlanta", SCHED_TOOL_VALUE_MAX - 1);
+   strncpy(s1[1].tool_name, "search", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(s1[1].tool_value, "today", SCHED_TOOL_VALUE_MAX - 1);
+   scheduler_db_briefing_steps_set(b1_id, s1, 2);
+
+   /* b2 deliberately empty (0 steps) */
+
+   sched_briefing_step_t s3[1];
+   memset(s3, 0, sizeof(s3));
+   strncpy(s3[0].tool_name, "url_fetch", SCHED_TOOL_NAME_MAX - 1);
+   strncpy(s3[0].tool_value, "https://x", SCHED_TOOL_VALUE_MAX - 1);
+   scheduler_db_briefing_steps_set(b3_id, s3, 1);
+
+   int64_t ids[4] = { b1_id, b2_id, b3_id, t_id };
+   sched_briefing_step_t table[4 * SCHED_BRIEFING_STEPS_MAX];
+   int counts[4] = { -1, -1, -1, -1 };
+   memset(table, 0, sizeof(table));
+
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS,
+                         scheduler_db_briefing_steps_list_many(ids, 4, table, counts));
+
+   /* Per-id counts match the single-row helper's output */
+   TEST_ASSERT_EQUAL_INT(2, counts[0]);
+   TEST_ASSERT_EQUAL_INT(0, counts[1]);
+   TEST_ASSERT_EQUAL_INT(1, counts[2]);
+   TEST_ASSERT_EQUAL_INT(0, counts[3]); /* timer has no steps */
+
+   /* Content matches and lives in the right row slots */
+   TEST_ASSERT_EQUAL_STRING("weather", table[0 * SCHED_BRIEFING_STEPS_MAX + 0].tool_name);
+   TEST_ASSERT_EQUAL_STRING("Atlanta", table[0 * SCHED_BRIEFING_STEPS_MAX + 0].tool_value);
+   TEST_ASSERT_EQUAL_STRING("search", table[0 * SCHED_BRIEFING_STEPS_MAX + 1].tool_name);
+   TEST_ASSERT_EQUAL_STRING("url_fetch", table[2 * SCHED_BRIEFING_STEPS_MAX + 0].tool_name);
+}
+
+static void test_briefing_steps_list_many_rejects_bad_args(void) {
+   sched_briefing_step_t table[SCHED_BRIEFING_STEPS_MAX];
+   int counts[1] = { 0 };
+   int64_t ids[1] = { 1 };
+
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE,
+                         scheduler_db_briefing_steps_list_many(NULL, 1, table, counts));
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE,
+                         scheduler_db_briefing_steps_list_many(ids, 1, NULL, counts));
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE,
+                         scheduler_db_briefing_steps_list_many(ids, 1, table, NULL));
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_FAILURE,
+                         scheduler_db_briefing_steps_list_many(ids, 0, table, counts));
+}
+
+/* ============================================================================
+ * Test: say_aloud column round-trips through insert + read (schema v53)
+ * ============================================================================ */
+
+static void test_say_aloud_persistence(void) {
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   ev.say_aloud = SCHED_SAY_ALOUD_ALWAYS;
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev, &id));
+
+   sched_event_t got;
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_INT(SCHED_SAY_ALOUD_ALWAYS, got.say_aloud);
+
+   /* Default = 0 round-trips */
+   ev.say_aloud = SCHED_SAY_ALOUD_DEFAULT;
+   id = 0;
+   scheduler_db_insert(&ev, &id);
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_SAY_ALOUD_DEFAULT, got.say_aloud);
+
+   /* NEVER round-trips */
+   ev.say_aloud = SCHED_SAY_ALOUD_NEVER;
+   id = 0;
+   scheduler_db_insert(&ev, &id);
+   scheduler_db_get(id, &got);
+   TEST_ASSERT_EQUAL_INT(SCHED_SAY_ALOUD_NEVER, got.say_aloud);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -925,5 +1113,10 @@ int main(void) {
    RUN_TEST(test_briefing_steps_roundtrip);
    RUN_TEST(test_insert_with_step_clone);
    RUN_TEST(test_insert_with_step_clone_no_source_steps);
+   RUN_TEST(test_cancel_and_insert_next_briefing);
+   RUN_TEST(test_cancel_and_insert_next_already_cancelled_aborts);
+   RUN_TEST(test_briefing_steps_list_many_mixed);
+   RUN_TEST(test_briefing_steps_list_many_rejects_bad_args);
+   RUN_TEST(test_say_aloud_persistence);
    return UNITY_END();
 }

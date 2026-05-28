@@ -242,6 +242,146 @@ static void test_composer_free_idempotent(void) {
 }
 
 /* ============================================================================
+ * prompt_compose_build_now_block — per-turn time injection (7a-7e)
+ *
+ * These pin the contract that the helper returns a non-NULL "Current time:"
+ * block containing both the human-readable form (for natural-language
+ * summaries the LLM speaks) and the ISO-8601 form (for tool args like
+ * `fire_at` that must round-trip through the scheduler's iso8601 parser).
+ * The composer-position cases pin the placement: between base_prompt and
+ * memory_block, sibling to focus, never confused with a user memory.
+ * ============================================================================ */
+
+static void test_now_block_contains_current_time_marker(void) {
+   char *block = prompt_compose_build_now_block();
+   TEST_ASSERT_NOT_NULL_MESSAGE(block, "now_block helper must return non-NULL on a sane clock");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(block, "Current time:"),
+                                "now_block must lead with the 'Current time:' marker");
+   /* ISO 8601 sub-string: matches both `+04:00` and `-04:00` colon offsets
+    * as well as the bare-`Z` UTC fallback we emit on offset parse failure. */
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(block, "(ISO: "),
+                                "now_block must include the '(ISO: ...)' anchor "
+                                "so the LLM has a fire_at-shaped value to copy");
+   /* The nudge that prevents reflexive `time` tool calls. */
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(block, "fresh as of this turn"),
+                                "now_block must include the freshness nudge so the LLM "
+                                "trusts the value over calling the time tool");
+   free(block);
+}
+
+static void test_now_block_iso_offset_form(void) {
+   /* The ISO substring should end in either Z (UTC) or [+-]HH:MM (offset).
+    * No bare four-digit offset like "-0400" — we explicitly reformat. */
+   char *block = prompt_compose_build_now_block();
+   TEST_ASSERT_NOT_NULL(block);
+   const char *iso = strstr(block, "(ISO: ");
+   TEST_ASSERT_NOT_NULL(iso);
+   iso += strlen("(ISO: ");
+   /* Walk to the closing ')' so we look only at the ISO payload. */
+   const char *end = strchr(iso, ')');
+   TEST_ASSERT_NOT_NULL_MESSAGE(end, "ISO payload must be parenthesized");
+   /* The payload must contain either a Z suffix or a ':' offset; the
+    * bare-4-digit form would indicate we forgot the colon reformat. */
+   bool has_colon_offset = false;
+   for (const char *p = iso; p < end; p++) {
+      if (*p == ':' && p > iso + 10) { /* skip the HH:MM:SS colons */
+         has_colon_offset = true;
+         break;
+      }
+   }
+   bool has_z_suffix = (end > iso && *(end - 1) == 'Z');
+   TEST_ASSERT_TRUE_MESSAGE(has_colon_offset || has_z_suffix,
+                            "ISO payload must end in Z or ±HH:MM, not bare ±HHMM");
+   free(block);
+}
+
+static void test_composer_renders_now_block_between_base_and_memory(void) {
+   composed_prompt_t cp = {
+      .base_prompt = strdup("BASE"),
+      .now_block = strdup("Current time: NOW.\n"),
+      .memory_block = strdup("\n\n--- USER MEMORY ---\nMEM\n--- END USER MEMORY ---\n"),
+      .focus_block = strdup("[memory_fact] hello\n"),
+   };
+   char *out = prompt_compose_to_string(&cp);
+   TEST_ASSERT_NOT_NULL(out);
+
+   const char *base_pos = strstr(out, "BASE");
+   const char *now_pos = strstr(out, "Current time: NOW.");
+   const char *mem_pos = strstr(out, "USER MEMORY");
+   const char *focus_pos = strstr(out, "TURN CONTEXT");
+   TEST_ASSERT_NOT_NULL(base_pos);
+   TEST_ASSERT_NOT_NULL(now_pos);
+   TEST_ASSERT_NOT_NULL(mem_pos);
+   TEST_ASSERT_NOT_NULL(focus_pos);
+
+   /* Order invariant: base → now → memory → focus.  The now block
+    * MUST land between base and memory so it sits at the top of the
+    * non-cacheable per-turn zone, where the LLM looks first for
+    * fresh state. */
+   TEST_ASSERT_TRUE_MESSAGE(base_pos < now_pos, "base must precede now_block");
+   TEST_ASSERT_TRUE_MESSAGE(now_pos < mem_pos, "now_block must precede memory");
+   TEST_ASSERT_TRUE_MESSAGE(mem_pos < focus_pos, "memory must precede focus");
+
+   free(out);
+   prompt_compose_free(&cp);
+}
+
+static void test_composer_now_null_omits_section(void) {
+   /* now_block=NULL must produce byte-identical output to the pre-this-
+    * commit composer.  Critical for backward compat: focus-block null
+    * test (test_composer_byte_identical_pre1e_when_focus_off above) is
+    * the same property for the focus side; this is the equivalent for
+    * the new now_block. */
+   composed_prompt_t cp = {
+      .base_prompt = strdup("BASE"),
+      .now_block = NULL,
+      .memory_block = strdup("\n\n--- USER MEMORY ---\ntext\n--- END USER MEMORY ---\n"),
+      .focus_block = NULL,
+   };
+   char *out = prompt_compose_to_string(&cp);
+   TEST_ASSERT_NOT_NULL(out);
+   const char *expected = "BASE\n\n--- USER MEMORY ---\ntext\n--- END USER MEMORY ---\n";
+   TEST_ASSERT_EQUAL_STRING(expected, out);
+   TEST_ASSERT_NULL_MESSAGE(strstr(out, "Current time:"),
+                            "now_block=NULL must omit the section entirely (no marker leak)");
+   free(out);
+   prompt_compose_free(&cp);
+}
+
+static void test_composer_now_empty_omits_section(void) {
+   /* Empty string treated as NULL — same shape as focus_block empty case
+    * (test_composer_focus_empty_omits_section above). */
+   composed_prompt_t cp = {
+      .base_prompt = strdup("BASE"),
+      .now_block = strdup(""),
+      .memory_block = NULL,
+      .focus_block = NULL,
+   };
+   char *out = prompt_compose_to_string(&cp);
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_EQUAL_STRING("BASE", out);
+   free(out);
+   prompt_compose_free(&cp);
+}
+
+static void test_composer_now_free_idempotent(void) {
+   /* Free must release now_block (no-leak verification) and the struct
+    * is safe to free twice. */
+   composed_prompt_t cp = {
+      .base_prompt = strdup("X"),
+      .now_block = strdup("Y"),
+      .memory_block = strdup("Z"),
+      .focus_block = strdup("W"),
+   };
+   prompt_compose_free(&cp);
+   TEST_ASSERT_NULL(cp.now_block);
+   TEST_ASSERT_NULL(cp.base_prompt);
+   TEST_ASSERT_NULL(cp.memory_block);
+   TEST_ASSERT_NULL(cp.focus_block);
+   prompt_compose_free(&cp); /* No-op on already-freed; not a double-free. */
+}
+
+/* ============================================================================
  * build_focus_block — feature gate (8-10)
  * ============================================================================ */
 
@@ -1316,6 +1456,14 @@ int main(void) {
    RUN_TEST(test_composer_framing_data_marking_strings);
    RUN_TEST(test_composer_null_inputs);
    RUN_TEST(test_composer_free_idempotent);
+
+   /* now_block per-turn time injection (7a-7e) */
+   RUN_TEST(test_now_block_contains_current_time_marker);
+   RUN_TEST(test_now_block_iso_offset_form);
+   RUN_TEST(test_composer_renders_now_block_between_base_and_memory);
+   RUN_TEST(test_composer_now_null_omits_section);
+   RUN_TEST(test_composer_now_empty_omits_section);
+   RUN_TEST(test_composer_now_free_idempotent);
 
    /* Feature gate (8-10) */
    RUN_TEST(test_focus_disabled_short_circuits);
