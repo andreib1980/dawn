@@ -1095,43 +1095,32 @@ static void cascade_deliver_to_rename_unlocked(int user_id,
    }
 }
 
-/* Resolve (user_id, display_name) → (provider, provider_address) for an
- * enabled channel under the ownership boundary.  Mirrors the resolver in
- * messaging_engine_reset_by_name.  Returns true on a hit (out buffers
- * filled), false otherwise.  Acquires + releases the auth_db lock itself
- * — callers must NOT hold it. */
-static bool resolve_enabled_channel_by_name(int user_id,
-                                            const char *display_name,
-                                            char *provider_out,
-                                            size_t provider_sz,
-                                            char *address_out,
-                                            size_t address_sz) {
-   AUTH_DB_LOCK_OR_RETURN(false);
+/* Resolve (user_id, display_name) → row id for an ENABLED channel under
+ * the ownership boundary.  Returns the id (>0) or 0 if no enabled channel
+ * by that name exists for the user.  Acquires + releases the auth_db lock
+ * itself — callers must NOT hold it.  The by-name unlink/rename entry
+ * points resolve the id here and delegate to their *_by_id cores, so there
+ * is one mutation path per op (mirrors messaging_engine_reset_by_name and
+ * _reenable_channel). */
+static int64_t resolve_enabled_channel_id_by_name(int user_id, const char *display_name) {
+   AUTH_DB_LOCK_OR_RETURN(0);
    sqlite3_stmt *stmt = NULL;
-   bool found = false;
-   const char *sql = "SELECT provider, provider_address FROM messaging_channels "
+   int64_t id = 0;
+   const char *sql = "SELECT id FROM messaging_channels "
                      "WHERE user_id = ? AND is_enabled = 1 AND "
                      "LOWER(COALESCE(display_name,'')) = LOWER(?) LIMIT 1";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
       sqlite3_bind_text(stmt, 2, display_name, -1, SQLITE_STATIC);
       if (sqlite3_step(stmt) == SQLITE_ROW) {
-         const unsigned char *p = sqlite3_column_text(stmt, 0);
-         const unsigned char *a = sqlite3_column_text(stmt, 1);
-         if (p) {
-            snprintf(provider_out, provider_sz, "%s", (const char *)p);
-         }
-         if (a) {
-            snprintf(address_out, address_sz, "%s", (const char *)a);
-         }
-         found = (p != NULL && a != NULL);
+         id = sqlite3_column_int64(stmt, 0);
       }
    }
    if (stmt) {
       sqlite3_finalize(stmt);
    }
    AUTH_DB_UNLOCK();
-   return found;
+   return id;
 }
 
 int messaging_engine_unlink_channel(int user_id, const char *display_name) {
@@ -1141,128 +1130,31 @@ int messaging_engine_unlink_channel(int user_id, const char *display_name) {
    if (!atomic_load(&s_initialized)) {
       return MESSAGING_FAILURE;
    }
-
-   char provider[16] = { 0 };
-   char provider_address[128] = { 0 };
-   if (!resolve_enabled_channel_by_name(user_id, display_name, provider, sizeof(provider),
-                                        provider_address, sizeof(provider_address))) {
+   /* Resolve the row id by name, then delegate to the by-id core (the
+    * single evict + soft-delete path). */
+   int64_t id = resolve_enabled_channel_id_by_name(user_id, display_name);
+   if (id <= 0) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
-
-   /* Close any live session for the channel first — session_destroy fires
-    * memory extraction on the closing conversation.  evict_session_slot
-    * drops the slot mutex before session_destroy (lock-order safe); the
-    * auth_db leaf lock is NOT held here.  No self-reset guard: see the
-    * header note — admin / WebUI callers can't be the running turn. */
-   evict_session_slot(provider, provider_address);
-
-   /* Soft-delete: is_enabled = 0.  conversation_id is left intact so a
-    * later re-link resumes the prior forever-conversation. */
-   AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
-   sqlite3_stmt *stmt = NULL;
-   int rc = MESSAGING_FAILURE;
-   const char *sql = "UPDATE messaging_channels SET is_enabled = 0 "
-                     "WHERE user_id = ? AND provider = ? AND provider_address = ?";
-   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_int(stmt, 1, user_id);
-      sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
-      sqlite3_bind_text(stmt, 3, provider_address, -1, SQLITE_STATIC);
-      if (sqlite3_step(stmt) == SQLITE_DONE) {
-         rc = (sqlite3_changes(s_db.db) > 0) ? MESSAGING_SUCCESS : MESSAGING_UNKNOWN_CHANNEL;
-      }
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-   }
-   AUTH_DB_UNLOCK();
-
-   if (rc == MESSAGING_SUCCESS) {
-      OLOG_INFO("messaging: unlinked channel '%s' (%s:%s) for user %d", display_name, provider,
-                provider_address, user_id);
-   }
-   return rc;
+   return messaging_engine_unlink_channel_by_id(user_id, id);
 }
 
 int messaging_engine_rename_channel(int user_id, const char *old_name, const char *new_name) {
    if (user_id <= 0 || !old_name || old_name[0] == '\0' || !new_name || new_name[0] == '\0') {
       return MESSAGING_FAILURE;
    }
-   /* display_name is plain TEXT; cap to keep parity with the link-flow
-    * default_name buffer and reject pathological / unsafe inputs. */
-   if (strlen(new_name) >= MESSAGING_DISPLAY_NAME_MAX || display_name_unsafe(new_name)) {
-      return MESSAGING_FAILURE;
-   }
    if (!atomic_load(&s_initialized)) {
       return MESSAGING_FAILURE;
    }
-
-   AUTH_DB_LOCK_OR_RETURN(MESSAGING_FAILURE);
-   sqlite3_stmt *stmt = NULL;
-   int rc = MESSAGING_FAILURE;
-
-   /* 1. Find the target row id by old_name (enabled, owned). */
-   int64_t target_id = 0;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT id FROM messaging_channels WHERE user_id = ? AND is_enabled = 1 "
-                          "AND LOWER(COALESCE(display_name,'')) = LOWER(?) LIMIT 1",
-                          -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_int(stmt, 1, user_id);
-      sqlite3_bind_text(stmt, 2, old_name, -1, SQLITE_STATIC);
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-         target_id = sqlite3_column_int64(stmt, 0);
-      }
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-      stmt = NULL;
-   }
-   if (target_id <= 0) {
-      AUTH_DB_UNLOCK();
+   /* Resolve the row id by old_name, then delegate to the by-id core, which
+    * owns the name validation (length + control/quote rejection), the
+    * collision check, the UPDATE, and the scheduled_events.deliver_to
+    * cascade — the single mutation path. */
+   int64_t id = resolve_enabled_channel_id_by_name(user_id, old_name);
+   if (id <= 0) {
       return MESSAGING_UNKNOWN_CHANNEL;
    }
-
-   /* 2. Reject collision with a DIFFERENT enabled channel of this user. */
-   bool collision = false;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT 1 FROM messaging_channels WHERE user_id = ? AND is_enabled = 1 "
-                          "AND LOWER(COALESCE(display_name,'')) = LOWER(?) AND id != ? LIMIT 1",
-                          -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_int(stmt, 1, user_id);
-      sqlite3_bind_text(stmt, 2, new_name, -1, SQLITE_STATIC);
-      sqlite3_bind_int64(stmt, 3, target_id);
-      collision = (sqlite3_step(stmt) == SQLITE_ROW);
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-      stmt = NULL;
-   }
-   if (collision) {
-      AUTH_DB_UNLOCK();
-      return MESSAGING_NAME_TAKEN;
-   }
-
-   /* 3. Apply the rename keyed on the stable row id. */
-   if (sqlite3_prepare_v2(s_db.db, "UPDATE messaging_channels SET display_name = ? WHERE id = ?",
-                          -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
-      sqlite3_bind_int64(stmt, 2, target_id);
-      if (sqlite3_step(stmt) == SQLITE_DONE) {
-         rc = MESSAGING_SUCCESS;
-      }
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-   }
-   if (rc == MESSAGING_SUCCESS) {
-      cascade_deliver_to_rename_unlocked(user_id, old_name, new_name);
-   }
-   AUTH_DB_UNLOCK();
-
-   if (rc == MESSAGING_SUCCESS) {
-      OLOG_INFO("messaging: renamed channel id %lld '%s' → '%s' for user %d", (long long)target_id,
-                old_name, new_name, user_id);
-   }
-   return rc;
+   return messaging_engine_rename_channel_by_id(user_id, id, new_name);
 }
 
 int messaging_engine_unlink_channel_by_id(int user_id, int64_t channel_id) {
