@@ -64,6 +64,54 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Gates all cloud LLM call paths; local providers bypass
    - Interrupt-aware blocking (wakes on shutdown signal)
 
+## Prompt construction (two-segment, cache-aware)
+
+The system prompt is assembled by `dawn_build_prompt()` (`src/webui/webui_auth_helpers.c:779`) into a `composed_prompt_t` (`include/core/session_manager.h`) with exactly two fields:
+
+- **`stable_prefix`** — persona, rules, identity, memory, and surface context. Byte-identical across turns unless settings change. The Anthropic `cache_control: ephemeral` breakpoint attaches here (`src/llm/llm_claude_format.c:987`).
+- **`volatile_block`** — per-turn retrievals (`[system_time]` + ranked focus candidates). Rebuilt every turn; never cache-eligible.
+
+This split (commit `e4dc72f`, "cache the system prefix end-to-end across providers") lets the bulk of the prompt hit the provider cache while per-turn context refreshes for free. Session-stable content — USER MEMORY preferences + recent summaries — deliberately lives in the stable prefix, not the volatile block, so it costs nothing per turn after the first cache write.
+
+> File:line references below are in `src/webui/webui_auth_helpers.c` unless another file is named.
+
+### Segment order
+
+The stable prefix is built first (`build_stable_segment`, `:435`), **then** satellite/messaging context is appended in `dawn_build_prompt` (`:812`–`815`), **then** the drift hash is taken — so the surface-context block lands *after* the tool-call footer, not before it.
+
+**Stable prefix** (`messages[0]`, cached):
+
+1. **Persona** — `get_persona_description()` (`src/llm/llm_command_parser.c`).
+2. **System instructions** — `get_system_instructions(true)`: core rules + feature rules (vision, search, weather, …).
+3. **TOOL DEFAULTS** — localization fallback (location/room/units/tz, `TOOL_DEFAULTS_HEADER_TEXT`). Emitted only for **unauthenticated** callers; `strip_tool_defaults()` (`:301`) removes it for authenticated users because the User Context block supersedes it.
+4. **User Context** — persona traits + location + timezone + units from `auth_db_get_user_settings()`. "append" mode adds a `## User Context` block; "replace" mode substitutes a custom persona (`build_stable_segment`, `:435`–`559`).
+5. **User Identity** — `## User Identity` (real name, preferred address, aliases) when set; no-ops otherwise (`build_identity_block`, `:139`).
+6. **USER MEMORY** — preferences + recent conversation summaries via `memory_build_context()` (`src/memory/memory_context.c`); no-ops when empty.
+7. **Memory instructions footer** — `k_memory_instructions_footer` (`:255`); appended only when a memory body was emitted, so its "the above is only a summary" referent stays valid.
+8. **Tool-call discipline footer** — `k_tool_call_discipline_footer` (`:274`); always emitted (no auth/memory gate). See below.
+9. **Surface context** — exactly one of: DAP2 satellite `Room=` / `HomeAssistant_Area=` (`append_satellite_context_to_stable`, `:727`) **or** messaging provider/channel (`append_messaging_context_to_stable`, `:648`). Mutually exclusive by session type; appended after the base segment (`:812`–`815`).
+
+— *cache boundary; drift hash computed here* —
+
+**Volatile block** (`messages[1]`, never cached) — `build_volatile_segment()` (`:582`) wraps `build_focus_block()` (`src/webui/build_focus_block.c:246`):
+
+10. `--- TURN CONTEXT ---` framing header.
+11. **`[system_time]`** — fresh `time()`-derived line, prepended when a dispatch session is present and the focus result is non-empty (`build_focus_block.c:369`). Lives here, not in the cached prefix, so the cache key doesn't churn across day boundaries.
+12. **Ranked focus candidates** — `[<source_id>] <text>` lines: memory facts/entities/relations/summaries, calendar events, document chunks, after per-session dedup.
+13. `--- END TURN CONTEXT ---` framing footer.
+
+### Drift hash and the cache boundary
+
+`session_update_system_messages()` (`src/core/session_manager.c:1685`) pushes both segments into the conversation history and computes an FNV-1a hash of the stable prefix (`:1718`). If the hash changes mid-session it logs a cache-invalidation warning. **This is why satellite/messaging context is appended inside `dawn_build_prompt` before this point** (`:803`–`807`): a mid-session room or HA-area change would otherwise silently bust the Anthropic cache with no drift-log signal.
+
+### Tool-call discipline footer
+
+`k_tool_call_discipline_footer` (`:274`, appended via `append_tool_discipline_footer`, `:383`) is a **universal** anti-bluff rule: when a reply commits to an action ("I'll search…", "I'll send…", "let me look that up"), the corresponding tool call must be in the **same turn** — not promised for later, not narrated as if it already happened. Aspirational offers ("if you'd like, I can…") don't require a call until the user accepts. It applies to every action-bearing tool (scheduler, search, url_fetch, email, calendar, memory, messaging, home_assistant, music, weather, …); the originating failure was a verbal "I've scheduled that" with no `scheduler.create` call. It always emits and lives in the cached prefix, so it costs nothing per turn. The scheduler tool descriptor carries its own louder "NO VERBAL COMMITMENTS" clause; this footer is the general-purpose version for every other tool. (Messaging-surface context for this rule is described in `docs/MESSAGING_CHANNELS_DESIGN.md` §10.5.)
+
+### Provider handling
+
+Assembly is provider-agnostic — the two-segment `composed_prompt_t` is serialized per provider downstream: Claude attaches `cache_control` to the first system message (plus a second breakpoint on the final tool schema, `src/llm/llm_claude_format.c`), the OpenAI Responses API concatenates the two segments, and Chat Completions tolerates two consecutive system messages. Commit `e4dc72f` also unified cache-token accounting across providers (Claude `cache_creation`/`cache_read` tokens, Responses API usage struct). Gemini caching is documented as unreliable upstream — see the Gemini native-API notes in `docs/TODO.md`.
+
 ## LLM Worker Thread
 
 LLM processing is non-blocking — the main audio loop never waits on an API call.
