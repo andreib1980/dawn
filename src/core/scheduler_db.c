@@ -114,6 +114,21 @@ sched_source_type_t sched_source_type_from_str(const char *str) {
  * Internal: Row extraction helper
  * ============================================================================= */
 
+/* Read a TEXT column into a bounded char buffer with NUL-termination on
+ * truncation.  NULL/empty column leaves dst unchanged (caller zero-inits
+ * the struct so this means "stays empty").  Folded out of the prior
+ * inline pattern that repeated 9 times in extract_event_row; the
+ * explicit NUL-term closes a latent silent-overrun if SQLite ever
+ * returned a string longer than dst_size-1. */
+static void read_text_col(sqlite3_stmt *stmt, int idx, char *dst, size_t dst_size) {
+   const char *src = (const char *)sqlite3_column_text(stmt, idx);
+   if (!src || !src[0] || dst_size == 0) {
+      return;
+   }
+   strncpy(dst, src, dst_size - 1);
+   dst[dst_size - 1] = '\0';
+}
+
 static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
    memset(event, 0, sizeof(*event));
    event->id = sqlite3_column_int64(stmt, 0);
@@ -125,13 +140,8 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
    const char *status_str = (const char *)sqlite3_column_text(stmt, 3);
    event->status = sched_status_from_str(status_str);
 
-   const char *name = (const char *)sqlite3_column_text(stmt, 4);
-   if (name)
-      strncpy(event->name, name, SCHED_NAME_MAX - 1);
-
-   const char *msg = (const char *)sqlite3_column_text(stmt, 5);
-   if (msg)
-      strncpy(event->message, msg, SCHED_MESSAGE_MAX - 1);
+   read_text_col(stmt, 4, event->name, SCHED_NAME_MAX);
+   read_text_col(stmt, 5, event->message, SCHED_MESSAGE_MAX);
 
    event->fire_at = (time_t)sqlite3_column_int64(stmt, 6);
    event->created_at = (time_t)sqlite3_column_int64(stmt, 7);
@@ -141,37 +151,17 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
    const char *recur_str = (const char *)sqlite3_column_text(stmt, 10);
    event->recurrence = sched_recurrence_from_str(recur_str);
 
-   const char *recur_days = (const char *)sqlite3_column_text(stmt, 11);
-   if (recur_days)
-      strncpy(event->recurrence_days, recur_days, SCHED_RECURRENCE_DAYS_MAX - 1);
-
-   const char *orig_time = (const char *)sqlite3_column_text(stmt, 12);
-   if (orig_time)
-      strncpy(event->original_time, orig_time, SCHED_ORIGINAL_TIME_MAX - 1);
-
-   const char *uuid = (const char *)sqlite3_column_text(stmt, 13);
-   if (uuid)
-      strncpy(event->source_uuid, uuid, SCHED_UUID_MAX - 1);
-
-   const char *loc = (const char *)sqlite3_column_text(stmt, 14);
-   if (loc)
-      strncpy(event->source_location, loc, SCHED_LOCATION_MAX - 1);
+   read_text_col(stmt, 11, event->recurrence_days, SCHED_RECURRENCE_DAYS_MAX);
+   read_text_col(stmt, 12, event->original_time, SCHED_ORIGINAL_TIME_MAX);
+   read_text_col(stmt, 13, event->source_uuid, SCHED_UUID_MAX);
+   read_text_col(stmt, 14, event->source_location, SCHED_LOCATION_MAX);
 
    event->source_client_type = (sched_source_type_t)sqlite3_column_int(stmt, 15);
-
    event->announce_all = sqlite3_column_int(stmt, 16) != 0;
 
-   const char *tool = (const char *)sqlite3_column_text(stmt, 17);
-   if (tool)
-      strncpy(event->tool_name, tool, SCHED_TOOL_NAME_MAX - 1);
-
-   const char *tool_act = (const char *)sqlite3_column_text(stmt, 18);
-   if (tool_act)
-      strncpy(event->tool_action, tool_act, SCHED_TOOL_NAME_MAX - 1);
-
-   const char *tool_val = (const char *)sqlite3_column_text(stmt, 19);
-   if (tool_val)
-      strncpy(event->tool_value, tool_val, SCHED_TOOL_VALUE_MAX - 1);
+   read_text_col(stmt, 17, event->tool_name, SCHED_TOOL_NAME_MAX);
+   read_text_col(stmt, 18, event->tool_action, SCHED_TOOL_NAME_MAX);
+   read_text_col(stmt, 19, event->tool_value, SCHED_TOOL_VALUE_MAX);
 
    event->fired_at = (time_t)sqlite3_column_int64(stmt, 20);
    event->snooze_count = sqlite3_column_int(stmt, 21);
@@ -185,40 +175,19 @@ static void extract_event_row(sqlite3_stmt *stmt, sched_event_t *event) {
     * Do NOT add columns to extract_event_row without the same migration
     * guarantee. */
    event->say_aloud = (sched_say_aloud_t)sqlite3_column_int(stmt, 22);
+   /* v54: deliver_to is the 23rd column.  Same migration-guarantee
+    * argument as say_aloud. */
+   read_text_col(stmt, 23, event->deliver_to, SCHED_DELIVER_TO_MAX);
 }
 
-/* Select all columns in consistent order */
-#define SCHED_SELECT_COLS                                                      \
-   "id, user_id, event_type, status, name, message, fire_at, created_at, "     \
-   "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, " \
-   "source_uuid, source_location, source_client_type, announce_all, "          \
-   "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud"
-
-/* =============================================================================
- * CRUD Operations
- * ============================================================================= */
-
-/* Inserts the event row.  Caller holds s_db.mutex; no lock management here.
- * Used by both scheduler_db_insert (acquires/releases lock around it) and
- * scheduler_db_insert_with_step_clone (acquires lock once for the whole
- * transaction).  Sets event->created_at and event->id; populates id_out. */
-static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
-   event->created_at = time(NULL);
-
-   const char *sql = "INSERT INTO scheduled_events "
-                     "(user_id, event_type, status, name, message, fire_at, created_at, "
-                     "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
-                     "source_uuid, source_location, source_client_type, announce_all, "
-                     "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("scheduler_db: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
-      return SCHED_DB_FAILURE;
-   }
-
+/* Bind every column of the INSERT statement.  Both insert call sites
+ * share this — the prepare + step + finalize stay at the call site
+ * because lock semantics differ (insert_event_unlocked assumes caller
+ * holds s_db.mutex; scheduler_db_insert_checked acquires it inline
+ * after running its limit checks).  Position 20 (fired_at) and 21
+ * (snooze_count) are pinned to 0 — this is by design for fresh inserts
+ * (event hasn't fired yet, no snoozes). */
+static void bind_event_columns(sqlite3_stmt *stmt, const sched_event_t *event) {
    sqlite3_bind_int(stmt, 1, event->user_id);
    sqlite3_bind_text(stmt, 2, sched_event_type_to_str(event->event_type), -1, SQLITE_STATIC);
    sqlite3_bind_text(stmt, 3, sched_status_to_str(event->status), -1, SQLITE_STATIC);
@@ -245,6 +214,45 @@ static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
    sqlite3_bind_int64(stmt, 20, 0);
    sqlite3_bind_int(stmt, 21, 0);
    sqlite3_bind_int(stmt, 22, (int)event->say_aloud);
+   sqlite3_bind_text(stmt, 23, event->deliver_to[0] ? event->deliver_to : NULL, -1,
+                     SQLITE_TRANSIENT);
+}
+
+/* Select all columns in consistent order */
+#define SCHED_SELECT_COLS                                                      \
+   "id, user_id, event_type, status, name, message, fire_at, created_at, "     \
+   "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, " \
+   "source_uuid, source_location, source_client_type, announce_all, "          \
+   "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "   \
+   "deliver_to"
+
+/* =============================================================================
+ * CRUD Operations
+ * ============================================================================= */
+
+/* Inserts the event row.  Caller holds s_db.mutex; no lock management here.
+ * Used by both scheduler_db_insert (acquires/releases lock around it) and
+ * scheduler_db_insert_with_step_clone (acquires lock once for the whole
+ * transaction).  Sets event->created_at and event->id; populates id_out. */
+static int insert_event_unlocked(sched_event_t *event, int64_t *id_out) {
+   event->created_at = time(NULL);
+
+   const char *sql = "INSERT INTO scheduled_events "
+                     "(user_id, event_type, status, name, message, fire_at, created_at, "
+                     "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
+                     "source_uuid, source_location, source_client_type, announce_all, "
+                     "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "
+                     "deliver_to) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("scheduler_db: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
+      return SCHED_DB_FAILURE;
+   }
+
+   bind_event_columns(stmt, event);
 
    rc = sqlite3_step(stmt);
    int result = SCHED_DB_FAILURE;
@@ -317,8 +325,9 @@ int scheduler_db_insert_checked(sched_event_t *event,
                      "(user_id, event_type, status, name, message, fire_at, created_at, "
                      "duration_sec, snoozed_until, recurrence, recurrence_days, original_time, "
                      "source_uuid, source_location, source_client_type, announce_all, "
-                     "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                     "tool_name, tool_action, tool_value, fired_at, snooze_count, say_aloud, "
+                     "deliver_to) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
@@ -328,32 +337,7 @@ int scheduler_db_insert_checked(sched_event_t *event,
       return SCHED_DB_FAILURE;
    }
 
-   sqlite3_bind_int(stmt, 1, event->user_id);
-   sqlite3_bind_text(stmt, 2, sched_event_type_to_str(event->event_type), -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 3, sched_status_to_str(event->status), -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 4, event->name, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 5, event->message, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 6, (int64_t)event->fire_at);
-   sqlite3_bind_int64(stmt, 7, (int64_t)event->created_at);
-   sqlite3_bind_int(stmt, 8, event->duration_sec);
-   sqlite3_bind_int64(stmt, 9, (int64_t)event->snoozed_until);
-   sqlite3_bind_text(stmt, 10, sched_recurrence_to_str(event->recurrence), -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 11, event->recurrence_days, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 12, event->original_time, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 13, event->source_uuid[0] ? event->source_uuid : NULL, -1,
-                     SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 14, event->source_location[0] ? event->source_location : NULL, -1,
-                     SQLITE_TRANSIENT);
-   sqlite3_bind_int(stmt, 15, (int)event->source_client_type);
-   sqlite3_bind_int(stmt, 16, event->announce_all ? 1 : 0);
-   sqlite3_bind_text(stmt, 17, event->tool_name[0] ? event->tool_name : NULL, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 18, event->tool_action[0] ? event->tool_action : NULL, -1,
-                     SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 19, event->tool_value[0] ? event->tool_value : NULL, -1,
-                     SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 20, 0);
-   sqlite3_bind_int(stmt, 21, 0);
-   sqlite3_bind_int(stmt, 22, (int)event->say_aloud);
+   bind_event_columns(stmt, event);
 
    rc = sqlite3_step(stmt);
    int result = SCHED_DB_FAILURE;

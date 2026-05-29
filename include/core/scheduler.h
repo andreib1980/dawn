@@ -165,6 +165,17 @@ void scheduler_broadcast_events_changed(int user_id);
  * session; the scheduler.c stub is the no-op default. */
 void scheduler_send_tts_to_session(session_t *session, const char *text);
 
+/* Fan briefing/task announcements out to a messaging channel (Telegram,
+ * Discord, Slack, SMS) in addition to the existing TTS + banner path.
+ * Called from the scheduler fire path when `event->deliver_to` is non-
+ * empty.  Strong definition lives in src/messaging/messaging_engine.c
+ * and delegates to messaging_engine_send, which enforces the
+ * (user_id, channel_name) ownership check + per-channel + provider-
+ * global rate limits; the scheduler.c stub is the no-op default for
+ * messaging-disabled builds.  Sixth scheduler weak symbol — see
+ * docs/MESSAGING_CHANNELS_DESIGN.md §9. */
+void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text);
+
 /* =============================================================================
  * Alarm Sound
  * ============================================================================= */

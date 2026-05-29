@@ -57,6 +57,11 @@ extern "C" {
 #define SCHED_RECURRENCE_DAYS_MAX 32
 #define SCHED_ORIGINAL_TIME_MAX 6 /* HH:MM + null */
 #define SCHED_MAX_RESULTS 50
+/* Messaging channel display_name cap for fan-out delivery (schema v54).
+ * Sized to the messaging engine's channel name surface — display names are
+ * user-supplied via /link but the engine caps inbound, so 64 is comfortable
+ * margin.  Empty = no fan-out (legacy default). */
+#define SCHED_DELIVER_TO_MAX 64
 
 /* Hard cap on briefing step count.  Not a config knob — at 9+ steps the LLM
  * summarization context approaches diminishing returns and the briefing
@@ -161,6 +166,19 @@ typedef struct {
     * other types (read but ignored at fire time).  Default 0 preserves
     * pre-v53 behavior on existing rows after migration. */
    sched_say_aloud_t say_aloud;
+   /* Messaging channel for fan-out delivery (schema v54).  Empty = no
+    * fan-out (legacy default; preserves pre-v54 behavior on existing
+    * rows).  When non-empty, the scheduler fires the announcement /
+    * briefing through scheduler_send_to_messaging_channel after the
+    * existing TTS + WebUI banner path.  Ownership check is at the
+    * engine layer (messaging_engine_send verifies the channel belongs
+    * to user_id) — prevents a stale row from leaking briefings into
+    * another user's channel.  Meaningful for ALL event types — the
+    * fan-out fires in announce_event (timer/alarm/reminder/task) and
+    * in briefing_thread_func (briefing success + failure).  Alarm
+    * auto-dismiss + timeout terminal-state notifications do NOT
+    * re-fan-out (the initial ring already did). */
+   char deliver_to[SCHED_DELIVER_TO_MAX];
 } sched_event_t;
 
 /* Single step within a multi-step briefing.  Schema v50+. */

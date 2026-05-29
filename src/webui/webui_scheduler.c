@@ -93,6 +93,7 @@ static json_object *serialize_event(const sched_event_t *e,
    json_object_object_add(obj, "snoozed_until", json_object_new_int64((int64_t)e->snoozed_until));
    json_object_object_add(obj, "snooze_count", json_object_new_int(e->snooze_count));
    json_object_object_add(obj, "say_aloud", json_object_new_int((int)e->say_aloud));
+   json_object_object_add(obj, "deliver_to", json_object_new_string(e->deliver_to));
    json_object_object_add(obj, "recurrence",
                           json_object_new_string(sched_recurrence_to_str(e->recurrence)));
    json_object_object_add(obj, "recurrence_days", json_object_new_string(e->recurrence_days));

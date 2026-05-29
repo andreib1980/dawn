@@ -262,6 +262,31 @@ static const char k_memory_instructions_footer[] =
     "- Use 'remember' to store new facts when the user shares personal "
     "information.\n";
 
+/* Tool-call discipline footer.  Universal rule against verbal-commitment-
+ * without-tool-call bluffs.  Lives in the stable prefix (always emitted
+ * regardless of memory state) so the rule is cached and applies to every
+ * tool-using turn.  Filed 2026-05-29 after a Discord briefing test showed
+ * Claude verbally promising "I'll set up your watchlist briefing" without
+ * actually calling scheduler.create — the user only caught it by asking
+ * "I'm not sure you set that".  The scheduler-specific descriptor has its
+ * own louder "CRITICAL — NO VERBAL COMMITMENTS" clause; this is the
+ * general-purpose version for all other tools. */
+static const char k_tool_call_discipline_footer[] =
+    "\n\nTOOL-CALL DISCIPLINE:\n"
+    "- When your reply commits to an action ('I'll search for...', 'I'll send...', "
+    "'let me look that up', 'I'll add that to memory'), the corresponding tool call MUST be in "
+    "the SAME TURN as the commitment — not promised for later, not described as if it already "
+    "happened.\n"
+    "- If you're about to say you did something but haven't called the tool yet, STOP and call "
+    "the tool first.\n"
+    "- Aspirational offers are fine and don't require a tool call ('if you'd like, I can "
+    "search for X' / 'I could schedule a briefing if that'd help') — the user has to accept "
+    "before you act.\n"
+    "- This applies to every action-bearing tool: scheduler, search, url_fetch, email, "
+    "calendar, memory, messaging, home_assistant, music, weather lookups, etc.  Bluff-and-skip "
+    "is the worst failure mode here — the user trusts the confirmation and finds out later "
+    "that nothing happened.\n";
+
 /* Strip the TOOL DEFAULTS section from @p src into a fresh allocation.
  * `get_remote_command_prompt()` always emits TOOL DEFAULTS (location /
  * room / units / timezone fallback for unauthenticated callers).  For
@@ -350,11 +375,33 @@ static char *strip_tool_defaults(const char *src) {
  * Transfers ownership of @p base on success.  No-op (just returns
  * @p base) when memory is disabled, user_id <= 0, or memory_build_
  * context returned NULL (no memories to surface). */
+/* Append the tool-call discipline footer to a stable-prefix buffer.
+ * Always emits (no memory/auth gate) so the rule sits in the cached
+ * segment for every tool-using turn.  See k_tool_call_discipline_footer
+ * comment for rationale.  Transfers ownership of @p base; returns the
+ * new buffer (or @p base unchanged on OOM). */
+static char *append_tool_discipline_footer(char *base) {
+   if (base == NULL)
+      return NULL;
+   const size_t base_len = strlen(base);
+   const size_t footer_len = sizeof(k_tool_call_discipline_footer) - 1;
+   char *combined = malloc(base_len + footer_len + 1);
+   if (combined == NULL)
+      return base;
+   memcpy(combined, base, base_len);
+   memcpy(combined + base_len, k_tool_call_discipline_footer, footer_len);
+   combined[base_len + footer_len] = '\0';
+   free(base);
+   return combined;
+}
+
 static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
    if (base == NULL)
       return NULL;
-   if (user_id <= 0 || !g_config.memory.enabled)
-      return base;
+   if (user_id <= 0 || !g_config.memory.enabled) {
+      /* Memory gated off; still apply the universal tool-call discipline. */
+      return append_tool_discipline_footer(base);
+   }
 
    /* Build the memory body.  NULL when memory is enabled but the user
     * has no preferences and no recent summaries — in that case we
@@ -362,7 +409,7 @@ static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
     * Token budget arg is ignored by memory_build_context now. */
    char *memory_body = memory_build_context(user_id, g_config.memory.context_budget_tokens);
    if (memory_body == NULL)
-      return base;
+      return append_tool_discipline_footer(base);
 
    const size_t base_len = strlen(base);
    const size_t mem_len = strlen(memory_body);
@@ -371,7 +418,7 @@ static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
    char *combined = malloc(base_len + mem_len + footer_len + 1);
    if (combined == NULL) {
       free(memory_body);
-      return base; /* OOM fallback: leave base intact, no body/footer */
+      return append_tool_discipline_footer(base); /* OOM fallback: discipline only */
    }
    memcpy(combined, base, base_len);
    memcpy(combined + base_len, memory_body, mem_len);
@@ -380,7 +427,9 @@ static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
 
    free(memory_body);
    free(base);
-   return combined;
+   /* Tool-call discipline lands AFTER the memory footer so the two
+    * rule blocks read as adjacent "IMPORTANT" sections. */
+   return append_tool_discipline_footer(combined);
 }
 
 static char *build_stable_segment(int user_id) {
@@ -402,9 +451,10 @@ static char *build_stable_segment(int user_id) {
 
    /* No user ID - return the owned base prompt (TOOL DEFAULTS still
     * present as fallback; no User Context / Identity / memory footer
-    * applies because memory is gated on user_id > 0). */
+    * applies because memory is gated on user_id > 0).  Tool-call
+    * discipline still applies — it's a universal rule. */
    if (user_id <= 0)
-      return base_prompt;
+      return append_tool_discipline_footer(base_prompt);
 
    /* Load user settings */
    auth_user_settings_t settings;
@@ -573,6 +623,85 @@ static char *build_volatile_segment(char *focus_body) {
 }
 
 /**
+ * @brief Append the messaging-channel context suffix into the stable
+ *        prefix.
+ *
+ * Mirrors `append_satellite_context_to_stable` for the messaging case.
+ * When the dispatch session is a SESSION_TYPE_MESSAGING with a
+ * populated `messaging_identity`, emit a Provider/Channel suffix so
+ * the LLM can self-identify which chat surface this turn arrived on
+ * (Slack vs Telegram vs Discord vs SMS).  Channel name uses the
+ * user-facing display_name so the LLM can reference it back through
+ * the existing `messaging` tool without translation.
+ *
+ * Lands in the stable prefix BEFORE the drift hash is computed in
+ * `session_update_system_messages` — same shape as the satellite
+ * append, same cache-friendly placement.  Messaging session
+ * provider+channel are session-stable (the messaging engine creates a
+ * fresh session_t per channel), so stable-prefix placement preserves
+ * the cache key across turns.
+ *
+ * Transfers ownership of @p base on success and frees it before
+ * returning the new buffer.  No-op (returns @p base unchanged) when
+ * the dispatch session isn't messaging, has no provider, OR on OOM.
+ */
+static char *append_messaging_context_to_stable(char *base, session_t *dispatch) {
+   if (base == NULL || dispatch == NULL)
+      return base;
+   if (dispatch->type != SESSION_TYPE_MESSAGING)
+      return base;
+   const char *provider = dispatch->messaging_identity.provider;
+   const char *channel = dispatch->messaging_identity.channel_name;
+   if (provider == NULL || provider[0] == '\0')
+      return base;
+
+   /* Explicit, actionable context block.  The bare "Key=value." shape
+    * (mirroring Room=/HomeAssistant_Area=) was too terse for the LLM —
+    * it saw the data but didn't connect it to the scheduler tool's
+    * deliver_to default rule.  This longer form spells out (a) what
+    * surface the user is on RIGHT NOW, (b) the exact channel name
+    * usable as deliver_to, and (c) the inference rule inline so Claude
+    * doesn't have to traverse the full scheduler descriptor to find
+    * it.  Stable across turns of a session, so it caches cleanly. */
+   char ctx[512];
+   ctx[0] = '\0';
+   int len;
+   if (channel && channel[0]) {
+      len = snprintf(ctx, sizeof(ctx),
+                     "\n\nYou are responding through the %s messaging channel "
+                     "\"%s\" RIGHT NOW.  This is where the user is reading your "
+                     "replies.  When scheduling events for this user (scheduler "
+                     "tool), default the `deliver_to` field to \"%s\" so the "
+                     "result reaches them on this surface — unless the user "
+                     "explicitly names a different channel or asks for "
+                     "local-only.",
+                     provider, channel, channel);
+   } else {
+      /* Provider known but no channel display_name (uncommon — only if
+       * messaging_channels.display_name is NULL).  Surface what we have
+       * so the LLM at least knows the surface. */
+      len = snprintf(ctx, sizeof(ctx),
+                     "\n\nYou are responding through the %s messaging surface "
+                     "RIGHT NOW.  The user is reading your replies on %s.",
+                     provider, provider);
+   }
+   if (len < 0 || (size_t)len >= sizeof(ctx)) {
+      return base;
+   }
+
+   const size_t base_len = strlen(base);
+   const size_t ctx_len = strlen(ctx);
+   char *combined = malloc(base_len + ctx_len + 1);
+   if (combined == NULL)
+      return base;
+   memcpy(combined, base, base_len);
+   memcpy(combined + base_len, ctx, ctx_len);
+   combined[base_len + ctx_len] = '\0';
+   free(base);
+   return combined;
+}
+
+/**
  * @brief Append the DAP2 satellite Room/HomeAssistant_Area suffix into
  *        the stable prefix.
  *
@@ -679,9 +808,12 @@ int dawn_build_prompt(int user_id,
     * the legacy post-rebuild call to session_append_satellite_context
     * in session_dispatch_user_turn (now removed). */
    session_t *dispatch_for_satellite = session_get_dispatch_session();
-   if (dispatch_for_satellite != NULL)
+   if (dispatch_for_satellite != NULL) {
       out->stable_prefix = append_satellite_context_to_stable(out->stable_prefix,
                                                               dispatch_for_satellite);
+      out->stable_prefix = append_messaging_context_to_stable(out->stable_prefix,
+                                                              dispatch_for_satellite);
+   }
 
    /* Segment 2 (volatile): focus block only.  Memory body (USER
     * MEMORY framing + preferences + RECENT CONVERSATIONS) moved

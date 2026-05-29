@@ -182,6 +182,65 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
 }
 
 /* =============================================================================
+ * Strong override: scheduler → messaging channel fan-out (Phase 5, schema v54)
+ *
+ * Sixth scheduler weak symbol per docs/MESSAGING_CHANNELS_DESIGN.md §9.
+ * The scheduler-side weak no-op lives in src/core/scheduler.c; this
+ * strong definition wins when messaging_engine is linked.  Delegates to
+ * messaging_engine_send, which:
+ *
+ *   1. Verifies the channel belongs to user_id (prevents cross-user
+ *      leak via a guessed channel name on a stale event row),
+ *   2. Applies per-channel + provider-global rate limits, and
+ *   3. Dispatches through the registered driver's send_text.
+ *
+ * Failures are logged but NOT propagated — the briefing's TTS + WebUI
+ * banner have already fired by the time we get here, so a messaging
+ * dispatch failure shouldn't poison the announcement.  Operators see
+ * the failure in the engine log.
+ * ============================================================================= */
+
+/* Symbolic name for an engine return code — used in operator-facing log
+ * lines so a Phase 6 panel reviewer doesn't need to cross-reference
+ * messaging_engine.h to interpret rc=4. */
+static const char *engine_rc_name(int rc) {
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         return "SUCCESS";
+      case MESSAGING_FAILURE:
+         return "FAILURE";
+      case MESSAGING_UNKNOWN_CHANNEL:
+         return "UNKNOWN_CHANNEL";
+      case MESSAGING_UNKNOWN_USER:
+         return "UNKNOWN_USER";
+      case MESSAGING_RATE_LIMITED:
+         return "RATE_LIMITED";
+      case MESSAGING_PROVIDER_RATE_LIMITED:
+         return "PROVIDER_RATE_LIMITED";
+      case MESSAGING_DRIVER_NOT_REGISTERED:
+         return "DRIVER_NOT_REGISTERED";
+      case MESSAGING_INVALID_ADDRESS:
+         return "INVALID_ADDRESS";
+      default:
+         return "UNKNOWN";
+   }
+}
+
+void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text) {
+   if (user_id <= 0 || !channel_name || channel_name[0] == '\0' || !text) {
+      return;
+   }
+   int rc = messaging_engine_send(user_id, channel_name, text);
+   if (rc == MESSAGING_SUCCESS) {
+      OLOG_INFO("messaging: scheduler fan-out to '%s' for user %d delivered", channel_name,
+                user_id);
+   } else {
+      OLOG_WARNING("messaging: scheduler fan-out to '%s' for user %d failed (rc=%d %s)",
+                   channel_name, user_id, rc, engine_rc_name(rc));
+   }
+}
+
+/* =============================================================================
  * Forward declarations
  * ============================================================================= */
 
@@ -1006,9 +1065,20 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
       return MESSAGING_UNKNOWN_CHANNEL;
    }
 
-   /* Per-user-channel rate limit. */
+   /* Per-user-channel rate limit.  Lowercase the channel_name into the
+    * key so two callers using different casings of the same channel
+    * ("Family" vs "family") hit the same bucket — matches the
+    * case-insensitive LOWER(...) lookup the channel resolver uses
+    * upstream.  channel_lc sized to fit "uNN:<48-char channel>" in
+    * rl_key with margin for an 11-digit user_id. */
    char rl_key[64];
-   snprintf(rl_key, sizeof(rl_key), "u%d:%s", user_id, channel_name);
+   char channel_lc[48];
+   size_t cn_len = 0;
+   for (; channel_name[cn_len] != '\0' && cn_len < sizeof(channel_lc) - 1; cn_len++) {
+      channel_lc[cn_len] = (char)tolower((unsigned char)channel_name[cn_len]);
+   }
+   channel_lc[cn_len] = '\0';
+   snprintf(rl_key, sizeof(rl_key), "u%d:%s", user_id, channel_lc);
    if (rate_limiter_check(&s_outbound_per_user_limiter, rl_key)) {
       free(address_json);
       return MESSAGING_RATE_LIMITED;
@@ -1863,6 +1933,22 @@ static session_t *get_or_create_messaging_session(const char *provider,
     * the session_t isn't yet visible to any other thread. */
    if (user_id > 0) {
       s->metrics.user_id = user_id;
+   }
+
+   /* Stamp messaging identity so the prompt build path can surface
+    * "you are responding through this channel" context to the LLM —
+    * mirrors how dap2_identity_t.location surfaces Room.  Resolved via
+    * the same lookup_channel_user used during inbound dispatch, so
+    * display_name reflects the user's current display_name for this
+    * channel.  Safe to set without locking: session_t isn't visible
+    * to any other thread yet. */
+   snprintf(s->messaging_identity.provider, sizeof(s->messaging_identity.provider), "%s",
+            provider ? provider : "");
+   char channel_name[sizeof(s->messaging_identity.channel_name)] = { 0 };
+   (void)lookup_channel_user(provider, provider_address, channel_name, sizeof(channel_name));
+   if (channel_name[0]) {
+      snprintf(s->messaging_identity.channel_name, sizeof(s->messaging_identity.channel_name), "%s",
+               channel_name);
    }
 
    /* Post-restart history restore.  Without this, daemon restart

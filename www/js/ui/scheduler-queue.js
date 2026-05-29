@@ -109,6 +109,23 @@
       custom: 'custom',
    };
 
+   /* say_aloud enum mirrors sched_say_aloud_t (scheduler_db.h v53).
+    * 0 = DEFAULT (source-heuristic), 1 = ALWAYS, 2 = NEVER.  DEFAULT is
+    * the no-op case — UI only surfaces 1 / 2 because those override the
+    * source-heuristic and are the values users opted into. */
+   const SAY_ALOUD_LABEL = {
+      0: '' /* DEFAULT — don't surface; behavior matches source heuristic */,
+      1: 'Always speaks aloud',
+      2: 'Never speaks aloud',
+   };
+
+   /* Compact label for the collapsed meta-line indicator. */
+   const SAY_ALOUD_META_LABEL = {
+      0: '',
+      1: 'TTS: always',
+      2: 'TTS: never',
+   };
+
    /* =============================================================================
     * Time formatting helpers
     * ============================================================================= */
@@ -242,6 +259,65 @@
       return r;
    }
 
+   /* True if the event has any non-default delivery metadata worth surfacing
+    * (channel fan-out OR overridden TTS routing).  Used both to decide
+    * whether to draw the collapsed-row indicator AND whether to render the
+    * delivery panel inside the expanded view. */
+   function hasDeliveryMeta(event) {
+      const sa = event.say_aloud | 0; /* int coercion: 0 / 1 / 2 */
+      const dt = (event.deliver_to || '').trim();
+      return dt.length > 0 || sa === 1 || sa === 2;
+   }
+
+   /* Collapsed-row indicator(s).  Compact glyph-style pills inside the
+    * existing flex-wrap meta line — no new row chrome, no horizontal
+    * pressure on the always-tight collapsed row.  When unset, contributes
+    * nothing so plain local-only events stay unchanged.
+    *
+    * The full channel name + TTS-override semantic live in the expanded
+    * view (buildDeliveryPanel) and as native `title=""` tooltips on the
+    * pills themselves so hover/long-press surfaces the detail.
+    *
+    * Provider-agnostic on purpose: one generic envelope glyph regardless
+    * of slack/telegram/discord/sms.  Reduces glyph weight, and the
+    * channel name in the tooltip already carries the provider info
+    * (e.g., "slack_main", "telegram_personal"). */
+   function buildDeliveryMetaBits(event) {
+      const bits = [];
+      const dt = (event.deliver_to || '').trim();
+      const sa = event.say_aloud | 0;
+      if (dt) {
+         /* Envelope glyph as unicode (matches the SMS/messaging
+          * notification language used throughout the panel banners). */
+         const tipTxt = 'Delivers to: ' + dt;
+         bits.push('<span class="sched-row-meta-sep" aria-hidden="true">·</span>');
+         bits.push(
+            '<span class="sched-row-deliver" title="' +
+               escapeAttr(tipTxt) +
+               '" aria-label="' +
+               escapeAttr(tipTxt) +
+               '">' +
+               '<span class="sched-row-deliver-glyph" aria-hidden="true">✉</span>' +
+               '<span class="sched-row-deliver-name">' +
+               escape(dt) +
+               '</span>' +
+               '</span>'
+         );
+      }
+      if (sa === 1 || sa === 2) {
+         const label = SAY_ALOUD_META_LABEL[sa] || '';
+         bits.push('<span class="sched-row-meta-sep" aria-hidden="true">·</span>');
+         bits.push(
+            '<span class="sched-row-tts" title="' +
+               escapeAttr(SAY_ALOUD_LABEL[sa] || '') +
+               '">' +
+               escape(label) +
+               '</span>'
+         );
+      }
+      return bits;
+   }
+
    function buildMetaLine(event) {
       const bits = [];
       bits.push('<span class="sched-row-when">' + escape(formatWhen(event)) + '</span>');
@@ -258,6 +334,12 @@
          bits.push('<span class="sched-row-meta-sep" aria-hidden="true">·</span>');
          bits.push('<span class="sched-row-snooze-count">×' + event.snooze_count + '</span>');
       }
+      /* Delivery indicators trail the rest of the meta line — they're
+       * secondary to the time/source/recurrence info and benefit from
+       * being last because they're optional, so the dominant case
+       * (no delivery override) doesn't get a trailing separator. */
+      const deliveryBits = buildDeliveryMetaBits(event);
+      for (const b of deliveryBits) bits.push(b);
       return bits.join('');
    }
 
@@ -294,6 +376,44 @@
          (action ? '.' + action : '') +
          (value ? ' (' + value + ')' : '');
       return '<div class="sched-row-tool">' + escape(txt) + '</div>';
+   }
+
+   /* Expanded delivery panel — rendered ABOVE the steps panel when a
+    * briefing row is expanded AND has any non-default delivery metadata
+    * (channel fan-out or TTS override).  Companion to buildDeliveryMetaBits
+    * which surfaces the same info inline on the collapsed meta line.
+    *
+    * Non-briefing rows can't expand (no chevron), so for those the inline
+    * meta-line indicators are the only surface — that's the deliberate
+    * scope choice: extending expand-affordance to all event types would
+    * add row chrome without enough payoff (timers/alarms/reminders don't
+    * have a "steps list" to host alongside).  Users who want the full
+    * "Delivers to" string for those still get it via the title="" tooltip
+    * on the collapsed-meta pill. */
+   function buildDeliveryPanel(event) {
+      if (event.event_type !== 'briefing') return '';
+      if (!state.expandedRowIds.has(event.id)) return '';
+      if (!hasDeliveryMeta(event)) return '';
+      const lines = [];
+      const dt = (event.deliver_to || '').trim();
+      const sa = event.say_aloud | 0;
+      if (dt) {
+         lines.push(
+            '<li><span class="sched-row-delivery-label">Delivers to:</span> ' +
+               '<span class="sched-row-delivery-value">' +
+               escape(dt) +
+               '</span></li>'
+         );
+      }
+      if (sa === 1 || sa === 2) {
+         lines.push(
+            '<li><span class="sched-row-delivery-label">Speaks aloud:</span> ' +
+               '<span class="sched-row-delivery-value">' +
+               escape(sa === 1 ? 'Always' : 'Never') +
+               '</span></li>'
+         );
+      }
+      return '<ul class="sched-row-delivery">' + lines.join('') + '</ul>';
    }
 
    /* Expanded steps panel — rendered inside the row body when the row is in
@@ -333,7 +453,10 @@
     * audited against the cursor-safe-replaceWith invariant in render().
     *
     * Currently state-coupled fields:
-    *   - state.armedRowId  →  `is-armed` class on the matching row
+    *   - state.armedRowId      →  `is-armed` class on the matching row
+    *   - state.expandedRowIds  →  chevron glyph in buildToolLine, plus the
+    *                              presence of buildStepsPanel and
+    *                              buildDeliveryPanel output (briefings only)
     *
     * If the list grows, also update the block comment in render() at
     * the cursor-fix site to keep both surfaces honest. */
@@ -402,6 +525,7 @@
          buildMetaLine(event) +
          '</div>' +
          buildToolLine(event) +
+         buildDeliveryPanel(event) +
          buildStepsPanel(event) +
          '</div>' +
          '<time class="sched-row-time">' +

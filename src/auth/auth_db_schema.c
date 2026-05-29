@@ -510,6 +510,7 @@ static const char *SCHEMA_SQL =
     "  fired_at INTEGER DEFAULT 0,"
     "  snooze_count INTEGER DEFAULT 0,"
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 — tri-state TTS override (briefings) */
+    "  deliver_to TEXT,"                      /* v54 — messaging channel for fan-out (optional) */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire ON scheduled_events(status, fire_at);"
@@ -2881,6 +2882,35 @@ int auth_db_create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v54 — scheduled_events.deliver_to (messaging channel for fan-out).
+    * Optional TEXT column holding a messaging_channels.display_name; when
+    * present and non-empty at fire time, the scheduler fans the briefing
+    * or task announcement out to that channel in addition to the existing
+    * TTS + WebUI banner path.  NULL/empty = legacy behavior (no messaging
+    * delivery).  Behavior is byte-identical pre/post migration since
+    * existing rows read NULL.
+    *
+    * Duplicate-column handling mirrors v53. */
+   bool v54_ok = (current_version >= 54) || (current_version == 0);
+   if (current_version >= 18 && current_version < 54) {
+      const char *v54_sql = "ALTER TABLE scheduled_events ADD COLUMN deliver_to TEXT";
+      rc = sqlite3_exec(s_db.db, v54_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK && !(errmsg && strstr(errmsg, "duplicate column"))) {
+         OLOG_ERROR("auth_db: v54 migration failed: %s", errmsg ? errmsg : "unknown");
+      } else {
+         if (rc == SQLITE_OK) {
+            OLOG_INFO("auth_db: v54 added scheduled_events.deliver_to "
+                      "(messaging channel for fan-out)");
+         } else {
+            OLOG_INFO("auth_db: v54 scheduled_events.deliver_to already present "
+                      "(applied by SCHEMA_SQL during multi-step migration)");
+         }
+         v54_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3017,7 +3047,7 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok;
+   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

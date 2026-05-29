@@ -781,6 +781,89 @@
    color: var(--text-tertiary);
 }
 
+/* Delivery indicators (collapsed meta-line)
+ * ----------------------------------------------------------------------------
+ * Surfaces deliver_to (channel fan-out target) and say_aloud (TTS override)
+ * inline within the existing .sched-row-meta flex-wrap container.  These are
+ * scoped to events with non-default delivery — the dominant local-only case
+ * contributes nothing and the row chrome stays unchanged.
+ *
+ * `.sched-row-deliver` carries a tiny envelope glyph + the channel name,
+ * provider-agnostic on purpose (one glyph for slack/telegram/discord/sms);
+ * the channel-name string already encodes the provider via convention.
+ * Hover/long-press reveals the full "Delivers to: X" via native title="".
+ *
+ * `.sched-row-tts` carries the TTS override label ("TTS: always" / "TTS:
+ * never") in muted text — secondary signal, not a primary attention cue.
+ */
+.sched-row-deliver {
+   display: inline-flex;
+   align-items: baseline;
+   gap: 0.2rem;
+   color: var(--accent);
+   font-weight: 500;
+   max-width: 12rem; /* truncate long channel names so they don't push the
+                        meta line past its container; tooltip carries the full
+                        string */
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
+.sched-row-deliver-glyph {
+   color: var(--accent);
+   font-size: 0.85rem;
+   line-height: 1;
+}
+
+.sched-row-deliver-name {
+   font-family: 'IBM Plex Mono', monospace;
+   font-size: 0.7rem;
+   color: var(--text-secondary);
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.sched-row-tts {
+   color: var(--text-tertiary);
+   font-style: italic;
+}
+
+/* Delivery detail panel (expanded view, briefings only)
+ * ----------------------------------------------------------------------------
+ * Visually parallels .sched-row-steps so the expanded briefing reads as a
+ * single coherent block: delivery cluster on top, then step list.  Same
+ * background tint + same accent-border stripe so they belong together. */
+.sched-row-delivery {
+   list-style: none;
+   margin: 4px 0 2px 0;
+   padding: 6px 8px;
+   background: rgba(0, 0, 0, 0.18);
+   border-left: 2px solid var(--accent-border);
+   border-radius: 3px;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+}
+
+.sched-row-delivery li {
+   margin: 0;
+   padding: 1px 0;
+   line-height: 1.4;
+   white-space: normal;
+   word-break: break-word;
+}
+
+.sched-row-delivery-label {
+   color: var(--text-tertiary);
+   margin-right: 0.25rem;
+}
+
+.sched-row-delivery-value {
+   color: var(--text-primary);
+   font-family: 'IBM Plex Mono', monospace;
+   font-weight: 500;
+}
+
 .sched-row-time {
    font-family: 'IBM Plex Mono', monospace;
    font-variant-numeric: tabular-nums;

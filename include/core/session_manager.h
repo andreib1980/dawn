@@ -151,6 +151,25 @@ typedef struct {
 } dap2_capabilities_t;
 
 /**
+ * @brief Messaging-channel identity (for SESSION_TYPE_MESSAGING sessions).
+ *
+ * Populated by the messaging engine at session creation from the
+ * messaging_channels row that matched the inbound's (provider,
+ * provider_address).  Used by the prompt build path to surface
+ * "you are responding through this channel" context to the LLM,
+ * mirroring how dap2_identity_t.location surfaces Room.
+ *
+ * Empty `provider[0]` means "not a messaging session" — the prompt
+ * helper guards on this.  channel_name is the user-facing display_name
+ * (e.g., "slack_main", "telegram_personal") that the messaging tool
+ * also accepts, so the LLM can self-reference it without translation.
+ */
+typedef struct {
+   char provider[16];      // "slack" / "telegram" / "discord" / "sms"
+   char channel_name[64];  // display_name from messaging_channels
+} messaging_identity_t;
+
+/**
  * @brief Async compaction state machine (per-session, embedded in session_t)
  *
  * State transitions: IDLE -> RUNNING (trigger) -> READY (bg complete) -> IDLE (merge)
@@ -268,6 +287,12 @@ typedef struct session {
    dap2_tier_t tier;                  // Tier 1 (text) or Tier 2 (audio)
    dap2_identity_t identity;          // UUID, name, location
    dap2_capabilities_t capabilities;  // Local ASR/TTS/wake word
+
+   // Messaging-specific fields (only valid when type == SESSION_TYPE_MESSAGING).
+   // Populated by the messaging engine at session creation from the
+   // messaging_channels row that matched the inbound's (provider,
+   // provider_address).  Empty provider[0] means "not a messaging session".
+   messaging_identity_t messaging_identity;
 
    // Cancellation (atomic for cross-thread visibility on ARM64)
    atomic_bool disconnected;  // Set on client disconnect

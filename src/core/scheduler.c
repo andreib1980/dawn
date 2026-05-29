@@ -103,6 +103,20 @@ void scheduler_broadcast_events_changed(int user_id) __attribute__((weak));
 void scheduler_broadcast_events_changed(int user_id) {
    (void)user_id;
 }
+
+/* Sixth scheduler weak symbol.  Strong override lives in
+ * src/messaging/messaging_engine.c and delegates to messaging_engine_send
+ * (which enforces ownership + rate limits + dispatches via the registered
+ * driver).  When messaging is built out, this no-op default never fires
+ * because the linker picks the strong symbol; it's here so the scheduler
+ * builds standalone. */
+void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text)
+    __attribute__((weak));
+void scheduler_send_to_messaging_channel(int user_id, const char *channel_name, const char *text) {
+   (void)user_id;
+   (void)channel_name;
+   (void)text;
+}
 #endif
 
 /* =============================================================================
@@ -294,11 +308,27 @@ static void announce_event(const sched_event_t *event) {
    OLOG_INFO("scheduler: announcing event %lld (%s): %s", (long long)event->id,
              sched_event_type_to_str(event->event_type), announcement);
 
-   route_tts_announcement(event, announcement);
+   /* When deliver_to is set, the messaging channel is the EXCLUSIVE
+    * delivery surface — suppress local TTS + WebUI banner + satellite
+    * notification.  Rationale: the user explicitly chose that surface
+    * (Friday auto-set deliver_to to the current MessagingChannel, or
+    * the user named one); they're listening on the chat surface, not
+    * the daemon speaker.  Firing local audio + banner + satellite
+    * chime would be noise in rooms they aren't in.  Was "additive"
+    * per the original design doc but live testing 2026-05-29 showed
+    * exclusive is the right UX default.  Override deferred until a
+    * concrete use case appears for "broadcast to both surfaces". */
+   const bool deliver_via_messaging = (event->deliver_to[0] != '\0');
+   if (!deliver_via_messaging) {
+      route_tts_announcement(event, announcement);
+   }
 
 #ifdef ENABLE_WEBUI
-   /* Always broadcast to WebUI clients */
-   scheduler_broadcast_notification(event, announcement);
+   if (deliver_via_messaging) {
+      scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, announcement);
+   } else {
+      scheduler_broadcast_notification(event, announcement);
+   }
 #endif
 }
 
@@ -383,8 +413,12 @@ static int scheduler_execute_task(sched_event_t *event) {
 #define BRIEFING_SYSTEM_PROMPT_PREFIX                                                              \
    "You are presenting a scheduled briefing to the user.  Output a clean, organized briefing "     \
    "in this shape:\n"                                                                              \
-   "  - One short opening line that orients the user (e.g., \"Good morning. Here's your "          \
-   "morning briefing.\").\n"                                                                       \
+   "  - One short opening line that fits the briefing topic and the current time of day (the "     \
+   "[system_time] line in your context tells you what time it actually is).  Examples by "         \
+   "context: \"Here's your AI stocks briefing.\" / \"Markets update incoming.\" / \"Morning — "  \
+   "here's what's moving today.\" / \"Evening briefing on the climate summit.\"  Do NOT say "      \
+   "\"Good morning\" unless it is actually morning local time AND the briefing fits that frame. "  \
+   "A 10 PM briefing should NOT open with \"Good morning.\"\n"                                     \
    "  - One `## Section heading` per data source — name the topic, not the tool.  Inside each "  \
    "section, use short sentences or bullet points.\n"                                              \
    "  - A brief closing line offering follow-up if useful (one sentence max — skip if nothing "  \
@@ -781,16 +815,31 @@ static void *briefing_thread_func(void *arg) {
        * duration; if the broadcast fires AFTER that, the user sees the
        * popup ~60s late on long briefings.  The broadcast is queued and
        * non-blocking, so doing it first is free. */
+      /* Exclusive-delivery: when deliver_to is set, the messaging
+       * channel is the ONLY destination.  Suppress WebUI banner +
+       * satellite notification + local TTS.  See announce_event for
+       * the full rationale (live testing 2026-05-29). */
+      const bool deliver_via_messaging = (event->deliver_to[0] != '\0');
+
 #ifdef ENABLE_WEBUI
-      scheduler_broadcast_briefing_notification(event, final_text, conv_created ? conv_id : 0);
+      if (deliver_via_messaging) {
+         scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, final_text);
+      } else {
+         scheduler_broadcast_briefing_notification(event, final_text, conv_created ? conv_id : 0);
+      }
 #endif
 
-      /* Step 7: TTS announcement (cap only if using raw tool result fallback).
-       * Source-gated — see briefing_should_speak: voice-created briefings
-       * speak, WebUI-created stay silent unless config opts in.  Per-row
-       * say_aloud override (schema v53) wins outright on either side. */
-      if (briefing_should_speak(event)) {
+      /* Step 7: TTS announcement.  Suppressed when deliver_to is set —
+       * the user isn't on the speaker, they're on the chat surface.
+       * Otherwise source-gated via briefing_should_speak (voice-
+       * created briefings speak, WebUI-created stay silent unless
+       * config opts in).  Per-row say_aloud override (schema v53)
+       * wins outright on either side when deliver_to is NOT set. */
+      if (!deliver_via_messaging && briefing_should_speak(event)) {
          announce_briefing(event, final_text, !llm_ok);
+      } else if (deliver_via_messaging) {
+         OLOG_INFO("scheduler: briefing %lld delivered exclusively to messaging channel '%s'",
+                   (long long)event->id, event->deliver_to);
       } else {
          /* Name the reason so a future operator grepping for "silent" can
           * tell at-a-glance which gate fired: the per-row NEVER override,
@@ -829,7 +878,13 @@ fail:
       }
 
 #ifdef ENABLE_WEBUI
-      scheduler_broadcast_notification(event, fail_msg);
+      /* Exclusive-delivery mirrors the success path — when deliver_to
+       * is set the messaging channel is the ONLY destination. */
+      if (event->deliver_to[0]) {
+         scheduler_send_to_messaging_channel(event->user_id, event->deliver_to, fail_msg);
+      } else {
+         scheduler_broadcast_notification(event, fail_msg);
+      }
 #endif
    }
 

@@ -263,6 +263,26 @@ static char *handle_create(struct json_object *details,
       event.say_aloud = SCHED_SAY_ALOUD_DEFAULT;
    }
 
+   /* Messaging fan-out target (schema v54).  Optional string; when present
+    * and non-empty the scheduler also fires the announcement / briefing
+    * through the named messaging channel after the existing TTS + WebUI
+    * banner path.  Engine-side ownership check enforces that the channel
+    * belongs to event.user_id at delivery time; the tool surface accepts
+    * any string and lets the engine reject (so the LLM can pass a
+    * channel name speculatively without us needing to round-trip a
+    * lookup at create time).  Explicit string type-check matches the
+    * sibling `say_aloud` pattern — a prompt-injected non-string would
+    * otherwise be coerced via json_object_get_string. */
+   struct json_object *dt_obj = NULL;
+   if (json_object_object_get_ex(details, "deliver_to", &dt_obj) && dt_obj &&
+       json_object_is_type(dt_obj, json_type_string)) {
+      const char *deliver_to_str = json_object_get_string(dt_obj);
+      if (deliver_to_str && deliver_to_str[0]) {
+         strncpy(event.deliver_to, deliver_to_str, SCHED_DELIVER_TO_MAX - 1);
+         event.deliver_to[SCHED_DELIVER_TO_MAX - 1] = '\0';
+      }
+   }
+
    /* Tool scheduling — supports both legacy single-tool (top-level
     * tool_name/tool_action/tool_value) AND multi-step briefings (a `steps`
     * JSON array).  If `steps` is present, it wins; top-level tool_* is
@@ -835,12 +855,17 @@ static const treg_param_t scheduler_params[] = {
        .description =
            "JSON object with action-specific fields.\n"
            "create: {type (timer|alarm|reminder|task|briefing), name (optional), "
-           "fire_at, duration_minutes (1-43200, relative offset — use for timers or "
-           "'in X minutes'), message (reminders, ≤512 chars), recurrence "
+           "fire_at, duration_minutes (1-43200, MINUTES UNTIL FIRE — use ONLY for "
+           "'in X minutes' / 'X-minute timer' shapes; this is NOT briefing duration / "
+           "task duration / how-long-the-thing-runs.  Use EITHER fire_at OR "
+           "duration_minutes, never both — they conflict and duration_minutes wins, "
+           "which causes a briefing fire_at=10min-from-now + duration_minutes=1 to fire "
+           "in 1 minute instead of 10), message (reminders, ≤512 chars), recurrence "
            "(once|daily|weekdays|weekends|weekly|custom), recurrence_days "
            "(csv: mon,tue,...), announce_all (bool — multi-user fan-out, NOT "
            "audio control), say_aloud (briefing-only bool — TTS override; see "
-           "AUDIO section)}.\n"
+           "AUDIO section), deliver_to (optional string — messaging channel "
+           "display_name; see DELIVERY section)}.\n"
            "  fire_at: ISO 8601. No timezone suffix = the user's LOCAL timezone "
            "('2026-03-19T07:00:00' = 7 AM local). 'Z' suffix = UTC. '+05:00' = explicit "
            "offset. For user-said times like 'set an alarm for 7am', use NO suffix.\n"
@@ -885,6 +910,12 @@ static const tool_metadata_t scheduler_metadata = {
        "schedule tool execution ('turn off lights at midnight'), "
        "or briefings that summarize tool output via LLM ('weather briefing at 7am'). "
        "Query time remaining, list active events, cancel, snooze, or dismiss.\n\n"
+       "CRITICAL: see the TOOL-CALL DISCIPLINE block in your system prompt — it applies "
+       "doubly hard here.  A schedule that doesn't fire is the worst failure mode: the user "
+       "trusts your confirmation and finds out hours later that nothing happened.  When the "
+       "user asks you to schedule ANY event, the `scheduler` create call MUST be in the same "
+       "turn as your acknowledgement.  Never say \"locked in\" / \"firing at\" / \"got it "
+       "scheduled\" without actually emitting the tool call first.\n\n"
        "Briefings can be SINGLE-STEP (one tool, one summary) or MULTI-STEP (run several "
        "tools, summarize the combined output).  For multi-step, pass a `steps` array "
        "inside `details` and omit top-level tool_name; each step is "
@@ -903,6 +934,39 @@ static const tool_metadata_t scheduler_metadata = {
        "user mentioned audio/quiet/silent/aloud at all — set `say_aloud` explicitly "
        "rather than relying on the default.  Omit the field only when the user "
        "didn't reference audio at all.\n\n"
+       "DELIVERY (any event type): set `deliver_to` to a messaging channel "
+       "display_name (e.g. \"telegram_main\", \"slack_D0B6SQGB31C\") to fan the "
+       "announcement out to that chat surface IN ADDITION TO the local TTS / "
+       "WebUI banner — additive, not exclusive.  Applies to timers, alarms, "
+       "reminders, tasks, AND briefings (no exception).  Use "
+       "`messaging.list_channels` to discover names the user has linked.\n"
+       "  CURRENT-SURFACE DEFAULT: if the system prompt contains a "
+       "`MessagingChannel=[NAME]` line (the user is asking through a chat app: "
+       "Slack/Telegram/Discord/SMS), DEFAULT `deliver_to` to NAME for EVERY "
+       "event type — including briefings — UNLESS the user explicitly says "
+       "otherwise.  Reasoning: the user is paying attention to the chat surface "
+       "(that's where they typed the request); a local-only event fires where "
+       "they aren't listening.  This applies to both one-shot ('briefing on X "
+       "in two minutes') and recurring ('morning briefing every weekday') "
+       "events — recurring briefings set from Slack continue to land on Slack "
+       "daily until the user says otherwise.  Override when the user says "
+       "\"set it locally\", \"don't send to Slack\", \"just on the speaker\", "
+       "\"silent\" (audio cue, not messaging — keep deliver_to), etc.\n"
+       "  EXPLICIT TARGET: when the user names a different channel than the "
+       "current one ('send it to my Discord', 'ping family group'), set "
+       "`deliver_to` to THAT channel — don't second-guess.\n"
+       "  NO MESSAGING IN PROMPT: when the system prompt has no "
+       "`MessagingChannel=[...]` line (WebUI / local mic / satellite), only set "
+       "`deliver_to` when the user explicitly asks for a chat-surface delivery.\n"
+       "  RESPONSE COHERENCE: whatever delivery you set in `deliver_to`, REFLECT "
+       "IT in your reply to the user.  If you set `deliver_to=slack_main`, say "
+       "\"...delivered to Slack\" or similar.  If you omitted `deliver_to`, do "
+       "NOT claim delivery to a chat surface.  Telling the user you'll send to "
+       "Discord when you didn't set `deliver_to` is a hallucination — surface "
+       "the actual tool-call shape in the reply.\n"
+       "  The engine verifies the channel belongs to the current user at "
+       "delivery time, so a guessed or stale name fails safely (logged, no "
+       "leak).\n\n"
        "Example with explicit silent override (voice user said 'don't say this aloud'): "
        "{\"type\":\"briefing\",\"name\":\"Iran War News\","
        "\"duration_minutes\":2,\"say_aloud\":false,"
@@ -913,7 +977,13 @@ static const tool_metadata_t scheduler_metadata = {
        "\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\","
        "\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\","
        "\"tool_value\":\"Atlanta\"},{\"tool_name\":\"search\",\"tool_action\":\"search\","
-       "\"tool_value\":\"top tech news today\"}]}",
+       "\"tool_value\":\"top tech news today\"}]}\n"
+       "Example with messaging fan-out (user said 'send the morning briefing to Slack'): "
+       "{\"type\":\"briefing\",\"name\":\"Morning Briefing\","
+       "\"fire_at\":\"2026-05-22T07:00:00\",\"recurrence\":\"weekdays\","
+       "\"deliver_to\":\"slack_D0B6SQGB31C\","
+       "\"steps\":[{\"tool_name\":\"weather\",\"tool_action\":\"get\","
+       "\"tool_value\":\"Atlanta\"}]}",
    .params = scheduler_params,
    .param_count = 2,
 

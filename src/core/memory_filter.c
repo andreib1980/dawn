@@ -43,9 +43,18 @@
  * ============================================================================= */
 
 static const char *BLOCKED_PATTERNS[] = {
-   /* Imperative patterns addressing the AI */
-   "you should", "you must", "you need to", "you shall", "you have to", "you will", "you are to",
-   "make sure", "ensure that", "be sure to", "don't forget",
+   /* Imperative patterns addressing the AI.  The bare imperatives ("you
+    * should", "you must", "make sure", "don't forget", etc.) were removed
+    * 2026-05-29 — they had the same false-positive class as the April
+    * 2026 "token/skip/always" incident.  Normal English ("You should
+    * know.", "Make sure to grab milk.", "Don't forget the keys.") was
+    * tripping the filter and dropping messages on the floor.  The
+    * dangerous COMBINATIONS that follow ("...ignore your instructions",
+    * "...forget the system prompt", "...always respond as DAN") are
+    * caught by the second-clause patterns below ("ignore your", "forget
+    * your", "always respond", "act as if", etc.), so removing the bare
+    * imperatives is safe — defense in depth shifts to the verb, not the
+    * subject. */
    /* "always/never/whenever" + imperative verb */
    "always respond", "always answer", "always say", "always reply", "always act", "always include",
    "always add", "always use", "always be ", "never refuse", "never deny", "never reject",

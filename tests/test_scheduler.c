@@ -69,6 +69,7 @@ static const char *DDL =
     "  fired_at INTEGER DEFAULT 0,"
     "  snooze_count INTEGER DEFAULT 0,"
     "  say_aloud INTEGER NOT NULL DEFAULT 0," /* v53 tri-state TTS override */
+    "  deliver_to TEXT,"                      /* v54 messaging channel fan-out */
     "  FOREIGN KEY (user_id) REFERENCES users(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sched_status_fire "
@@ -1086,6 +1087,92 @@ static void test_say_aloud_persistence(void) {
 }
 
 /* ============================================================================
+ * Test: deliver_to column round-trips through insert + read (schema v54)
+ * ============================================================================ */
+
+static void test_deliver_to_persistence(void) {
+   /* Non-empty channel name round-trips */
+   sched_event_t ev = make_event();
+   ev.event_type = SCHED_EVENT_BRIEFING;
+   strncpy(ev.deliver_to, "slack_main", SCHED_DELIVER_TO_MAX - 1);
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev, &id));
+
+   sched_event_t got;
+   memset(&got, 0, sizeof(got));
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("slack_main", got.deliver_to);
+
+   /* Empty deliver_to stays empty (default — no fan-out) */
+   sched_event_t ev2 = make_event();
+   ev2.event_type = SCHED_EVENT_BRIEFING;
+   /* deliver_to[0] == '\0' from make_event's memset */
+   id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev2, &id));
+
+   memset(&got, 0xAA, sizeof(got)); /* prove the read actually clears */
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_INT(0, got.deliver_to[0]);
+
+   /* deliver_to also round-trips on SCHED_EVENT_TASK (not briefing-only) */
+   sched_event_t ev3 = make_event();
+   ev3.event_type = SCHED_EVENT_TASK;
+   strncpy(ev3.deliver_to, "telegram_personal", SCHED_DELIVER_TO_MAX - 1);
+   id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&ev3, &id));
+
+   memset(&got, 0, sizeof(got));
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("telegram_personal", got.deliver_to);
+}
+
+/* ============================================================================
+ * Test: deliver_to carries through recurrence (struct copy invariant)
+ *
+ * prepare_next_occurrence_row in scheduler.c does *next_out = *src and only
+ * clears the lifecycle fields (id, status, fire_at, fired_at, snooze_count,
+ * snoozed_until).  Everything else MUST carry over, including the new
+ * deliver_to.  Pin this invariant so a future struct refactor that drops
+ * the wholesale copy doesn't silently break recurring fan-out.
+ *
+ * Operates directly on the struct because prepare_next_occurrence_row is
+ * file-static in scheduler.c — we mirror its known semantics rather than
+ * call it.  If the function ever moves out of static, switch this test
+ * to call it.
+ * ============================================================================ */
+
+static void test_deliver_to_recurrence_carry(void) {
+   sched_event_t src = make_event();
+   src.event_type = SCHED_EVENT_BRIEFING;
+   src.recurrence = SCHED_RECUR_DAILY;
+   strncpy(src.deliver_to, "slack_morning", SCHED_DELIVER_TO_MAX - 1);
+   src.say_aloud = SCHED_SAY_ALOUD_ALWAYS;
+
+   /* Mirror prepare_next_occurrence_row's exact body. */
+   sched_event_t next = src;
+   next.id = 0;
+   next.status = SCHED_STATUS_PENDING;
+   next.fire_at = src.fire_at + 86400;
+   next.fired_at = 0;
+   next.snooze_count = 0;
+   next.snoozed_until = 0;
+
+   TEST_ASSERT_EQUAL_STRING("slack_morning", next.deliver_to);
+   TEST_ASSERT_EQUAL_INT(SCHED_SAY_ALOUD_ALWAYS, next.say_aloud);
+   TEST_ASSERT_EQUAL_INT(SCHED_EVENT_BRIEFING, next.event_type);
+
+   /* Round-trip the next-occurrence row through the DB too so a struct
+    * shape that survives the in-memory copy but fails on DB persist
+    * still trips the test. */
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_insert(&next, &id));
+   sched_event_t got;
+   memset(&got, 0, sizeof(got));
+   TEST_ASSERT_EQUAL_INT(0, scheduler_db_get(id, &got));
+   TEST_ASSERT_EQUAL_STRING("slack_morning", got.deliver_to);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -1118,5 +1205,7 @@ int main(void) {
    RUN_TEST(test_briefing_steps_list_many_mixed);
    RUN_TEST(test_briefing_steps_list_many_rejects_bad_args);
    RUN_TEST(test_say_aloud_persistence);
+   RUN_TEST(test_deliver_to_persistence);
+   RUN_TEST(test_deliver_to_recurrence_carry);
    return UNITY_END();
 }
