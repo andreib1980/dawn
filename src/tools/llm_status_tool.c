@@ -91,10 +91,11 @@ static char *llm_status_tool_callback(const char *action, char *value, int *shou
    llm_resolve_config(&session_config, &resolved);
 
    llm_type_t current = resolved.type;
-   const char *provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
-                          : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
-                          : resolved.cloud_provider == CLOUD_PROVIDER_GEMINI ? "Gemini"
-                                                                             : "None";
+   const char *provider = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI       ? "OpenAI"
+                          : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE     ? "Claude"
+                          : resolved.cloud_provider == CLOUD_PROVIDER_GEMINI     ? "Gemini"
+                          : resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER ? "OpenRouter"
+                                                                                 : "None";
 
    /* Get model name - fall back to provider defaults if not set in session */
    const char *model = resolved.model;
@@ -131,6 +132,8 @@ static char *llm_status_tool_callback(const char *action, char *value, int *shou
          model = llm_get_default_claude_model();
       } else if (resolved.cloud_provider == CLOUD_PROVIDER_GEMINI) {
          model = llm_get_default_gemini_model();
+      } else if (resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         model = llm_get_default_openrouter_model();
       }
    }
    const char *type_str = (current == LLM_LOCAL) ? "local" : "cloud";

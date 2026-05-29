@@ -1106,7 +1106,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          return 1;
       }
 
-      headers = llm_openai_build_headers(api_key);
+      headers = llm_openai_build_headers(api_key, base_url);
       headers = curl_slist_append(headers, "Accept: text/event-stream");
 
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_RESPONSES_ENDPOINT);

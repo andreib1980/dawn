@@ -403,6 +403,7 @@ static void parse_llm_cloud(toml_table_t *table, llm_cloud_config_t *config) {
    static const char *const known_keys[] = { "provider",
                                              "endpoint",
                                              "vision_enabled",
+                                             "use_openrouter",
                                              "openai_use_responses_api",
                                              "openai_models",
                                              "openai_default_model_idx",
@@ -410,12 +411,15 @@ static void parse_llm_cloud(toml_table_t *table, llm_cloud_config_t *config) {
                                              "claude_default_model_idx",
                                              "gemini_models",
                                              "gemini_default_model_idx",
+                                             "openrouter_models",
+                                             "openrouter_default_model_idx",
                                              NULL };
    warn_unknown_keys(table, "llm.cloud", known_keys);
 
    PARSE_STRING(table, "provider", config->provider);
    PARSE_STRING(table, "endpoint", config->endpoint);
    PARSE_BOOL(table, "vision_enabled", config->vision_enabled);
+   PARSE_BOOL(table, "use_openrouter", config->use_openrouter);
    PARSE_STRING(table, "openai_use_responses_api", config->openai_use_responses_api);
 
    /* Parse openai_models array */
@@ -496,6 +500,33 @@ static void parse_llm_cloud(toml_table_t *table, llm_cloud_config_t *config) {
          config->gemini_default_model_idx = 0;
       } else {
          config->gemini_default_model_idx = (int)gemini_idx.u.i;
+      }
+   }
+
+   /* Parse openrouter_models array */
+   toml_array_t *openrouter_arr = toml_array_in(table, "openrouter_models");
+   if (openrouter_arr) {
+      config->openrouter_models_count = 0;
+      for (int i = 0; i < toml_array_nelem(openrouter_arr) && i < LLM_CLOUD_MAX_MODELS; i++) {
+         toml_datum_t val = toml_string_at(openrouter_arr, i);
+         if (val.ok) {
+            safe_strncpy(config->openrouter_models[config->openrouter_models_count++], val.u.s,
+                         LLM_CLOUD_MODEL_NAME_MAX);
+            free(val.u.s);
+         }
+      }
+   }
+
+   /* Parse openrouter_default_model_idx with bounds check */
+   toml_datum_t openrouter_idx = toml_int_in(table, "openrouter_default_model_idx");
+   if (openrouter_idx.ok) {
+      /* Check range before cast to avoid integer overflow */
+      if (openrouter_idx.u.i < 0 || openrouter_idx.u.i > INT_MAX ||
+          (int)openrouter_idx.u.i >= config->openrouter_models_count) {
+         OLOG_WARNING("llm.cloud.openrouter_default_model_idx out of range, defaulting to 0");
+         config->openrouter_default_model_idx = 0;
+      } else {
+         config->openrouter_default_model_idx = (int)openrouter_idx.u.i;
       }
    }
 }
@@ -1686,6 +1717,7 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
       PARSE_STRING(secrets_section, "openai_api_key", secrets->openai_api_key);
       PARSE_STRING(secrets_section, "claude_api_key", secrets->claude_api_key);
       PARSE_STRING(secrets_section, "gemini_api_key", secrets->gemini_api_key);
+      PARSE_STRING(secrets_section, "openrouter_api_key", secrets->openrouter_api_key);
       PARSE_STRING(secrets_section, "mqtt_username", secrets->mqtt_username);
       PARSE_STRING(secrets_section, "mqtt_password", secrets->mqtt_password);
       PARSE_STRING(secrets_section, "satellite_registration_key",
@@ -1736,6 +1768,8 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          PARSE_STRING(api_keys, "openai", secrets->openai_api_key);
       if (secrets->claude_api_key[0] == '\0')
          PARSE_STRING(api_keys, "claude", secrets->claude_api_key);
+      if (secrets->openrouter_api_key[0] == '\0')
+         PARSE_STRING(api_keys, "openrouter", secrets->openrouter_api_key);
    }
 
    toml_free(root);

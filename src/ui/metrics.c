@@ -748,11 +748,8 @@ int metrics_export_json(const char *filepath) {
                                   ? "local"
                                   : ((snapshot.current_llm_type == LLM_CLOUD) ? "cloud"
                                                                               : "undefined");
-   const char *provider_str = (snapshot.current_cloud_provider == CLOUD_PROVIDER_OPENAI)
-                                  ? "openai"
-                                  : ((snapshot.current_cloud_provider == CLOUD_PROVIDER_CLAUDE)
-                                         ? "claude"
-                                         : "none");
+   /* Use the shared mapping so all providers (incl. gemini/openrouter) are covered */
+   const char *provider_str = cloud_provider_to_string(snapshot.current_cloud_provider);
 
    fprintf(fp, "  \"llm_configuration\": {\n");
    fprintf(fp, "    \"type\": \"%s\",\n", llm_type_str);

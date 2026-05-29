@@ -2312,7 +2312,9 @@ mqtt_disabled:
       llm_set_type(LLM_CLOUD);
    } else if (strcmp(g_config.llm.type, "local") == 0) {
       llm_set_type(LLM_LOCAL);
-   } else if (llm_check_connection("https://api.openai.com", 4)) {
+   } else if (llm_check_connection(llm_openrouter_gateway_enabled() ? "https://openrouter.ai"
+                                                                    : "https://api.openai.com",
+                                   4)) {
       llm_set_type(LLM_CLOUD);
    } else {
       llm_set_type(LLM_LOCAL);

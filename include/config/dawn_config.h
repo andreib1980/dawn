@@ -200,11 +200,19 @@ typedef struct {
 #define LLM_DEFAULT_OPENAI_MODEL "gpt-5.4"
 #define LLM_DEFAULT_CLAUDE_MODEL "claude-sonnet-4-6"
 #define LLM_DEFAULT_GEMINI_MODEL "gemini-2.5-flash"
+#define LLM_DEFAULT_OPENROUTER_MODEL "anthropic/claude-sonnet-4"
 
 typedef struct {
    char provider[16];              /* "openai", "claude", or "gemini" */
    char endpoint[CONFIG_PATH_MAX]; /* Empty = default, or custom endpoint */
    bool vision_enabled;            /* Model supports vision/image analysis */
+
+   /* OpenRouter gateway mode: when true, ALL cloud traffic (main chat AND the
+    * auxiliary extraction/compaction/silent-observe/scheduler calls) routes
+    * through OpenRouter using openrouter_api_key, regardless of the provider
+    * field above.  Direct-provider settings are hidden in the WebUI but
+    * preserved.  See docs/arch/subsystems/llm.md "OpenRouter gateway". */
+   bool use_openrouter;
 
    /* OpenAI endpoint selection: "auto" (route gpt-5.4* to /v1/responses),
     * "always" (force /v1/responses for all OpenAI cloud calls),
@@ -223,6 +231,14 @@ typedef struct {
    char gemini_models[LLM_CLOUD_MAX_MODELS][LLM_CLOUD_MODEL_NAME_MAX];
    int gemini_models_count;
    int gemini_default_model_idx; /* Index into gemini_models for default */
+
+   /* OpenRouter model list (used when use_openrouter is true).  These are the
+    * curated "favorites" shown in the header model switcher; the full live
+    * catalog (Phase 2) is browsed in Settings.  IDs are "vendor/model"
+    * (e.g. "anthropic/claude-sonnet-4"). */
+   char openrouter_models[LLM_CLOUD_MAX_MODELS][LLM_CLOUD_MODEL_NAME_MAX];
+   int openrouter_models_count;
+   int openrouter_default_model_idx; /* Index into openrouter_models for default */
 } llm_cloud_config_t;
 
 typedef struct {
@@ -841,6 +857,7 @@ typedef struct {
    char openai_api_key[CONFIG_API_KEY_MAX];
    char claude_api_key[CONFIG_API_KEY_MAX];
    char gemini_api_key[CONFIG_API_KEY_MAX];
+   char openrouter_api_key[CONFIG_API_KEY_MAX]; /* OpenRouter gateway key (sk-or-...) */
    char mqtt_username[CONFIG_CREDENTIAL_MAX];
    char mqtt_password[CONFIG_CREDENTIAL_MAX];
 

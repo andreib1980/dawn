@@ -54,10 +54,9 @@
 #include "llm/llm_openai.h"
 #include "llm/llm_rate_limit.h"
 
-// LLM URLs - cloud endpoints (local endpoint comes from g_config.llm.local.endpoint)
-#define CLOUDAI_URL "https://api.openai.com"
-#define CLAUDE_URL "https://api.anthropic.com"
-#define GEMINI_URL "https://generativelanguage.googleapis.com/v1beta/openai"
+// LLM cloud base URLs (CLOUDAI_URL/CLAUDE_URL/GEMINI_URL/OPENROUTER_URL) are
+// defined in llm_interface.h so the auxiliary resolvers share them.
+// Local endpoint comes from g_config.llm.local.endpoint.
 
 /* Thread-local timeout override for per-request timeout control.
  * Set by llm_chat_completion_with_config() when config->timeout_ms > 0,
@@ -112,6 +111,13 @@ static const char *get_gemini_api_key(void) {
    return NULL;
 }
 
+static const char *get_openrouter_api_key(void) {
+   if (g_secrets.openrouter_api_key[0] != '\0') {
+      return g_secrets.openrouter_api_key;
+   }
+   return NULL;
+}
+
 static bool is_openai_available(void) {
    return get_openai_api_key() != NULL;
 }
@@ -122,6 +128,10 @@ static bool is_claude_available(void) {
 
 static bool is_gemini_available(void) {
    return get_gemini_api_key() != NULL;
+}
+
+static bool is_openrouter_available(void) {
+   return get_openrouter_api_key() != NULL;
 }
 
 // Public API key availability functions (wrappers for static helpers)
@@ -137,7 +147,40 @@ bool llm_has_gemini_key(void) {
    return is_gemini_available();
 }
 
+bool llm_has_openrouter_key(void) {
+   return is_openrouter_available();
+}
+
+bool llm_openrouter_gateway_enabled(void) {
+   return g_config.llm.cloud.use_openrouter;
+}
+
+bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
+                                  const char **endpoint,
+                                  const char **api_key) {
+   if (!provider || !llm_openrouter_gateway_enabled()) {
+      return false;
+   }
+   /* Only rewrite cloud targets; local stays local. */
+   if (*provider == CLOUD_PROVIDER_NONE) {
+      return false;
+   }
+   *provider = CLOUD_PROVIDER_OPENROUTER;
+   if (endpoint) {
+      *endpoint = OPENROUTER_URL; /* unconditional — do not rely on downstream fallback */
+   }
+   if (api_key) {
+      *api_key = get_openrouter_api_key();
+   }
+   return true;
+}
+
 cloud_provider_t llm_detect_available_provider(void) {
+   /* Gateway mode is the single authority for bool→enum: when on, OpenRouter
+    * (if keyed) wins over any direct provider. */
+   if (llm_openrouter_gateway_enabled()) {
+      return is_openrouter_available() ? CLOUD_PROVIDER_OPENROUTER : CLOUD_PROVIDER_NONE;
+   }
    if (is_claude_available())
       return CLOUD_PROVIDER_CLAUDE;
    if (is_openai_available())
@@ -345,6 +388,30 @@ void llm_init(const char *cloud_provider_override) {
                              g_config.llm.tools.remote_enabled_configured);
    }
 
+   /* CLI alias: "-P openrouter" enables the gateway by flipping the config bool,
+    * so the bool remains the single authority for the bool->enum conversion
+    * (see llm_openrouter_gateway_enabled / the single-authority rule). */
+   if (cloud_provider_override != NULL && strcmp(cloud_provider_override, "openrouter") == 0) {
+      g_config.llm.cloud.use_openrouter = true;
+   }
+
+   /* OpenRouter gateway: SINGLE AUTHORITY for use_openrouter -> CLOUD_PROVIDER_OPENROUTER.
+    * When on, force the provider and skip the direct-provider CLI>config>auto-detect
+    * ladder entirely.  Mirrored in llm_refresh_providers().  A direct-provider CLI
+    * override (-P claude, etc.) does NOT override the gateway. */
+   if (llm_openrouter_gateway_enabled()) {
+      if (is_openrouter_available()) {
+         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+         OLOG_INFO("Cloud provider set to OpenRouter (gateway mode)");
+      } else {
+         OLOG_WARNING("OpenRouter gateway enabled but openrouter_api_key not configured — "
+                      "staying on local LLM");
+         current_cloud_provider = CLOUD_PROVIDER_NONE;
+         llm_set_type(LLM_LOCAL);
+      }
+      return;
+   }
+
    // Detect available providers from runtime config (secrets.toml)
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
@@ -405,7 +472,52 @@ void llm_init(const char *cloud_provider_override) {
    // allowing proper TTS announcement after TTS is initialized.
 }
 
+/* Re-derive the global llm_url from current_cloud_provider + config endpoint (no TTS).
+ * llm_refresh_providers() can change the provider at runtime (e.g. a WebUI gateway
+ * toggle or secrets reload) but historically left llm_url stale — the non-session
+ * global chat path (MQTT replies, search/summary fallback) uses llm_url + the live
+ * provider together, so they must stay in sync.  Custom llm.cloud.endpoint still wins. */
+static void refresh_cloud_llm_url(void) {
+   if (current_type != LLM_CLOUD) {
+      return;
+   }
+   const char *cfg_ep = g_config.llm.cloud.endpoint[0] != '\0' ? g_config.llm.cloud.endpoint : NULL;
+   const char *def_url = NULL;
+   switch (current_cloud_provider) {
+      case CLOUD_PROVIDER_CLAUDE:
+         def_url = CLAUDE_URL;
+         break;
+      case CLOUD_PROVIDER_GEMINI:
+         def_url = GEMINI_URL;
+         break;
+      case CLOUD_PROVIDER_OPENROUTER:
+         def_url = OPENROUTER_URL;
+         break;
+      case CLOUD_PROVIDER_OPENAI:
+         def_url = CLOUDAI_URL;
+         break;
+      default:
+         return; /* NONE — about to fall back to local; leave llm_url unchanged */
+   }
+   snprintf(llm_url, sizeof(llm_url), "%s", cfg_ep ? cfg_ep : def_url);
+}
+
 int llm_refresh_providers(void) {
+   /* OpenRouter gateway short-circuit (mirrors llm_init): the gateway bool is the
+    * single authority, so skip the direct-provider availability dance entirely.
+    * Without this, a secrets/settings reload would silently un-set OpenRouter. */
+   if (llm_openrouter_gateway_enabled()) {
+      if (is_openrouter_available()) {
+         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+         refresh_cloud_llm_url();
+         OLOG_INFO("LLM refresh: OpenRouter gateway ready");
+         return 1;
+      }
+      OLOG_INFO("LLM refresh: OpenRouter gateway on but no key available");
+      current_cloud_provider = CLOUD_PROVIDER_NONE;
+      return 0;
+   }
+
    bool openai_available = is_openai_available();
    bool claude_available = is_claude_available();
    bool gemini_available = is_gemini_available();
@@ -470,6 +582,7 @@ int llm_refresh_providers(void) {
       }
    }
 
+   refresh_cloud_llm_url();
    OLOG_INFO("LLM refresh: Cloud provider ready (%s)", llm_get_cloud_provider_name());
    return 1;
 }
@@ -486,6 +599,9 @@ int llm_set_type(llm_type_t type) {
       } else if (current_cloud_provider == CLOUD_PROVIDER_GEMINI) {
          has_api_key = is_gemini_available();
          provider_name = "Gemini";
+      } else if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         has_api_key = is_openrouter_available();
+         provider_name = "OpenRouter";
       } else {
          has_api_key = is_openai_available();
          provider_name = "OpenAI";
@@ -513,6 +629,9 @@ int llm_set_type(llm_type_t type) {
       } else if (current_cloud_provider == CLOUD_PROVIDER_GEMINI) {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : GEMINI_URL);
          text_to_speech("Setting AI to cloud LLM using Gemini.");
+      } else if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : OPENROUTER_URL);
+         text_to_speech("Setting AI to cloud LLM using OpenRouter.");
       } else {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : CLOUDAI_URL);
          text_to_speech("Setting AI to cloud LLM using OpenAI.");
@@ -566,6 +685,8 @@ const char *llm_get_cloud_provider_name(void) {
          return "Claude";
       case CLOUD_PROVIDER_GEMINI:
          return "Gemini";
+      case CLOUD_PROVIDER_OPENROUTER:
+         return "OpenRouter";
       case CLOUD_PROVIDER_NONE:
          return "None";
       default:
@@ -581,6 +702,8 @@ const char *cloud_provider_to_string(cloud_provider_t provider) {
          return "claude";
       case CLOUD_PROVIDER_GEMINI:
          return "gemini";
+      case CLOUD_PROVIDER_OPENROUTER:
+         return "openrouter";
       case CLOUD_PROVIDER_NONE:
       default:
          return "none";
@@ -632,6 +755,21 @@ int llm_set_cloud_provider(cloud_provider_t provider) {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
       }
       OLOG_INFO("Cloud provider set to Gemini");
+      return 0;
+   } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
+      if (!is_openrouter_available()) {
+         OLOG_ERROR("Cannot switch to OpenRouter: API key not configured");
+         return 1;
+      }
+      current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      // Update URL if we're currently in cloud mode
+      if (current_type == LLM_CLOUD) {
+         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
+                                          ? g_config.llm.cloud.endpoint
+                                          : OPENROUTER_URL;
+         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+      }
+      OLOG_INFO("Cloud provider set to OpenRouter");
       return 0;
    }
    return 1;
@@ -686,6 +824,8 @@ const char *llm_get_model_name(void) {
       return llm_get_default_claude_model();
    } else if (provider == CLOUD_PROVIDER_GEMINI) {
       return llm_get_default_gemini_model();
+   } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
+      return llm_get_default_openrouter_model();
    }
    return "None";
 }
@@ -730,6 +870,20 @@ const char *llm_get_default_gemini_model(void) {
       idx = 0;
    }
    return g_config.llm.cloud.gemini_models[idx];
+}
+
+const char *llm_get_default_openrouter_model(void) {
+   int idx = g_config.llm.cloud.openrouter_default_model_idx;
+   int count = g_config.llm.cloud.openrouter_models_count;
+
+   /* Fallback to first model if index out of bounds or no models */
+   if (count <= 0) {
+      return LLM_DEFAULT_OPENROUTER_MODEL;
+   }
+   if (idx < 0 || idx >= count) {
+      idx = 0;
+   }
+   return g_config.llm.cloud.openrouter_models[idx];
 }
 
 void llm_request_interrupt(void) {
@@ -832,6 +986,8 @@ char *llm_chat_completion(struct json_object *conversation_history,
          api_key = get_claude_api_key();
       } else if (provider == CLOUD_PROVIDER_GEMINI) {
          api_key = get_gemini_api_key();
+      } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
+         api_key = get_openrouter_api_key();
       }
    }
 
@@ -862,7 +1018,8 @@ char *llm_chat_completion(struct json_object *conversation_history,
             break;
 
          case CLOUD_PROVIDER_GEMINI:
-            /* Gemini uses OpenAI-compatible API */
+         case CLOUD_PROVIDER_OPENROUTER:
+            /* Gemini and OpenRouter both use the OpenAI-compatible API */
             response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
                                                   vision_image_sizes, vision_image_count, url,
                                                   api_key, model);
@@ -877,7 +1034,7 @@ char *llm_chat_completion(struct json_object *conversation_history,
    /* If cloud LLM failed (but not interrupted by user), try falling back to local */
    if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested()) {
       if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0 ||
-          strcmp(GEMINI_URL, url) == 0) {
+          strcmp(GEMINI_URL, url) == 0 || strcmp(OPENROUTER_URL, url) == 0) {
          OLOG_WARNING("Falling back to local LLM due to connection failure.");
          text_to_speech("Unable to contact cloud LLM.");
          llm_set_type(LLM_LOCAL);
@@ -938,6 +1095,8 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
          api_key = get_claude_api_key();
       } else if (provider == CLOUD_PROVIDER_GEMINI) {
          api_key = get_gemini_api_key();
+      } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
+         api_key = get_openrouter_api_key();
       }
    }
 
@@ -957,7 +1116,9 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
       provider_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
       history_format = LLM_HISTORY_CLAUDE;
    } else {
-      /* OpenAI, Gemini, and local all use OpenAI-compatible API */
+      /* OpenAI, Gemini, OpenRouter, and local all use the OpenAI-compatible API
+       * (including Anthropic models served via OpenRouter — they use OpenAI wire
+       * format, not the native Claude path). */
       provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
       history_format = LLM_HISTORY_OPENAI;
       if (type == LLM_LOCAL) {
@@ -989,7 +1150,7 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
    /* If cloud LLM failed (but not interrupted by user), try falling back to local */
    if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested()) {
       if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0 ||
-          strcmp(GEMINI_URL, url) == 0) {
+          strcmp(GEMINI_URL, url) == 0 || strcmp(OPENROUTER_URL, url) == 0) {
          OLOG_WARNING("Falling back to local LLM due to connection failure.");
          text_to_speech("Unable to contact cloud LLM.");
          llm_set_type(LLM_LOCAL);
@@ -1132,26 +1293,32 @@ void llm_get_default_config(session_llm_config_t *config) {
       config->type = LLM_CLOUD;
    }
 
-   // Set default cloud provider (used when switching from local to cloud)
-   // If config specifies a provider AND it has a key, use it; otherwise auto-detect
-   cloud_provider_t configured = CLOUD_PROVIDER_NONE;
-   bool configured_has_key = false;
-   if (strcasecmp(g_config.llm.cloud.provider, "claude") == 0) {
-      configured = CLOUD_PROVIDER_CLAUDE;
-      configured_has_key = is_claude_available();
-   } else if (strcasecmp(g_config.llm.cloud.provider, "gemini") == 0) {
-      configured = CLOUD_PROVIDER_GEMINI;
-      configured_has_key = is_gemini_available();
-   } else if (strcasecmp(g_config.llm.cloud.provider, "openai") == 0) {
-      configured = CLOUD_PROVIDER_OPENAI;
-      configured_has_key = is_openai_available();
-   }
-
-   if (configured != CLOUD_PROVIDER_NONE && configured_has_key) {
-      config->cloud_provider = configured;
+   // Set default cloud provider (used when switching from local to cloud).
+   // OpenRouter gateway is the single authority: when on, the default provider is
+   // always OpenRouter regardless of the provider string (mirrors llm_init).
+   if (llm_openrouter_gateway_enabled()) {
+      config->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
    } else {
-      // Config provider unavailable or empty — use the auto-detected provider
-      config->cloud_provider = llm_get_cloud_provider();
+      // If config specifies a provider AND it has a key, use it; otherwise auto-detect
+      cloud_provider_t configured = CLOUD_PROVIDER_NONE;
+      bool configured_has_key = false;
+      if (strcasecmp(g_config.llm.cloud.provider, "claude") == 0) {
+         configured = CLOUD_PROVIDER_CLAUDE;
+         configured_has_key = is_claude_available();
+      } else if (strcasecmp(g_config.llm.cloud.provider, "gemini") == 0) {
+         configured = CLOUD_PROVIDER_GEMINI;
+         configured_has_key = is_gemini_available();
+      } else if (strcasecmp(g_config.llm.cloud.provider, "openai") == 0) {
+         configured = CLOUD_PROVIDER_OPENAI;
+         configured_has_key = is_openai_available();
+      }
+
+      if (configured != CLOUD_PROVIDER_NONE && configured_has_key) {
+         config->cloud_provider = configured;
+      } else {
+         // Config provider unavailable or empty — use the auto-detected provider
+         config->cloud_provider = llm_get_cloud_provider();
+      }
    }
 
    // Endpoint and model are empty by default (resolved at call time from config)
@@ -1201,6 +1368,16 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    resolved->model = session_config->model[0] != '\0' ? session_config->model : NULL;
    resolved->api_key = NULL;
 
+   /* OpenRouter gateway: canonical, inescapable enforcement of the single-authority
+    * rule.  Even a session whose stored cloud_provider predates a runtime gateway
+    * toggle resolves to OpenRouter here.  Forcing the enum (not the helper) keeps the
+    * existing per-provider endpoint resolution below intact, so a custom
+    * llm.cloud.endpoint still overrides the default OpenRouter URL.  The model is left
+    * as-is (session model, or the OpenRouter default filled in below). */
+   if (resolved->type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
+      resolved->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+   }
+
    // Validate and get API key for cloud providers
    if (resolved->type == LLM_CLOUD) {
       if (resolved->cloud_provider == CLOUD_PROVIDER_OPENAI) {
@@ -1221,6 +1398,12 @@ int llm_resolve_config(const session_llm_config_t *session_config,
             return 1;
          }
          resolved->api_key = get_gemini_api_key();
+      } else if (resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         if (!is_openrouter_available()) {
+            OLOG_ERROR("Session config requests OpenRouter but no API key configured");
+            return 1;
+         }
+         resolved->api_key = get_openrouter_api_key();
       } else {
          OLOG_ERROR("Session config requests cloud but no provider specified");
          return 1;
@@ -1237,6 +1420,8 @@ int llm_resolve_config(const session_llm_config_t *session_config,
          resolved->endpoint = CLAUDE_URL;
       } else if (resolved->cloud_provider == CLOUD_PROVIDER_GEMINI) {
          resolved->endpoint = GEMINI_URL;
+      } else if (resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         resolved->endpoint = OPENROUTER_URL;
       }
    }
 
@@ -1250,6 +1435,8 @@ int llm_resolve_config(const session_llm_config_t *session_config,
          resolved->model = llm_get_default_claude_model();
       } else if (resolved->cloud_provider == CLOUD_PROVIDER_GEMINI) {
          resolved->model = llm_get_default_gemini_model();
+      } else if (resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         resolved->model = llm_get_default_openrouter_model();
       }
    }
 
@@ -1325,6 +1512,8 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
          endpoint = CLAUDE_URL;
       } else if (config->cloud_provider == CLOUD_PROVIDER_GEMINI) {
          endpoint = GEMINI_URL;
+      } else if (config->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+         endpoint = OPENROUTER_URL;
       }
    }
 
@@ -1364,7 +1553,8 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
             break;
 
          case CLOUD_PROVIDER_GEMINI:
-            /* Gemini uses OpenAI-compatible API */
+         case CLOUD_PROVIDER_OPENROUTER:
+            /* Gemini and OpenRouter both use the OpenAI-compatible API */
             response = llm_openai_chat_completion(conversation_history, input_text, vision_images,
                                                   vision_image_sizes, vision_image_count, endpoint,
                                                   config->api_key, config->model);

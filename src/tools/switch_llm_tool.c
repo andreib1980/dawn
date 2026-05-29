@@ -67,6 +67,9 @@ static const llm_target_entry_t llm_targets[] = {
    /* Gemini variants */
    { "gemini", LLM_CLOUD, CLOUD_PROVIDER_GEMINI, "Gemini", "API key not configured." },
    { "jiminy", LLM_CLOUD, CLOUD_PROVIDER_GEMINI, "Gemini", "API key not configured." },
+   /* OpenRouter */
+   { "openrouter", LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "OpenRouter", "API key not configured." },
+   { "open router", LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "OpenRouter", "API key not configured." },
 };
 
 /* ========== Parameter Definitions ========== */
@@ -188,6 +191,15 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
                   target);
       }
       return result;
+   }
+
+   /* Under the OpenRouter gateway, switching to a specific DIRECT cloud provider is
+    * meaningless — all cloud traffic routes through OpenRouter.  Allow local / cloud /
+    * openrouter; refuse openai/claude/gemini with an explanation. */
+   if (llm_openrouter_gateway_enabled() && entry->type == LLM_CLOUD &&
+       entry->provider != CLOUD_PROVIDER_NONE && entry->provider != CLOUD_PROVIDER_OPENROUTER) {
+      return strdup("All cloud language models are routed through OpenRouter on this system. "
+                    "Say 'switch to local' or 'switch to OpenRouter' instead.");
    }
 
    /* Get session from command context, fall back to local session for external MQTT */

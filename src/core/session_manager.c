@@ -2267,6 +2267,8 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
          has_key = llm_has_claude_key();
       else if (config->cloud_provider == CLOUD_PROVIDER_GEMINI)
          has_key = llm_has_gemini_key();
+      else if (config->cloud_provider == CLOUD_PROVIDER_OPENROUTER)
+         has_key = llm_has_openrouter_key();
 
       if (!has_key) {
          // Try to fall back to an available provider

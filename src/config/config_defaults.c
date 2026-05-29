@@ -114,6 +114,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.cloud.provider[0] = '\0'; /* Empty = auto-detect from available API keys */
    config->llm.cloud.endpoint[0] = '\0'; /* Empty = use default */
    config->llm.cloud.vision_enabled = true;
+   config->llm.cloud.use_openrouter = false; /* Direct providers by default */
    /* OpenAI endpoint selection: auto routes gpt-5.4* to /v1/responses */
    SAFE_COPY(config->llm.cloud.openai_use_responses_api, "auto");
 
@@ -144,6 +145,16 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->llm.cloud.gemini_models[3], "gemini-3-flash-preview");
    SAFE_COPY(config->llm.cloud.gemini_models[4], "gemini-3-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
+
+   /* Default OpenRouter model list (first entry is default).
+    * IDs are "vendor/model"; these are the curated favorites for the header
+    * switcher.  The full live catalog is browsed in Settings (Phase 2). */
+   config->llm.cloud.openrouter_models_count = 4;
+   SAFE_COPY(config->llm.cloud.openrouter_models[0], "anthropic/claude-sonnet-4");
+   SAFE_COPY(config->llm.cloud.openrouter_models[1], "openai/gpt-5.4");
+   SAFE_COPY(config->llm.cloud.openrouter_models[2], "google/gemini-2.5-flash");
+   SAFE_COPY(config->llm.cloud.openrouter_models[3], "meta-llama/llama-3.3-70b-instruct");
+   config->llm.cloud.openrouter_default_model_idx = 0;
 
    /* LLM Local */
    SAFE_COPY(config->llm.local.endpoint, "http://127.0.0.1:8080");

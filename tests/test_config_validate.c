@@ -231,6 +231,28 @@ static void test_invalid_cloud_provider(void) {
    TEST_ASSERT_TRUE_MESSAGE(found, "expected error for llm.cloud.provider");
 }
 
+/* ── OpenRouter gateway ──────────────────────────────────────────────────── */
+
+/* use_openrouter is a separate bool, NOT a provider-string value — turning it on
+ * must not break provider validation (provider stays openai/claude/gemini). */
+static void test_openrouter_gateway_provider_still_validated(void) {
+   s_config.llm.cloud.use_openrouter = true;
+   /* provider remains "openai" from defaults — valid */
+   int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* Gateway on but no openrouter_api_key is warn-only (runtime falls back to local),
+ * so it must NOT add a hard validation error. */
+static void test_openrouter_gateway_missing_key_is_not_fatal(void) {
+   secrets_config_t secrets;
+   memset(&secrets, 0, sizeof(secrets));
+   s_config.llm.cloud.use_openrouter = true;
+   /* secrets.openrouter_api_key left empty */
+   int n = config_validate(&s_config, &secrets, s_errors, MAX_ERRORS);
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
 static void test_invalid_summarizer_backend(void) {
    strncpy(s_config.search.summarizer.backend, "gpt",
            sizeof(s_config.search.summarizer.backend) - 1);
@@ -321,6 +343,8 @@ int main(void) {
    RUN_TEST(test_invalid_processing_mode);
    RUN_TEST(test_invalid_llm_type);
    RUN_TEST(test_invalid_cloud_provider);
+   RUN_TEST(test_openrouter_gateway_provider_still_validated);
+   RUN_TEST(test_openrouter_gateway_missing_key_is_not_fatal);
    RUN_TEST(test_invalid_summarizer_backend);
 
    RUN_TEST(test_compact_threshold_ordering);

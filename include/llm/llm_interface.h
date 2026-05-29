@@ -26,6 +26,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Default cloud LLM base URLs (overridable via llm.cloud.endpoint).  Shared so
+ * the auxiliary resolvers (compaction/extraction/silent-observe) use the same
+ * constants as the main path instead of duplicating literals. */
+#define CLOUDAI_URL "https://api.openai.com"
+#define CLAUDE_URL "https://api.anthropic.com"
+#define GEMINI_URL "https://generativelanguage.googleapis.com/v1beta/openai"
+#define OPENROUTER_URL "https://openrouter.ai/api/v1"
+
 /**
  * @brief LLM call mode
  *
@@ -80,10 +88,14 @@ typedef struct {
  * --cloud-provider command-line argument or dawn.toml config.
  */
 typedef enum {
-   CLOUD_PROVIDER_OPENAI, /**< OpenAI (GPT models) */
-   CLOUD_PROVIDER_CLAUDE, /**< Anthropic Claude models */
-   CLOUD_PROVIDER_GEMINI, /**< Google Gemini models (OpenAI-compatible API) */
-   CLOUD_PROVIDER_NONE    /**< No cloud provider configured */
+   CLOUD_PROVIDER_OPENAI,     /**< OpenAI (GPT models) */
+   CLOUD_PROVIDER_CLAUDE,     /**< Anthropic Claude models */
+   CLOUD_PROVIDER_GEMINI,     /**< Google Gemini models (OpenAI-compatible API) */
+   CLOUD_PROVIDER_OPENROUTER, /**< OpenRouter gateway (OpenAI-compatible, many vendors) */
+   CLOUD_PROVIDER_NONE        /**< No cloud provider configured */
+   /* NOTE: append new providers BEFORE _NONE to preserve existing ordinals.
+    * The enum is never serialized as an integer (only as strings via
+    * cloud_provider_to_string), so ordinal stability is for in-memory state only. */
 } cloud_provider_t;
 
 /**
@@ -91,7 +103,7 @@ typedef enum {
  */
 typedef enum {
    LLM_LOCAL,    /**< Local LLM server (e.g., llama.cpp) */
-   LLM_CLOUD,    /**< Cloud LLM provider (OpenAI or Claude) */
+   LLM_CLOUD,    /**< Cloud LLM provider (OpenAI/Claude/Gemini/OpenRouter) */
    LLM_UNDEFINED /**< Not yet initialized / inherit from global */
 } llm_type_t;
 
@@ -325,10 +337,11 @@ const char *cloud_provider_to_string(cloud_provider_t provider);
 /**
  * @brief Set the cloud provider at runtime
  *
- * Switches between OpenAI and Claude. Validates that the required API key
+ * Switches the active cloud provider. Validates that the required API key
  * is available before switching. Updates the endpoint URL if currently in cloud mode.
  *
- * @param provider CLOUD_PROVIDER_OPENAI or CLOUD_PROVIDER_CLAUDE
+ * @param provider CLOUD_PROVIDER_OPENAI, CLOUD_PROVIDER_CLAUDE, CLOUD_PROVIDER_GEMINI,
+ *                 or CLOUD_PROVIDER_OPENROUTER
  * @return 0 on success, 1 on failure (API key not configured)
  */
 int llm_set_cloud_provider(cloud_provider_t provider);
@@ -336,8 +349,8 @@ int llm_set_cloud_provider(cloud_provider_t provider);
 /**
  * @brief Get current cloud provider enum value
  *
- * @return Current cloud provider (CLOUD_PROVIDER_OPENAI, CLOUD_PROVIDER_CLAUDE, or
- * CLOUD_PROVIDER_NONE)
+ * @return Current cloud provider (CLOUD_PROVIDER_OPENAI, CLOUD_PROVIDER_CLAUDE,
+ * CLOUD_PROVIDER_GEMINI, CLOUD_PROVIDER_OPENROUTER, or CLOUD_PROVIDER_NONE)
  */
 cloud_provider_t llm_get_cloud_provider(void);
 
@@ -377,6 +390,17 @@ const char *llm_get_default_claude_model(void);
  * @return Model name string (pointer to config memory, do not free)
  */
 const char *llm_get_default_gemini_model(void);
+
+/**
+ * @brief Get the default OpenRouter model name from config
+ *
+ * Returns the model name at openrouter_default_model_idx in the openrouter_models
+ * array.  Falls back to the first model if index is out of bounds or no models
+ * configured.
+ *
+ * @return Model name string (pointer to config memory, do not free)
+ */
+const char *llm_get_default_openrouter_model(void);
 
 /**
  * @brief Check internet connectivity to LLM endpoint
@@ -491,9 +515,55 @@ bool llm_has_claude_key(void);
 bool llm_has_gemini_key(void);
 
 /**
+ * @brief Check if an OpenRouter API key is available
+ *
+ * Checks runtime config (secrets.toml or OPENROUTER_API_KEY env)
+ *
+ * @return true if openrouter_api_key is configured, false otherwise
+ */
+bool llm_has_openrouter_key(void);
+
+/**
+ * @brief Whether OpenRouter gateway mode is active.
+ *
+ * Reads g_config.llm.cloud.use_openrouter.  When true, ALL cloud traffic
+ * (main chat + auxiliary extraction/compaction/silent-observe/scheduler calls)
+ * routes through OpenRouter.  This is the single source of truth for the
+ * bool→CLOUD_PROVIDER_OPENROUTER conversion done in llm_init/llm_refresh_providers.
+ *
+ * @return true if the gateway is enabled in config
+ */
+bool llm_openrouter_gateway_enabled(void);
+
+/**
+ * @brief Rewrite an auxiliary resolver's cloud target to OpenRouter when the
+ *        gateway is on.
+ *
+ * Used by the string-keyed auxiliary resolvers (compaction, extraction,
+ * silent-observe, scheduler) that do not go through the session path.  When the
+ * gateway is enabled and *provider indicates a cloud provider, this sets
+ * *provider = CLOUD_PROVIDER_OPENROUTER, writes *endpoint = OPENROUTER base URL
+ * UNCONDITIONALLY (callers must not rely on downstream endpoint fallback), and
+ * sets *api_key to the OpenRouter key.  The model string is left untouched — the
+ * caller's configured model (e.g. an "anthropic/..." OpenRouter ID) is preserved.
+ *
+ * Reads global config; not reentrant across a mid-flight config change (matches
+ * every other resolver's convention).
+ *
+ * @param provider [in,out] provider enum to (possibly) rewrite
+ * @param endpoint [out]    receives the OpenRouter base URL when applied; may be NULL (skipped)
+ * @param api_key  [out]    receives the OpenRouter key when applied; may be NULL (skipped)
+ * @return true if the override was applied, false otherwise (advisory — callers may ignore)
+ */
+bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
+                                  const char **endpoint,
+                                  const char **api_key);
+
+/**
  * @brief Auto-detect the first cloud provider with an available API key
  *
- * Priority: Claude > OpenAI > Gemini
+ * When the OpenRouter gateway is on, returns CLOUD_PROVIDER_OPENROUTER if its
+ * key is present.  Otherwise priority: Claude > OpenAI > Gemini.
  *
  * @return The first available provider, or CLOUD_PROVIDER_NONE if no keys found
  */

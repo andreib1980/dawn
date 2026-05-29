@@ -108,9 +108,11 @@
    let globalDefaults = {
       type: 'cloud',
       provider: '',
+      use_openrouter: false,
       openai_model: '',
       claude_model: '',
       gemini_model: '',
+      openrouter_model: '',
       tools_mode: 'native',
       thinking_mode: 'disabled', // disabled/enabled
       reasoning_effort: 'medium', // low/medium/high - controls token budget
@@ -121,9 +123,11 @@
       openai: [],
       claude: [],
       gemini: [],
+      openrouter: [],
       openaiDefaultIdx: 0,
       claudeDefaultIdx: 0,
       geminiDefaultIdx: 0,
+      openrouterDefaultIdx: 0,
    };
    let localModelList = [];
    let localProviderType = 'unknown'; // 'ollama', 'llama.cpp', 'Generic', 'Unknown'
@@ -941,6 +945,8 @@
             defaultIdx = cloudModelLists.claudeDefaultIdx;
          } else if (provider === 'gemini') {
             defaultIdx = cloudModelLists.geminiDefaultIdx;
+         } else if (provider === 'openrouter') {
+            defaultIdx = cloudModelLists.openrouterDefaultIdx;
          } else {
             defaultIdx = cloudModelLists.openaiDefaultIdx;
          }
@@ -975,9 +981,11 @@
          cloudModelLists.openai = cloud.openai_models || [];
          cloudModelLists.claude = cloud.claude_models || [];
          cloudModelLists.gemini = cloud.gemini_models || [];
+         cloudModelLists.openrouter = cloud.openrouter_models || [];
          cloudModelLists.openaiDefaultIdx = cloud.openai_default_model_idx || 0;
          cloudModelLists.claudeDefaultIdx = cloud.claude_default_model_idx || 0;
          cloudModelLists.geminiDefaultIdx = cloud.gemini_default_model_idx || 0;
+         cloudModelLists.openrouterDefaultIdx = cloud.openrouter_default_model_idx || 0;
       }
    }
 
@@ -997,6 +1005,8 @@
       if (config.llm?.cloud?.provider) {
          globalDefaults.provider = config.llm.cloud.provider;
       }
+      // OpenRouter gateway flag
+      globalDefaults.use_openrouter = !!config.llm?.cloud?.use_openrouter;
 
       // Default models (resolve idx to model name)
       if (config.llm?.cloud) {
@@ -1004,13 +1014,17 @@
          const openaiModels = cloud.openai_models || [];
          const claudeModels = cloud.claude_models || [];
          const geminiModels = cloud.gemini_models || [];
+         const openrouterModels = cloud.openrouter_models || [];
          const openaiIdx = cloud.openai_default_model_idx || 0;
          const claudeIdx = cloud.claude_default_model_idx || 0;
          const geminiIdx = cloud.gemini_default_model_idx || 0;
+         const openrouterIdx = cloud.openrouter_default_model_idx || 0;
 
          globalDefaults.openai_model = openaiModels[openaiIdx] || openaiModels[0] || '';
          globalDefaults.claude_model = claudeModels[claudeIdx] || claudeModels[0] || '';
          globalDefaults.gemini_model = geminiModels[geminiIdx] || geminiModels[0] || '';
+         globalDefaults.openrouter_model =
+            openrouterModels[openrouterIdx] || openrouterModels[0] || '';
       }
 
       // Tools mode
@@ -1081,6 +1095,31 @@
 
       if (typeSelect) {
          typeSelect.value = runtime.type || 'cloud';
+      }
+
+      // OpenRouter gateway: the backend forces every cloud session through OpenRouter,
+      // so reflect that honestly as a read-only "OpenRouter" provider instead of leaving
+      // a stale direct-provider dropdown that contradicts the actual routing. The full
+      // interactive switcher under gateway is a Phase 2 item.
+      const gatewayOn = !!globalDefaults.use_openrouter;
+      if (providerSelect && gatewayOn && runtime.type !== 'local') {
+         providerSelect.innerHTML = '';
+         const opt = document.createElement('option');
+         opt.value = 'openrouter';
+         opt.textContent = 'OpenRouter';
+         providerSelect.appendChild(opt);
+         providerSelect.value = 'openrouter';
+         providerSelect.disabled = true;
+         providerSelect.title = 'Gateway mode — all cloud models routed through OpenRouter';
+         setControlHint('provider-hint', 'Gateway: OpenRouter');
+         updateModelDropdownForCloud();
+         if (runtime.model) {
+            syncEffortDropdownToModel(runtime.model, true);
+         }
+         if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
+            DAWN.updateLlmMiniSummary();
+         }
+         return;
       }
 
       if (providerSelect) {

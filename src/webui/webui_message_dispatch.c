@@ -280,8 +280,11 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   OLOG_INFO("WebUI: Switched to local LLM");
                } else if (strcmp(new_type, "cloud") == 0) {
                   /* When switching to cloud, ensure we have a valid provider selected.
-                   * Prefer OpenAI if available, otherwise Claude, otherwise Gemini. */
-                  if (llm_has_openai_key()) {
+                   * Under the OpenRouter gateway, the provider is always OpenRouter;
+                   * otherwise prefer OpenAI, then Claude, then Gemini. */
+                  if (llm_openrouter_gateway_enabled() && llm_has_openrouter_key()) {
+                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
+                  } else if (llm_has_openai_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
                   } else if (llm_has_claude_key()) {
                      llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
@@ -310,6 +313,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
                } else if (strcmp(new_provider, "gemini") == 0) {
                   rc = llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
+               } else if (strcmp(new_provider, "openrouter") == 0) {
+                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
                }
                if (rc != 0) {
                   success = 0;
@@ -341,6 +346,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                              json_object_new_boolean(llm_has_claude_key()));
       json_object_object_add(resp_payload, "gemini_available",
                              json_object_new_boolean(llm_has_gemini_key()));
+      json_object_object_add(resp_payload, "openrouter_available",
+                             json_object_new_boolean(llm_has_openrouter_key()));
 
       json_object_object_add(response, "payload", resp_payload);
       send_json_response(conn, response);
@@ -419,6 +426,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
                } else if (strcmp(new_provider, "gemini") == 0) {
                   config.cloud_provider = CLOUD_PROVIDER_GEMINI;
+               } else if (strcmp(new_provider, "openrouter") == 0) {
+                  config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
                }
             }
          }
@@ -437,8 +446,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
                   /* Infer provider from model name if not explicitly set
                    * (handles old conversations and frontend bugs).
-                   * Only infer if the inferred provider has an API key available. */
-                  if (!provider_explicitly_set) {
+                   * Only infer if the inferred provider has an API key available.
+                   * Skipped under the OpenRouter gateway — IDs are "vendor/model"
+                   * and the gateway forces OPENROUTER below. */
+                  if (!provider_explicitly_set && !llm_openrouter_gateway_enabled()) {
                      if ((strncmp(new_model, "gpt-", 4) == 0 || strncmp(new_model, "o1-", 3) == 0 ||
                           strncmp(new_model, "o3-", 3) == 0) &&
                          llm_has_openai_key()) {
@@ -455,6 +466,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                } else {
                   OLOG_WARNING("WebUI: Rejected invalid model name from client");
                }
+            }
+         }
+
+         /* OpenRouter gateway is the single authority: any cloud session config
+          * change is pinned to OpenRouter regardless of the requested provider.
+          * OpenRouter model IDs are "vendor/model"; if a bare model name slipped in
+          * (e.g. from a not-yet-gateway-aware control), drop it so the resolver uses
+          * the OpenRouter default instead of sending an unrecognized ID. */
+         if (config.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
+            config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+            if (config.model[0] != '\0' && strchr(config.model, '/') == NULL) {
+               config.model[0] = '\0';
             }
          }
 
@@ -605,6 +628,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                model_name = llm_get_default_claude_model();
             } else if (current.cloud_provider == CLOUD_PROVIDER_GEMINI) {
                model_name = llm_get_default_gemini_model();
+            } else if (current.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+               model_name = llm_get_default_openrouter_model();
             }
          }
          json_object_object_add(resp_payload, "model",
@@ -618,6 +643,8 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                              json_object_new_boolean(llm_has_claude_key()));
       json_object_object_add(resp_payload, "gemini_available",
                              json_object_new_boolean(llm_has_gemini_key()));
+      json_object_object_add(resp_payload, "openrouter_available",
+                             json_object_new_boolean(llm_has_openrouter_key()));
 
       json_object_object_add(response, "payload", resp_payload);
       send_json_response(conn, response);

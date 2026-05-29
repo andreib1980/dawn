@@ -48,7 +48,8 @@
  *   - "always"           — route every cloud OpenAI call
  *   - "never"            — never route (gpt-5.4 will fail per OpenAI's HTTP 400)
  *
- * Local LLMs and non-OpenAI cloud providers (Gemini OpenAI-compat, etc.) never route.
+ * Local LLMs and non-OpenAI cloud providers (Gemini, OpenRouter, and other
+ * OpenAI-compat proxies) never route — they only serve /v1/chat/completions.
  */
 static bool should_dispatch_to_responses_api(const char *api_key,
                                              const char *base_url,
@@ -57,7 +58,8 @@ static bool should_dispatch_to_responses_api(const char *api_key,
       return false;
    if (!model_name || !*model_name)
       return false;
-   if (base_url && strstr(base_url, "generativelanguage.googleapis.com"))
+   if (base_url &&
+       (strstr(base_url, "generativelanguage.googleapis.com") || strstr(base_url, "openrouter.ai")))
       return false;
 
    const char *mode = g_config.llm.cloud.openai_use_responses_api;
@@ -74,7 +76,7 @@ static bool should_dispatch_to_responses_api(const char *api_key,
 
 /* ── Shared helpers (used by chat-completions and responses) ────────────── */
 
-struct curl_slist *llm_openai_build_headers(const char *api_key) {
+struct curl_slist *llm_openai_build_headers(const char *api_key, const char *base_url) {
    struct curl_slist *headers = NULL;
 
    headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -83,6 +85,14 @@ struct curl_slist *llm_openai_build_headers(const char *api_key) {
       char auth_header[512];
       snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
       headers = curl_slist_append(headers, auth_header);
+   }
+
+   /* OpenRouter optional attribution headers (used for their app rankings).
+    * Harmless on other endpoints, but only sent when talking to OpenRouter. */
+   if (base_url != NULL && strstr(base_url, "openrouter.ai") != NULL) {
+      headers = curl_slist_append(headers,
+                                  "HTTP-Referer: https://github.com/The-OASIS-Project/dawn");
+      headers = curl_slist_append(headers, "X-Title: DAWN");
    }
 
    return headers;

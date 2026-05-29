@@ -1167,10 +1167,11 @@ void llm_stream_handle_event(llm_stream_context_t *ctx, const char *event_data) 
 
    // Route to provider-specific parser
    // Local LLM (llama.cpp) uses OpenAI-compatible format
-   // Gemini also uses OpenAI-compatible format
-   // Cloud can be OpenAI, Gemini, or Claude
+   // Gemini and OpenRouter also use OpenAI-compatible format
+   // Cloud can be OpenAI, Gemini, OpenRouter, or Claude
    if (ctx->llm_type == LLM_LOCAL || ctx->cloud_provider == CLOUD_PROVIDER_OPENAI ||
-       ctx->cloud_provider == CLOUD_PROVIDER_GEMINI) {
+       ctx->cloud_provider == CLOUD_PROVIDER_GEMINI ||
+       ctx->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
       parse_openai_chunk(ctx, event_data);
    } else if (ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
       parse_claude_event(ctx, event_data);

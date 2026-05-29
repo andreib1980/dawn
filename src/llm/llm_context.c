@@ -440,6 +440,23 @@ int llm_context_get_size(llm_type_t type, cloud_provider_t provider, const char 
       if (size == 0) {
          size = LLM_CONTEXT_DEFAULT_GEMINI;
       }
+   } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
+      /* OpenRouter IDs are "vendor/model".  Best-effort: strip the vendor prefix
+       * and probe the known tables (many OpenRouter models map to names we know).
+       * Otherwise use a conservative default.  Phase 2 will supply the exact
+       * context_length from the /api/v1/models catalog. */
+      const char *bare = model ? strrchr(model, '/') : NULL;
+      bare = bare ? bare + 1 : model;
+      size = lookup_model_context(s_openai_models, bare);
+      if (size == 0) {
+         size = lookup_model_context(s_claude_models, bare);
+      }
+      if (size == 0) {
+         size = lookup_model_context(s_gemini_models, bare);
+      }
+      if (size == 0) {
+         size = LLM_CONTEXT_DEFAULT_OPENAI; /* conservative 128K default */
+      }
    } else {
       size = LLM_CONTEXT_DEFAULT_OPENAI; /* Fallback for unknown providers */
    }
@@ -913,17 +930,17 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
    if (strcmp(p, "claude") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      cfg->endpoint = "https://api.anthropic.com";
+      cfg->endpoint = CLAUDE_URL;
       cfg->api_key = g_secrets.claude_api_key;
    } else if (strcmp(p, "openai") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
-      cfg->endpoint = "https://api.openai.com";
+      cfg->endpoint = CLOUDAI_URL;
       cfg->api_key = g_secrets.openai_api_key;
    } else if (strcmp(p, "gemini") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
-      cfg->endpoint = "https://generativelanguage.googleapis.com/v1beta/openai";
+      cfg->endpoint = GEMINI_URL;
       cfg->api_key = g_secrets.gemini_api_key;
    } else if (strcmp(p, "local") == 0) {
       cfg->type = LLM_LOCAL;
@@ -932,6 +949,10 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
    } else {
       return false;
    }
+
+   /* OpenRouter gateway: reroute the dedicated compaction provider through
+    * OpenRouter (model string preserved — user must configure an OpenRouter ID). */
+   (void)llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key);
 
    cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
    strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);

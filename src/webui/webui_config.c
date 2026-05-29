@@ -182,10 +182,11 @@ void handle_get_config(ws_connection_t *conn) {
    json_object_object_add(llm_runtime, "type",
                           json_object_new_string(resolved.type == LLM_LOCAL ? "local" : "cloud"));
 
-   const char *provider_name = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI   ? "OpenAI"
-                               : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE ? "Claude"
-                               : resolved.cloud_provider == CLOUD_PROVIDER_GEMINI ? "Gemini"
-                                                                                  : "None";
+   const char *provider_name = resolved.cloud_provider == CLOUD_PROVIDER_OPENAI       ? "OpenAI"
+                               : resolved.cloud_provider == CLOUD_PROVIDER_CLAUDE     ? "Claude"
+                               : resolved.cloud_provider == CLOUD_PROVIDER_GEMINI     ? "Gemini"
+                               : resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER ? "OpenRouter"
+                                                                                      : "None";
    json_object_object_add(llm_runtime, "provider", json_object_new_string(provider_name));
    /* Get actual model name from config based on type/provider */
    const char *model_name = NULL;
@@ -199,6 +200,8 @@ void handle_get_config(ws_connection_t *conn) {
       model_name = llm_get_default_claude_model();
    } else if (resolved.cloud_provider == CLOUD_PROVIDER_GEMINI) {
       model_name = llm_get_default_gemini_model();
+   } else if (resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
+      model_name = llm_get_default_openrouter_model();
    }
    json_object_object_add(llm_runtime, "model",
                           json_object_new_string(model_name ? model_name : ""));
@@ -390,6 +393,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
          }
          JSON_TO_CONFIG_STR(cloud, "endpoint", config->llm.cloud.endpoint);
          JSON_TO_CONFIG_BOOL(cloud, "vision_enabled", config->llm.cloud.vision_enabled);
+         JSON_TO_CONFIG_BOOL(cloud, "use_openrouter", config->llm.cloud.use_openrouter);
          JSON_TO_CONFIG_STR(cloud, "openai_use_responses_api",
                             config->llm.cloud.openai_use_responses_api);
          /* Validate openai_use_responses_api */
@@ -491,6 +495,38 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
             } else if (config->llm.cloud.gemini_models_count > 0) {
                OLOG_WARNING("WebUI: gemini_default_model_idx %d out of range, using 0", idx);
                config->llm.cloud.gemini_default_model_idx = 0;
+            }
+         }
+
+         struct json_object *openrouter_models_arr;
+         if (json_object_object_get_ex(cloud, "openrouter_models", &openrouter_models_arr) &&
+             json_object_is_type(openrouter_models_arr, json_type_array)) {
+            config->llm.cloud.openrouter_models_count = 0;
+            int arr_len = json_object_array_length(openrouter_models_arr);
+            for (int i = 0; i < arr_len && i < LLM_CLOUD_MAX_MODELS; i++) {
+               struct json_object *model_obj = json_object_array_get_idx(openrouter_models_arr, i);
+               const char *model = json_object_get_string(model_obj);
+               if (model && model[0] != '\0') {
+                  strncpy(config->llm.cloud
+                              .openrouter_models[config->llm.cloud.openrouter_models_count],
+                          model, LLM_CLOUD_MODEL_NAME_MAX - 1);
+                  config->llm.cloud.openrouter_models[config->llm.cloud.openrouter_models_count]
+                                                     [LLM_CLOUD_MODEL_NAME_MAX - 1] = '\0';
+                  config->llm.cloud.openrouter_models_count++;
+               }
+            }
+         }
+
+         /* Parse default model index with bounds check */
+         struct json_object *openrouter_idx_obj;
+         if (json_object_object_get_ex(cloud, "openrouter_default_model_idx",
+                                       &openrouter_idx_obj)) {
+            int idx = json_object_get_int(openrouter_idx_obj);
+            if (idx >= 0 && idx < config->llm.cloud.openrouter_models_count) {
+               config->llm.cloud.openrouter_default_model_idx = idx;
+            } else if (config->llm.cloud.openrouter_models_count > 0) {
+               OLOG_WARNING("WebUI: openrouter_default_model_idx %d out of range, using 0", idx);
+               config->llm.cloud.openrouter_default_model_idx = 0;
             }
          }
       }
@@ -1098,6 +1134,9 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    strncpy(old_local_endpoint, g_config.llm.local.endpoint, sizeof(old_local_endpoint) - 1);
    old_local_endpoint[sizeof(old_local_endpoint) - 1] = '\0';
 
+   /* Track OpenRouter gateway toggle so the global provider is re-derived on change */
+   bool old_use_openrouter = g_config.llm.cloud.use_openrouter;
+
    /* Apply changes to global config with mutex protection.
     * The write lock ensures no other threads are reading config during modification.
     * TOML write is also inside the lock to prevent concurrent reads of partial state.
@@ -1144,7 +1183,10 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
           json_object_object_get_ex(llm_section, "cloud", &cloud_section) &&
           json_object_object_get_ex(cloud_section, "provider", &provider_obj)) {
          const char *new_provider = json_object_get_string(provider_obj);
-         if (new_provider) {
+         /* Skip the direct-provider switch entirely under the OpenRouter gateway —
+          * the gateway is the single authority; honoring a direct provider here would
+          * set the global to a non-OpenRouter provider while the gateway is on. */
+         if (new_provider && !llm_openrouter_gateway_enabled()) {
             int rc = 0;
             if (strcmp(new_provider, "openai") == 0) {
                rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
@@ -1160,6 +1202,12 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
                                           "API key not configured"));
             }
          }
+      }
+
+      /* OpenRouter gateway toggled — re-derive the global cloud provider so non-session
+       * paths pick up (or drop) OpenRouter immediately, not just on restart. */
+      if (old_use_openrouter != g_config.llm.cloud.use_openrouter) {
+         llm_refresh_providers();
       }
 
       /* Invalidate local provider, models, and context cache if endpoint changed */

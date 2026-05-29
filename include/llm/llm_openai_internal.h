@@ -39,9 +39,11 @@ typedef struct llm_tool_response llm_tool_response_t;
  * @brief Build standard OpenAI HTTP headers (Content-Type + optional Bearer auth).
  *
  * @param api_key API key for cloud (NULL for local LLM — auth header omitted).
+ * @param base_url Request base URL; when it points at OpenRouter, the optional
+ *                 HTTP-Referer + X-Title attribution headers are added. May be NULL.
  * @return CURL header list (caller must free with curl_slist_free_all).
  */
-struct curl_slist *llm_openai_build_headers(const char *api_key);
+struct curl_slist *llm_openai_build_headers(const char *api_key, const char *base_url);
 
 /**
  * @brief Extract the human-readable error message from an OpenAI API error body.

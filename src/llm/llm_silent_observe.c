@@ -250,6 +250,11 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
       return FAILURE;
    }
 
+   /* OpenRouter gateway: reroute cloud silent-observe through OpenRouter.  The
+    * helper writes the endpoint unconditionally; the configured model string
+    * (must be an OpenRouter ID when the gateway is on) is preserved. */
+   (void)llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key);
+
    /* Tools off, thinking off — invariants 2 and 4. */
    strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
    cfg->tool_mode[sizeof(cfg->tool_mode) - 1] = '\0';

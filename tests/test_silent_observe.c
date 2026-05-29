@@ -87,6 +87,17 @@ static void test_event_listener(const char *category,
 dawn_config_t g_config;
 secrets_config_t g_secrets;
 
+/* Stub for llm_apply_openrouter_gateway — silent-observe's resolver calls this;
+ * the test doesn't exercise gateway mode, so it's a no-op (returns false). */
+bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
+                                  const char **endpoint,
+                                  const char **api_key) {
+   (void)provider;
+   (void)endpoint;
+   (void)api_key;
+   return false;
+}
+
 /* Stub for llm_chat_completion_with_config — silent-observe calls this
  * directly; we don't link against the real provider stack. */
 char *llm_chat_completion_with_config(struct json_object *conversation_history,

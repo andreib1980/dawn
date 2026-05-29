@@ -2809,13 +2809,17 @@ int webui_restore_conversation_context(ws_connection_t *conn,
             cfg.cloud_provider = CLOUD_PROVIDER_CLAUDE;
          else if (strcmp(conv->cloud_provider, "gemini") == 0)
             cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
+         else if (strcmp(conv->cloud_provider, "openrouter") == 0)
+            cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
       }
       if (conv->model[0] != '\0') {
          strncpy(cfg.model, conv->model, sizeof(cfg.model) - 1);
          cfg.model[sizeof(cfg.model) - 1] = '\0';
 
-         /* Infer provider from model name if not explicitly stored */
-         if (conv->cloud_provider[0] == '\0') {
+         /* Infer provider from model name if not explicitly stored.  Skipped under
+          * the OpenRouter gateway (model-name prefixes don't apply to "vendor/model"
+          * OpenRouter IDs — the gateway override below forces OPENROUTER anyway). */
+         if (conv->cloud_provider[0] == '\0' && !llm_openrouter_gateway_enabled()) {
             if (strncmp(conv->model, "gpt-", 4) == 0 || strncmp(conv->model, "o1-", 3) == 0 ||
                 strncmp(conv->model, "o3-", 3) == 0) {
                cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
@@ -2824,6 +2828,18 @@ int webui_restore_conversation_context(ws_connection_t *conn,
             } else if (strncmp(conv->model, "gemini-", 7) == 0) {
                cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
             }
+         }
+      }
+
+      /* OpenRouter gateway is the single authority: a restored conversation always
+       * runs through OpenRouter regardless of its stored/inferred provider.  A stored
+       * bare model ID (e.g. "claude-sonnet-4-6" from a pre-gateway conversation) is not
+       * a valid OpenRouter "vendor/model" ID — drop it so the resolver uses the
+       * OpenRouter default (matches the session-dispatch guard). */
+      if (cfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
+         cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+         if (cfg.model[0] != '\0' && strchr(cfg.model, '/') == NULL) {
+            cfg.model[0] = '\0';
          }
       }
       if (conv->tools_mode[0] != '\0') {

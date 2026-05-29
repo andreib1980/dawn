@@ -1602,6 +1602,12 @@ static void *extraction_thread(void *arg) {
                fallback_config.api_key = g_secrets.openai_api_key;
             else if (fallback_config.cloud_provider == CLOUD_PROVIDER_CLAUDE)
                fallback_config.api_key = g_secrets.claude_api_key;
+            else if (fallback_config.cloud_provider == CLOUD_PROVIDER_GEMINI)
+               fallback_config.api_key = g_secrets.gemini_api_key;
+            /* OpenRouter gateway: reroute the fallback (session) provider through
+             * OpenRouter too, so it doesn't issue a NULL-key request under gateway. */
+            (void)llm_apply_openrouter_gateway(&fallback_config.cloud_provider,
+                                               &fallback_config.endpoint, &fallback_config.api_key);
          }
 
          response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
@@ -2005,6 +2011,11 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
       endpoint_buf[endpoint_buf_sz - 1] = '\0';
       cfg->endpoint = endpoint_buf;
    }
+
+   /* OpenRouter gateway: reroute cloud extraction through OpenRouter (endpoint set
+    * to the OpenRouter base URL; the configured extraction_model must be an
+    * OpenRouter ID when the gateway is on). */
+   (void)llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key);
 
    strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);

@@ -574,6 +574,19 @@ static void briefing_build_llm_config(llm_resolved_config_t *cfg,
          model_buf[model_buf_size - 1] = '\0';
          cfg->model = model_buf;
       }
+   } else if (llm_openrouter_gateway_enabled()) {
+      /* OpenRouter gateway: cloud briefings route through OpenRouter regardless of
+       * key presence (consistent with the other auxiliary resolvers — a missing key
+       * fails the cloud call rather than silently leaking to a direct provider).
+       * Unlike the others (which preserve a configured model string), the scheduler
+       * picks from per-provider model lists, so select the OpenRouter default here. */
+      cfg->type = LLM_CLOUD;
+      cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      cfg->api_key = g_secrets.openrouter_api_key;
+      cfg->endpoint = OPENROUTER_URL;
+      strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size - 1);
+      model_buf[model_buf_size - 1] = '\0';
+      cfg->model = model_buf;
    } else if (strcmp(provider, "claude") == 0 && g_secrets.claude_api_key[0]) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;

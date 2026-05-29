@@ -300,7 +300,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
    curl_handle = curl_easy_init();
    if (curl_handle) {
-      headers = llm_openai_build_headers(api_key);
+      headers = llm_openai_build_headers(api_key, base_url);
 
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);
@@ -708,6 +708,8 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
       stream_provider = session_config.cloud_provider;
    } else if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
       stream_provider = CLOUD_PROVIDER_GEMINI;
+   } else if (base_url && strstr(base_url, "openrouter.ai")) {
+      stream_provider = CLOUD_PROVIDER_OPENROUTER;
    }
    stream_ctx = llm_stream_create(stream_llm_type, stream_provider, chunk_callback,
                                   callback_userdata);
@@ -731,7 +733,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    curl_handle = curl_easy_init();
    if (curl_handle) {
-      headers = llm_openai_build_headers(api_key);
+      headers = llm_openai_build_headers(api_key, base_url);
 
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
 
@@ -1255,6 +1257,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       stream_provider = session_config.cloud_provider;
    } else if (base_url && strstr(base_url, "generativelanguage.googleapis.com")) {
       stream_provider = CLOUD_PROVIDER_GEMINI;
+   } else if (base_url && strstr(base_url, "openrouter.ai")) {
+      stream_provider = CLOUD_PROVIDER_OPENROUTER;
    }
    stream_ctx = llm_stream_create(stream_llm_type, stream_provider, chunk_callback,
                                   callback_userdata);
@@ -1288,7 +1292,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
          return 1;
       }
 
-      headers = llm_openai_build_headers(api_key);
+      headers = llm_openai_build_headers(api_key, base_url);
       snprintf(full_url, sizeof(full_url), "%s%s", base_url, OPENAI_CHAT_ENDPOINT);
 
       curl_easy_setopt(curl_handle, CURLOPT_URL, full_url);

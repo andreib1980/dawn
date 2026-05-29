@@ -261,6 +261,11 @@ int config_validate(const dawn_config_t *config,
       }
    }
 
+   /* NOTE: use_openrouter is a separate bool, NOT a provider-string value — it is
+    * deliberately not added to valid_providers above.  A gateway-on-but-no-key
+    * config is non-fatal (the runtime falls back to local — see llm_init), so it is
+    * intentionally not flagged here; config_validate reports hard errors only. */
+
    /* ===== OpenAI Responses API mode (enum) ===== */
    if (config->llm.cloud.openai_use_responses_api[0] != '\0') {
       const char *valid_modes[] = { "auto", "always", "never" };

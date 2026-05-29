@@ -122,6 +122,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_SECRET("OPENAI_API_KEY", secrets->openai_api_key);
    ENV_SECRET("ANTHROPIC_API_KEY", secrets->claude_api_key);
    ENV_SECRET("GEMINI_API_KEY", secrets->gemini_api_key);
+   ENV_SECRET("OPENROUTER_API_KEY", secrets->openrouter_api_key);
    ENV_SECRET("TAVILY_API_KEY", secrets->tavily_api_key);
    ENV_SECRET("TELEGRAM_BOT_TOKEN", secrets->telegram_bot_token);
    ENV_SECRET("DISCORD_BOT_TOKEN", secrets->discord_bot_token);
@@ -188,11 +189,14 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_LLM_CLOUD_PROVIDER", config->llm.cloud.provider);
    ENV_STRING("DAWN_LLM_CLOUD_ENDPOINT", config->llm.cloud.endpoint);
    ENV_BOOL("DAWN_LLM_CLOUD_VISION_ENABLED", config->llm.cloud.vision_enabled);
+   ENV_BOOL("DAWN_LLM_CLOUD_USE_OPENROUTER", config->llm.cloud.use_openrouter);
    ENV_STRING("DAWN_LLM_CLOUD_OPENAI_USE_RESPONSES_API",
               config->llm.cloud.openai_use_responses_api);
    ENV_INT("DAWN_LLM_CLOUD_OPENAI_DEFAULT_MODEL_IDX", config->llm.cloud.openai_default_model_idx);
    ENV_INT("DAWN_LLM_CLOUD_CLAUDE_DEFAULT_MODEL_IDX", config->llm.cloud.claude_default_model_idx);
    ENV_INT("DAWN_LLM_CLOUD_GEMINI_DEFAULT_MODEL_IDX", config->llm.cloud.gemini_default_model_idx);
+   ENV_INT("DAWN_LLM_CLOUD_OPENROUTER_DEFAULT_MODEL_IDX",
+           config->llm.cloud.openrouter_default_model_idx);
 
    /* [llm.local] */
    ENV_STRING("DAWN_LLM_LOCAL_ENDPOINT", config->llm.local.endpoint);
@@ -349,6 +353,7 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[llm.cloud]\n");
    printf("  provider = \"%s\"\n", config->llm.cloud.provider);
    printf("  endpoint = \"%s\"\n", config->llm.cloud.endpoint);
+   printf("  use_openrouter = %s\n", config->llm.cloud.use_openrouter ? "true" : "false");
    printf("  openai_use_responses_api = \"%s\"\n", config->llm.cloud.openai_use_responses_api);
    printf("  openai_default_model_idx = %d\n", config->llm.cloud.openai_default_model_idx);
    printf("  claude_default_model_idx = %d\n", config->llm.cloud.claude_default_model_idx);
@@ -723,6 +728,11 @@ void config_dump_settings(const dawn_config_t *config,
                       detect_source_bool(config->llm.cloud.vision_enabled,
                                          defaults.llm.cloud.vision_enabled,
                                          "DAWN_LLM_CLOUD_VISION_ENABLED"));
+   PRINT_SETTING_BOOL("use_openrouter", config->llm.cloud.use_openrouter,
+                      "DAWN_LLM_CLOUD_USE_OPENROUTER",
+                      detect_source_bool(config->llm.cloud.use_openrouter,
+                                         defaults.llm.cloud.use_openrouter,
+                                         "DAWN_LLM_CLOUD_USE_OPENROUTER"));
 
    /* [llm.local] */
    printf("[llm.local]\n");
@@ -1116,6 +1126,12 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(cloud, "endpoint", json_object_new_string(config->llm.cloud.endpoint));
    json_object_object_add(cloud, "vision_enabled",
                           json_object_new_boolean(config->llm.cloud.vision_enabled));
+   json_object_object_add(cloud, "use_openrouter",
+                          json_object_new_boolean(config->llm.cloud.use_openrouter));
+   /* Key presence only (never the value) so the WebUI can warn when the gateway
+    * is on but no key is configured. */
+   json_object_object_add(cloud, "openrouter_key_present",
+                          json_object_new_boolean(g_secrets.openrouter_api_key[0] != '\0'));
 
    /* Model lists for quick controls dropdown */
    json_object *openai_models = json_object_new_array();
@@ -1144,6 +1160,15 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(cloud, "gemini_models", gemini_models);
    json_object_object_add(cloud, "gemini_default_model_idx",
                           json_object_new_int(config->llm.cloud.gemini_default_model_idx));
+
+   json_object *openrouter_models = json_object_new_array();
+   for (int i = 0; i < config->llm.cloud.openrouter_models_count; i++) {
+      json_object_array_add(openrouter_models,
+                            json_object_new_string(config->llm.cloud.openrouter_models[i]));
+   }
+   json_object_object_add(cloud, "openrouter_models", openrouter_models);
+   json_object_object_add(cloud, "openrouter_default_model_idx",
+                          json_object_new_int(config->llm.cloud.openrouter_default_model_idx));
 
    json_object_object_add(llm, "cloud", cloud);
 
@@ -1645,6 +1670,8 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
                           json_object_new_boolean(secrets && secrets->claude_api_key[0]));
    json_object_object_add(obj, "gemini_api_key",
                           json_object_new_boolean(secrets && secrets->gemini_api_key[0]));
+   json_object_object_add(obj, "openrouter_api_key",
+                          json_object_new_boolean(secrets && secrets->openrouter_api_key[0]));
    json_object_object_add(obj, "mqtt_username",
                           json_object_new_boolean(secrets && secrets->mqtt_username[0]));
    json_object_object_add(obj, "mqtt_password",
@@ -2274,6 +2301,7 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
    WRITE_SECRET("openai_api_key", secrets->openai_api_key);
    WRITE_SECRET("claude_api_key", secrets->claude_api_key);
    WRITE_SECRET("gemini_api_key", secrets->gemini_api_key);
+   WRITE_SECRET("openrouter_api_key", secrets->openrouter_api_key);
    WRITE_SECRET("tavily_api_key", secrets->tavily_api_key);
    WRITE_SECRET("mqtt_username", secrets->mqtt_username);
    WRITE_SECRET("mqtt_password", secrets->mqtt_password);

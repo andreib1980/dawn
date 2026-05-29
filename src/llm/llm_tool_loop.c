@@ -287,9 +287,10 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
    bool switched = false;
 
    if (current_config.type == LLM_LOCAL || current_config.cloud_provider == CLOUD_PROVIDER_OPENAI ||
-       current_config.cloud_provider == CLOUD_PROVIDER_GEMINI) {
+       current_config.cloud_provider == CLOUD_PROVIDER_GEMINI ||
+       current_config.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
       if (params->history_format == LLM_HISTORY_CLAUDE) {
-         /* Switched from Claude to OpenAI/local/Gemini */
+         /* Switched from Claude to OpenAI/local/Gemini/OpenRouter */
          new_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
          new_format = LLM_HISTORY_OPENAI;
          switched = true;
