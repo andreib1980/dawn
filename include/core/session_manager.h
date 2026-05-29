@@ -163,10 +163,17 @@ typedef struct {
  * helper guards on this.  channel_name is the user-facing display_name
  * (e.g., "slack_main", "telegram_personal") that the messaging tool
  * also accepts, so the LLM can self-reference it without translation.
+ *
+ * channel_name is REFRESHED from the DB on every turn (in
+ * get_or_create_messaging_session, on the worker thread), not just at
+ * session creation — so a mid-session channel rename is reflected in the
+ * next prompt's current-channel injection and the LLM emits the correct
+ * scheduler `deliver_to`.  Treat it as "current display_name as of this
+ * turn," not a creation-time snapshot.
  */
 typedef struct {
    char provider[16];      // "slack" / "telegram" / "discord" / "sms"
-   char channel_name[64];  // display_name from messaging_channels
+   char channel_name[64];  // current display_name from messaging_channels (refreshed per turn)
 } messaging_identity_t;
 
 /**

@@ -204,7 +204,14 @@ typedef enum {
     * messaging_link_codes with the standard 10-minute TTL. */
    ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE = 0xA0,
 
-   /* Next free messaging opcode: 0xA1.  (Range ends 0xAF.) */
+   /* Phase 6 operator commands (channel management).  User-scoped except
+    * link-attempts, which is pre-link (no owning user yet). */
+   ADMIN_MSG_MESSAGING_LIST_CHANNELS = 0xA1,    /**< list a user's channels (text table) */
+   ADMIN_MSG_MESSAGING_UNLINK_CHANNEL = 0xA2,   /**< soft-delete a user's channel by name */
+   ADMIN_MSG_MESSAGING_LINK_ATTEMPTS = 0xA3,    /**< recent /link attempts (abuse review) */
+   ADMIN_MSG_MESSAGING_REENABLE_CHANNEL = 0xA4, /**< re-enable a soft-deleted channel by name */
+
+   /* Next free messaging opcode: 0xA5.  (Range ends 0xAF.) */
 } admin_msg_type_t;
 
 /**
@@ -434,6 +441,34 @@ typedef struct __attribute__((packed)) {
  */
 #define ADMIN_MESSAGING_PROVIDER_HINT_MAX 16
 #define ADMIN_MESSAGING_USERNAME_MAX 32
+#define ADMIN_MESSAGING_DISPLAY_NAME_MAX 64 /* must match MESSAGING_DISPLAY_NAME_MAX */
+
+/*
+ * =============================================================================
+ * Phase 6 messaging operator command payloads
+ * =============================================================================
+ *
+ * ADMIN_MSG_MESSAGING_LIST_CHANNELS — payload is the raw username
+ *   (1..ADMIN_MESSAGING_USERNAME_MAX bytes, no NUL).  Response body is the
+ *   user's channels as an aligned text table (ID/NAME/PROVIDER/ENABLED/LAST
+ *   USED).  The WebUI panel uses the JSON form
+ *   (messaging_engine_list_channels_json) directly, not this socket path.
+ *
+ * ADMIN_MSG_MESSAGING_UNLINK_CHANNEL — wire format:
+ *   Byte 0:        username_len (1..ADMIN_MESSAGING_USERNAME_MAX)
+ *   Byte 1..1+U:   username     (no NUL)
+ *   Byte 1+U..:    display_name (no NUL; the channel to soft-delete)
+ *
+ * ADMIN_MSG_MESSAGING_REENABLE_CHANNEL — wire format identical to UNLINK:
+ *   Byte 0:        username_len (1..ADMIN_MESSAGING_USERNAME_MAX)
+ *   Byte 1..1+U:   username     (no NUL)
+ *   Byte 1+U..:    display_name (no NUL; the soft-deleted channel to re-enable)
+ *
+ * ADMIN_MSG_MESSAGING_LINK_ATTEMPTS — wire format:
+ *   Byte 0:        provider_len (0..ADMIN_MESSAGING_PROVIDER_HINT_MAX; 0 = all)
+ *   Byte 1..1+P:   provider     (no NUL; may be empty)
+ *   Byte 1+P..1+P+2 (optional): limit, uint16 little-endian (0/absent = default 50)
+ */
 
 /*
  * =============================================================================

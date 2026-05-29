@@ -46,6 +46,11 @@ extern "C" {
 #define MESSAGING_PROVIDER_RATE_LIMITED 5
 #define MESSAGING_DRIVER_NOT_REGISTERED 6
 #define MESSAGING_INVALID_ADDRESS 7
+#define MESSAGING_NAME_TAKEN 8 /* rename target collides with an existing channel */
+
+/* Maximum channel display_name length (bytes, excluding NUL).  The admin
+ * protocol's ADMIN_MESSAGING_DISPLAY_NAME_MAX must match this. */
+#define MESSAGING_DISPLAY_NAME_MAX 64
 
 /* Link-code shape — Crockford base32, no I/L/O/U. */
 #define MESSAGING_LINK_CODE_LEN 8
@@ -120,6 +125,20 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
 char *messaging_engine_list_channels_json(int user_id);
 
 /**
+ * @brief Render a user's channels as an aligned text table.
+ *
+ * Operator-facing equivalent of messaging_engine_list_channels_json for
+ * the `dawn-admin messaging list-channels` command (the WebUI panel uses
+ * the JSON form).  Columns: ID, NAME, PROVIDER, ENABLED, LAST USED.
+ *
+ * @param user_id  Owner of the channels.
+ * @param buf      Caller buffer; always NUL-terminated on return.
+ * @param buflen   Size of @p buf.
+ * @return MESSAGING_SUCCESS / MESSAGING_FAILURE.
+ */
+int messaging_engine_list_channels_text(int user_id, char *buf, size_t buflen);
+
+/**
  * @brief Generate a new one-time link code for `user_id`.
  *
  * Inserts into messaging_link_codes with a 10-minute TTL.  Prunes
@@ -182,6 +201,126 @@ int messaging_engine_reset_channel(const char *provider, const char *provider_ad
  * @return Same codes as `messaging_engine_reset_channel`.
  */
 int messaging_engine_reset_by_name(int user_id, const char *channel_name);
+
+/**
+ * @brief Unlink (soft-delete) a channel by display_name for a user.
+ *
+ * Resolves (user_id, display_name) → (provider, provider_address) under
+ * the ownership boundary, evicts any live in-memory session slot (which
+ * fires memory extraction on the closing conversation), then sets
+ * `is_enabled = 0`.  The row and its `conversation_id` are PRESERVED:
+ * unlink means "disconnect this surface," not "wipe history."  A later
+ * re-link of the same address re-enables the existing row (via the
+ * link-claim `ON CONFLICT … DO UPDATE SET is_enabled = 1` upsert) and
+ * resumes the prior forever-conversation; the custom display_name also
+ * survives.  Inbound on a disabled channel stops dispatching because the
+ * inbound lookup filters `is_enabled = 1`.
+ *
+ * NOTE: no self-reset deferral guard is applied — the admin / WebUI
+ * callers have no LLM command context, so they cannot target the channel
+ * a running turn is on.  A future user-facing `/unlink` slash command
+ * would need to add a deferred-unlink path mirroring reset's
+ * `mark_pending_reset_if_self`.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no enabled
+ *         channel by that name for the user), MESSAGING_FAILURE.
+ */
+int messaging_engine_unlink_channel(int user_id, const char *display_name);
+
+/**
+ * @brief Rename a channel's display_name for a user.
+ *
+ * Rejects a rename whose target collides (case-insensitively) with
+ * another enabled channel owned by the same user — name-based lookups
+ * (`messaging_engine_send`, `_reset_by_name`) use `LIMIT 1`, so duplicate
+ * display_names would silently shadow each other.  A no-op rename
+ * (new_name equal to old_name modulo case) is allowed.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (old_name not
+ *         found), MESSAGING_NAME_TAKEN (new_name collides),
+ *         MESSAGING_FAILURE (bad args / DB error).
+ */
+int messaging_engine_rename_channel(int user_id, const char *old_name, const char *new_name);
+
+/**
+ * @brief Unlink (soft-delete) a channel by stable row id.
+ *
+ * Same semantics as messaging_engine_unlink_channel but keyed on the
+ * `messaging_channels.id` primary key under the (id, user_id) ownership
+ * boundary.  Preferred by concurrent surfaces (the WebUI panel) where
+ * the mutable, non-unique display_name is a poor operation key.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no enabled
+ *         channel with that id owned by the user), MESSAGING_FAILURE.
+ */
+int messaging_engine_unlink_channel_by_id(int user_id, int64_t channel_id);
+
+/**
+ * @brief Rename a channel by stable row id.
+ *
+ * Same collision semantics as messaging_engine_rename_channel, keyed on
+ * the row id under the (id, user_id) ownership boundary.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL, MESSAGING_NAME_TAKEN,
+ *         MESSAGING_FAILURE.
+ */
+int messaging_engine_rename_channel_by_id(int user_id, int64_t channel_id, const char *new_name);
+
+/**
+ * @brief Re-enable a previously unlinked (soft-deleted) channel.
+ *
+ * The inverse of unlink: flips `is_enabled` back to 1 on a row that was
+ * soft-deleted, restoring inbound dispatch.  No `/link` proof-of-control
+ * round-trip is needed — control was proven when the row was first
+ * created, and unlink preserved the row (provider_address, address_json,
+ * conversation_id, display_name).  Rejects re-enable when it would
+ * collide with an existing ENABLED channel of the same display_name
+ * (name-based lookups use LIMIT 1).  No session eviction — re-enabling
+ * touches no live session.
+ *
+ * Keys on the row id (preferred for the WebUI).
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no disabled
+ *         channel matches), MESSAGING_NAME_TAKEN (name now collides),
+ *         MESSAGING_FAILURE.
+ */
+int messaging_engine_reenable_channel_by_id(int user_id, int64_t channel_id);
+
+/**
+ * @brief Re-enable a previously unlinked channel by display_name.
+ *
+ * By-name form of messaging_engine_reenable_channel_by_id for the operator
+ * CLI: resolves the disabled row's id by display_name, then delegates to
+ * the by-id path for the collision check + enable.
+ *
+ * @return Same codes as messaging_engine_reenable_channel_by_id.
+ */
+int messaging_engine_reenable_channel(int user_id, const char *display_name);
+
+/**
+ * @brief Render recent /link attempts as an aligned text table.
+ *
+ * Operator abuse-review surface (admin-only; no per-user ownership
+ * filter — link attempts are pre-link, so there's no owning user yet).
+ * Writes a header line plus up to `limit` rows newest-first into @p buf.
+ *
+ * @param provider_filter  NULL/empty = all providers; else exact match.
+ * @param since            Unix epoch lower bound; <= 0 defaults to the
+ *                         last 7 days (matching the table's retention).
+ *                         NOTE: the admin-socket command currently always
+ *                         passes 0 (no `--since` flag in v1); call the API
+ *                         directly to use a custom window.
+ * @param limit            Max rows; <= 0 or > 200 clamps to 50.
+ * @param buf              Caller buffer; always NUL-terminated on return.
+ * @param buflen           Size of @p buf.
+ *
+ * @return MESSAGING_SUCCESS / MESSAGING_FAILURE.
+ */
+int messaging_engine_link_attempts_text(const char *provider_filter,
+                                        int64_t since,
+                                        int limit,
+                                        char *buf,
+                                        size_t buflen);
 
 /**
  * @brief Return true if `name` is a provider name the engine recognizes.

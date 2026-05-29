@@ -2390,6 +2390,14 @@ static int handle_client(int client_fd) {
       /* Phase 7: Messaging-channels operator commands */
       case ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE:
          return handle_messaging_generate_link_code(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MESSAGING_LIST_CHANNELS:
+         return handle_messaging_list_channels(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MESSAGING_UNLINK_CHANNEL:
+         return handle_messaging_unlink_channel(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MESSAGING_LINK_ATTEMPTS:
+         return handle_messaging_link_attempts(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_MESSAGING_REENABLE_CHANNEL:
+         return handle_messaging_reenable_channel(client_fd, payload, header.payload_len);
 
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);

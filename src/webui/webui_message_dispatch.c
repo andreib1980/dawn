@@ -805,6 +805,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else if (strcmp(type, "get_satellite_registration_key") == 0) {
       handle_get_satellite_registration_key(conn);
    }
+   /* Messaging channel management (user-scoped) */
+   else if (strcmp(type, "list_channels") == 0) {
+      handle_list_channels(conn);
+   } else if (strcmp(type, "create_link_code") == 0) {
+      handle_create_link_code(conn, payload);
+   } else if (strcmp(type, "unlink_channel") == 0) {
+      handle_unlink_channel(conn, payload);
+   } else if (strcmp(type, "rename_channel") == 0) {
+      handle_rename_channel(conn, payload);
+   } else if (strcmp(type, "reenable_channel") == 0) {
+      handle_reenable_channel(conn, payload);
+   }
    /* Personal settings (authenticated users) */
    else if (strcmp(type, "get_my_settings") == 0) {
       handle_get_my_settings(conn);

@@ -64,6 +64,10 @@ int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t 
 /* Messaging-channels handlers (admin_socket_messaging.c).  Dispatched from
  * handle_client() in admin_socket.c against ADMIN_MSG_MESSAGING_* opcodes. */
 int handle_messaging_generate_link_code(int client_fd, const char *payload, uint16_t payload_len);
+int handle_messaging_list_channels(int client_fd, const char *payload, uint16_t payload_len);
+int handle_messaging_unlink_channel(int client_fd, const char *payload, uint16_t payload_len);
+int handle_messaging_link_attempts(int client_fd, const char *payload, uint16_t payload_len);
+int handle_messaging_reenable_channel(int client_fd, const char *payload, uint16_t payload_len);
 
 #ifdef __cplusplus
 }

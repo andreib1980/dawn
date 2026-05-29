@@ -1,0 +1,195 @@
+/* =============================================================================
+ * Messaging Channels settings panel (Phase 6) — user-scoped channel
+ * management.  Mirrors the satellite-card layout; reuses the shared
+ * .dawn-status-dot, .dawn-badge, and .dawn-secret-field primitives from
+ * base/components.css.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 6.
+ * ============================================================================= */
+
+.channel-link-actions {
+   display: flex;
+   gap: 0.5rem;
+   align-items: center;
+   flex-wrap: wrap;
+   padding-top: 0.5rem;
+   margin-bottom: 0.75rem;
+}
+
+.channel-provider-select {
+   padding: 0.35rem 0.5rem;
+   background: var(--bg-tertiary);
+   color: var(--text-primary);
+   border: 1px solid var(--border-color);
+   border-radius: 4px;
+}
+
+.channel-provider-select:focus-visible {
+   border-color: var(--accent);
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* Readonly link-code field — plain mono text, NOT a masked credential
+ * (the code is short-lived + low-sensitivity, so no reveal toggle). */
+.channel-code-display {
+   font-family: var(--font-mono, 'IBM Plex Mono', monospace);
+   font-size: 13px;
+   letter-spacing: 0.05em;
+   background: var(--bg-secondary);
+   color: var(--text-primary);
+   border: 1px solid var(--border-color);
+   border-radius: 6px;
+   padding: 8px 10px;
+}
+
+/* Inline link-code panel (shown after "Link a channel") */
+.channel-link-code {
+   background: var(--bg-tertiary);
+   border: 1px solid var(--border-color);
+   border-radius: 6px;
+   padding: 0.75rem;
+   margin-bottom: 0.75rem;
+}
+
+.channel-link-code.hidden {
+   display: none;
+}
+
+.channel-code-row {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   flex-wrap: wrap;
+}
+
+.channel-code-ttl {
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+}
+
+.channel-code-instr {
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+   margin-top: 0.5rem;
+}
+
+.channel-code-instr code {
+   background: var(--bg-secondary);
+   padding: 1px 5px;
+   border-radius: 3px;
+   font-family: var(--font-mono, 'IBM Plex Mono', monospace);
+}
+
+/* Channel list + cards (cloned from .satellite-card) */
+.channel-list {
+   display: flex;
+   flex-direction: column;
+   gap: 0.75rem;
+   margin-bottom: 1rem;
+}
+
+.channel-list-empty {
+   color: var(--text-secondary);
+   font-style: italic;
+   padding: 1rem;
+   text-align: center;
+}
+
+.channel-card {
+   background: var(--bg-tertiary);
+   border: 1px solid var(--border-color);
+   border-radius: 6px;
+   padding: 0.75rem;
+   transition: border-color var(--transition-fast);
+}
+
+.channel-card:hover {
+   border-color: var(--accent-dim);
+}
+
+.channel-card.channel-disabled {
+   opacity: 0.65;
+}
+
+.channel-header {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   margin-bottom: 0.4rem;
+   flex-wrap: wrap;
+}
+
+/* Inline-editable name (commits on blur/Enter), styled to read as text
+ * until hovered/focused — mirrors the satellite ha_area inline input. */
+/* Editable name: a persistent hairline border signals "editable"; the
+ * border + background strengthen on hover, and :focus-visible carries a
+ * real focus ring (WCAG 2.4.7) rather than suppressing the outline. */
+.channel-name {
+   font-weight: 600;
+   color: var(--text-primary);
+   background: transparent;
+   border: 1px solid var(--border-color);
+   border-radius: 4px;
+   padding: 0.2rem 0.4rem;
+   flex: 1 1 auto;
+   min-width: 8rem;
+}
+
+.channel-name:hover {
+   background: var(--bg-secondary);
+}
+
+.channel-name:focus-visible {
+   border-color: var(--accent);
+   background: var(--bg-secondary);
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* Disabled (unlinked) channel: name renders as a read-only label span. */
+.channel-name-static {
+   font-weight: 600;
+   color: var(--text-secondary);
+   padding: 0.2rem 0.4rem;
+   flex: 1 1 auto;
+   min-width: 8rem;
+}
+
+.channel-status-text {
+   font-size: 0.8rem;
+   margin-left: auto;
+}
+
+.channel-status-text.online {
+   color: var(--success);
+}
+
+.channel-status-text.offline {
+   color: var(--text-secondary);
+}
+
+.channel-meta {
+   color: var(--text-secondary);
+   font-size: 0.8rem;
+   margin-bottom: 0.5rem;
+}
+
+.channel-controls {
+   display: flex;
+   gap: 0.5rem;
+}
+
+/* Narrow viewports: don't right-orphan the status text, and meet the 44px
+ * touch-target guideline (mirrors the satellite panel's mobile rules). */
+@media (max-width: 600px) {
+   .channel-status-text {
+      width: 100%;
+      margin-left: 0;
+   }
+
+   .channel-controls .btn,
+   .channel-provider-select,
+   #channel-generate-code-btn,
+   #refresh-channels-btn {
+      min-height: 44px;
+   }
+}

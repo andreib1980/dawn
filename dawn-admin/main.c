@@ -126,7 +126,13 @@ static void print_usage(const char *prog) {
            "                               [--provider telegram|discord|slack|sms]\n"
            "                                       Issue a one-time link code; the user sends\n"
            "                                       '/link <CODE>' from the chat client to bind\n"
-           "                                       it to their DAWN account.\n");
+           "                                       it to their DAWN account.\n"
+           "  messaging list-channels --user <u>     List the user's linked channels (table).\n"
+           "  messaging unlink --user <u> --name <c> Soft-delete (unlink) a channel by name.\n"
+           "  messaging reenable --user <u> --name <c>\n"
+           "                                       Re-enable a previously unlinked channel.\n"
+           "  messaging link-attempts [--provider p] [--limit n]\n"
+           "                                       Recent /link attempts (abuse review).\n");
    fprintf(stderr, "\n");
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  --yes, -y    Skip confirmation prompts\n");
@@ -2028,8 +2034,135 @@ int main(int argc, char *argv[]) {
          return 1;
       }
 
+      if (strcmp(subcmd, "list-channels") == 0) {
+         const char *username = NULL;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else {
+               fprintf(stderr, "Error: Unknown option for messaging list-channels: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         if (!username || !username[0]) {
+            fprintf(stderr, "Error: --user <username> is required\n");
+            return 1;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[ADMIN_MSG_CONTENT_MAX + 1];
+         admin_resp_code_t resp = admin_client_messaging_list_channels(fd, username, response,
+                                                                       sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "unlink") == 0) {
+         const char *username = NULL;
+         const char *name = NULL;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+               name = argv[++i];
+            } else {
+               fprintf(stderr, "Error: Unknown option for messaging unlink: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         if (!username || !username[0] || !name || !name[0]) {
+            fprintf(stderr, "Error: --user <username> and --name <channel> are required\n");
+            return 1;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = admin_client_messaging_unlink_channel(fd, username, name,
+                                                                        response, sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "reenable") == 0) {
+         const char *username = NULL;
+         const char *name = NULL;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+               username = argv[++i];
+            } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+               name = argv[++i];
+            } else {
+               fprintf(stderr, "Error: Unknown option for messaging reenable: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         if (!username || !username[0] || !name || !name[0]) {
+            fprintf(stderr, "Error: --user <username> and --name <channel> are required\n");
+            return 1;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = admin_client_messaging_reenable_channel(fd, username, name,
+                                                                          response,
+                                                                          sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "link-attempts") == 0) {
+         const char *provider = NULL;
+         int limit = 0;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
+               provider = argv[++i];
+            } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
+               limit = atoi(argv[++i]);
+            } else {
+               fprintf(stderr, "Error: Unknown option for messaging link-attempts: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[ADMIN_MSG_CONTENT_MAX + 1];
+         admin_resp_code_t resp = admin_client_messaging_link_attempts(fd, provider, limit,
+                                                                       response, sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s", response); /* table already newline-terminated */
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
       fprintf(stderr, "Error: Unknown messaging subcommand: %s\n", subcmd);
-      fprintf(stderr, "Available: generate-link-code\n");
+      fprintf(stderr,
+              "Available: generate-link-code, list-channels, unlink, reenable, link-attempts\n");
       return 1;
    }
 

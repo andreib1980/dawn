@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "auth/admin_socket_internal.h"
@@ -119,5 +120,172 @@ int handle_messaging_generate_link_code(int client_fd, const char *payload, uint
                "chat client to claim.",
                username, code, MESSAGING_LINK_TTL_SECONDS, code, code);
    }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}
+
+/* =============================================================================
+ * Messaging: list-channels (Phase 6)
+ *
+ * Payload: raw username (1..ADMIN_MESSAGING_USERNAME_MAX bytes, no NUL).
+ * Response: aligned text table (operator surface; the WebUI panel uses the
+ * JSON form, messaging_engine_list_channels_json, directly).
+ * ============================================================================= */
+
+int handle_messaging_list_channels(int client_fd, const char *payload, uint16_t payload_len) {
+   if (payload_len == 0 || payload_len >= ADMIN_MESSAGING_USERNAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[ADMIN_MESSAGING_USERNAME_MAX];
+   memcpy(username, payload, payload_len);
+   username[payload_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+
+   /* Operator surface gets the aligned text table; the WebUI panel uses
+    * the JSON form (messaging_engine_list_channels_json) instead. */
+   char buf[ADMIN_MSG_CONTENT_MAX + 1];
+   if (messaging_engine_list_channels_text(user.id, buf, sizeof(buf)) != MESSAGING_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "list_channels failed");
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, buf);
+}
+
+/* =============================================================================
+ * Messaging: unlink-channel (Phase 6)
+ *
+ * Wire format:
+ *   Byte 0:        username_len (1..ADMIN_MESSAGING_USERNAME_MAX)
+ *   Byte 1..1+U:   username
+ *   Byte 1+U..:    display_name (the channel to soft-delete)
+ * ============================================================================= */
+
+int handle_messaging_unlink_channel(int client_fd, const char *payload, uint16_t payload_len) {
+   if (payload_len < 3) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid unlink payload");
+   }
+   uint8_t uname_len = (uint8_t)payload[0];
+   if (uname_len == 0 || uname_len >= ADMIN_MESSAGING_USERNAME_MAX ||
+       (size_t)1 + uname_len >= payload_len) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[ADMIN_MESSAGING_USERNAME_MAX];
+   memcpy(username, payload + 1, uname_len);
+   username[uname_len] = '\0';
+
+   uint16_t name_len = (uint16_t)(payload_len - 1 - uname_len);
+   if (name_len == 0 || name_len >= ADMIN_MESSAGING_DISPLAY_NAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid channel name");
+   }
+   char display_name[ADMIN_MESSAGING_DISPLAY_NAME_MAX];
+   memcpy(display_name, payload + 1 + uname_len, name_len);
+   display_name[name_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+
+   int rc = messaging_engine_unlink_channel(user.id, display_name);
+   if (rc == MESSAGING_UNKNOWN_CHANNEL) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND,
+                                "No linked channel by that name for the user");
+   }
+   if (rc != MESSAGING_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "unlink failed");
+   }
+   char msg[128];
+   snprintf(msg, sizeof(msg), "Unlinked channel '%s' for user '%s'.", display_name, username);
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}
+
+/* =============================================================================
+ * Messaging: link-attempts (Phase 6) — operator abuse review
+ *
+ * Wire format:
+ *   Byte 0:           provider_len (0..ADMIN_MESSAGING_PROVIDER_HINT_MAX; 0 = all)
+ *   Byte 1..1+P:      provider     (may be empty)
+ *   Byte 1+P..1+P+2 (optional): limit, uint16 little-endian (0/absent = default)
+ * ============================================================================= */
+
+int handle_messaging_link_attempts(int client_fd, const char *payload, uint16_t payload_len) {
+   if (payload_len < 1) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid link-attempts payload");
+   }
+   uint8_t prov_len = (uint8_t)payload[0];
+   if (prov_len > ADMIN_MESSAGING_PROVIDER_HINT_MAX || (size_t)1 + prov_len > payload_len) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid provider filter");
+   }
+   char provider[ADMIN_MESSAGING_PROVIDER_HINT_MAX + 1] = { 0 };
+   if (prov_len > 0) {
+      memcpy(provider, payload + 1, prov_len);
+   }
+
+   int limit = 0; /* 0 → engine default (50) */
+   size_t off = (size_t)1 + prov_len;
+   if (payload_len - off >= 2) {
+      limit = (uint8_t)payload[off] | ((uint8_t)payload[off + 1] << 8);
+   }
+
+   char buf[ADMIN_MSG_CONTENT_MAX + 1];
+   int rc = messaging_engine_link_attempts_text((prov_len > 0) ? provider : NULL, 0, limit, buf,
+                                                sizeof(buf));
+   if (rc != MESSAGING_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "link-attempts query failed");
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, buf);
+}
+
+/* =============================================================================
+ * Messaging: reenable-channel (Phase 6) — inverse of unlink
+ *
+ * Wire format identical to unlink:
+ *   Byte 0:        username_len (1..ADMIN_MESSAGING_USERNAME_MAX)
+ *   Byte 1..1+U:   username
+ *   Byte 1+U..:    display_name (the soft-deleted channel to re-enable)
+ * ============================================================================= */
+
+int handle_messaging_reenable_channel(int client_fd, const char *payload, uint16_t payload_len) {
+   if (payload_len < 3) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid reenable payload");
+   }
+   uint8_t uname_len = (uint8_t)payload[0];
+   if (uname_len == 0 || uname_len >= ADMIN_MESSAGING_USERNAME_MAX ||
+       (size_t)1 + uname_len >= payload_len) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[ADMIN_MESSAGING_USERNAME_MAX];
+   memcpy(username, payload + 1, uname_len);
+   username[uname_len] = '\0';
+
+   uint16_t name_len = (uint16_t)(payload_len - 1 - uname_len);
+   if (name_len == 0 || name_len >= ADMIN_MESSAGING_DISPLAY_NAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid channel name");
+   }
+   char display_name[ADMIN_MESSAGING_DISPLAY_NAME_MAX];
+   memcpy(display_name, payload + 1 + uname_len, name_len);
+   display_name[name_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+
+   int rc = messaging_engine_reenable_channel(user.id, display_name);
+   if (rc == MESSAGING_UNKNOWN_CHANNEL) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND,
+                                "No unlinked channel by that name for the user");
+   }
+   if (rc == MESSAGING_NAME_TAKEN) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "An enabled channel with that name already exists");
+   }
+   if (rc != MESSAGING_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "reenable failed");
+   }
+   char msg[ADMIN_MESSAGING_DISPLAY_NAME_MAX + ADMIN_MESSAGING_USERNAME_MAX + 48];
+   snprintf(msg, sizeof(msg), "Re-enabled channel '%s' for user '%s'.", display_name, username);
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
 }

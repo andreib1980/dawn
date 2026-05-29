@@ -547,6 +547,28 @@ void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload)
 void handle_get_satellite_registration_key(ws_connection_t *conn);
 
 /* =============================================================================
+ * Messaging Channel Handler Functions (defined in webui_messaging.c)
+ *
+ * User-scoped (conn_require_auth + conn->auth_user_id) channel management
+ * for the Settings panel.  Mutations key on the stable row id.
+ * ============================================================================= */
+
+/** @brief List the authenticated user's linked messaging channels. */
+void handle_list_channels(ws_connection_t *conn);
+
+/** @brief Issue a one-time link code for the authenticated user (optional provider). */
+void handle_create_link_code(ws_connection_t *conn, struct json_object *payload);
+
+/** @brief Unlink (soft-delete) one of the user's channels by row id. */
+void handle_unlink_channel(ws_connection_t *conn, struct json_object *payload);
+
+/** @brief Rename one of the user's channels by row id. */
+void handle_rename_channel(ws_connection_t *conn, struct json_object *payload);
+
+/** @brief Re-enable one of the user's soft-deleted channels by row id. */
+void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload);
+
+/* =============================================================================
  * Satellite Handler Functions (defined in webui_satellite.c)
  * ============================================================================= */
 

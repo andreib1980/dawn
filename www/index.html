@@ -1782,6 +1782,40 @@ Format rules:
                   </div>
                </div>
 
+               <!-- Messaging Channels Section (all authenticated users) -->
+               <div class="settings-section collapsed" id="messaging-channels-section">
+                  <h3 class="section-header">
+                     <span class="section-icon">&#x1F4AC;</span>
+                     Messaging Channels
+                     <span class="section-toggle">&#9660;</span>
+                  </h3>
+                  <div class="section-content">
+                     <div class="channel-link-actions">
+                        <select
+                           id="channel-provider-select"
+                           class="channel-provider-select"
+                           aria-label="Provider for new link code"
+                        >
+                           <option value="">Any provider</option>
+                           <option value="telegram">Telegram</option>
+                           <option value="slack">Slack</option>
+                           <option value="discord">Discord</option>
+                           <option value="sms">SMS</option>
+                        </select>
+                        <button id="channel-generate-code-btn" class="btn btn-primary">
+                           Link a channel
+                        </button>
+                        <button id="refresh-channels-btn" class="btn btn-secondary">Refresh</button>
+                     </div>
+                     <div
+                        id="channel-link-code"
+                        class="channel-link-code hidden"
+                        aria-live="polite"
+                     ></div>
+                     <div id="channel-list" class="channel-list"></div>
+                  </div>
+               </div>
+
                <!-- My Settings Section (all authenticated users) -->
                <div class="settings-section collapsed" id="my-settings-section">
                   <h3 class="section-header">
@@ -2926,6 +2960,7 @@ token = "eyJ..."</pre
       <script defer src="/js/admin/metrics-panel.js"></script>
       <script defer src="/js/admin/users.js"></script>
       <script defer src="/js/admin/satellites.js"></script>
+      <script defer src="/js/admin/my-channels.js"></script>
       <script defer src="/js/admin/my-settings.js"></script>
       <script defer src="/js/admin/my-sessions.js"></script>
       <script defer src="/js/ui/export.js"></script>

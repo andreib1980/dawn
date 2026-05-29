@@ -757,4 +757,66 @@ admin_resp_code_t admin_client_messaging_generate_link_code(int fd,
                                                             char *response,
                                                             size_t resp_len);
 
+/**
+ * @brief List a user's linked channels (response is a JSON array).
+ *
+ * @param fd        Connected socket FD.
+ * @param username  Target user (1..ADMIN_MESSAGING_USERNAME_MAX bytes).
+ * @param response  Output buffer for the JSON response.
+ * @param resp_len  Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_messaging_list_channels(int fd,
+                                                       const char *username,
+                                                       char *response,
+                                                       size_t resp_len);
+
+/**
+ * @brief Soft-delete (unlink) a user's channel by display name.
+ *
+ * @param fd            Connected socket FD.
+ * @param username      Target user.
+ * @param display_name  Channel display name to unlink.
+ * @param response      Output buffer for daemon response text.
+ * @param resp_len      Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_messaging_unlink_channel(int fd,
+                                                        const char *username,
+                                                        const char *display_name,
+                                                        char *response,
+                                                        size_t resp_len);
+
+/**
+ * @brief Fetch recent /link attempts (abuse review) as an aligned table.
+ *
+ * @param fd              Connected socket FD.
+ * @param provider_filter NULL/"" = all providers; else exact match.
+ * @param limit           0 = daemon default (50); else max rows.
+ * @param response        Output buffer for the table text.
+ * @param resp_len        Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_messaging_link_attempts(int fd,
+                                                       const char *provider_filter,
+                                                       int limit,
+                                                       char *response,
+                                                       size_t resp_len);
+
+/**
+ * @brief Re-enable a previously unlinked channel by display name.
+ *
+ * @param fd            Connected socket FD.
+ * @param username      Target user.
+ * @param display_name  Soft-deleted channel display name to re-enable.
+ * @param response      Output buffer for daemon response text.
+ * @param resp_len      Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_messaging_reenable_channel(int fd,
+                                                          const char *username,
+                                                          const char *display_name,
+                                                          char *response,
+                                                          size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

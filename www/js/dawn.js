@@ -449,6 +449,21 @@
                if (typeof DawnSatellites !== 'undefined')
                   DawnSatellites.handleRegistrationKeyResponse(msg.payload);
                break;
+            // Messaging channel management responses (user-scoped)
+            case 'list_channels_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleListResponse(msg.payload);
+               break;
+            case 'create_link_code_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleCreateCodeResponse(msg.payload);
+               break;
+            case 'unlink_channel_response':
+            case 'rename_channel_response':
+            case 'reenable_channel_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleMutationResponse(msg.payload);
+               break;
             case 'get_my_settings_response':
                DawnMySettings.handleGetResponse(msg.payload);
                break;
@@ -953,6 +968,9 @@
          DawnElements.connectionStatus.textContent = 'Connected';
          if (typeof DawnSatellites !== 'undefined') {
             DawnSatellites.handleReconnect();
+         }
+         if (typeof DawnMessaging !== 'undefined') {
+            DawnMessaging.handleReconnect();
          }
          if (typeof DawnAlwaysOn !== 'undefined') {
             DawnAlwaysOn.handleReconnect();
@@ -1694,6 +1712,11 @@
          showConfirmModal: DawnSettings.showConfirmModal,
          trapFocus: DawnSettings.trapFocus,
       });
+      if (typeof DawnMessaging !== 'undefined') {
+         DawnMessaging.setCallbacks({
+            showConfirmModal: DawnSettings.showConfirmModal,
+         });
+      }
       DawnMySettings.setCallbacks({
          showConfirmModal: DawnSettings.showConfirmModal,
          setTheme: DawnTheme.set,

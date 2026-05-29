@@ -1673,3 +1673,107 @@ admin_resp_code_t admin_client_messaging_generate_link_code(int fd,
    }
    return recv_text_response(fd, response, resp_len);
 }
+
+admin_resp_code_t admin_client_messaging_list_channels(int fd,
+                                                       const char *username,
+                                                       char *response,
+                                                       size_t resp_len) {
+   if (!username || !username[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ulen = strlen(username);
+   if (ulen >= ADMIN_MESSAGING_USERNAME_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+   /* Payload is the raw username. */
+   if (send_message(fd, ADMIN_MSG_MESSAGING_LIST_CHANNELS, username, (uint16_t)ulen) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_messaging_unlink_channel(int fd,
+                                                        const char *username,
+                                                        const char *display_name,
+                                                        char *response,
+                                                        size_t resp_len) {
+   if (!username || !username[0] || !display_name || !display_name[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ulen = strlen(username);
+   size_t nlen = strlen(display_name);
+   if (ulen == 0 || ulen >= ADMIN_MESSAGING_USERNAME_MAX || nlen == 0 ||
+       nlen >= ADMIN_MESSAGING_DISPLAY_NAME_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+
+   /* Wire: byte 0 = username_len, [username], [display_name]. */
+   uint8_t buf[1 + ADMIN_MESSAGING_USERNAME_MAX + ADMIN_MESSAGING_DISPLAY_NAME_MAX];
+   buf[0] = (uint8_t)ulen;
+   memcpy(buf + 1, username, ulen);
+   memcpy(buf + 1 + ulen, display_name, nlen);
+   uint16_t total = (uint16_t)(1 + ulen + nlen);
+
+   if (send_message(fd, ADMIN_MSG_MESSAGING_UNLINK_CHANNEL, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_messaging_reenable_channel(int fd,
+                                                          const char *username,
+                                                          const char *display_name,
+                                                          char *response,
+                                                          size_t resp_len) {
+   if (!username || !username[0] || !display_name || !display_name[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ulen = strlen(username);
+   size_t nlen = strlen(display_name);
+   if (ulen == 0 || ulen >= ADMIN_MESSAGING_USERNAME_MAX || nlen == 0 ||
+       nlen >= ADMIN_MESSAGING_DISPLAY_NAME_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+
+   /* Wire: byte 0 = username_len, [username], [display_name] (same as unlink). */
+   uint8_t buf[1 + ADMIN_MESSAGING_USERNAME_MAX + ADMIN_MESSAGING_DISPLAY_NAME_MAX];
+   buf[0] = (uint8_t)ulen;
+   memcpy(buf + 1, username, ulen);
+   memcpy(buf + 1 + ulen, display_name, nlen);
+   uint16_t total = (uint16_t)(1 + ulen + nlen);
+
+   if (send_message(fd, ADMIN_MSG_MESSAGING_REENABLE_CHANNEL, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_messaging_link_attempts(int fd,
+                                                       const char *provider_filter,
+                                                       int limit,
+                                                       char *response,
+                                                       size_t resp_len) {
+   size_t plen = (provider_filter && provider_filter[0]) ? strlen(provider_filter) : 0;
+   if (plen > ADMIN_MESSAGING_PROVIDER_HINT_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+   if (limit < 0) {
+      limit = 0;
+   }
+
+   /* Wire: byte 0 = provider_len, [provider], then uint16 LE limit. */
+   uint8_t buf[1 + ADMIN_MESSAGING_PROVIDER_HINT_MAX + 2];
+   buf[0] = (uint8_t)plen;
+   if (plen > 0) {
+      memcpy(buf + 1, provider_filter, plen);
+   }
+   uint16_t lim = (uint16_t)(limit > 0xFFFF ? 0xFFFF : limit);
+   buf[1 + plen] = (uint8_t)(lim & 0xFF);
+   buf[1 + plen + 1] = (uint8_t)((lim >> 8) & 0xFF);
+   uint16_t total = (uint16_t)(1 + plen + 2);
+
+   if (send_message(fd, ADMIN_MSG_MESSAGING_LINK_ATTEMPTS, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
