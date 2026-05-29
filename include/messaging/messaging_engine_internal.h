@@ -1,0 +1,205 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Messaging engine — INTERNAL shared surface.
+ *
+ * Private to the src/messaging/messaging_engine*.c translation units.  Holds
+ * the cross-file types, module-state externs, and helper prototypes that the
+ * engine was split across (core / session / channels / link / inbound) when
+ * messaging_engine.c outgrew the 2,500-line hard limit.  NOT a public API —
+ * external consumers use include/messaging/messaging_engine.h.  See
+ * docs/MESSAGING_ENGINE_SPLIT_PLAN.md for the decomposition rationale.
+ *
+ * Each engine .c that includes this header must first
+ *   #define MESSAGING_ENGINE_INTERNAL_ALLOWED
+ * so an accidental include from outside the engine fails the build.
+ */
+#ifndef MESSAGING_ENGINE_INTERNAL_H
+#define MESSAGING_ENGINE_INTERNAL_H
+
+#ifndef MESSAGING_ENGINE_INTERNAL_ALLOWED
+#error "messaging_engine_internal.h is private to src/messaging/messaging_engine*.c"
+#endif
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "core/rate_limiter.h"
+#include "core/session_manager.h"
+#include "messaging/messaging_engine.h"
+
+struct json_object;
+
+/* =============================================================================
+ * Cross-file constants
+ *
+ * Only the constants referenced from more than one engine .c live here;
+ * file-local sizing constants stay in the .c that owns them.
+ * ============================================================================= */
+
+#define MESSAGING_INBOUND_QUEUE_DEPTH 32
+#define MESSAGING_MAX_SESSIONS 64
+
+/* Stack buffer for per-provider address_json blob construction
+ * (build_address_json_for).  Sized for Telegram chat_id + SMS phone_e164 +
+ * Discord/Slack extras (guild_id, team_id).  Shared by the channels, link,
+ * and inbound files, which all build the blob at their send sites. */
+#define MESSAGING_ADDRESS_JSON_BUF_SIZE 256
+
+/* =============================================================================
+ * Cross-file types
+ * ============================================================================= */
+
+typedef struct {
+   char provider[16];
+   char provider_address[128];
+   char sender_display[64];
+   char *body; /* heap-allocated */
+   int64_t timestamp;
+   int user_id; /* resolved at enqueue time; 0 if unresolved (shouldn't happen) */
+} inbound_item_t;
+
+typedef struct {
+   char provider[16];
+   char provider_address[128];
+   session_t *session;
+   time_t last_used;
+   /* Self-reset deferral flag.  Set when the LLM (running on THIS
+    * slot's session via the tool loop) calls
+    * `messaging.reset_conversation` targeting its own channel.
+    * Immediate reset would session_destroy the session out from under
+    * the worker that's still mid-dispatch.  Instead, the reset is
+    * deferred: process_inbound checks this flag after its dispatch
+    * returns + persistence completes, then performs the eviction +
+    * conv_id clear there.  Reset by the worker after processing. */
+   bool pending_reset;
+   /* Highest msg_id stamped on a message we (the messaging engine)
+    * have written or restored into this slot's session.  Used by the
+    * cross-channel staleness check in process_inbound — when an
+    * external writer (WebUI conversation panel, voice session, MCP)
+    * appends to the same conv between messaging turns, DB MAX(id)
+    * exceeds this value and we reload session->conversation_history
+    * from DB so the LLM doesn't operate on stale frozen context.
+    * Set: (a) during get_or_create_messaging_session's history
+    * restore, (b) after each successful conv_db_add_message_ex in
+    * process_inbound.  Zero means "no DB persistence yet" — the
+    * staleness check correctly no-ops in that case. */
+   int64_t last_known_msg_id;
+} session_slot_t;
+
+/* =============================================================================
+ * Module state — DEFINED in messaging_engine.c (core), shared across files.
+ *
+ * The driver registry, worker-thread handle, rate-limiter entry arrays, and
+ * the Crockford alphabet stay file-local to the .c that uses them and are NOT
+ * declared here.
+ * ============================================================================= */
+
+extern atomic_bool s_initialized;
+extern atomic_bool s_shutdown_requested;
+
+/* Inbound queue (bounded ring buffer) + its lock/cond. */
+extern inbound_item_t *s_inbound_queue[MESSAGING_INBOUND_QUEUE_DEPTH];
+extern size_t s_inbound_head;
+extern size_t s_inbound_tail;
+extern size_t s_inbound_count;
+extern pthread_mutex_t s_inbound_mutex;
+extern pthread_cond_t s_inbound_cond;
+
+/* In-memory session map: (provider, provider_address) -> session_t*. */
+extern session_slot_t s_session_slots[MESSAGING_MAX_SESSIONS];
+extern pthread_mutex_t s_session_slots_mutex;
+
+/* Rate limiters (entry-storage arrays are file-local to core). */
+extern rate_limiter_t s_inbound_link_limiter;
+extern rate_limiter_t s_inbound_general_limiter;
+extern rate_limiter_t s_outbound_per_user_limiter;
+
+/* =============================================================================
+ * Cross-file helper prototypes (promoted from static when the file split).
+ *
+ * Generic-named helpers stay un-prefixed because they are visible only here,
+ * not in the public header; the one exception is messaging_worker_thread,
+ * renamed from worker_thread so it doesn't shadow worker_pool.c's static
+ * symbol in a debugger/stack trace.
+ * ============================================================================= */
+
+/* Layer-boundary weak symbol — defined as a no-op in messaging_engine.c
+ * (core) so the engine has no hard dependency on the WebUI layer; the strong
+ * override in src/webui/webui_broadcasts.c wins when WebUI is linked.
+ * Declared here (rather than pulling in the Layer-4 webui_server.h) so the
+ * inbound file's process_inbound can call it without a layering violation. */
+void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
+
+/* core (driver registry) */
+const messaging_driver_t *find_driver(const char *name);
+
+/* channels (lookup / binding / outbound shaping helpers) */
+int lookup_channel_user(const char *provider,
+                        const char *provider_address,
+                        char *display_name_out,
+                        size_t display_name_buf_size);
+int64_t resolve_channel_conversation_id(const char *provider,
+                                        const char *provider_address,
+                                        int user_id);
+int clear_channel_conversation_id(const char *provider, const char *provider_address);
+bool sms_within_active_window(const char *sender_e164);
+void touch_channel_last_used(const char *provider, const char *provider_address);
+void build_address_json_for(const char *provider,
+                            const char *sender_address,
+                            char *buf,
+                            size_t buf_size);
+
+/* link (async send + link-code claim) */
+void engine_send_async(const messaging_driver_t *drv,
+                       int user_id,
+                       const char *provider_address,
+                       const char *address_json,
+                       const char *text);
+void link_attempt_log(const char *provider,
+                      const char *sender_address,
+                      const char *code_tried,
+                      const char *result);
+int handle_link_command(const char *provider, const char *sender_address, const char *code_part);
+
+/* inbound (dispatch + worker drain) */
+int engine_inbound_dispatch(const char *provider,
+                            const char *provider_address,
+                            const char *sender_display,
+                            const char *body,
+                            int64_t timestamp);
+void *messaging_worker_thread(void *arg);
+
+/* session (slot map + staleness reload) */
+void evict_session_slot(const char *provider, const char *provider_address);
+void slot_bump_last_known_msg_id(session_t *session, int64_t msg_id);
+void reload_session_history_if_stale(session_t *session,
+                                     const char *provider,
+                                     const char *provider_address,
+                                     int64_t conv_id,
+                                     int user_id);
+bool mark_pending_reset_if_self(const char *provider, const char *provider_address);
+session_t *get_or_create_messaging_session(const char *provider,
+                                           const char *provider_address,
+                                           int user_id,
+                                           int64_t conversation_id);
+
+#endif /* MESSAGING_ENGINE_INTERNAL_H */

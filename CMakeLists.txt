@@ -618,6 +618,10 @@ if(ENABLE_WEBUI)
         src/core/embedding_engine.c
         # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c
+        src/messaging/messaging_engine_session.c
+        src/messaging/messaging_engine_channels.c
+        src/messaging/messaging_engine_link.c
+        src/messaging/messaging_engine_inbound.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_sms.c
         src/messaging/messaging_discord.c
