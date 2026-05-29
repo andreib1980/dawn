@@ -73,6 +73,12 @@ OPTIONS:
    -c, --config FILE   Use alternate config file (default: .clang-format)
    --check             Check if files are formatted (exit 1 if not)
    --changed           Only format files changed since last commit or staged
+   --staged            Operate on the STAGED (git index) content of staged
+                       files — what a commit will actually record.  Unlike
+                       --changed (which reads working-tree files), --staged
+                       --check verifies the index blobs, so a clean working
+                       tree can't mask an unformatted staged blob.  Used by
+                       the pre-commit hook.
 
 EXAMPLES:
    $0                  Format all files in current directory
@@ -81,6 +87,7 @@ EXAMPLES:
    $0 --dry-run        Show what would be changed without formatting
    $0 --check          Check if code is properly formatted (CI mode)
    $0 --changed        Format only uncommitted/staged files (fast)
+   $0 --staged --check Verify staged index content (pre-commit hook mode)
 
 NOTE: Prettier formatting requires 'npm install' to be run first.
       If Prettier is not available, only C/C++ files are formatted.
@@ -453,6 +460,147 @@ format_changed_files() {
    return $overall_result
 }
 
+# Check the STAGED blob of a C/C++ file (git index content) through
+# clang-format.  This is what `git commit` records — checking it (rather than
+# the working-tree file, as --changed does) closes the "fix-after-stage" gap
+# where a clean working tree masks an unformatted blob still sitting in the
+# index.
+#
+# --assume-filename is REQUIRED: clang-format reading from stdin has no path,
+# so its main-header rule (the include matching the source basename sorts
+# first) can't fire, and it emits spurious include-sort violations on every
+# commit.  Passing the real path restores correct behavior.
+check_staged_c_blob() {
+   local file=$1
+   git show ":$file" 2>/dev/null \
+      | $CLANG_FORMAT --style=file:"$CONFIG_FILE" --dry-run --Werror \
+                      --assume-filename="$file" &> /dev/null
+}
+
+# Check the STAGED blob of a web file through Prettier.  Prettier has no
+# --check-from-stdin, so format the staged blob via --stdin-filepath and
+# compare against the staged input.  The `; echo X` sentinel on both sides
+# preserves trailing newlines (command substitution would otherwise strip
+# them, hiding a missing-final-newline diff).
+check_staged_web_blob() {
+   local file=$1
+   local staged formatted
+   staged=$(git show ":$file" 2>/dev/null; echo X)
+   formatted=$(git show ":$file" 2>/dev/null | npx prettier --stdin-filepath "$file" 2>/dev/null; echo X)
+   [[ "$staged" == "$formatted" ]]
+}
+
+format_staged_files() {
+   local dry_run=$1
+   local check_mode=$2
+   local verbose=$3
+   local prettier_available=$4
+
+   # Staged files only (index), additions/copies/modifications/renames —
+   # never deletions.  `--name-only` lists each path once, so no dedup needed.
+   local c_files=()
+   local web_files=()
+   while IFS= read -r file; do
+      [[ -z "$file" ]] && continue
+      if is_c_file "$file" || is_cpp_file "$file"; then
+         should_exclude_file "$file" && continue
+         local skip=0
+         for dir in "${EXCLUDE_DIRS[@]}"; do
+            if [[ "$file" == *"/$dir/"* || "$file" == "$dir/"* ]]; then
+               skip=1
+               break
+            fi
+         done
+         [[ $skip -eq 1 ]] && continue
+         c_files+=("$file")
+      fi
+      local ext="${file##*.}"
+      for e in "${WEB_EXTENSIONS[@]}"; do
+         if [[ "$ext" == "$e" ]]; then
+            web_files+=("$file")
+            break
+         fi
+      done
+   done < <(git diff --name-only --cached --diff-filter=ACMR 2>/dev/null)
+
+   local overall_result=0
+
+   # --- C/C++ (staged blobs) ---
+   echo "=== Checking C/C++ (staged index content) ==="
+   if [[ ${#c_files[@]} -eq 0 ]]; then
+      log_info "No staged C/C++ files"
+   else
+      local count=0
+      local failed=0
+      for file in "${c_files[@]}"; do
+         if check_staged_c_blob "$file"; then
+            [[ $verbose -eq 1 ]] && log_success "OK (staged): $file"
+            ((count++))
+         else
+            if [[ $check_mode -eq 1 ]]; then
+               log_error "Not formatted (staged): $file"
+            elif [[ $dry_run -eq 1 ]]; then
+               log_info "Would format (staged): $file"
+            else
+               # Write path: format the working-tree copy in place; the index
+               # must then be re-staged to pick up the fix.
+               if [[ -f "$file" ]]; then
+                  format_file "$file" 0 0 "$verbose"
+                  log_warning "Formatted working tree — re-stage to fix the index: git add $file"
+               else
+                  log_warning "Staged blob unformatted but no working-tree file: $file (re-stage after formatting)"
+               fi
+            fi
+            ((failed++))
+         fi
+      done
+      echo ""
+      if [[ $failed -eq 0 ]]; then
+         log_success "All $count staged C/C++ files are properly formatted"
+      else
+         log_error "$failed of $((count + failed)) staged C/C++ files need formatting"
+         overall_result=1
+      fi
+   fi
+
+   # --- Web (staged blobs) ---
+   if [[ $prettier_available -eq 1 && ${#web_files[@]} -gt 0 ]]; then
+      echo ""
+      echo "=== Checking JS/CSS/HTML (staged index content) ==="
+      local wcount=0
+      local wfailed=0
+      for file in "${web_files[@]}"; do
+         if check_staged_web_blob "$file"; then
+            [[ $verbose -eq 1 ]] && log_success "OK (staged): $file"
+            ((wcount++))
+         else
+            if [[ $check_mode -eq 1 ]]; then
+               log_error "Not formatted (staged): $file"
+            elif [[ $dry_run -eq 1 ]]; then
+               log_info "Would format (staged): $file"
+            else
+               if [[ -f "$file" ]]; then
+                  npx prettier --write "$file" &> /dev/null
+                  log_warning "Formatted working tree — re-stage to fix the index: git add $file"
+               else
+                  log_warning "Staged blob unformatted but no working-tree file: $file (re-stage after formatting)"
+               fi
+            fi
+            ((wfailed++))
+         fi
+      done
+      echo ""
+      if [[ $wfailed -eq 0 ]]; then
+         log_success "All $wcount staged web files are properly formatted"
+      else
+         log_error "$wfailed of $((wcount + wfailed)) staged web files need formatting"
+         overall_result=1
+      fi
+   fi
+
+   return $overall_result
+}
+
 ###############################################################################
 # Main
 ###############################################################################
@@ -463,6 +611,7 @@ main() {
    local check_mode=0
    local verbose=0
    local changed_only=0
+   local staged_only=0
 
    # Parse arguments
    while [[ $# -gt 0 ]]; do
@@ -481,6 +630,10 @@ main() {
             ;;
          --changed)
             changed_only=1
+            shift
+            ;;
+         --staged)
+            staged_only=1
             shift
             ;;
          -v|--verbose)
@@ -525,8 +678,16 @@ main() {
       prettier_available=1
    fi
 
+   # --staged and --changed are mutually exclusive; --staged wins.
+   if [[ $staged_only -eq 1 && $changed_only -eq 1 ]]; then
+      log_warning "--staged and --changed both given; using --staged (index content)"
+      changed_only=0
+   fi
+
    # Show what we're doing
-   if [[ $changed_only -eq 1 ]]; then
+   if [[ $staged_only -eq 1 ]]; then
+      log_info "STAGED MODE: Operating on staged index content"
+   elif [[ $changed_only -eq 1 ]]; then
       log_info "CHANGED MODE: Formatting only uncommitted/staged files"
    elif [[ $dry_run -eq 1 ]]; then
       log_info "DRY RUN: Checking what would be formatted in: $target_dir"
@@ -541,6 +702,13 @@ main() {
 
    # Track overall result
    local overall_result=0
+
+   if [[ $staged_only -eq 1 ]]; then
+      if ! format_staged_files "$dry_run" "$check_mode" "$verbose" "$prettier_available"; then
+         overall_result=1
+      fi
+      exit $overall_result
+   fi
 
    if [[ $changed_only -eq 1 ]]; then
       if ! format_changed_files "$dry_run" "$check_mode" "$verbose" "$prettier_available"; then

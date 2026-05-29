@@ -51,8 +51,11 @@ if [ ! -f "./format_code.sh" ]; then
    exit 1
 fi
 
-echo -e "${BLUE}Pre-commit: checking formatting of staged files…${NC}"
-./format_code.sh --changed --check
+# Check the STAGED index content (--staged), not the working tree (--changed):
+# the index is what this commit records, so a working tree formatted after a
+# `git add` can't mask an unformatted staged blob.
+echo -e "${BLUE}Pre-commit: checking formatting of staged content…${NC}"
+./format_code.sh --staged --check
 FORMAT_RESULT=$?
 
 if [ $FORMAT_RESULT -ne 0 ]; then
