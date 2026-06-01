@@ -65,8 +65,10 @@ sudo apt update && sudo apt install -y \
   meson ninja-build libabsl-dev \
   libmupdf-dev libfreetype-dev libharfbuzz-dev \
   libzip-dev libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev \
-  libical-dev libxml2-dev
+  libical-dev libxml2-dev libstemmer-dev
 ```
+
+> **`libstemmer-dev` note**: Provides Porter2 stemming for the memory subsystem's BM25 keyword index. Required as of May 2026 — without it the build fails to link `memory_stem.c`.
 
 > **Package name note**: On Ubuntu 22.04 (including Jetson Linux R36), the abseil package is `libabsl-dev`. On Ubuntu 24.04+, it may be named `libabseil-dev`. If one isn't found, try the other.
 
@@ -238,6 +240,7 @@ nano secrets.toml
 openai_api_key = "sk-your-openai-key"
 # claude_api_key = "sk-ant-your-claude-key"
 # gemini_api_key = "your-gemini-key"
+# openrouter_api_key = "sk-or-your-key"   # Optional: OpenRouter gateway (one key, any model) — set [llm.cloud] use_openrouter = true
 # plex_token = "your-plex-token"          # Optional: adds Plex library to unified music DB
 # home_assistant_token = "your-ha-token"  # Optional: for Home Assistant smart home control
 # tavily_api_key = "tvly-your-tavily-key" # Optional: commercial search + URL extract (see Tavily section)
@@ -795,6 +798,22 @@ All accounts are managed through the **WebUI Settings > Email Accounts** panel.
 - *"Send an email to bob@example.com about the meeting tomorrow"* (two-step: draft → confirm)
 - *"Delete that email"* (two-step: pending → confirm)
 - *"Archive that email"* (single-step, non-destructive)
+
+### Messaging Channels (Telegram / Slack / Discord / SMS)
+
+Chat with DAWN from the apps you already use. Link a Telegram, Slack, Discord, or SMS conversation to your account and the full assistant — tools, memory, scheduler — is available from that chat client. Each channel becomes a persistent conversation that appears in your WebUI history.
+
+Happy path:
+
+1. Add the provider's bot/app token to `secrets.toml` (Telegram `telegram_bot_token`, Discord `discord_bot_token`, Slack `slack_app_token` + `slack_bot_token`; SMS routes through ECHO and needs no token). Restart DAWN — the driver loads only when its token is present.
+2. Generate a one-time link code:
+   ```bash
+   ./build/dawn-admin messaging generate-link-code --user <username>
+   ```
+   (or use the WebUI **Settings → Messaging Channels** panel).
+3. From the chat app, send `/link CODE` to the bot (Slack: `link CODE`, no slash).
+
+After linking, just talk — no wake word needed. Send `/new` to reset the conversation. See **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** for per-provider bot/app creation, the SMS active-conversation window, scheduler delivery, and channel management.
 
 ## Troubleshooting
 

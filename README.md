@@ -46,7 +46,7 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 ### Voice Intelligence
 
 - **Speech Recognition** — Whisper ASR with GPU acceleration on Jetson (2.3x–5.5x faster than real-time). Intelligent voice activity detection knows when you're speaking and when you've stopped.
-- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3. Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
+- **Multi-Provider LLM** — Cloud: OpenAI GPT-5, Anthropic Claude 4.6, Google Gemini 2.5/3, or any model through the OpenRouter gateway. Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
 - **Text-to-Speech** — Piper TTS with ONNX Runtime. Multiple voices included. Text preprocessing for natural phrasing.
 - **Extended Thinking** — Deep reasoning mode for complex queries:
    - Claude: thinking budget control with collapsible blocks
@@ -79,6 +79,17 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 - **Debug Mode** — Toggle to view tool results, commands, and system messages.
 
 <!-- TODO: Screenshot of WebUI on desktop and mobile -->
+
+### Messaging Channels (Chat Apps & SMS)
+
+- **Talk to DAWN from the apps you already use** — Link a **Telegram**, **Slack**, **Discord**, or **SMS** conversation to your account and get the full assistant (tools, memory, scheduler) from your phone or desktop chat client, no WebUI required.
+- **One-time link flow** — Generate a link code in the WebUI or via `dawn-admin`, send `/link CODE` from the chat app, and you're connected. Drivers load only when their token is configured.
+- **Forever-conversations** — Each channel maps to one persistent conversation that shows up in WebUI history and feeds memory extraction like any other session. `/new` resets the thread.
+- **Scheduler delivery** — Briefings, reminders, and alarms can be delivered to a messaging channel instead of spoken aloud — "send me a morning briefing on Telegram."
+- **Channel management** — Rename, unlink (history preserved), and re-enable channels from the WebUI panel or the `dawn-admin messaging` operator commands.
+- **Setup**: [docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md).
+
+<!-- TODO: Screenshot of a Telegram/Slack conversation with DAWN -->
 
 ### Smart Home & IoT
 
@@ -199,6 +210,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 |---------|-------------|-------------|
 | **CalDAV Calendar** | Query and manage calendar events by voice | [GETTING_STARTED.md — CalDAV](GETTING_STARTED.md#caldav-calendar) |
 | **Email (IMAP/SMTP)** | Check, read, search, send, trash, and archive email by voice | [GETTING_STARTED.md — Email](GETTING_STARTED.md#email-imapsmtp) |
+| **Messaging Channels** | Chat with DAWN from Telegram, Slack, Discord, or SMS | [docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
 | **Google OAuth** | Connect Google Calendar and Gmail via OAuth 2.0 (no app password needed) | [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md) |
 | **Home Assistant** | Control smart home devices by voice | [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) |
 | **SearXNG Web Search** | Privacy-focused voice-activated web search | [GETTING_STARTED.md — SearXNG](GETTING_STARTED.md#searxng-setup-for-web-search) |
@@ -220,6 +232,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[CODING_STYLE_GUIDE.md](CODING_STYLE_GUIDE.md)** | Code formatting and development standards |
 | **[docs/LLM_INTEGRATION_GUIDE.md](docs/LLM_INTEGRATION_GUIDE.md)** | LLM setup for cloud and local providers |
 | **[docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md)** | Home Assistant integration setup |
+| **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** | Link Telegram / Slack / Discord / SMS to DAWN |
 | **[docs/WEBSOCKET_PROTOCOL.md](docs/WEBSOCKET_PROTOCOL.md)** | WebSocket protocol reference (all message types) |
 | **[docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** | Tier 1 satellite (RPi) install, build, config, deployment, troubleshooting |
 | **[dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)** | Tier 2 satellite (ESP32-S3, Arduino) setup |
