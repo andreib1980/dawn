@@ -397,7 +397,11 @@ free(response);
 response = NULL;
 ```
 
-### Memory Usage Estimates
+### Memory Usage
+
+"How big is the model?" and "how much RAM does DAWN use?" are different questions, and on a CUDA build the answers are far apart: the running daemon's footprint is dominated by the **CUDA runtime** (context + BLAS/DNN workspaces), not the model weights. This section covers both — first the per-artifact sizes, then the measured daemon footprint.
+
+#### Model & buffer artifacts
 
 | Component    | Memory Usage | Notes                      |
 | ------------ | ------------ | -------------------------- |
@@ -408,7 +412,24 @@ response = NULL;
 | Ring Buffer  | ~256 KB      | 16kHz × 16-bit × 8s buffer |
 | Conversation | ~10 KB       | History for LLM context    |
 
-**Total (Whisper)**: ~230 MB RAM minimum. **Total (Vosk)**: ~140 MB RAM minimum.
+These are the artifacts in isolation — they exclude the CUDA runtime, cuBLAS/cuDNN workspaces, and per-request heap, which is why the daemon's resident set is several times larger on a GPU build (below).
+
+#### Measured daemon footprint
+
+*(Jetson Orin, JetPack R36, release build, GPU Whisper base, cloud LLM, 1 WebUI + 1 satellite connected.)* Unified memory — the GPU shares system RAM — so the resident set splits into two pools:
+
+| Pool | Approx | Contents |
+|---|---|---|
+| CPU-side RSS | ~435 MB | app heap, thread stacks + CUDA host-pinned + ONNX-Runtime arenas, resident library code, Whisper CPU mmap |
+| GPU / unified | ~1.12 GB | CUDA context + cuBLAS/cuDNN workspaces + Whisper weights + ggml compute buffers |
+| **Total resident (VmRSS)** | **~1.56 GB** | peak ~1.63 GB; the number `top`/`ps` report |
+
+- **The CUDA runtime dominates, not the model.** Whisper *base* weights are ~140 MB; the rest of the GPU pool is the CUDA context + BLAS/DNN workspaces. A smaller Whisper model (`tiny`) trims the GPU pool modestly, not the fixed CUDA cost.
+- **VSZ (~19 GB) is not real memory.** CUDA plus ~19 thread stacks reserve large virtual ranges that stay mostly uncommitted; ignore it.
+- **The LLM isn't in this number with a cloud provider** (OpenAI/Claude/Gemini ≈ 0 local RAM). A **local** LLM (llama.cpp/Ollama) adds its model size on top — commonly **+2–8 GB**.
+- **Threads / clients.** ~22 threads with two clients connected; the thread stacks cost only ~17 MB resident in total. Each additional connected client adds roughly one handler thread plus a small session-heap slice — a few MB for an active WebUI audio session (its per-connection ASR/TTS pipeline), ~1–2 MB for a text/satellite client. Client scaling is modest next to the fixed CUDA/model footprint.
+- **A debug build runs ~75 MB heavier** on the CPU side (debug allocator + symbols); the GPU pool is identical.
+- On Tegra the GPU pool counts toward VmRSS but is allocated via `nvmap`, so it does **not** appear in `/proc/<pid>/smaps`; per-library GPU attribution requires instrumenting allocations (an `LD_PRELOAD` `cudaMalloc` hook or Nsight Systems).
 
 ---
 

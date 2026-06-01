@@ -154,6 +154,8 @@ DAWN remembers facts, preferences, and relationships about its users across sess
 
 DAWN runs on a range of hardware. These tables can help you choose the right platform.
 
+> **Runtime memory:** the daemon's resident set is roughly **~1.6 GB** on a Jetson with GPU-accelerated Whisper and a cloud LLM — most of it the CUDA runtime, not the models. A local LLM adds its model size on top (commonly +2–8 GB). See [ARCHITECTURE.md — Memory Management](ARCHITECTURE.md#memory-management) for the full breakdown.
+
 ### Server Hardware (runs the DAWN daemon)
 
 #### Tier 1: Excellent (Production Ready)
