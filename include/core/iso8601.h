@@ -76,6 +76,25 @@ time_t iso8601_parse(const char *iso_str);
  */
 int64_t iso8601_parse_date_utc(const char *iso_str);
 
+/**
+ * @brief Format a Gregorian date as "YYYY-MM-DD" into @p out.
+ *
+ * Convenience for the many sites that print struct tm fields.  Components are
+ * normalized to their valid printed widths (year mod 10000, month/day mod 100,
+ * forced non-negative), so the result is always exactly 10 chars + NUL.  That
+ * also lets the compiler prove the output fits, which silences
+ * -Wformat-truncation at the call sites — `struct tm` fields are plain `int`,
+ * a range the compiler otherwise can't bound.
+ *
+ * @param year     Full year (e.g. tm_year + 1900).
+ * @param month    Month 1-12 (e.g. tm_mon + 1).
+ * @param day      Day of month 1-31.
+ * @param out      Output buffer; needs >= 11 bytes.  NUL-terminated on return
+ *                 (set empty if @p out_size < 11).
+ * @param out_size Size of @p out.
+ */
+void iso8601_format_date(int year, int month, int day, char *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

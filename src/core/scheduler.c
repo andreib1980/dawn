@@ -177,14 +177,15 @@ static void generate_announcement_text(const sched_event_t *event, char *buf, si
       }
       case SCHED_EVENT_REMINDER:
          if (event->message[0])
-            snprintf(buf, buf_size, "Reminder: %s", event->message);
+            snprintf(buf, buf_size, "Reminder: %.*s", (int)(buf_size > 11 ? buf_size - 11 : 0),
+                     event->message);
          else
             snprintf(buf, buf_size, "You have a reminder.");
          break;
       case SCHED_EVENT_TASK:
          if (event->tool_name[0])
-            snprintf(buf, buf_size, "Scheduled task complete: %s %s", event->tool_action,
-                     event->tool_value);
+            snprintf(buf, buf_size, "Scheduled task complete: %s %.*s", event->tool_action,
+                     (int)(buf_size > 90 ? buf_size - 90 : 0), event->tool_value);
          else
             snprintf(buf, buf_size, "Scheduled task complete.");
          break;

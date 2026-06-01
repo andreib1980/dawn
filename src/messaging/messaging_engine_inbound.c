@@ -62,7 +62,9 @@
 /* Per-turn channel-hint buffer (the SMS system-prompt augmentation).
  * Holds the base hint plus an optional truncation-feedback append
  * when the previous reply overflowed.  See provider_outbound_for. */
-#define MESSAGING_CHANNEL_HINT_BUF_SIZE 1024
+/* ~640-char SMS constraints block + ~460-char truncation-feedback append
+ * (~1.1 KB total) — 1024 silently truncated the prompt; 2048 leaves headroom. */
+#define MESSAGING_CHANNEL_HINT_BUF_SIZE 2048
 
 /* enqueue_inbound is referenced by engine_inbound_dispatch (below) before its
  * definition further down; the rest of the inbound surface is in source order. */

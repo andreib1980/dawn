@@ -1299,8 +1299,11 @@ static admin_resp_code_t recv_text_response(int fd, char *response, size_t resp_
          size_t remaining = text_len - to_read;
          while (remaining > 0) {
             size_t chunk = (remaining < sizeof(discard)) ? remaining : sizeof(discard);
-            read(fd, discard, chunk);
-            remaining -= chunk;
+            ssize_t got = read(fd, discard, chunk);
+            if (got <= 0) {
+               break; /* connection closed or error — stop draining */
+            }
+            remaining -= (size_t)got;
          }
       }
    } else if (response && resp_len > 0) {

@@ -44,6 +44,7 @@
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
 #include "core/crypto_store.h"
+#include "core/iso8601.h"
 #include "core/path_utils.h"
 #include "logging.h"
 #include "tools/caldav_client.h"
@@ -576,13 +577,13 @@ static void expand_rrule(int64_t event_id,
       if (ce->all_day) {
          struct tm occ_tm;
          gmtime_r(&occ_start, &occ_tm);
-         snprintf(occ.dtstart_date, sizeof(occ.dtstart_date), "%04d-%02d-%02d",
-                  occ_tm.tm_year + 1900, occ_tm.tm_mon + 1, occ_tm.tm_mday);
+         iso8601_format_date(occ_tm.tm_year + 1900, occ_tm.tm_mon + 1, occ_tm.tm_mday,
+                             occ.dtstart_date, sizeof(occ.dtstart_date));
          time_t end_t = occ_start + duration;
          struct tm end_tm;
          gmtime_r(&end_t, &end_tm);
-         snprintf(occ.dtend_date, sizeof(occ.dtend_date), "%04d-%02d-%02d", end_tm.tm_year + 1900,
-                  end_tm.tm_mon + 1, end_tm.tm_mday);
+         iso8601_format_date(end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
+                             occ.dtend_date, sizeof(occ.dtend_date));
       }
 
       calendar_db_occurrence_insert(&occ, NULL);
@@ -767,16 +768,16 @@ int calendar_service_today(int user_id,
 
    /* Query all-day events for today's date */
    char date_str[16];
-   snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", local_tm.tm_year + 1900,
-            local_tm.tm_mon + 1, local_tm.tm_mday);
+   iso8601_format_date(local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday, date_str,
+                       sizeof(date_str));
 
    /* Next day for exclusive end */
    char next_date[16];
    struct tm next_tm = local_tm;
    next_tm.tm_mday += 1;
    mktime(&next_tm); /* normalize */
-   snprintf(next_date, sizeof(next_date), "%04d-%02d-%02d", next_tm.tm_year + 1900,
-            next_tm.tm_mon + 1, next_tm.tm_mday);
+   iso8601_format_date(next_tm.tm_year + 1900, next_tm.tm_mon + 1, next_tm.tm_mday, next_date,
+                       sizeof(next_date));
 
    if (count < max_count) {
       int allday = 0;
@@ -1039,12 +1040,12 @@ int calendar_service_add(int user_id,
    if (all_day) {
       struct tm ds;
       gmtime_r(&start, &ds);
-      snprintf(evt.dtstart_date, sizeof(evt.dtstart_date), "%04d-%02d-%02d", ds.tm_year + 1900,
-               ds.tm_mon + 1, ds.tm_mday);
+      iso8601_format_date(ds.tm_year + 1900, ds.tm_mon + 1, ds.tm_mday, evt.dtstart_date,
+                          sizeof(evt.dtstart_date));
       struct tm de;
       gmtime_r(&end, &de);
-      snprintf(evt.dtend_date, sizeof(evt.dtend_date), "%04d-%02d-%02d", de.tm_year + 1900,
-               de.tm_mon + 1, de.tm_mday);
+      iso8601_format_date(de.tm_year + 1900, de.tm_mon + 1, de.tm_mday, evt.dtend_date,
+                          sizeof(evt.dtend_date));
    }
    if (rrule)
       snprintf(evt.rrule, sizeof(evt.rrule), "%s", rrule);
@@ -1139,12 +1140,12 @@ int calendar_service_update(int user_id,
    if (evt.all_day) {
       struct tm ds;
       gmtime_r(&evt.dtstart, &ds);
-      snprintf(evt.dtstart_date, sizeof(evt.dtstart_date), "%04d-%02d-%02d", ds.tm_year + 1900,
-               ds.tm_mon + 1, ds.tm_mday);
+      iso8601_format_date(ds.tm_year + 1900, ds.tm_mon + 1, ds.tm_mday, evt.dtstart_date,
+                          sizeof(evt.dtstart_date));
       struct tm de;
       gmtime_r(&evt.dtend, &de);
-      snprintf(evt.dtend_date, sizeof(evt.dtend_date), "%04d-%02d-%02d", de.tm_year + 1900,
-               de.tm_mon + 1, de.tm_mday);
+      iso8601_format_date(de.tm_year + 1900, de.tm_mon + 1, de.tm_mday, evt.dtend_date,
+                          sizeof(evt.dtend_date));
    }
    sanitize_ical_value(evt.summary);
    sanitize_ical_value(evt.location);

@@ -56,7 +56,7 @@ static void get_key_path(char *out, size_t out_len) {
    } else {
       snprintf(expanded, sizeof(expanded), "/var/lib/dawn");
    }
-   snprintf(out, out_len, "%s/dawn.key", expanded);
+   snprintf(out, out_len, "%.*s/dawn.key", (int)(out_len > 10 ? out_len - 10 : 0), expanded);
 }
 
 /* =============================================================================

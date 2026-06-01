@@ -133,7 +133,12 @@ static bool validate_db_filename(const char *filename) {
  * @brief Build full filesystem path for an image file
  */
 static void build_filepath(const char *filename, char *out, size_t out_size) {
-   snprintf(out, out_size, "%s/%s", s_store.images_dir, filename);
+   /* images_dir is a short, config-derived directory and image filenames are
+    * short hashes, so this never truncates in practice.  Bound each field to
+    * half the output so the result provably fits — the compiler can't prove
+    * out_size holds dir + '/' + name otherwise (-Wformat-truncation). */
+   snprintf(out, out_size, "%.*s/%.*s", (int)(out_size > 2 ? out_size / 2 - 1 : 0),
+            s_store.images_dir, (int)(out_size > 2 ? out_size / 2 - 1 : 0), filename);
 }
 
 /**
@@ -146,7 +151,10 @@ static int write_file_atomic(const char *final_path,
                              const void *data,
                              size_t size) {
    char tmppath[IMAGE_PATH_MAX + 16];
-   snprintf(tmppath, sizeof(tmppath), "%s/.%s.tmp", s_store.images_dir, filename);
+   /* Same provably-fits bound as build_filepath; "/." + ".tmp" + NUL = 7. */
+   int tp_half = (int)((sizeof(tmppath) - 7) / 2);
+   snprintf(tmppath, sizeof(tmppath), "%.*s/.%.*s.tmp", tp_half, s_store.images_dir, tp_half,
+            filename);
 
    int fd = open(tmppath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0640);
    if (fd < 0) {

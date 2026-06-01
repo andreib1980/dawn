@@ -30,6 +30,22 @@
 #include <stdio.h>
 #include <string.h>
 
+void iso8601_format_date(int year, int month, int day, char *out, size_t out_size) {
+   if (!out || out_size == 0) {
+      return;
+   }
+   if (out_size < 11) {
+      out[0] = '\0';
+      return;
+   }
+   /* Normalize each component to a fixed printed width so the output is
+    * provably 10 chars + NUL (see header note on -Wformat-truncation). */
+   int y = ((year % 10000) + 10000) % 10000;
+   int mo = ((month % 100) + 100) % 100;
+   int d = ((day % 100) + 100) % 100;
+   snprintf(out, out_size, "%04d-%02d-%02d", y, mo, d);
+}
+
 /**
  * @brief Parse timezone offset from ISO 8601 suffix.
  *

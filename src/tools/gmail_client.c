@@ -885,8 +885,8 @@ static int parse_batch_response(const char *resp_data,
                                 int *out_count) {
    *out_count = 0;
 
-   /* Build delimiter: "--boundary" */
-   char delim[256];
+   /* Build delimiter: "--boundary" (sized for "--" + longest boundary + NUL). */
+   char delim[512];
    snprintf(delim, sizeof(delim), "--%s", boundary);
    size_t delim_len = strlen(delim);
 

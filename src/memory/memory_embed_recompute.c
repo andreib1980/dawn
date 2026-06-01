@@ -603,7 +603,11 @@ static void *recompute_thread_fn(void *arg) {
    (void)arg;
 
 #ifdef __linux__
-   nice(10);
+   /* Best-effort priority drop for this background worker.  nice() can return
+    * -1 on success, so there's nothing useful to check — consume the result
+    * only to satisfy warn_unused_result. */
+   int nice_unused = nice(10);
+   (void)nice_unused;
 #endif
 
    OLOG_INFO("memory_embed_recompute: worker started (model_id='%s')", g_config.memory.model_id);

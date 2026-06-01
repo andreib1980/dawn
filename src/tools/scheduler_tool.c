@@ -708,8 +708,10 @@ static char *handle_query(struct json_object *details, int user_id) {
             off += snprintf(result + off, sizeof(result) - off, " Runs %s", event.tool_name);
             if (off < sizeof(result) && event.tool_action[0])
                off += snprintf(result + off, sizeof(result) - off, ".%s", event.tool_action);
-            if (off < sizeof(result) && event.tool_value[0])
-               snprintf(result + off, sizeof(result) - off, "(%s)", event.tool_value);
+            if (off + 4 <= sizeof(result) && event.tool_value[0])
+               snprintf(result + off, sizeof(result) - off, "(%.*s)",
+                        (int)((sizeof(result) - off) > 3 ? (sizeof(result) - off) - 3 : 0),
+                        event.tool_value);
          }
       } else if (written > 0 && (size_t)written < sizeof(result) &&
                  event.event_type == SCHED_EVENT_TASK && event.tool_name[0]) {
@@ -717,7 +719,7 @@ static char *handle_query(struct json_object *details, int user_id) {
          off += snprintf(result + off, sizeof(result) - off, " Runs %s", event.tool_name);
          if (off < sizeof(result) && event.tool_action[0])
             off += snprintf(result + off, sizeof(result) - off, ".%s", event.tool_action);
-         if (off < sizeof(result) && event.tool_value[0])
+         if (off + 4 <= sizeof(result) && event.tool_value[0])
             snprintf(result + off, sizeof(result) - off, "(%s)", event.tool_value);
       }
    }

@@ -4,6 +4,13 @@
 ### Philosophy
 This style guide balances professional best practices with hacker pragmatism. Code should be readable, maintainable, and elegant—but never at the expense of progress. When in doubt, favor clarity and function over formalism.
 
+### Zero Warnings
+Local code compiles **warning-free**. A warning is a defect — fix the root cause, don't silence it.
+
+- **Check an optimized/release build, not just debug.** `-O2` + `_FORTIFY_SOURCE` surface `-Wformat-truncation`, `-Wstringop-*`, and similar that an unoptimized debug build never triggers. A change isn't "clean" until both build without warnings.
+- **Fix, don't suppress.** Bound a `%s` that can truncate with a precision (`%.*s`), size the destination correctly, consume `warn_unused_result` returns (`read`, `nice`, …), and add the missing include for an implicit declaration. Reserve compiler diagnostic-ignore pragmas for genuinely-unfixable third-party headers — never for our own code.
+- **Scope:** first-party (project-owned) source only. Third-party dependencies and vendored submodules are exempt — we don't own their source.
+
 ---
 
 ## 1. Indentation & Spacing
