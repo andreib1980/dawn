@@ -311,6 +311,22 @@ int memory_db_entity_maybe_auto_promote_user_self(int user_id,
    return MEMORY_DB_NOT_FOUND;
 }
 
+/* memory_extraction.c aliases an abstract "user" entity to the user_self
+ * anchor during extraction; the bench has no user_self anchor so this is a
+ * no-op, but the symbol must resolve. */
+int memory_db_entity_maybe_alias_user_to_self(int user_id,
+                                              int64_t entity_id,
+                                              const char *canonical_name,
+                                              bool *out_aliased) {
+   (void)user_id;
+   (void)entity_id;
+   (void)canonical_name;
+   if (out_aliased != NULL) {
+      *out_aliased = false;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
 /* memory_callback.c's `merge_entities` tool action calls this; the bench
  * never reaches that path but the symbol must resolve. */
 int memory_db_entity_alias_link(int user_id,
