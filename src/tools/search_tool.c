@@ -156,17 +156,17 @@ static char *perform_search(const char *query,
    search_response_t *response = web_search_query_typed(query, SEARXNG_MAX_RESULTS, type,
                                                         time_range);
    if (!response) {
-      return strdup("Search request failed.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Search request failed.");
    }
 
    if (response->error) {
       OLOG_ERROR("search_tool: Search error: %s", response->error);
       char *result = malloc(256);
       if (result) {
-         snprintf(result, 256, "Search failed: %s", response->error);
+         snprintf(result, 256, TOOL_RESULT_ERROR_MARK "Search failed: %s", response->error);
       }
       web_search_free_response(response);
-      return result ? result : strdup("Search failed.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Search failed.");
    }
 
    /* Auto-fallback: if news returned 0 results, retry as web search */
@@ -176,16 +176,16 @@ static char *perform_search(const char *query,
       OLOG_INFO("search_tool: News returned 0 results, falling back to web search");
       response = web_search_query_typed(query, SEARXNG_MAX_RESULTS, SEARCH_TYPE_WEB, NULL);
       if (!response) {
-         return strdup("Search request failed.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Search request failed.");
       }
       if (response->error) {
          OLOG_ERROR("search_tool: Web fallback error: %s", response->error);
          char *result = malloc(256);
          if (result) {
-            snprintf(result, 256, "Search failed: %s", response->error);
+            snprintf(result, 256, TOOL_RESULT_ERROR_MARK "Search failed: %s", response->error);
          }
          web_search_free_response(response);
-         return result ? result : strdup("Search failed.");
+         return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Search failed.");
       }
       fell_back = true;
       type_name = "web (news fallback)";
@@ -214,7 +214,7 @@ static char *perform_search(const char *query,
       }
 
       web_search_free_response(response);
-      return result ? result : strdup("Failed to format search results.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to format search results.");
    }
 
    web_search_free_response(response);
@@ -235,7 +235,7 @@ static char *search_tool_callback(const char *action, char *value, int *should_r
       const char *endpoint = g_config.search.endpoint[0] != '\0' ? g_config.search.endpoint : NULL;
       if (web_search_init(endpoint) != 0) {
          OLOG_ERROR("search_tool: Failed to initialize web search module");
-         return strdup("Web search service is not available.");
+         return strdup(TOOL_RESULT_ERROR_MARK "Web search service is not available.");
       }
    }
 

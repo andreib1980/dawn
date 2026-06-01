@@ -140,10 +140,11 @@ static char *weather_tool_callback(const char *action, char *value, int *should_
          OLOG_ERROR("weather_tool_callback: Weather error: %s", response->error);
          char *result = malloc(256);
          if (result) {
-            snprintf(result, 256, "Weather lookup failed: %s", response->error);
+            snprintf(result, 256, TOOL_RESULT_ERROR_MARK "Weather lookup failed: %s",
+                     response->error);
          }
          weather_free_response(response);
-         return result ? result : strdup("Weather lookup failed.");
+         return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Weather lookup failed.");
       }
 
       char *result = malloc(WEATHER_RESULT_BUFFER_SIZE);
@@ -156,16 +157,16 @@ static char *weather_tool_callback(const char *action, char *value, int *should_
                        formatted_len, WEATHER_RESULT_BUFFER_SIZE);
             free(result);
             weather_free_response(response);
-            return strdup("Weather data too large to format.");
+            return strdup(TOOL_RESULT_ERROR_MARK "Weather data too large to format.");
          }
          OLOG_INFO("weather_tool_callback: Weather data retrieved successfully (%d bytes)",
                    formatted_len);
       }
       weather_free_response(response);
-      return result ? result : strdup("Failed to format weather data.");
+      return result ? result : strdup(TOOL_RESULT_ERROR_MARK "Failed to format weather data.");
    }
 
-   return strdup("Weather request failed.");
+   return strdup(TOOL_RESULT_ERROR_MARK "Weather request failed.");
 }
 
 /* ========== Public API ========== */

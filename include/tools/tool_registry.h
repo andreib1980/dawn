@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 /* Forward declaration for TOML table (avoid including toml.h everywhere) */
 typedef struct toml_table_t toml_table_t;
@@ -208,6 +209,41 @@ typedef void (*tool_cleanup_fn)(void);
  * @return Heap-allocated response string, or NULL
  */
 typedef char *(*tool_callback_fn)(const char *action, char *value, int *should_respond);
+
+/* =============================================================================
+ * Tool result error-marker convention (opt-in)
+ *
+ * The legacy `char *` callback contract carries no success/failure status, so
+ * a result that is actually an error (e.g. "Weather lookup failed: HTTP 502")
+ * is indistinguishable from a normal result — consumers that count "non-NULL
+ * result == success" over-report.  A tool MAY prefix a result it considers a
+ * HARD FAILURE with TOOL_RESULT_ERROR_MARK.  Consumers detect it via
+ * tool_result_is_error() to keep their own accounting honest (e.g. the
+ * scheduler briefing runner's per-step success count) and strip the marker
+ * before the text reaches the LLM, so the human-readable error still survives.
+ * Tools that don't use it behave exactly as before.
+ * ============================================================================= */
+#define TOOL_RESULT_ERROR_MARK "\x01"
+
+/** @return true if @p result begins with the tool error marker. NULL-safe. */
+static inline bool tool_result_is_error(const char *result) {
+   return result != NULL && result[0] == TOOL_RESULT_ERROR_MARK[0];
+}
+
+/**
+ * @brief Strip a leading TOOL_RESULT_ERROR_MARK from @p result in place.
+ *
+ * No-op when @p result is NULL or unmarked.  Same allocation (the string stays
+ * free()-able).  Every callback-dispatch site that hands a result to the LLM
+ * calls this so the marker never leaks; the one consumer that also needs the
+ * failure signal (the scheduler briefing runner) uses tool_result_is_error()
+ * directly before stripping, to keep its per-step accounting honest.
+ */
+static inline void tool_result_strip_error_mark(char *result) {
+   if (tool_result_is_error(result)) {
+      memmove(result, result + 1, strlen(result + 1) + 1);
+   }
+}
 
 /* =============================================================================
  * Tool Metadata (Complete Definition)

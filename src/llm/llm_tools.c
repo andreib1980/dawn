@@ -1400,6 +1400,10 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       char *cb_result = meta->callback(action_name[0] ? action_name : "get",
                                        value_buf[0] ? value_buf : NULL, &should_respond);
 
+      /* Strip the opt-in tool error-marker (this native-tool path invokes the
+       * callback directly, bypassing command_execute's strip). */
+      tool_result_strip_error_mark(cb_result);
+
       if (cb_result) {
          size_t cb_len = strlen(cb_result);
          if (cb_len >= LLM_TOOLS_RESULT_LEN) {

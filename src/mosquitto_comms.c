@@ -138,6 +138,8 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    device_callback_fn callback = get_device_callback(deviceName);
    if (callback) {
       callback_result = callback(actionName, (char *)value, &should_respond);
+      /* Strip the opt-in tool error-marker before the result reaches the AI. */
+      tool_result_strip_error_mark(callback_result);
 
       // If in AI mode and callback returned data, store it for AI response
       if (callback_result != NULL && should_respond &&
@@ -555,6 +557,8 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
    device_callback_fn dev_callback = get_device_callback(deviceName);
    if (dev_callback) {
       callback_result = dev_callback(actionName, (char *)value, &should_respond);
+      /* Strip the opt-in tool error-marker before the result reaches the AI. */
+      tool_result_strip_error_mark(callback_result);
    }
 
    // Clear command context and release session reference

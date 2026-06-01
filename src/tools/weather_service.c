@@ -504,11 +504,14 @@ static weather_response_t *fetch_weather(double latitude,
             "&timezone=auto&forecast_days=%d",
             OPEN_METEO_FORECAST_URL, latitude, longitude, forecast_days);
 
-   // Try once, retry once on transient-looking failure.  Open-Meteo
-   // occasionally serves HTML error pages or empty bodies during load
-   // spikes (often at the top of the hour when scheduled briefings
-   // fire); a single retry with a brief backoff catches the common
-   // case without burning much latency on persistent failures.
+   // Try up to 4 times with exponential backoff on transient-looking
+   // failure.  Open-Meteo occasionally serves HTML error pages, 5xx, or
+   // empty bodies during load spikes — often at the top of the hour, when
+   // scheduled briefings fire and everyone's cron jobs hit it at once.
+   // Those spikes can persist for several seconds, so a couple of retries
+   // walked out to ~7s ride past them without burning much latency on
+   // genuinely persistent failures (5xx come back immediately, not as
+   // timeouts).
    //
    // Retry triggers:
    //   - CURLcode != OK (network failure)
@@ -523,15 +526,19 @@ static weather_response_t *fetch_weather(double latitude,
    struct json_object *root = NULL;
    CURLcode res = CURLE_OK;
    long http_code = 0;
-   const int max_attempts = 2;
+   const int max_attempts = 4;
 
    for (int attempt = 0; attempt < max_attempts; attempt++) {
       if (attempt > 0) {
-         OLOG_INFO("Weather: retrying after transient error (HTTP=%ld curl=%s, attempt %d/%d)",
+         /* Exponential backoff: 1s, 2s, 4s before attempts 2/3/4. */
+         long backoff_ms = 1000L << (attempt - 1);
+         OLOG_INFO("Weather: retrying after transient error (HTTP=%ld curl=%s, attempt %d/%d, "
+                   "backoff=%ldms)",
                    http_code, (res != CURLE_OK) ? curl_easy_strerror(res) : "OK", attempt + 1,
-                   max_attempts);
+                   max_attempts, backoff_ms);
          curl_buffer_reset(&buffer);
-         struct timespec ts = { .tv_sec = 0, .tv_nsec = 500 * 1000000L };
+         struct timespec ts = { .tv_sec = backoff_ms / 1000,
+                                .tv_nsec = (backoff_ms % 1000) * 1000000L };
          nanosleep(&ts, NULL);
       }
 

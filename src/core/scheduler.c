@@ -690,6 +690,18 @@ static void *briefing_thread_func(void *arg) {
                            steps[i].tool_name);
             continue;
          }
+         if (tool_result_is_error(step_result)) {
+            /* Tool ran but reported a hard failure (e.g. weather upstream
+             * 502).  Include the marker-stripped message so the LLM can note
+             * the gap and degrade gracefully, but do NOT count it as a success
+             * — keeps the "N/M succeeded" accounting honest. */
+            OLOG_WARNING("scheduler: briefing %lld step %d (%s) reported failure: %s",
+                         (long long)event->id, i + 1, steps[i].tool_name, step_result + 1);
+            strbuf_appendf(&combined, "## Step %d (%s): [unavailable: %s]\n\n", i + 1,
+                           steps[i].tool_name, step_result + 1);
+            free(step_result);
+            continue;
+         }
          strbuf_appendf(&combined, "## Step %d (%s):\n%s\n\n", i + 1, steps[i].tool_name,
                         step_result);
          free(step_result);
@@ -739,6 +751,12 @@ static void *briefing_thread_func(void *arg) {
          OLOG_ERROR("scheduler: briefing %lld tool returned NULL", (long long)event->id);
          goto fail;
       }
+
+      /* Strip the opt-in tool error-marker — the legacy single-tool path
+       * doesn't track per-step success; just keep the marker out of the LLM
+       * input.  (New briefings go through the multi-step path above, which
+       * counts a marked failure honestly.) */
+      tool_result_strip_error_mark(tool_result);
 
       OLOG_INFO("scheduler: briefing %lld tool result: %.200s", (long long)event->id, tool_result);
    }

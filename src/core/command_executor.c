@@ -205,6 +205,13 @@ int command_execute(const char *device,
                                                                    : get_default_action(tool);
       char *cb_result = tool->callback(effective_action, value_buf, &should_respond);
 
+      /* Strip the opt-in tool error-marker so it never reaches the LLM.
+       * `success` deliberately stays true — the interactive tool-result path
+       * (llm_tools) keys off it, and a marked error should still flow to the
+       * model as descriptive text.  The scheduler briefing runner inspects the
+       * marker itself (before its own strip) to keep its accounting honest. */
+      tool_result_strip_error_mark(cb_result);
+
       result->success = true;
       result->should_respond = (should_respond != 0);
       result->result = cb_result; /* Takes ownership (may be NULL) */
