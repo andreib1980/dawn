@@ -885,7 +885,14 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
       }
       OLOG_WARNING("plan_executor: unknown tool '%s'", tool_name);
       plan_send_progress("step_error", current_index, NULL, 0, 0, 0, "unknown tool");
+      {
+         char line[128];
+         snprintf(line, sizeof(line), "[step %d] FAILED: unknown tool '%.48s'\n", current_index,
+                  tool_name);
+         output_append(ctx, line);
+      }
       ctx->total_tool_calls++;
+      ctx->failed_steps++;
       ctx->call_index++;
       return PLAN_OK; /* fail-forward */
    }
@@ -900,7 +907,16 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
       }
       OLOG_WARNING("plan_executor: tool '%s' not allowed in plans", tool_name);
       plan_send_progress("step_error", current_index, NULL, 0, 0, 0, "not allowed in plans");
+      {
+         char line[192];
+         snprintf(line, sizeof(line),
+                  "[step %d] FAILED: tool '%.48s' is not allowed inside a plan — call it "
+                  "directly instead (only schedulable, non-dangerous tools run in plans).\n",
+                  current_index, tool_name);
+         output_append(ctx, line);
+      }
       ctx->total_tool_calls++;
+      ctx->failed_steps++;
       ctx->call_index++;
       return PLAN_OK; /* fail-forward */
    }
@@ -915,7 +931,14 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
       }
       OLOG_WARNING("plan_executor: tool '%s' is disabled", tool_name);
       plan_send_progress("step_error", current_index, NULL, 0, 0, 0, "tool disabled");
+      {
+         char line[128];
+         snprintf(line, sizeof(line), "[step %d] FAILED: tool '%.48s' is disabled\n", current_index,
+                  tool_name);
+         output_append(ctx, line);
+      }
       ctx->total_tool_calls++;
+      ctx->failed_steps++;
       ctx->call_index++;
       return PLAN_OK; /* fail-forward */
    }
@@ -952,6 +975,18 @@ static int plan_step_call(plan_context_t *ctx, struct json_object *step) {
       const char *result_text = tool_result_content(&result);
       plan_vars_set(ctx, store_name, result_text);
       plan_vars_set_success(ctx, store_name, result.success);
+   }
+
+   /* Surface a genuine tool failure even when the step has no `store` — otherwise the
+    * error text vanishes and the plan looks like it succeeded.  (This is how the
+    * "fact too long" rejection silently disappeared.) */
+   if (!result.success) {
+      const char *result_text = tool_result_content(&result);
+      char line[256];
+      snprintf(line, sizeof(line), "[step %d] FAILED (%.32s): %.180s\n", current_index, tool_name,
+               (result_text && result_text[0]) ? result_text : "tool reported failure");
+      output_append(ctx, line);
+      ctx->failed_steps++;
    }
 
    /* Free extended result if allocated */

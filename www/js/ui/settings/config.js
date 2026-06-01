@@ -29,6 +29,13 @@
          maxlength: 256,
       },
       {
+         id: 'secret-openrouter',
+         key: 'openrouter_api_key',
+         label: 'OpenRouter API Key',
+         placeholder: 'sk-or-...',
+         maxlength: 256,
+      },
+      {
          id: 'secret-tavily',
          key: 'tavily_api_key',
          label: 'Tavily API Key',

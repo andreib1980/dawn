@@ -145,8 +145,35 @@ static void add_local_thinking_params(json_object *root) {
 
 /* ── Cloud reasoning effort ─────────────────────────────────────────────── */
 
-static void add_cloud_reasoning_effort(json_object *root, const char *model_name) {
+static void add_cloud_reasoning_effort(json_object *root,
+                                       const char *model_name,
+                                       const char *base_url) {
    const char *thinking_mode = llm_get_current_thinking_mode();
+
+   /* OpenRouter: use the unified reasoning OBJECT (`reasoning: { effort }`), not OpenAI's
+    * flat `reasoning_effort` string.  Gate on the gateway endpoint rather than model-name
+    * heuristics — OpenRouter slugs are "vendor/model" (e.g. anthropic/claude-sonnet-4.6) so
+    * the gpt-5/o-series/gemini prefix checks below never match.  OpenRouter ignores the
+    * field for models that don't support reasoning, so it's safe to always send it when
+    * thinking is on.  The streamed reasoning comes back in delta.reasoning_details[]
+    * (parsed in llm_streaming.c). */
+   if (base_url && strstr(base_url, "openrouter.ai") != NULL) {
+      if (strcmp(thinking_mode, "disabled") == 0 || llm_tools_suppressed()) {
+         return;
+      }
+      const char *effort = thinking_mode;
+      if (strcmp(effort, "enabled") == 0 || strcmp(effort, "auto") == 0) {
+         effort = g_config.llm.thinking.reasoning_effort;
+         if (!effort || effort[0] == '\0') {
+            effort = "medium";
+         }
+      }
+      json_object *reasoning = json_object_new_object();
+      json_object_object_add(reasoning, "effort", json_object_new_string(effort));
+      json_object_object_add(root, "reasoning", reasoning);
+      OLOG_INFO("OpenRouter: reasoning effort '%s' requested for model %s", effort, model_name);
+      return;
+   }
 
    bool is_o_series = (strncmp(model_name, "o1", 2) == 0 || strncmp(model_name, "o3", 2) == 0);
    bool is_gpt5 = (strncmp(model_name, "gpt-5", 5) == 0);
@@ -541,7 +568,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
       json_object_object_add(root, "timings_per_token", json_object_new_boolean(1));
       add_local_thinking_params(root);
    } else {
-      add_cloud_reasoning_effort(root, model_name);
+      add_cloud_reasoning_effort(root, model_name, base_url);
    }
 
    if (vision_images != NULL && vision_image_count > 0) {
@@ -1150,7 +1177,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       json_object_object_add(root, "timings_per_token", json_object_new_boolean(1));
       add_local_thinking_params(root);
    } else {
-      add_cloud_reasoning_effort(root, model_name);
+      add_cloud_reasoning_effort(root, model_name, base_url);
    }
 
    if (vision_images != NULL && vision_image_count > 0) {

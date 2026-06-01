@@ -32,7 +32,10 @@
 #define CLOUDAI_URL "https://api.openai.com"
 #define CLAUDE_URL "https://api.anthropic.com"
 #define GEMINI_URL "https://generativelanguage.googleapis.com/v1beta/openai"
-#define OPENROUTER_URL "https://openrouter.ai/api/v1"
+/* Base WITHOUT the /v1 — the chat-completions path "/v1/chat/completions"
+ * (OPENAI_CHAT_ENDPOINT) is appended downstream, matching OpenAI's bare host.
+ * Full URL resolves to https://openrouter.ai/api/v1/chat/completions. */
+#define OPENROUTER_URL "https://openrouter.ai/api"
 
 /**
  * @brief LLM call mode

@@ -950,11 +950,16 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
       return false;
    }
 
-   /* OpenRouter gateway: reroute the dedicated compaction provider through
-    * OpenRouter (model string preserved — user must configure an OpenRouter ID). */
-   (void)llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key);
-
-   cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
+   /* OpenRouter gateway: reroute the dedicated compaction provider through OpenRouter.
+    * Under the gateway, use the OpenRouter-formatted compaction model (vendor/model),
+    * falling back to the main OpenRouter default when unset — the direct compact_model
+    * naming would not resolve on OpenRouter. */
+   if (llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key)) {
+      cfg->model = g_config.llm.compact_openrouter_model[0] ? g_config.llm.compact_openrouter_model
+                                                            : llm_get_default_openrouter_model();
+   } else {
+      cfg->model = g_config.llm.compact_model[0] ? g_config.llm.compact_model : NULL;
+   }
    strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);
    cfg->timeout_ms = g_config.network.summarization_timeout_ms;

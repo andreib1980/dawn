@@ -1533,8 +1533,15 @@ static void *extraction_thread(void *arg) {
       goto cleanup;
    }
 
-   OLOG_INFO("memory_extraction: using provider=%s, model=%s", g_config.memory.extraction_provider,
-             g_config.memory.extraction_model[0] ? g_config.memory.extraction_model : "(default)");
+   /* Log the RESOLVED provider/model (post-gateway), not the raw config — under the
+    * OpenRouter gateway the resolver rewrites these, and logging g_config here would
+    * misleadingly show the direct provider/model that aren't actually used. */
+   OLOG_INFO("memory_extraction: using provider=%s, model=%s",
+             extraction_config.type == LLM_LOCAL
+                 ? g_config.memory.extraction_provider
+                 : cloud_provider_to_string(extraction_config.cloud_provider),
+             (extraction_config.model && extraction_config.model[0]) ? extraction_config.model
+                                                                     : "(default)");
 
    /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
     * three "%s" format specifiers plus a small safety margin; expand if more
@@ -1605,9 +1612,16 @@ static void *extraction_thread(void *arg) {
             else if (fallback_config.cloud_provider == CLOUD_PROVIDER_GEMINI)
                fallback_config.api_key = g_secrets.gemini_api_key;
             /* OpenRouter gateway: reroute the fallback (session) provider through
-             * OpenRouter too, so it doesn't issue a NULL-key request under gateway. */
-            (void)llm_apply_openrouter_gateway(&fallback_config.cloud_provider,
-                                               &fallback_config.endpoint, &fallback_config.api_key);
+             * OpenRouter too, so it doesn't issue a NULL-key request under gateway.
+             * The session model is a direct-API name (claude-sonnet-4-6, not a
+             * vendor/model slug) — swap to the OpenRouter extraction model, matching
+             * the primary resolver, or OpenRouter would reject the unrecognized id. */
+            if (llm_apply_openrouter_gateway(&fallback_config.cloud_provider,
+                                             &fallback_config.endpoint, &fallback_config.api_key)) {
+               fallback_config.model = g_config.memory.extraction_openrouter_model[0]
+                                           ? g_config.memory.extraction_openrouter_model
+                                           : llm_get_default_openrouter_model();
+            }
          }
 
          response = llm_chat_completion_with_config(extraction_history, prompt, NULL, NULL, 0,
@@ -2012,10 +2026,18 @@ int memory_extraction_resolve_config(llm_resolved_config_t *cfg,
       cfg->endpoint = endpoint_buf;
    }
 
-   /* OpenRouter gateway: reroute cloud extraction through OpenRouter (endpoint set
-    * to the OpenRouter base URL; the configured extraction_model must be an
-    * OpenRouter ID when the gateway is on). */
-   (void)llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key);
+   /* OpenRouter gateway: reroute cloud extraction through OpenRouter.  Under the gateway,
+    * swap in the OpenRouter-formatted extraction model (vendor/model), falling back to the
+    * main OpenRouter default when unset — the direct extraction_model naming would not
+    * resolve on OpenRouter. */
+   if (llm_apply_openrouter_gateway(&cfg->cloud_provider, &cfg->endpoint, &cfg->api_key)) {
+      const char *or_model = g_config.memory.extraction_openrouter_model[0]
+                                 ? g_config.memory.extraction_openrouter_model
+                                 : llm_get_default_openrouter_model();
+      strncpy(model_buf, or_model, model_buf_sz - 1);
+      model_buf[model_buf_sz - 1] = '\0';
+      cfg->model = model_buf;
+   }
 
    strncpy(cfg->tool_mode, "disabled", sizeof(cfg->tool_mode) - 1);
    strncpy(cfg->thinking_mode, "disabled", sizeof(cfg->thinking_mode) - 1);

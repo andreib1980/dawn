@@ -214,6 +214,9 @@ static const tool_metadata_t memory_metadata = {
 
    .description = "Store and retrieve persistent memories about the user. "
                   "Use 'remember' to store facts (preferences, information shared by user). "
+                  "Each 'remember' stores ONE concise fact, max 511 characters — for longer "
+                  "content (e.g. a journal entry) split it into several 'remember' calls, one "
+                  "fact each. Call 'remember' directly; it cannot be used inside execute_plan. "
                   "Use 'search' to find relevant stored memories (optionally filtered by "
                   "time_range like '24h', '7d', '2w'). "
                   "Use 'forget' to delete a specific memory by its numeric ID (you MUST use "

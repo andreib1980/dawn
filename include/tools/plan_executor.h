@@ -99,6 +99,7 @@ typedef struct {
    int depth;                /* current nesting depth */
    int total_steps_executed; /* counts ALL executions including nested */
    int total_tool_calls;     /* counts only 'call' steps */
+   int failed_steps;         /* 'call' steps that failed (unknown/disallowed/disabled/tool error) */
    int call_index;           /* UI index for current call step */
    char error[256];          /* last error message */
    struct timespec start_time;

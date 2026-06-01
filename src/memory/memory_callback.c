@@ -929,7 +929,15 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
    }
 
    if (strlen(fact_text) > MEMORY_FACT_TEXT_MAX - 1) {
-      return strdup("The fact is too long. Please keep it under 500 characters.");
+      /* Report the actual limit and tell the model how to recover — split the content
+       * into multiple shorter 'remember' calls (one fact each), not one oversized fact.
+       * Stack buffer (not static): memory tool callbacks run on parallel worker threads. */
+      char too_long_msg[160];
+      snprintf(too_long_msg, sizeof(too_long_msg),
+               "The fact is too long (%zu chars; max %d). Split it into several shorter "
+               "'remember' calls — one concise fact each — rather than one big entry.",
+               strlen(fact_text), MEMORY_FACT_TEXT_MAX - 1);
+      return strdup(too_long_msg);
    }
 
    /* Check for injection patterns */

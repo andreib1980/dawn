@@ -390,6 +390,35 @@ process_remaining:
 }
 
 /**
+ * @brief Emit a chunk of reasoning/thinking text to all sinks.
+ *
+ * Marks thinking active (sending thinking_start to the WebUI on the first chunk),
+ * forwards the text to the chunk callback (LLM_CHUNK_THINKING), streams it to the
+ * WebUI for live display, and accumulates it.  Shared by the llama.cpp
+ * `reasoning_content` path and the OpenRouter `reasoning_details` path.  No-op on
+ * NULL/empty text.
+ */
+static void stream_emit_thinking(llm_stream_context_t *ctx,
+                                 const char *text,
+                                 int has_ws_session,
+                                 session_t *ws_session,
+                                 const char *provider_label) {
+   if (!text || text[0] == '\0') {
+      return;
+   }
+   /* On the first reasoning chunk, mark thinking active + announce thinking_start. */
+   if (!ctx->thinking_active) {
+      ctx->thinking_active = 1;
+      ctx->has_thinking = 1;
+      if (has_ws_session) {
+         webui_send_thinking_start(ws_session, provider_label);
+      }
+   }
+   /* Delegate accumulate + chunk-callback + WebUI delta to the shared helper. */
+   emit_thinking(ctx, text, has_ws_session, ws_session);
+}
+
+/**
  * @brief Parse OpenAI/llama.cpp streaming chunk
  *
  * Format: {"choices":[{"delta":{"content":"text"}}]}
@@ -427,31 +456,47 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
          if (json_object_object_get_ex(delta, "reasoning_content", &reasoning_content)) {
             const char *thinking_text = json_object_get_string(reasoning_content);
             if (thinking_text && thinking_text[0] != '\0') {
-               // Mark thinking as active and send thinking_start on first chunk
                if (!ctx->thinking_active) {
-                  ctx->thinking_active = 1;
-                  ctx->has_thinking = 1;
                   OLOG_INFO("LLM: Reasoning content detected (llama.cpp)");
-
-                  // Send thinking_start to WebUI
-                  if (has_ws_session) {
-                     webui_send_thinking_start(ws_session, "local");
-                  }
                }
+               stream_emit_thinking(ctx, thinking_text, has_ws_session, ws_session, "local");
+            }
+         }
 
-               // Call chunk callback with thinking type if available
-               if (ctx->chunk_callback) {
-                  ctx->chunk_callback(LLM_CHUNK_THINKING, thinking_text,
-                                      ctx->chunk_callback_userdata);
+         // OpenRouter unified reasoning: streaming chunks carry reasoning in
+         // delta.reasoning_details[] (reasoning.text -> text, reasoning.summary ->
+         // summary; reasoning.encrypted holds opaque base64 in .data -> skip).  Some
+         // providers instead stream a flat delta.reasoning string; use it only when no
+         // details array is present so the same text isn't surfaced twice.
+         json_object *reasoning_details;
+         if (json_object_object_get_ex(delta, "reasoning_details", &reasoning_details) &&
+             json_object_get_type(reasoning_details) == json_type_array) {
+            int rd_count = json_object_array_length(reasoning_details);
+            for (int ri = 0; ri < rd_count; ri++) {
+               json_object *entry = json_object_array_get_idx(reasoning_details, ri);
+               if (!entry || json_object_get_type(entry) != json_type_object) {
+                  continue;
                }
-
-               // Send to WebUI for real-time display
-               if (has_ws_session) {
-                  webui_send_thinking_delta(ws_session, thinking_text);
+               json_object *type_obj, *val_obj = NULL;
+               const char *rtype = json_object_object_get_ex(entry, "type", &type_obj)
+                                       ? json_object_get_string(type_obj)
+                                       : NULL;
+               const char *think = NULL;
+               if (rtype && strcmp(rtype, "reasoning.text") == 0 &&
+                   json_object_object_get_ex(entry, "text", &val_obj)) {
+                  think = json_object_get_string(val_obj);
+               } else if (rtype && strcmp(rtype, "reasoning.summary") == 0 &&
+                          json_object_object_get_ex(entry, "summary", &val_obj)) {
+                  think = json_object_get_string(val_obj);
                }
-
-               // Accumulate thinking content
-               append_to_thinking(ctx, thinking_text);
+               stream_emit_thinking(ctx, think, has_ws_session, ws_session, "openrouter");
+            }
+         } else {
+            json_object *reasoning_str;
+            if (json_object_object_get_ex(delta, "reasoning", &reasoning_str) &&
+                json_object_get_type(reasoning_str) == json_type_string) {
+               stream_emit_thinking(ctx, json_object_get_string(reasoning_str), has_ws_session,
+                                    ws_session, "openrouter");
             }
          }
 

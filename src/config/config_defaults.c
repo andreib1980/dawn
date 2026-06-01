@@ -146,15 +146,19 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->llm.cloud.gemini_models[4], "gemini-3-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
 
-   /* Default OpenRouter model list (first entry is default).
-    * IDs are "vendor/model"; these are the curated favorites for the header
-    * switcher.  The full live catalog is browsed in Settings (Phase 2). */
-   config->llm.cloud.openrouter_models_count = 4;
-   SAFE_COPY(config->llm.cloud.openrouter_models[0], "anthropic/claude-sonnet-4");
-   SAFE_COPY(config->llm.cloud.openrouter_models[1], "openai/gpt-5.4");
-   SAFE_COPY(config->llm.cloud.openrouter_models[2], "google/gemini-2.5-flash");
-   SAFE_COPY(config->llm.cloud.openrouter_models[3], "meta-llama/llama-3.3-70b-instruct");
-   config->llm.cloud.openrouter_default_model_idx = 0;
+   /* Default OpenRouter model list (curated favorites shown in the header switcher;
+    * full live catalog browsing is Phase 2).  IDs are OpenRouter "vendor/model" slugs —
+    * verify against https://openrouter.ai/models as the catalog shifts. */
+   config->llm.cloud.openrouter_models_count = 8;
+   SAFE_COPY(config->llm.cloud.openrouter_models[0], "anthropic/claude-opus-4.7");
+   SAFE_COPY(config->llm.cloud.openrouter_models[1], "anthropic/claude-sonnet-4.6");
+   SAFE_COPY(config->llm.cloud.openrouter_models[2], "anthropic/claude-haiku-4.5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[3], "openai/gpt-5.5");
+   SAFE_COPY(config->llm.cloud.openrouter_models[4], "openai/gpt-5.4-mini");
+   SAFE_COPY(config->llm.cloud.openrouter_models[5], "openai/gpt-5.4-nano");
+   SAFE_COPY(config->llm.cloud.openrouter_models[6], "google/gemini-3.1-pro-preview");
+   SAFE_COPY(config->llm.cloud.openrouter_models[7], "google/gemini-3.5-flash");
+   config->llm.cloud.openrouter_default_model_idx = 1; /* anthropic/claude-sonnet-4.6 */
 
    /* LLM Local */
    SAFE_COPY(config->llm.local.endpoint, "http://127.0.0.1:8080");
@@ -169,7 +173,8 @@ void config_set_defaults(dawn_config_t *config) {
     * Default to local provider so background observations don't accrue cloud
     * spend.  Operator can flip to a cloud provider with a configured key. */
    SAFE_COPY(config->llm.silent_observe.provider, "local");
-   config->llm.silent_observe.model[0] = '\0'; /* Empty = let provider pick */
+   config->llm.silent_observe.model[0] = '\0';            /* Empty = let provider pick */
+   config->llm.silent_observe.openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
 
    /* LLM Thinking/Reasoning */
    SAFE_COPY(config->llm.thinking.mode, "disabled");           /* "disabled", "enabled", "auto" */
@@ -180,15 +185,16 @@ void config_set_defaults(dawn_config_t *config) {
    config->llm.thinking.budget_xhigh = LLM_THINKING_BUDGET_XHIGH_DEFAULT;
 
    /* LLM Context Management */
-   config->llm.summarize_threshold = 0.85f;    /* Legacy alias — maps to hard threshold */
-   config->llm.compact_soft_threshold = 0.60f; /* Async compaction trigger (background) */
-   config->llm.compact_hard_threshold = 0.85f; /* Blocking compaction trigger (safety net) */
-   config->llm.compact_use_session = true;     /* Use session's provider for compaction */
-   config->llm.compact_provider[0] = '\0';     /* Dedicated provider (empty = none) */
-   config->llm.compact_model[0] = '\0';        /* Dedicated model (empty = none) */
-   config->llm.conversation_logging = false;   /* Disabled: WebUI saves to DB, set true for debug */
-   config->llm.rate_limit_enabled = true;      /* Throttle cloud API calls by default */
-   config->llm.rate_limit_rpm = 40;            /* 20% headroom under typical 50 RPM limit */
+   config->llm.summarize_threshold = 0.85f;        /* Legacy alias — maps to hard threshold */
+   config->llm.compact_soft_threshold = 0.60f;     /* Async compaction trigger (background) */
+   config->llm.compact_hard_threshold = 0.85f;     /* Blocking compaction trigger (safety net) */
+   config->llm.compact_use_session = true;         /* Use session's provider for compaction */
+   config->llm.compact_provider[0] = '\0';         /* Dedicated provider (empty = none) */
+   config->llm.compact_model[0] = '\0';            /* Dedicated model (empty = none) */
+   config->llm.compact_openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
+   config->llm.conversation_logging = false; /* Disabled: WebUI saves to DB, set true for debug */
+   config->llm.rate_limit_enabled = true;    /* Throttle cloud API calls by default */
+   config->llm.rate_limit_rpm = 40;          /* 20% headroom under typical 50 RPM limit */
 
    /* Search */
    SAFE_COPY(config->search.engine, "searxng");
@@ -288,7 +294,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.source_budget_chars = 3072;
    SAFE_COPY(config->memory.extraction_provider, "local");
    SAFE_COPY(config->memory.extraction_model, "qwen2.5:7b");
-   config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */
+   config->memory.extraction_openrouter_model[0] = '\0'; /* Empty = main OpenRouter default */
+   config->memory.extraction_timeout_ms = 120000;        /* 2 minutes for fact extraction */
    config->memory.pruning_enabled = true;
    config->memory.prune_superseded_days = 30; /* Delete old superseded facts after 30 days */
    config->memory.prune_stale_days = 180; /* Delete unused low-confidence facts after 6 months */

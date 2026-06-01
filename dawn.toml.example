@@ -142,6 +142,9 @@
 # compact_use_session = true      # Use session's LLM for compaction (false = dedicated)
 # compact_provider = ""           # Dedicated compaction provider: claude/openai/gemini/local
 # compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5)
+# compact_openrouter_model = ""   # Compaction model when the OpenRouter gateway is on
+                                  # ("vendor/model", e.g. anthropic/claude-3.5-haiku).
+                                  # Empty = use the main OpenRouter default model.
 # conversation_logging = false    # Save chat history to log files (WebUI saves to DB)
                                   # Env: DAWN_LLM_CONVERSATION_LOGGING
 # rate_limit_enabled = true       # Throttle cloud API calls to avoid 429 errors
@@ -162,8 +165,11 @@
 # OpenRouter (https://openrouter.ai/api/v1) using openrouter_api_key from secrets.toml,
 # regardless of the "provider" setting above. The direct provider/key fields are then
 # unused. This keeps "which key am I using" unambiguous: either fully direct, or fully
-# OpenRouter. Auxiliary model strings (compact_model, silent-observe model,
-# memory.extraction_model) must be OpenRouter "vendor/model" IDs when this is on.
+# OpenRouter. The background tasks each have a SEPARATE OpenRouter-formatted model setting
+# (compact_openrouter_model, memory.extraction_openrouter_model,
+# llm.silent_observe.openrouter_model) used only when the gateway is on — so you don't have
+# to rewrite the direct-API model names every time you toggle. Each falls back to the main
+# OpenRouter default (openrouter_default_model_idx) when left empty.
 # use_openrouter = false          # Env: DAWN_LLM_CLOUD_USE_OPENROUTER
 
 # OpenAI endpoint selection. "auto" routes gpt-5.4* to /v1/responses (where
@@ -184,8 +190,9 @@
 # gemini_default_model_idx = 0
 # OpenRouter favorites (used when use_openrouter = true). IDs are "vendor/model".
 # These are the curated shortlist shown in the header model switcher.
-# openrouter_models = ["anthropic/claude-sonnet-4", "openai/gpt-5.4", "google/gemini-2.5-flash", "meta-llama/llama-3.3-70b-instruct"]
-# openrouter_default_model_idx = 0
+# openrouter_models = ["anthropic/claude-opus-4.7", "anthropic/claude-sonnet-4.6", "anthropic/claude-haiku-4.5", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.1-pro-preview", "google/gemini-3.5-flash"]
+# openrouter_default_model_idx = 1   # anthropic/claude-sonnet-4.6
+                                  # Verify slugs against https://openrouter.ai/models
 
 [llm.local]
 # endpoint = "http://127.0.0.1:8080"  # Local LLM server endpoint
@@ -242,6 +249,8 @@
                                   # Env: DAWN_LLM_SILENT_OBSERVE_PROVIDER
 # model = ""                      # Model name; empty = let provider pick a default
                                   # Env: DAWN_LLM_SILENT_OBSERVE_MODEL
+# openrouter_model = ""           # Model when the OpenRouter gateway is on ("vendor/model",
+                                  # e.g. anthropic/claude-3.5-haiku). Empty = main OpenRouter default.
 
 # =============================================================================
 # Web Search (SearXNG)
@@ -440,6 +449,9 @@
                                   # recall_generation; Opus is *worse* than Haiku (entity over-
                                   # fragmentation). Going to a larger Claude tier is not a free
                                   # win for extraction.
+# extraction_openrouter_model = "" # Extraction model when the OpenRouter gateway is on
+                                  # ("vendor/model", e.g. anthropic/claude-3.5-haiku).
+                                  # Empty = main OpenRouter default.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
 # pruning_enabled = true          # Automatically remove old superseded and stale facts

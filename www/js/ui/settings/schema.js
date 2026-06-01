@@ -9,7 +9,7 @@
 
    // Schema version — bump when adding/removing/reordering fields or sections.
    // When this changes, the settings DOM is rebuilt from scratch.
-   const SCHEMA_VERSION = 3;
+   const SCHEMA_VERSION = 7;
 
    // Track whether DOM has been rendered and which schema version it represents
    let renderedSchemaVersion = null;
@@ -421,7 +421,10 @@
                      label: 'OpenAI Responses API',
                      options: ['auto', 'always', 'never'],
                      hint: 'Route reasoning-capable OpenAI models to /v1/responses. "auto" is recommended.',
-                     showWhen: { key: 'llm.cloud.provider', value: 'openai' },
+                     showWhen: [
+                        { key: 'llm.cloud.provider', value: 'openai' },
+                        { key: 'llm.cloud.use_openrouter', value: false },
+                     ],
                   },
                   claude_models: {
                      type: 'model_list',
@@ -457,7 +460,8 @@
                      type: 'model_list',
                      label: 'OpenRouter Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-2.5-flash',
+                     placeholder:
+                        'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-2.5-flash',
                      hint: 'Curated shortlist shown in the header model switcher. One OpenRouter model ID per line, "vendor/model" (e.g. anthropic/claude-sonnet-4).',
                      showWhen: { key: 'llm.cloud.use_openrouter', value: true },
                   },
@@ -569,7 +573,10 @@
                options: ['claude', 'openai', 'gemini', 'local'],
                hint: 'Provider to use for context compaction summaries',
                advanced: true,
-               showWhen: { key: 'llm.compact_use_session', value: false },
+               showWhen: [
+                  { key: 'llm.compact_use_session', value: false },
+                  { key: 'llm.cloud.use_openrouter', value: false },
+               ],
             },
             compact_model: {
                type: 'text',
@@ -578,7 +585,24 @@
                   'Model name for compaction (e.g., claude-haiku-4-5 — the same ' +
                   'tier validated for memory extraction). Leave empty for provider default.',
                advanced: true,
-               showWhen: { key: 'llm.compact_use_session', value: false },
+               showWhen: [
+                  { key: 'llm.compact_use_session', value: false },
+                  { key: 'llm.cloud.use_openrouter', value: false },
+               ],
+            },
+            compact_openrouter_model: {
+               type: 'model_source_select',
+               sourceKey: 'llm.cloud.openrouter_models',
+               label: 'Compaction Model (OpenRouter)',
+               hint:
+                  'OpenRouter model for compaction when the gateway is on. Chosen from your ' +
+                  'OpenRouter Models list (Language Model settings). "(Use default)" = the main ' +
+                  'OpenRouter default model.',
+               advanced: true,
+               showWhen: [
+                  { key: 'llm.compact_use_session', value: false },
+                  { key: 'llm.cloud.use_openrouter', value: true },
+               ],
             },
             conversation_logging: {
                type: 'checkbox',
@@ -824,6 +848,7 @@
                hint: 'LLM provider for extracting facts from conversations',
                id: 'memory-extraction-provider',
                advanced: true,
+               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
             },
             extraction_model: {
                type: 'dynamic_select',
@@ -835,6 +860,18 @@
                dynamicKey: 'memory_extraction_models',
                id: 'memory-extraction-model',
                advanced: true,
+               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
+            },
+            extraction_openrouter_model: {
+               type: 'model_source_select',
+               sourceKey: 'llm.cloud.openrouter_models',
+               label: 'Extraction Model (OpenRouter)',
+               hint:
+                  'OpenRouter model for memory extraction when the gateway is on. Chosen from your ' +
+                  'OpenRouter Models list (Language Model settings). "(Use default)" = the main ' +
+                  'OpenRouter default model.',
+               advanced: true,
+               showWhen: { key: 'llm.cloud.use_openrouter', value: true },
             },
             extraction_timeout_ms: {
                type: 'number',
@@ -855,6 +892,7 @@
                   'no tools, no TTS. Defaults to local for cost.',
                configPath: 'llm.silent_observe.provider',
                advanced: true,
+               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
             },
             silent_observe_model: {
                type: 'text',
@@ -864,6 +902,19 @@
                   'A small/fast model is fine.',
                configPath: 'llm.silent_observe.model',
                advanced: true,
+               showWhen: { key: 'llm.cloud.use_openrouter', value: false },
+            },
+            silent_observe_openrouter_model: {
+               type: 'model_source_select',
+               sourceKey: 'llm.cloud.openrouter_models',
+               label: 'Silent-Observe Model (OpenRouter)',
+               hint:
+                  'OpenRouter model for silent observations when the gateway is on. Chosen from ' +
+                  'your OpenRouter Models list (Language Model settings). "(Use default)" = the ' +
+                  'main OpenRouter default model.',
+               configPath: 'llm.silent_observe.openrouter_model',
+               advanced: true,
+               showWhen: { key: 'llm.cloud.use_openrouter', value: true },
             },
             pruning_enabled: {
                type: 'checkbox',
@@ -1354,6 +1405,7 @@
                },
             },
             entity_merge_settings: {
+               type: 'group',
                label: 'Entity Merge (Phase 2)',
                fields: {
                   entity_merge_enabled: {
@@ -1410,32 +1462,34 @@
                max: 65535,
                hint: 'MQTT broker port (default: 1883, TLS: 8883)',
             },
-         },
-         groups: {
-            tls: {
+            tls_group: {
+               type: 'group',
                label: 'TLS Encryption',
-               collapsed: true,
                fields: {
                   tls: {
                      type: 'checkbox',
                      label: 'Enable TLS',
                      restart: true,
                      hint: 'Encrypt MQTT connection with TLS/SSL',
+                     configPath: 'mqtt.tls',
                   },
                   tls_ca_cert: {
                      type: 'text',
                      label: 'CA Certificate Path',
                      hint: 'Path to CA certificate file (leave empty for system default)',
+                     configPath: 'mqtt.tls_ca_cert',
                   },
                   tls_cert_path: {
                      type: 'text',
                      label: 'Client Certificate Path',
                      hint: 'Path to client certificate for mutual TLS (optional)',
+                     configPath: 'mqtt.tls_cert_path',
                   },
                   tls_key_path: {
                      type: 'text',
                      label: 'Client Key Path',
                      hint: 'Path to client private key for mutual TLS (optional)',
+                     configPath: 'mqtt.tls_key_path',
                   },
                },
             },
@@ -2220,20 +2274,53 @@
     * @param {HTMLElement} el - Element to show/hide
     * @param {Object} condition - { key, value } condition
     */
+   /**
+    * Evaluate a single showWhen condition against a value-getter.
+    * @param {Object} cond - { key, value } or { key, notValue }
+    * @param {Function} getVal - (key) => current value
+    * @returns {boolean} true if the condition is satisfied
+    */
+   function showWhenCondMatches(cond, getVal) {
+      const v = getVal(cond.key);
+      if (cond.notValue) {
+         const blocked = Array.isArray(cond.notValue) ? cond.notValue : [cond.notValue];
+         return !blocked.includes(v);
+      }
+      return v === cond.value;
+   }
+
+   /**
+    * Read a config key's current LIVE value: prefer the rendered input's state
+    * (so unsaved edits are honored), falling back to the loaded config. Used for
+    * re-evaluating multi-condition (AND) showWhen when any dependency changes.
+    */
+   function getLiveConfigValue(key, changedKey, changedValue) {
+      if (key === changedKey) return changedValue;
+      // Resolve by data-key (which IS the config key / fullKey), not by reconstructing
+      // the element id — element ids are "setting-<section>-<field>" and diverge from the
+      // key path for any field that sets configPath, which would silently miss live edits.
+      const inputEl = sectionsContainer
+         ? sectionsContainer.querySelector('[data-key="' + key + '"]')
+         : null;
+      if (inputEl) {
+         return inputEl.type === 'checkbox' ? inputEl.checked : inputEl.value;
+      }
+      const currentConfig = getCurrentConfigFn ? getCurrentConfigFn() : {};
+      return Utils.getNestedValue(currentConfig, key);
+   }
+
    function applyShowWhen(el, condition) {
       const currentConfig = getCurrentConfigFn ? getCurrentConfigFn() : {};
-      const currentValue = Utils.getNestedValue(currentConfig, condition.key);
-      if (currentValue === undefined && condition.key) {
+      const getVal = (k) => Utils.getNestedValue(currentConfig, k);
+      // Multi-condition (AND): array of { key, value } — element visible iff all match.
+      if (Array.isArray(condition)) {
+         el.style.display = condition.every((c) => showWhenCondMatches(c, getVal)) ? '' : 'none';
+         return;
+      }
+      if (getVal(condition.key) === undefined && condition.key) {
          console.warn('showWhen: config key not found:', condition.key);
       }
-      if (condition.notValue) {
-         const blocked = Array.isArray(condition.notValue)
-            ? condition.notValue
-            : [condition.notValue];
-         el.style.display = blocked.includes(currentValue) ? 'none' : '';
-      } else {
-         el.style.display = currentValue === condition.value ? '' : 'none';
-      }
+      el.style.display = showWhenCondMatches(condition, getVal) ? '' : 'none';
    }
 
    /**
@@ -2257,7 +2344,14 @@
       const dependents = showWhenDependents[changedKey];
       if (!dependents) return;
       dependents.forEach((el) => {
-         if (el.dataset.showWhenNotValue) {
+         if (el.__showWhenAll) {
+            // Multi-condition (AND): re-evaluate every sub-condition against live input
+            // state (the changed key uses newValue; others are read from their inputs).
+            const getVal = (k) => getLiveConfigValue(k, changedKey, newValue);
+            el.style.display = el.__showWhenAll.every((c) => showWhenCondMatches(c, getVal))
+               ? ''
+               : 'none';
+         } else if (el.dataset.showWhenNotValue) {
             const blocked = JSON.parse(el.dataset.showWhenNotValue);
             el.style.display = blocked.includes(newValue) ? 'none' : '';
          } else {
@@ -2344,18 +2438,25 @@
 
       // Apply showWhen conditional visibility
       if (def.showWhen) {
-         item.dataset.showWhenKey = def.showWhen.key;
-         if (def.showWhen.notValue) {
-            item.dataset.showWhenNotValue = JSON.stringify(
-               Array.isArray(def.showWhen.notValue)
-                  ? def.showWhen.notValue
-                  : [def.showWhen.notValue]
-            );
+         if (Array.isArray(def.showWhen)) {
+            // Multi-condition (AND): store on the element and depend on every key.
+            item.__showWhenAll = def.showWhen;
+            applyShowWhen(item, def.showWhen);
+            def.showWhen.forEach((c) => registerShowWhenDependent(c.key, item));
          } else {
-            item.dataset.showWhenValue = def.showWhen.value;
+            item.dataset.showWhenKey = def.showWhen.key;
+            if (def.showWhen.notValue) {
+               item.dataset.showWhenNotValue = JSON.stringify(
+                  Array.isArray(def.showWhen.notValue)
+                     ? def.showWhen.notValue
+                     : [def.showWhen.notValue]
+               );
+            } else {
+               item.dataset.showWhenValue = def.showWhen.value;
+            }
+            applyShowWhen(item, def.showWhen);
+            registerShowWhenDependent(def.showWhen.key, item);
          }
-         applyShowWhen(item, def.showWhen);
-         registerShowWhenDependent(def.showWhen.key, item);
       }
 
       // Add tooltip hint if defined
@@ -2466,6 +2567,30 @@
             }
             inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-type="model_default_select" data-source-key="${sourceKey}">${defaultSelectHtml}</select>`;
             break;
+         case 'model_source_select': {
+            // String-valued dropdown sourced from a config array (e.g. openrouter_models).
+            // Unlike model_default_select (which stores an index), this stores the selected
+            // model string. Includes a "(Use default)" empty option and preserves a current
+            // value that isn't in the list.
+            const srcModels = Utils.getNestedValue(currentConfig, def.sourceKey) || [];
+            const curVal = value || '';
+            const emptyLabel = def.emptyLabel || '(Use default)';
+            let optsHtml = `<option value="" ${curVal === '' ? 'selected' : ''}>${escapeHtml(emptyLabel)}</option>`;
+            let inList = false;
+            srcModels.forEach((m) => {
+               const sel = String(m) === String(curVal);
+               if (sel) inList = true;
+               optsHtml += `<option value="${Utils.escapeAttr(m)}" ${sel ? 'selected' : ''}>${escapeHtml(m)}</option>`;
+            });
+            if (curVal !== '' && !inList) {
+               optsHtml += `<option value="${Utils.escapeAttr(curVal)}" selected>${escapeHtml(curVal)} (custom)</option>`;
+            }
+            // data-source-key opts this select into updateDependentModelSelects so it
+            // live-refreshes when the source list changes; data-type tells that function
+            // to rebuild with STRING values (not indices like model_default_select).
+            inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-type="model_source_select" data-source-key="${def.sourceKey}">${optsHtml}</select>`;
+            break;
+         }
          case 'range':
             // Range slider with value display
             const rangeAttrs = [
@@ -2571,6 +2696,25 @@
       const selects = sectionsContainer.querySelectorAll(`select[data-source-key="${sourceKey}"]`);
 
       selects.forEach((select) => {
+         // String-valued source select (aux OpenRouter models): rebuild with string
+         // options, an empty "(Use default)" entry, and preserve the current selection
+         // (kept as a "(custom)" option if it's no longer in the list).
+         if (select.dataset.type === 'model_source_select') {
+            const cur = select.value || '';
+            let inList = false;
+            let html = `<option value="" ${cur === '' ? 'selected' : ''}>(Use default)</option>`;
+            models.forEach((m) => {
+               const sel = m === cur;
+               if (sel) inList = true;
+               html += `<option value="${Utils.escapeAttr(m)}" ${sel ? 'selected' : ''}>${escapeHtml(m)}</option>`;
+            });
+            if (cur !== '' && !inList) {
+               html += `<option value="${Utils.escapeAttr(cur)}" selected>${escapeHtml(cur)} (custom)</option>`;
+            }
+            select.innerHTML = html;
+            return;
+         }
+
          const currentIdx = parseInt(select.value, 10) || 0;
          // Preserve selection if still valid, otherwise reset to 0
          const newIdx = currentIdx < models.length ? currentIdx : 0;

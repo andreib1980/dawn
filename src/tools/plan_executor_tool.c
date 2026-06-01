@@ -117,7 +117,12 @@ static const tool_metadata_t plan_executor_metadata = {
    .description = "Execute a multi-step tool plan locally. Use this when a task "
                   "requires multiple tool calls with conditional logic or data "
                   "dependencies between steps. The plan runs entirely on the server "
-                  "without additional LLM round trips. Returns aggregated results.",
+                  "without additional LLM round trips. Returns aggregated results. "
+                  "NOTE: only schedulable, non-dangerous tools may run inside a plan "
+                  "(e.g. search, weather, calendar, home_assistant). Stateful tools such "
+                  "as `memory` and `phone` are NOT allowed in plans — call those directly. "
+                  "If a step's tool is rejected, the result reports the failure; do not "
+                  "claim the action succeeded.",
    .params = plan_params,
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
@@ -226,6 +231,25 @@ static char *plan_executor_callback(const char *action, char *value, int *should
             json_object_put(nerr);
             json_object_put(perr);
          }
+      }
+   } else if (ctx.failed_steps > 0) {
+      /* Fail-forward steps don't abort the plan, but the result MUST say so — otherwise
+       * the model is told "executed successfully" for steps that did nothing and will
+       * report success to the user (e.g. claiming a journal was saved when every memory
+       * step was rejected). */
+      size_t len = strlen(ctx.output) + 192;
+      result = malloc(len);
+      if (result) {
+         snprintf(result, len,
+                  "Plan completed but %d of %d step(s) FAILED — the actions those steps "
+                  "intended were NOT performed. Details:\n%s",
+                  ctx.failed_steps, ctx.total_tool_calls,
+                  ctx.output[0] ? ctx.output : "(no detail captured)");
+         OLOG_WARNING("plan_executor: completed with failures — %d of %d tool call(s) failed",
+                      ctx.failed_steps, ctx.total_tool_calls);
+      } else {
+         OLOG_ERROR("plan_executor: malloc failed building failure summary (%d of %d failed)",
+                    ctx.failed_steps, ctx.total_tool_calls);
       }
    } else {
       if (ctx.output[0]) {

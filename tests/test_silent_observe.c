@@ -98,6 +98,12 @@ bool llm_apply_openrouter_gateway(cloud_provider_t *provider,
    return false;
 }
 
+/* Stub for llm_get_default_openrouter_model — referenced by the resolver's gateway
+ * branch (never reached here since the gateway stub returns false), but must link. */
+const char *llm_get_default_openrouter_model(void) {
+   return "anthropic/claude-3.5-haiku";
+}
+
 /* Stub for llm_chat_completion_with_config — silent-observe calls this
  * directly; we don't link against the real provider stack. */
 char *llm_chat_completion_with_config(struct json_object *conversation_history,
