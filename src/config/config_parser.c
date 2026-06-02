@@ -1087,6 +1087,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "recovery",
                                              "focus_injection", /* Phase 1b sub-table */
                                              "entity_merge",    /* Phase 2 sub-table */
+                                             "graph_retrieval", /* Phase 1A sub-table */
                                              NULL };
    warn_unknown_keys(table, "memory", known_keys);
 

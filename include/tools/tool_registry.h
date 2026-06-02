@@ -112,6 +112,16 @@ typedef enum {
     * on tools that fall back to config defaults like weather (uses
     * configured location when value is empty). */
    TOOL_CAP_REQUIRES_VALUE = (1 << 6),
+   /* Read-only tool whose output is meant for the user to RECEIVE (weather,
+    * search, url_fetch).  The scheduler uses this to auto-promote a scheduled
+    * `task` on such a tool into a single-step briefing, so the result is
+    * LLM-summarized and delivered (TTS / WebUI / deliver_to) instead of being
+    * discarded.  Do NOT set on action tools (lights, send message) whose
+    * scheduled result is just a status — "completed" is the right feedback
+    * there.  Mixed read/write tools (calendar, email) are intentionally NOT
+    * marked: their writes are legitimate tasks and a per-tool flag can't
+    * distinguish a scheduled read from a scheduled write. */
+   TOOL_CAP_INFORMATIONAL = (1 << 7),
 } tool_capability_t;
 
 /* =============================================================================

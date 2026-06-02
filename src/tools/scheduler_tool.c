@@ -395,6 +395,43 @@ static char *handle_create(struct json_object *details,
       }
    }
 
+   /* Option A auto-promotion: a `task` on a purely informational (read-only)
+    * tool would execute at fire time but its result is discarded — only
+    * briefings summarize + deliver tool output.  Promote such a task to a
+    * single-step briefing so the user actually receives what they scheduled.
+    * Action tools (lights, send message) stay tasks: their result is a status
+    * and "completed" is the right feedback.  The single tool is rewritten into
+    * a 1-step briefing (steps table owns it, legacy event tool_* fields
+    * cleared — the new-briefing convention), so it fires through the validated
+    * multi-step path rather than the legacy single-tool compat branch.  The
+    * tool + tool_value were already validated by the single-tool branch above,
+    * so the promoted step carries validated data.  say_aloud stays
+    * SCHED_SAY_ALOUD_DEFAULT here (the briefing-only override block ran earlier
+    * while this was still a TASK) → fire-time source heuristic speaks for
+    * voice-created events and stays silent for WebUI, which is the intent. */
+   if (type == SCHED_EVENT_TASK && event.tool_name[0]) {
+      const tool_metadata_t *promote_meta = tool_registry_find(event.tool_name);
+      if (promote_meta && (promote_meta->capabilities & TOOL_CAP_INFORMATIONAL)) {
+         memset(parsed_steps, 0, sizeof(parsed_steps));
+         strncpy(parsed_steps[0].tool_name, event.tool_name, SCHED_TOOL_NAME_MAX - 1);
+         strncpy(parsed_steps[0].tool_action, event.tool_action, SCHED_TOOL_NAME_MAX - 1);
+         strncpy(parsed_steps[0].tool_value, event.tool_value, SCHED_TOOL_VALUE_MAX - 1);
+         parsed_step_count = 1;
+         event.tool_name[0] = '\0';
+         event.tool_action[0] = '\0';
+         event.tool_value[0] = '\0';
+         type = SCHED_EVENT_BRIEFING;
+         event.event_type = SCHED_EVENT_BRIEFING;
+         /* Keep the confirmation text (and the LLM's relayed reply) coherent
+          * with the row's real type — the WebUI panel + list already render by
+          * event_type, and the event delivers a summary, not a status. */
+         type_str = sched_event_type_to_str(SCHED_EVENT_BRIEFING);
+         OLOG_INFO("scheduler: promoted informational task '%s' to single-step briefing "
+                   "(result would otherwise be discarded)",
+                   promote_meta->name);
+      }
+   }
+
    /* Atomic limit check + insert */
    int64_t id = 0;
    int insert_rc = scheduler_db_insert_checked(&event, g_config.scheduler.max_events_per_user,
@@ -415,12 +452,15 @@ static char *handle_create(struct json_object *details,
       return strdup(result);
    }
 
-   /* Multi-step briefing: write the parsed steps to briefing_steps now that
-    * the event row exists.  On failure, cancel the just-inserted event row
-    * (status='cancelled' — row stays for the retention sweep but is invisible
-    * to the queue) so we don't leave a zero-step briefing pending that would
-    * silently no-op at fire time. */
-   if (has_steps_array && parsed_step_count > 0) {
+   /* Write the parsed steps to briefing_steps now that the event row exists.
+    * parsed_step_count > 0 comes from either a multi-step `steps` array OR an
+    * informational-task promotion — both imply the row is a BRIEFING (the
+    * steps-array branch enforces type==BRIEFING; promotion flips event_type
+    * first), so this never persists steps onto a non-briefing row.  On failure,
+    * cancel the just-inserted event row (status='cancelled' — row stays for the
+    * retention sweep but is invisible to the queue) so we don't leave a
+    * zero-step briefing pending that would silently no-op at fire time. */
+   if (parsed_step_count > 0) {
       int set_rc = scheduler_db_briefing_steps_set(id, parsed_steps, parsed_step_count);
       if (set_rc != SCHED_DB_SUCCESS) {
          scheduler_db_cancel(id);
@@ -912,6 +952,14 @@ static const tool_metadata_t scheduler_metadata = {
        "schedule tool execution ('turn off lights at midnight'), "
        "or briefings that summarize tool output via LLM ('weather briefing at 7am'). "
        "Query time remaining, list active events, cancel, snooze, or dismiss.\n\n"
+       "TASK vs BRIEFING: use `briefing` whenever the user wants to RECEIVE the tool's "
+       "output (weather, search, news, web fetches, calendar readouts) — briefings "
+       "summarize and deliver the result.  Use `task` ONLY for action tools whose "
+       "result is just a status the user doesn't need read back (lights, locks, "
+       "media control, sending a message).  A `task` discards its tool output; if you "
+       "schedule an informational/read-only tool as a `task` the scheduler "
+       "auto-corrects it to a single-step briefing so the result isn't lost, but "
+       "picking `briefing` yourself is clearer.\n\n"
        "CRITICAL: see the TOOL-CALL DISCIPLINE block in your system prompt — it applies "
        "doubly hard here.  A schedule that doesn't fire is the worst failure mode: the user "
        "trusts your confirmation and finds out hours later that nothing happened.  When the "

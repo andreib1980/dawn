@@ -783,6 +783,16 @@
             case 'conversation_messages_appended':
                DawnHistory.handleConversationMessagesAppended(msg.payload);
                break;
+            case 'lock_conversation_llm_response':
+               // Background ack for per-conversation LLM settings lock. Silent on
+               // success; surface only genuine failures (success === false).
+               if (msg.payload && msg.payload.success === false) {
+                  console.warn(
+                     'Failed to lock conversation LLM settings:',
+                     msg.payload.error || 'unknown error'
+                  );
+               }
+               break;
             case 'always_on_state':
             case 'wake_detected':
             case 'recording_end':
