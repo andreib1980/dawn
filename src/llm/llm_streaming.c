@@ -1201,7 +1201,17 @@ void llm_stream_free(llm_stream_context_t *ctx) {
 
    free(ctx->accumulated_response);
    free(ctx->accumulated_thinking);
-   free(ctx->provider.claude.thinking_signature);
+   /* thinking_signature is a heap pointer that lives ONLY in the Claude arm of
+    * the `provider` union; it's allocated solely by the Claude SSE parser.  For
+    * OpenAI/OpenRouter/Gemini/local streams the active union member is
+    * openai.tool_args_buffer, whose bytes alias this pointer — a response with
+    * >=2 parallel tool calls writes arg JSON into tool_args_buffer[1], which
+    * overlaps thinking_signature, so freeing it unconditionally hands free() a
+    * pointer made of JSON text → SIGSEGV.  Only free it for actual Claude
+    * streams (matches the parse-routing condition in llm_stream_handle_event). */
+   if (ctx->llm_type != LLM_LOCAL && ctx->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
+      free(ctx->provider.claude.thinking_signature);
+   }
    free(ctx);
 }
 
