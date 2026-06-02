@@ -178,6 +178,55 @@
    gap: 0.5rem;
 }
 
+/* Shown when a linked channel's driver isn't loaded (e.g. missing bot token). */
+.channel-warning {
+   margin-bottom: 0.5rem;
+   padding: 0.4rem 0.6rem;
+   font-size: 0.8rem;
+   color: var(--warning);
+   background: var(--warning-subtle);
+   border: 1px solid var(--warning-border);
+   border-radius: var(--border-radius-sm);
+}
+
+/* Per-channel LLM controls: model shown read-only (changed in chat via the
+ * switch-model tool), reasoning + effort editable here. */
+.channel-llm {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+   gap: 0.5rem 0.75rem;
+   margin-bottom: 0.5rem;
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+}
+
+.channel-llm-model {
+   flex: 1 1 100%;
+   font-family: var(--font-mono);
+   color: var(--text-secondary);
+}
+
+.channel-llm-field {
+   display: inline-flex;
+   align-items: center;
+   gap: 0.3rem;
+}
+
+.channel-llm-field select {
+   padding: 0.2rem 0.4rem;
+   background: var(--bg-tertiary);
+   color: var(--text-primary);
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius-sm);
+   font-size: 0.8rem;
+}
+
+.channel-llm-field select:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+}
+
 /* Narrow viewports: don't right-orphan the status text, and meet the 44px
  * touch-target guideline (mirrors the satellite panel's mobile rules). */
 @media (max-width: 600px) {
@@ -188,6 +237,7 @@
 
    .channel-controls .btn,
    .channel-provider-select,
+   .channel-llm-field select,
    #channel-generate-code-btn,
    #refresh-channels-btn {
       min-height: 44px;

@@ -39,6 +39,7 @@
 #include "auth/auth_db_internal.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_interface.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "messaging/messaging_engine.h"
@@ -474,6 +475,76 @@ session_t *get_or_create_messaging_session(const char *provider,
              * we just allocated. */
             json_object_put(loaded);
          }
+      }
+   }
+
+   /* Apply this channel's per-conversation LLM settings to the session.
+    *
+    * The forever-conversation row owns these (the same conversations.llm_*
+    * columns the WebUI per-conversation control uses).  New messaging
+    * conversations are seeded thinking-ON at creation (resolve_channel_
+    * conversation_id) so the small global model stops bluffing tool calls;
+    * the user changes them per channel from the WebUI Messaging Channels
+    * panel or in chat via the switch_llm tool.  This is the server-side apply
+    * that messaging needs because, unlike the WebUI, there is no browser
+    * client to round-trip the stored conv settings through.
+    *
+    * Stash conversation_id on the session so switch_llm can persist a later
+    * in-chat change back to this conversation's row.
+    *
+    * Set ONCE at creation.  The channel-name fast-path refresh (~296) must NOT
+    * mirror this — LLM config is per-creation/restart, not per-turn (per-turn
+    * re-application would churn the Anthropic stable-prefix cache).  Safe
+    * without engine locks: session_t is thread-private here, and
+    * session_set_llm_config takes only the leaf llm_config_mutex. */
+   s->messaging_identity.conversation_id = conversation_id;
+   if (conversation_id > 0 && user_id > 0) {
+      conversation_t conv;
+      if (conv_db_get(conversation_id, user_id, &conv) == AUTH_DB_SUCCESS) {
+         session_llm_config_t mcfg;
+         session_get_llm_config(s, &mcfg); /* seed ALL fields from the global default */
+
+         if (conv.llm_type[0]) {
+            mcfg.type = (strcmp(conv.llm_type, "local") == 0) ? LLM_LOCAL : LLM_CLOUD;
+         }
+         if (conv.cloud_provider[0]) {
+            /* type already set from conv.llm_type above; we only need the
+             * provider enum here, so t is intentionally discarded. */
+            llm_type_t t;
+            cloud_provider_t cp;
+            if (cloud_provider_from_string(conv.cloud_provider, &t, &cp) == SUCCESS) {
+               (void)t;
+               mcfg.cloud_provider = cp;
+            }
+         }
+         if (conv.model[0]) {
+            strncpy(mcfg.model, conv.model, sizeof(mcfg.model) - 1);
+            mcfg.model[sizeof(mcfg.model) - 1] = '\0';
+         }
+         if (conv.thinking_mode[0]) {
+            strncpy(mcfg.thinking_mode, conv.thinking_mode, sizeof(mcfg.thinking_mode) - 1);
+            mcfg.thinking_mode[sizeof(mcfg.thinking_mode) - 1] = '\0';
+         }
+         if (conv.reasoning_effort[0]) {
+            strncpy(mcfg.reasoning_effort, conv.reasoning_effort,
+                    sizeof(mcfg.reasoning_effort) - 1);
+            mcfg.reasoning_effort[sizeof(mcfg.reasoning_effort) - 1] = '\0';
+         }
+
+         /* OpenRouter gateway: a CLOUD session is force-routed to OpenRouter by
+          * llm_resolve_config at request time.  Force the provider enum here too
+          * so session_set_llm_config validates the OpenRouter key (not the stored
+          * direct provider's).  A local session keeps its local model. */
+         if (mcfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
+            mcfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+         }
+
+         if (session_set_llm_config(s, &mcfg) != SUCCESS) {
+            OLOG_WARNING(
+                "messaging: conv %lld LLM settings rejected; session %u uses global default",
+                (long long)conversation_id, s->session_id);
+         }
+         conv_free(&conv);
       }
    }
 

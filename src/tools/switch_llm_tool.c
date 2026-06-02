@@ -27,7 +27,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -225,13 +227,48 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    }
    config.model[0] = '\0'; /* Clear model to use provider default */
 
-   if (session_set_llm_config(session, &config) != 0) {
+   if (session_set_llm_config(session, &config) != SUCCESS) {
       char *result = malloc(128);
       if (result) {
          snprintf(result, 128, "Failed to switch to %s.%s%s", entry->label,
                   entry->fail_hint ? " " : "", entry->fail_hint ? entry->fail_hint : "");
       }
       return result;
+   }
+
+   /* Persist the change to the conversation row so it survives session
+    * recreation (idle eviction / daemon restart).  Only messaging sessions
+    * carry a conversation_id; WebUI/local sessions (conv_id 0) keep their
+    * existing live-only behavior — the WebUI has its own per-conversation
+    * lock UI.  Re-read the applied config first (session_set_llm_config may
+    * fall back on a missing key) and write the FULL config, because
+    * conv_db_update_llm_settings overwrites all columns (no keep-current) —
+    * passing the current thinking_mode/reasoning_effort preserves the
+    * conversation's thinking-on seed that switch_llm itself doesn't touch. */
+   if (session->messaging_identity.conversation_id > 0 && session->metrics.user_id > 0) {
+      session_llm_config_t applied;
+      session_get_llm_config(session, &applied);
+      const char *type_str = (applied.type == LLM_LOCAL) ? "local" : "cloud";
+      /* Under the OpenRouter gateway the applied provider is OPENROUTER (the
+       * session was force-routed), so that is what gets persisted — correct
+       * while the gateway stays on.  If the operator later disables the gateway
+       * the row reads "openrouter" and session_set_llm_config falls back to the
+       * global default at that point; benign display/semantic drift, not data
+       * corruption. */
+      const char *prov_str = (applied.type == LLM_CLOUD)
+                                 ? cloud_provider_to_string(applied.cloud_provider)
+                                 : "";
+      int prc = conv_db_update_llm_settings(session->messaging_identity.conversation_id,
+                                            session->metrics.user_id, type_str, prov_str,
+                                            applied.model, applied.tool_mode, applied.thinking_mode,
+                                            applied.reasoning_effort);
+      if (prc != AUTH_DB_SUCCESS) {
+         /* Best-effort: the live session changed but the row didn't, so the
+          * change reverts on next session recreation.  Log so it's diagnosable. */
+         OLOG_WARNING("switch_llm: failed to persist LLM change to conversation %lld (rc=%d); "
+                      "live session updated but it will not survive restart",
+                      (long long)session->messaging_identity.conversation_id, prc);
+      }
    }
 
    char *result = malloc(64);

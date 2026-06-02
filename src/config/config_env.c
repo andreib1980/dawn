@@ -1634,6 +1634,15 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->calendar.default_event_duration_min));
    json_object_object_add(root, "calendar", calendar);
 
+   /* [messaging] — parent object with nested sms child (fixes the pre-existing gap
+    * where sms_active_window_sec was parsed but never re-serialized). */
+   json_object *messaging = json_object_new_object();
+   json_object *messaging_sms = json_object_new_object();
+   json_object_object_add(messaging_sms, "active_window_sec",
+                          json_object_new_int(config->messaging.sms_active_window_sec));
+   json_object_object_add(messaging, "sms", messaging_sms);
+   json_object_object_add(root, "messaging", messaging);
+
    /* Music configuration */
    json_object *music = json_object_new_object();
    json_object_object_add(music, "scan_interval_minutes",
@@ -1699,6 +1708,14 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
                           json_object_new_boolean(secrets && secrets->google_redirect_url[0]));
    json_object_object_add(obj, "tavily_api_key",
                           json_object_new_boolean(secrets && secrets->tavily_api_key[0]));
+   json_object_object_add(obj, "telegram_bot_token",
+                          json_object_new_boolean(secrets && secrets->telegram_bot_token[0]));
+   json_object_object_add(obj, "discord_bot_token",
+                          json_object_new_boolean(secrets && secrets->discord_bot_token[0]));
+   json_object_object_add(obj, "slack_app_token",
+                          json_object_new_boolean(secrets && secrets->slack_app_token[0]));
+   json_object_object_add(obj, "slack_bot_token",
+                          json_object_new_boolean(secrets && secrets->slack_bot_token[0]));
 
    return obj;
 }
@@ -2267,6 +2284,11 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "cache_future_days = %d\n", config->calendar.cache_future_days);
    fprintf(fp, "default_event_duration_min = %d\n", config->calendar.default_event_duration_min);
 
+   /* [messaging.sms] — explicit sub-table header so sms_active_window_sec
+    * round-trips (it was parsed but never re-serialized before). */
+   fprintf(fp, "\n[messaging.sms]\n");
+   fprintf(fp, "active_window_sec = %d\n", config->messaging.sms_active_window_sec);
+
    /* Write tool-owned config sections (e.g. [home_assistant], [shutdown]) */
    tool_registry_write_configs(fp);
 
@@ -2323,6 +2345,16 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
    WRITE_SECRET("satellite_registration_key", secrets->satellite_registration_key);
    WRITE_SECRET("plex_token", secrets->plex_token);
    WRITE_SECRET("embedding_api_key", secrets->embedding_api_key);
+
+   /* Service-to-service auth token + messaging-channel driver tokens.  These
+    * are parsed from [secrets] (config_parser.c) but were previously omitted
+    * here, so any WebUI "Save Secrets" silently dropped them (O_TRUNC rewrite).
+    * Preserve them on write — even service_token, which isn't WebUI-editable. */
+   WRITE_SECRET("service_token", secrets->service_token);
+   WRITE_SECRET("telegram_bot_token", secrets->telegram_bot_token);
+   WRITE_SECRET("discord_bot_token", secrets->discord_bot_token);
+   WRITE_SECRET("slack_app_token", secrets->slack_app_token);
+   WRITE_SECRET("slack_bot_token", secrets->slack_bot_token);
 
    /* Home Assistant */
    if (secrets->home_assistant_token[0]) {

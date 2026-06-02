@@ -181,9 +181,54 @@
    border-bottom: 1px solid var(--accent-border);
 }
 
+.history-search-input-wrap {
+   position: relative;
+}
+
+/* Clear (×) button inside the search field — mirrors .settings-search-clear. */
+.history-search-clear {
+   position: absolute;
+   right: 0.5rem;
+   /* Vertically center WITHOUT transform: the global button:hover rule
+    * (buttons.css) sets transform: translateY(-1px), which would override a
+    * centering transform and make the button jump on hover.  top/bottom + auto
+    * margins center it and leave the 1px hover nudge harmless (same as the
+    * settings-search clear button). */
+   top: 0;
+   bottom: 0;
+   margin-top: auto;
+   margin-bottom: auto;
+   width: 20px;
+   height: 20px;
+   padding: 0;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   background: transparent;
+   border: none;
+   color: var(--text-secondary);
+   font-size: 1.1rem;
+   line-height: 1;
+   cursor: pointer;
+}
+
+.history-search-clear:hover {
+   color: var(--text-primary);
+}
+
+.history-search-clear:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+   border-radius: var(--border-radius-sm);
+}
+
+.history-search-clear.hidden {
+   display: none;
+}
+
 #history-search-input {
    width: 100%;
-   padding: 0.75rem 1rem;
+   padding: 0.75rem 2.25rem 0.75rem 1rem; /* right pad leaves room for the clear button */
    background: rgba(0, 0, 0, 0.3);
    border: 1px solid var(--accent-focus);
    border-radius: 8px;
@@ -251,7 +296,10 @@
    text-transform: uppercase;
    letter-spacing: 0.1em;
    color: var(--text-secondary);
-   background: rgba(0, 0, 0, 0.2);
+   /* Opaque (matches the panel) so that when the next period's header pins to
+    * top:0 it fully covers the previous one — a translucent background let the
+    * stacked sticky headers show through each other ("TODAY"/"YESTERDAY"/… piled up). */
+   background: rgb(16, 16, 23);
    position: sticky;
    top: 0;
    z-index: 1;

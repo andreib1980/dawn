@@ -90,6 +90,34 @@
          maxlength: 256,
          inputType: 'text',
       },
+      {
+         id: 'secret-telegram-token',
+         key: 'telegram_bot_token',
+         label: 'Telegram Bot Token',
+         placeholder: 'From @BotFather, e.g. 123456:ABC-DEF...',
+         maxlength: 256,
+      },
+      {
+         id: 'secret-discord-token',
+         key: 'discord_bot_token',
+         label: 'Discord Bot Token',
+         placeholder: 'From the Discord Developer Portal...',
+         maxlength: 256,
+      },
+      {
+         id: 'secret-slack-app-token',
+         key: 'slack_app_token',
+         label: 'Slack App Token',
+         placeholder: 'xapp-...',
+         maxlength: 256,
+      },
+      {
+         id: 'secret-slack-bot-token',
+         key: 'slack_bot_token',
+         label: 'Slack Bot Token',
+         placeholder: 'xoxb-...',
+         maxlength: 256,
+      },
    ];
 
    // Configuration state

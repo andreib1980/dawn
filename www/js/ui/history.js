@@ -11,6 +11,9 @@
 
    let historyState = {
       conversations: [],
+      conversationsTotal: 0, // total available on the server (for list pagination)
+      conversationsLoading: false, // a list_conversations request is in flight
+      pendingListAppend: false, // the in-flight request is a "load more" (append, not replace)
       activeConversationId: null,
       searchQuery: '',
       searchTimeout: null,
@@ -172,12 +175,19 @@
     * API Requests
     * ============================================================================= */
 
-   function requestListConversations() {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+   const CONVERSATION_PAGE_SIZE = 50;
 
+   function requestListConversations(append) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      if (historyState.conversationsLoading) return; // one page at a time
+
+      // append = "load more" (next page); otherwise a fresh load that replaces.
+      const offset = append ? historyState.conversations.length : 0;
+      historyState.pendingListAppend = !!append;
+      historyState.conversationsLoading = true;
       DawnWS.send({
          type: 'list_conversations',
-         payload: { limit: 50, offset: 0 },
+         payload: { limit: CONVERSATION_PAGE_SIZE, offset: offset },
       });
    }
 
@@ -303,6 +313,10 @@
     * ============================================================================= */
 
    function handleListConversationsResponse(payload) {
+      const wasAppend = historyState.pendingListAppend;
+      historyState.conversationsLoading = false;
+      historyState.pendingListAppend = false;
+
       if (!payload.success) {
          console.error('Failed to list conversations:', payload.error);
          if (typeof DawnToast !== 'undefined') {
@@ -311,8 +325,45 @@
          return;
       }
 
-      historyState.conversations = payload.conversations || [];
-      renderConversationList();
+      const incoming = payload.conversations || [];
+      if (wasAppend) {
+         // An empty page means we've reached the end (e.g. rows were deleted
+         // between pages and `total` is stale) — pin total to what we have so
+         // the scroll handler stops requesting more.
+         if (incoming.length === 0) {
+            historyState.conversationsTotal = historyState.conversations.length;
+            return;
+         }
+         // Preserve the user's scroll position across the innerHTML rebuild —
+         // new items append at the bottom, so the view shouldn't jump.  The
+         // scroller is .history-content, not #history-list.
+         const scroller = historyElements.content;
+         const scrollTop = scroller ? scroller.scrollTop : 0;
+         historyState.conversations = historyState.conversations.concat(incoming);
+         historyState.conversationsTotal =
+            payload.total != null ? payload.total : historyState.conversations.length;
+         renderConversationList();
+         if (scroller) {
+            scroller.scrollTop = scrollTop;
+         }
+      } else {
+         historyState.conversations = incoming;
+         historyState.conversationsTotal = payload.total != null ? payload.total : incoming.length;
+         renderConversationList();
+      }
+   }
+
+   // Infinite-scroll for the conversation LIST: when scrolled near the bottom and
+   // more conversations exist on the server, fetch the next page and append.
+   // (Disabled while a search is active — search has its own result set.)
+   function handleConversationListScroll() {
+      const scroller = historyElements.content;
+      if (!scroller || historyState.searchQuery) return;
+      if (historyState.conversationsLoading) return;
+      if (historyState.conversations.length >= historyState.conversationsTotal) return;
+      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 150) {
+         requestListConversations(true);
+      }
    }
 
    function handleNewConversationResponse(payload) {
@@ -1182,7 +1233,7 @@
       }
    }
 
-   function openHistory() {
+   function openHistory(focusSearch) {
       if (!historyElements.panel) return;
 
       historyElements.panel.classList.remove('hidden');
@@ -1203,15 +1254,44 @@
 
       requestListConversations();
 
-      setTimeout(() => {
-         if (historyElements.searchInput) {
-            historyElements.searchInput.focus();
-         } else if (historyElements.closeBtn) {
-            historyElements.closeBtn.focus();
-         }
-      }, 100);
+      // Re-sync the clear (×) visibility in case search text persisted across an
+      // open/close cycle (the toggle otherwise only runs on input/clear).
+      if (historyElements.searchClear && historyElements.searchInput) {
+         historyElements.searchClear.classList.toggle(
+            'hidden',
+            historyElements.searchInput.value.trim().length === 0
+         );
+      }
 
-      if (callbacks.trapFocus) {
+      // Focus the search box only on an interactive open (the user clicked to
+      // open the sidebar and likely wants to search).  On a passive restore of a
+      // persisted-open sidebar after a page refresh (focusSearch === false), do
+      // NOT grab focus — that would steal it from the message composer.
+      if (focusSearch !== false) {
+         setTimeout(() => {
+            if (historyElements.searchInput) {
+               historyElements.searchInput.focus();
+            } else if (historyElements.closeBtn) {
+               historyElements.closeBtn.focus();
+            }
+         }, 100);
+      } else {
+         // Passive restore (page refresh with the sidebar persisted open): put
+         // focus on the message composer so the user can type immediately,
+         // rather than leaving it in the sidebar.
+         setTimeout(() => {
+            const composer = document.getElementById('text-input');
+            if (composer) {
+               composer.focus();
+            }
+         }, 100);
+      }
+
+      // The focus trap pulls focus into the panel (onto the first focusable
+      // element — the "+ New" button).  That's right for an interactive open,
+      // but on a passive restore after refresh it would steal focus from the
+      // message composer just like the search-focus above, so skip it there.
+      if (focusSearch !== false && callbacks.trapFocus) {
          historyFocusTrapCleanup = callbacks.trapFocus(historyElements.panel);
       }
 
@@ -1279,7 +1359,7 @@
          historyStateRestored = true;
          const savedState = localStorage.getItem('dawn_history_open');
          if (savedState === 'true') {
-            openHistory();
+            openHistory(false); // passive restore — don't steal focus from the composer
          }
       }
    }
@@ -1398,8 +1478,14 @@
       historyElements.closeBtn = document.getElementById('history-close');
       historyElements.newBtn = document.getElementById('new-conversation-btn');
       historyElements.searchInput = document.getElementById('history-search-input');
+      historyElements.searchClear = document.getElementById('history-search-clear');
       historyElements.searchContentCheckbox = document.getElementById('history-search-content');
       historyElements.list = document.getElementById('history-list');
+      // The scrollable container is .history-content (overflow-y:auto), NOT
+      // #history-list (display:flex) — infinite-scroll must listen on this.
+      historyElements.content = historyElements.panel
+         ? historyElements.panel.querySelector('.history-content')
+         : null;
       // Sidebar rail
       historyElements.sidebarRail = document.getElementById('sidebar-rail');
       historyElements.sidebarToggle = document.getElementById('sidebar-toggle');
@@ -1413,6 +1499,12 @@
 
       if (historyElements.closeBtn) {
          historyElements.closeBtn.addEventListener('click', closeHistory);
+      }
+
+      // Conversation-list infinite scroll (load older conversations near the bottom).
+      // Listen on the scrollable container (.history-content), not #history-list.
+      if (historyElements.content) {
+         historyElements.content.addEventListener('scroll', handleConversationListScroll);
       }
 
       if (historyElements.overlay) {
@@ -1446,6 +1538,11 @@
             const query = e.target.value.trim();
             historyState.searchQuery = query;
 
+            // Show the clear button only when there's text.
+            if (historyElements.searchClear) {
+               historyElements.searchClear.classList.toggle('hidden', query.length === 0);
+            }
+
             if (historyState.searchTimeout) {
                clearTimeout(historyState.searchTimeout);
             }
@@ -1457,6 +1554,23 @@
                   requestListConversations();
                }
             }, 300);
+         });
+      }
+
+      // Clear (×) button: reset the search and restore the full conversation list.
+      if (historyElements.searchClear) {
+         historyElements.searchClear.addEventListener('click', () => {
+            if (historyState.searchTimeout) {
+               clearTimeout(historyState.searchTimeout);
+               historyState.searchTimeout = null;
+            }
+            if (historyElements.searchInput) {
+               historyElements.searchInput.value = '';
+               historyElements.searchInput.focus();
+            }
+            historyState.searchQuery = '';
+            historyElements.searchClear.classList.add('hidden');
+            requestListConversations();
          });
       }
 

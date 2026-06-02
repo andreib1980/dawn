@@ -57,6 +57,9 @@
    --transition-fast: 150ms;
    --transition-medium: 300ms;
 
+   /* Typography */
+   --font-mono: 'IBM Plex Mono', monospace;
+
    /* Responsive Breakpoints (for reference - CSS can't use vars in @media)
    * --bp-mobile: 600px    - Major layout shifts
    * --bp-compact: 500px   - Tighter spacing

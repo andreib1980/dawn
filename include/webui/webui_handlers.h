@@ -568,6 +568,9 @@ void handle_rename_channel(ws_connection_t *conn, struct json_object *payload);
 /** @brief Re-enable one of the user's soft-deleted channels by row id. */
 void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload);
 
+/** @brief Set the per-channel LLM settings (writes the channel's conversation row). */
+void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload);
+
 /* =============================================================================
  * Satellite Handler Functions (defined in webui_satellite.c)
  * ============================================================================= */

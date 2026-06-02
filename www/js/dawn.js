@@ -464,6 +464,10 @@
                if (typeof DawnMessaging !== 'undefined')
                   DawnMessaging.handleMutationResponse(msg.payload);
                break;
+            case 'set_channel_llm_response':
+               if (typeof DawnMessaging !== 'undefined')
+                  DawnMessaging.handleSetChannelLlmResponse(msg.payload);
+               break;
             case 'get_my_settings_response':
                DawnMySettings.handleGetResponse(msg.payload);
                break;

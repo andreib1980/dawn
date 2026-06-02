@@ -338,6 +338,23 @@ const char *llm_get_cloud_provider_name(void);
 const char *cloud_provider_to_string(cloud_provider_t provider);
 
 /**
+ * @brief Convert a provider string to an LLM type + cloud provider enum
+ *
+ * Inverse of cloud_provider_to_string, plus the LLM type. "local"/"ollama" map to
+ * LLM_LOCAL + CLOUD_PROVIDER_NONE; "openai"/"claude"/"anthropic"/"gemini"/"openrouter"
+ * map to LLM_CLOUD + the matching provider. Use instead of inline string->enum ladders.
+ *
+ * @param str          Provider string (lowercase)
+ * @param[out] type_out     Set to LLM_LOCAL or LLM_CLOUD on SUCCESS
+ * @param[out] provider_out Set to the cloud provider enum on SUCCESS (NONE for local)
+ * @return SUCCESS on a recognized provider; FAILURE on NULL args or unknown string
+ *         (outputs left untouched on FAILURE)
+ */
+int cloud_provider_from_string(const char *str,
+                               llm_type_t *type_out,
+                               cloud_provider_t *provider_out);
+
+/**
  * @brief Set the cloud provider at runtime
  *
  * Switches the active cloud provider. Validates that the required API key

@@ -19,8 +19,17 @@ the thread at any time with `/new`.
 
 ## How linking works (all providers)
 
-1. Put the provider's bot/app token in `secrets.toml` and restart DAWN. The
-   matching driver only loads when its token is present.
+1. Give DAWN the provider's bot/app token. Two ways:
+   - **WebUI (recommended):** Settings → **Secrets** has fields for the Telegram,
+     Discord, and Slack tokens. Paste the token and Save — the matching driver
+     **starts immediately, no restart needed**.
+   - **`secrets.toml`:** add the token by hand (see each provider below) and
+     restart DAWN.
+
+   The matching driver only loads when its token is present. *Adding* a token in
+   the WebUI starts the driver live; **rotating or removing** a token is
+   restart-to-apply (the driver's listener can't be torn down cleanly while
+   running). SMS needs no token — see [SMS](#sms).
 2. Generate a one-time **link code** for your user, either in the WebUI
    **Messaging Channels** settings panel or with the admin CLI:
    ```bash
@@ -42,12 +51,14 @@ active window; see [SMS](#sms)). Send `/new` (Slack: ask the assistant to
 
 1. Open [@BotFather](https://t.me/BotFather), send `/newbot`, and follow the
    prompts. BotFather returns a token like `123456:ABC-DEF...`.
-2. Add it to `secrets.toml`:
+2. Give DAWN the token — paste it into Settings → Secrets → **Telegram Bot
+   Token** and Save (driver starts immediately), or add it to `secrets.toml` and
+   restart:
    ```toml
    [secrets]
    telegram_bot_token = "123456:ABC-DEF..."
    ```
-3. Restart DAWN, generate a link code, and DM your bot `/link CODE`.
+3. Generate a link code and DM your bot `/link CODE`.
 
 ## Discord
 
@@ -57,13 +68,13 @@ v1 is **DM-only, text-only**.
    [discord.com/developers/applications](https://discord.com/developers/applications).
 2. Under **Bot** settings, enable the **MESSAGE CONTENT INTENT** toggle (a
    privileged intent — required to read DM text).
-3. Copy the bot token into `secrets.toml`:
+3. Give DAWN the bot token — Settings → Secrets → **Discord Bot Token** and Save
+   (driver starts immediately), or add it to `secrets.toml` and restart:
    ```toml
    [secrets]
    discord_bot_token = "..."
    ```
-4. Invite the bot so you can DM it, restart DAWN, generate a code, and DM
-   `/link CODE`.
+4. Invite the bot so you can DM it, generate a code, and DM `/link CODE`.
 
 ## Slack
 
@@ -76,13 +87,15 @@ v1 is **DM-only, single-workspace**, over Socket Mode (no public URL needed).
    the **Bot User OAuth Token** (`xoxb-...`).
 4. **Event Subscriptions** → enable, and subscribe to bot events: `message.im`,
    `app_mention`.
-5. Add both tokens to `secrets.toml`:
+5. Give DAWN both tokens — Settings → Secrets → **Slack App Token** + **Slack Bot
+   Token** and Save (driver starts immediately once *both* are set), or add them
+   to `secrets.toml` and restart:
    ```toml
    [secrets]
    slack_app_token = "xapp-..."
    slack_bot_token = "xoxb-..."
    ```
-6. Restart DAWN, generate a code, and DM the bot `link CODE` (no leading slash).
+6. Generate a code and DM the bot `link CODE` (no leading slash).
 
 ## SMS
 
@@ -116,11 +129,42 @@ local TTS/banner are suppressed for it.
 
 ---
 
+## Per-channel model & reasoning
+
+Each channel's conversation carries its own LLM settings — the same
+per-conversation mechanism the WebUI uses, stored on the channel's
+forever-conversation. You set them in Settings → **Messaging Channels**, per
+channel:
+
+- **Reasoning** — *Default* (inherit the global setting, shown as e.g.
+  "Default (Off)"), *Off*, or *On*. **New messaging conversations default to
+  On.** Extended thinking makes the model reliably *use its tools* over chat —
+  without it, smaller/faster models tend to *say* they did something ("Briefing
+  scheduled") without actually emitting the tool call. The cost is a few extra
+  seconds before the reply starts.
+- **Effort** — reasoning token budget when Reasoning is on: *Default*, *Low*
+  (the shipped default), *Medium*, *High*.
+- **Model** — shown read-only (e.g. `Model: Default (claude-sonnet-4.6)`).
+  Change it **from within the chat**: ask the assistant, e.g. "switch to Claude"
+  or "use the local model". That change persists to the channel's conversation
+  and survives restarts. Under the OpenRouter gateway all channels route through
+  OpenRouter using its default model.
+
+Changes apply to that channel's conversation; an in-progress session picks them
+up on its next session (re)creation. "Default" everywhere means "inherit the
+global LLM," so leaving them alone just follows your main configuration.
+
+---
+
 ## Managing channels
 
 **WebUI** — Settings → **Messaging Channels**: list your linked channels,
 generate link codes, rename a channel's display name, unlink (soft-delete,
-preserving history), and re-enable a previously unlinked channel.
+preserving history), re-enable a previously unlinked channel, and set each
+channel's [Reasoning/Effort](#per-channel-model--reasoning). Each row shows a
+status dot: **Active** (driver running), **Not connected** (linked, but the
+provider's driver isn't loaded — add its token in Settings → Secrets), or
+**Unlinked**.
 
 **Operator CLI** — `dawn-admin messaging`:
 
@@ -139,9 +183,12 @@ later re-link of the same address resumes the prior thread and custom name.
 
 ## Notes and troubleshooting
 
-- **Driver not loading?** The driver only registers when its token is present in
-  `secrets.toml` and DAWN has been restarted. Check the daemon log for
-  `registered driver '<provider>'`.
+- **Driver not loading?** A driver registers only when its token is present.
+  Adding the token via Settings → Secrets starts it immediately; if you edited
+  `secrets.toml` by hand, restart DAWN. Check the daemon log for
+  `registered driver '<provider>'`. A linked channel whose driver isn't running
+  shows **Not connected** in the Messaging Channels panel — that means the token
+  is missing (or you rotated/removed it and haven't restarted).
 - **`/link` says invalid/expired?** Codes last 10 minutes and are single-use.
   Generate a fresh one. Review attempts with `dawn-admin messaging link-attempts`.
 - **Messages from an unlinked sender are ignored** by design — the bot never

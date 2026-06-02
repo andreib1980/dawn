@@ -43,6 +43,23 @@ extern "C" {
  */
 int messaging_tool_register(void);
 
+/**
+ * @brief Start any token-gated messaging driver whose token is now set but which
+ *        isn't already registered.
+ *
+ * Called after the WebUI saves secrets, so adding a Telegram/Discord/Slack bot
+ * token starts its driver live without a daemon restart.  Additive only: it
+ * never tears down a running driver, so rotating or removing a token remains
+ * daemon-restart-to-apply (live teardown would join a long-poll listener and the
+ * engine has no clean per-driver unregister path).  Safe to call on any secrets
+ * save — already-running drivers are skipped.
+ *
+ * @note Thread safety: typically called from the lws service thread (set_secrets).
+ *       The shared registration state is mutex-guarded, so it is safe even if it
+ *       races the one-time init-thread registration.
+ */
+void messaging_tool_refresh_drivers(void);
+
 #ifdef __cplusplus
 }
 #endif

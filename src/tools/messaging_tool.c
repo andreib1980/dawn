@@ -22,6 +22,7 @@
 #include "tools/messaging_tool.h"
 
 #include <json-c/json.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,6 +228,56 @@ static const treg_param_t messaging_params[] = {
    },
 };
 
+/* Which optional drivers we've registered, so messaging_tool_refresh_drivers()
+ * can start a newly-tokened driver live (WebUI "Save Secrets") without trying to
+ * re-register one that's already running.  SMS is unconditional and not tracked. */
+static bool s_telegram_registered = false;
+static bool s_discord_registered = false;
+static bool s_slack_registered = false;
+/* Guards the flags + the register calls.  In practice the two callers don't
+ * overlap (init runs before the WebUI accepts connections; the live refresh
+ * runs on the lws service thread afterward), but the mutex closes the
+ * theoretical race and documents the shared state. */
+static pthread_mutex_t s_driver_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Register the optional token-gated drivers whose tokens are present and which
+ * aren't already registered.  Additive only — never tears a running driver down
+ * (token rotation/removal is daemon-restart-to-apply; live teardown would join a
+ * long-poll listener and the driver isn't cleanly unregisterable from the engine
+ * today).  Called at init and again from set_secrets so adding a token in the
+ * WebUI starts the driver without a restart. */
+static void register_token_drivers(void) {
+   pthread_mutex_lock(&s_driver_reg_mutex);
+   if (!s_telegram_registered && g_secrets.telegram_bot_token[0] != '\0') {
+      if (messaging_telegram_register(g_secrets.telegram_bot_token) == SUCCESS) {
+         s_telegram_registered = true;
+      } else {
+         OLOG_WARNING("messaging_tool: Telegram driver registration failed");
+      }
+   }
+   if (!s_discord_registered && g_secrets.discord_bot_token[0] != '\0') {
+      if (messaging_discord_register(g_secrets.discord_bot_token) == SUCCESS) {
+         s_discord_registered = true;
+      } else {
+         OLOG_WARNING("messaging_tool: Discord driver registration failed");
+      }
+   }
+   if (!s_slack_registered && g_secrets.slack_app_token[0] != '\0' &&
+       g_secrets.slack_bot_token[0] != '\0') {
+      if (messaging_slack_register(g_secrets.slack_app_token, g_secrets.slack_bot_token) ==
+          SUCCESS) {
+         s_slack_registered = true;
+      } else {
+         OLOG_WARNING("messaging_tool: Slack driver registration failed");
+      }
+   }
+   pthread_mutex_unlock(&s_driver_reg_mutex);
+}
+
+void messaging_tool_refresh_drivers(void) {
+   register_token_drivers();
+}
+
 static int messaging_tool_init(void) {
    if (messaging_engine_init() != MESSAGING_SUCCESS) {
       OLOG_ERROR("messaging_tool: engine init failed");
@@ -239,33 +290,21 @@ static int messaging_tool_init(void) {
       OLOG_WARNING("messaging_tool: SMS driver registration failed");
    }
 
-   /* Conditionally register drivers based on configured tokens.  When
-    * no token is set, the engine still runs (the LLM-facing tool can
-    * report "no channels linked"), but no driver listens. */
-   if (g_secrets.telegram_bot_token[0] != '\0') {
-      if (messaging_telegram_register(g_secrets.telegram_bot_token) != SUCCESS) {
-         OLOG_WARNING("messaging_tool: Telegram driver registration failed");
-      }
-   } else {
+   /* Conditionally register drivers based on configured tokens.  When no token
+    * is set, the engine still runs (the LLM-facing tool can report "no channels
+    * linked"), but no driver listens.  Adding a token later via the WebUI starts
+    * the driver live (messaging_tool_refresh_drivers); removing/rotating one is
+    * daemon-restart-to-apply. */
+   if (g_secrets.telegram_bot_token[0] == '\0') {
       OLOG_INFO("messaging_tool: no telegram_bot_token configured; Telegram disabled");
    }
-
-   if (g_secrets.discord_bot_token[0] != '\0') {
-      if (messaging_discord_register(g_secrets.discord_bot_token) != SUCCESS) {
-         OLOG_WARNING("messaging_tool: Discord driver registration failed");
-      }
-   } else {
+   if (g_secrets.discord_bot_token[0] == '\0') {
       OLOG_INFO("messaging_tool: no discord_bot_token configured; Discord disabled");
    }
-
-   if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
-      if (messaging_slack_register(g_secrets.slack_app_token, g_secrets.slack_bot_token) !=
-          SUCCESS) {
-         OLOG_WARNING("messaging_tool: Slack driver registration failed");
-      }
-   } else {
+   if (g_secrets.slack_app_token[0] == '\0' || g_secrets.slack_bot_token[0] == '\0') {
       OLOG_INFO("messaging_tool: no slack_app_token/slack_bot_token configured; Slack disabled");
    }
+   register_token_drivers();
    return SUCCESS;
 }
 

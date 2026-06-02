@@ -774,16 +774,28 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
             if (existing)
                json_object_put(existing);
 
-            if (existing_count <= 1) {
+            /* Restore (replacing the session's in-memory history) on a fresh
+             * session OR a switch to a DIFFERENT conversation.  Only skip when
+             * re-loading the SAME conversation the session already holds — the
+             * auto-create-already-restored case, where re-restoring would wipe
+             * messages added since.  `active_conversation_id` still holds the
+             * OLD conv here (it's updated to conv_id further below), so
+             * `!= conv_id` reliably means "the user switched conversations".
+             *
+             * The previous guard skipped on message-count alone (existing_count
+             * > 1), which wrongly skipped genuine switches: the session kept the
+             * previous conversation's history for the LLM while the UI displayed
+             * the newly-loaded one — messages then went to the wrong thread. */
+            if (existing_count <= 1 || conn->active_conversation_id != conv_id) {
                int restored = webui_restore_conversation_context(conn, &conv, conv_id, all_msgs);
                if (restored >= 0) {
-                  OLOG_INFO("WebUI: Restored %d messages to session %u context", restored,
-                            conn->session->session_id);
+                  OLOG_INFO("WebUI: Restored %d messages to session %u context (conv %lld)",
+                            restored, conn->session->session_id, (long long)conv_id);
                }
             } else {
                OLOG_INFO("WebUI: Skipped redundant restore for session %u "
-                         "(already has %d messages)",
-                         conn->session->session_id, existing_count);
+                         "(same conversation %lld, already has %d messages)",
+                         conn->session->session_id, (long long)conv_id, existing_count);
             }
          }
 

@@ -1660,12 +1660,21 @@ Format rules:
             </div>
 
             <div class="history-search">
-               <input
-                  type="text"
-                  id="history-search-input"
-                  placeholder="Search conversations..."
-                  autocomplete="off"
-               />
+               <div class="history-search-input-wrap">
+                  <input
+                     type="text"
+                     id="history-search-input"
+                     placeholder="Search conversations..."
+                     autocomplete="off"
+                  />
+                  <button
+                     class="history-search-clear hidden"
+                     id="history-search-clear"
+                     aria-label="Clear search"
+                  >
+                     &times;
+                  </button>
+               </div>
                <label class="history-search-option">
                   <input type="checkbox" id="history-search-content" />
                   <span>Search message content</span>

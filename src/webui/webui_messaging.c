@@ -29,10 +29,12 @@
  */
 
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "auth/auth_db.h"
 #include "logging.h"
 #include "messaging/messaging_engine.h"
 #include "webui/webui_internal.h"
@@ -253,4 +255,122 @@ void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload)
 
    OLOG_INFO("WebUI: user %d re-enabled messaging channel id %lld", conn->auth_user_id,
              (long long)channel_id);
+}
+
+/* =============================================================================
+ * set_channel_llm — { conversation_id, llm_type, cloud_provider, model,
+ *                     thinking_mode, reasoning_effort } → { success }
+ *
+ * Writes the channel's forever-conversation row (the same conversations.llm_*
+ * columns the WebUI per-conversation control uses).  Applies on the channel's
+ * NEXT messaging session (daemon picks it up at session (re)creation), or in
+ * chat immediately via the switch_llm tool.  Ownership is enforced by
+ * conv_db_get / conv_db_update_llm_settings (both filter on user_id).
+ * ============================================================================= */
+
+/* Empty (inherit) or a member of the NULL-terminated allowlist. */
+static bool set_channel_llm_field_valid(const char *value, const char *const *allowed) {
+   if (!value || value[0] == '\0') {
+      return true; /* "" = inherit the global default */
+   }
+   for (const char *const *p = allowed; *p; p++) {
+      if (strcmp(value, *p) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+   struct json_object *conv_obj = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "conversation_id", &conv_obj)) {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Missing 'conversation_id'");
+      return;
+   }
+   int64_t conv_id = json_object_get_int64(conv_obj);
+   if (conv_id <= 0) {
+      send_error_impl(conn->wsi, "INVALID_PARAM",
+                      "Channel has no conversation yet (send a message first)");
+      return;
+   }
+
+   /* Optional string fields; absent = empty (= inherit the global default). */
+   struct json_object *v = NULL;
+   const char *llm_type = json_object_object_get_ex(payload, "llm_type", &v)
+                              ? json_object_get_string(v)
+                              : "";
+   const char *cloud_provider = json_object_object_get_ex(payload, "cloud_provider", &v)
+                                    ? json_object_get_string(v)
+                                    : "";
+   const char *model = json_object_object_get_ex(payload, "model", &v) ? json_object_get_string(v)
+                                                                       : "";
+   const char *thinking_mode = json_object_object_get_ex(payload, "thinking_mode", &v)
+                                   ? json_object_get_string(v)
+                                   : "";
+   const char *reasoning_effort = json_object_object_get_ex(payload, "reasoning_effort", &v)
+                                      ? json_object_get_string(v)
+                                      : "";
+
+   /* Bound lengths to the conversation column sizes (mirror
+    * handle_lock_conversation_llm) so an overlong value can't be stored. */
+   if (strlen(llm_type) > 15 || strlen(cloud_provider) > 15 || strlen(model) > 63 ||
+       strlen(thinking_mode) > 15 || strlen(reasoning_effort) > 15) {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Field value too long");
+      return;
+   }
+
+   /* Edge enum validation (defense-in-depth — the dropdowns already constrain
+    * these; downstream falls back gracefully on a bad value, but fail fast). */
+   if (!set_channel_llm_field_valid(llm_type, (const char *[]){ "local", "cloud", NULL }) ||
+       !set_channel_llm_field_valid(cloud_provider,
+                                    (const char *[]){ "openai", "claude", "anthropic", "gemini",
+                                                      "openrouter", NULL }) ||
+       !set_channel_llm_field_valid(thinking_mode,
+                                    (const char *[]){ "disabled", "enabled", "auto", NULL }) ||
+       !set_channel_llm_field_valid(reasoning_effort,
+                                    (const char *[]){ "none", "minimal", "low", "medium", "high",
+                                                      "xhigh", NULL })) {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Invalid LLM setting value");
+      return;
+   }
+
+   /* Fetch the current row to (a) verify ownership, (b) preserve tools_mode
+    * (this panel doesn't edit it; conv_db_update_llm_settings overwrites all
+    * columns), and (c) confirm it's a messaging conversation — this endpoint is
+    * for messaging channels, not arbitrary owned conversations. */
+   conversation_t conv;
+   if (conv_db_get(conv_id, conn->auth_user_id, &conv) != AUTH_DB_SUCCESS) {
+      send_error_impl(conn->wsi, "NOT_FOUND", "No such conversation");
+      return;
+   }
+   if (strncmp(conv.origin, "messaging:", 10) != 0) {
+      conv_free(&conv);
+      send_error_impl(conn->wsi, "INVALID_PARAM", "Not a messaging conversation");
+      return;
+   }
+   int rc = conv_db_update_llm_settings(conv_id, conn->auth_user_id, llm_type, cloud_provider,
+                                        model, conv.tools_mode, thinking_mode, reasoning_effort);
+   conv_free(&conv);
+
+   if (rc != AUTH_DB_SUCCESS) {
+      send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to update channel model");
+      return;
+   }
+
+   struct json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_channel_llm_response"));
+   struct json_object *payload_out = json_object_new_object();
+   json_object_object_add(payload_out, "success", json_object_new_boolean(1));
+   json_object_object_add(payload_out, "conversation_id", json_object_new_int64(conv_id));
+   json_object_object_add(response, "payload", payload_out);
+   send_json_response(conn, response);
+   json_object_put(response);
+
+   OLOG_INFO(
+       "WebUI: user %d set LLM for messaging conversation %lld (type=%s provider=%s model=%s)",
+       conn->auth_user_id, (long long)conv_id, llm_type[0] ? llm_type : "(inherit)",
+       cloud_provider[0] ? cloud_provider : "(inherit)", model[0] ? model : "(inherit)");
 }

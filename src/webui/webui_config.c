@@ -46,6 +46,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_rate_limit.h"
 #include "logging.h"
+#include "tools/messaging_tool.h"
 #include "tools/tool_registry.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
@@ -1071,6 +1072,15 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       CONFIG_CLAMP(config->calendar.default_event_duration_min, 5, 480);
    }
 
+   /* [messaging] — nested sms child (audio.bargein pattern). */
+   if (json_object_object_get_ex(payload, "messaging", &section)) {
+      struct json_object *msg_sms = NULL;
+      if (json_object_object_get_ex(section, "sms", &msg_sms)) {
+         JSON_TO_CONFIG_INT(msg_sms, "active_window_sec", config->messaging.sms_active_window_sec);
+         CONFIG_CLAMP(config->messaging.sms_active_window_sec, 0, 86400);
+      }
+   }
+
    /* [music] */
    if (json_object_object_get_ex(payload, "music", &section)) {
       JSON_TO_CONFIG_INT(section, "scan_interval_minutes", config->music.scan_interval_minutes);
@@ -1383,6 +1393,39 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
          mutable_secrets->embedding_api_key[sizeof(mutable_secrets->embedding_api_key) - 1] = '\0';
       }
    }
+   if (json_object_object_get_ex(payload, "telegram_bot_token", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->telegram_bot_token, str,
+                 sizeof(mutable_secrets->telegram_bot_token) - 1);
+         mutable_secrets->telegram_bot_token[sizeof(mutable_secrets->telegram_bot_token) - 1] =
+             '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "discord_bot_token", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->discord_bot_token, str,
+                 sizeof(mutable_secrets->discord_bot_token) - 1);
+         mutable_secrets->discord_bot_token[sizeof(mutable_secrets->discord_bot_token) - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "slack_app_token", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->slack_app_token, str,
+                 sizeof(mutable_secrets->slack_app_token) - 1);
+         mutable_secrets->slack_app_token[sizeof(mutable_secrets->slack_app_token) - 1] = '\0';
+      }
+   }
+   if (json_object_object_get_ex(payload, "slack_bot_token", &val)) {
+      const char *str = json_object_get_string(val);
+      if (str) {
+         strncpy(mutable_secrets->slack_bot_token, str,
+                 sizeof(mutable_secrets->slack_bot_token) - 1);
+         mutable_secrets->slack_bot_token[sizeof(mutable_secrets->slack_bot_token) - 1] = '\0';
+      }
+   }
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
    if (json_object_object_get_ex(payload, "home_assistant_token", &val)) {
       const char *str = json_object_get_string(val);
@@ -1437,6 +1480,11 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
 
       /* Refresh LLM providers to pick up new API keys immediately */
       llm_refresh_providers();
+
+      /* Start any messaging driver whose bot token was just added, so a linked
+       * Telegram/Discord/Slack channel works without a daemon restart.  Additive
+       * only — rotating/removing a token is still restart-to-apply. */
+      messaging_tool_refresh_drivers();
 
       OLOG_INFO("WebUI: Secrets saved to %s", secrets_path);
    } else {

@@ -236,6 +236,21 @@ int64_t resolve_channel_conversation_id(const char *provider,
                 provider_address, (long long)new_conv_id, origin);
    }
 
+   /* Seed thinking ON for the fresh messaging conversation so the small global
+    * model doesn't bluff tool calls over chat (reply "done" with no tool call).
+    * NULL type/provider/model = inherit the global LLM; only thinking_mode +
+    * reasoning_effort are set.  Stored per-conversation and user-overridable
+    * (WebUI Messaging Channels panel, or the switch_llm tool in chat).
+    * conv_db_lock_llm_settings takes the auth_db lock itself, so call it after
+    * the UNLOCK above; it only writes while message_count == 0 (true here). */
+   if (conv_db_lock_llm_settings(new_conv_id, user_id, NULL, NULL, NULL, NULL, "enabled", "low") !=
+       AUTH_DB_SUCCESS) {
+      /* Non-fatal: the conversation just falls back to the global LLM default
+       * (no thinking-on seed).  Log so the missing seed is diagnosable. */
+      OLOG_WARNING("messaging: failed to seed thinking-on for new conv %lld (uses global default)",
+                   (long long)new_conv_id);
+   }
+
    return new_conv_id;
 }
 
@@ -897,10 +912,22 @@ char *messaging_engine_list_channels_json(int user_id) {
     * `id` is the stable operation key for rename/unlink (display_name is
     * mutable + non-unique); `last_used_at` drives the "last active"
     * column.  The LLM tool consumer reads only name/provider/enabled, so
-    * the extra fields are harmless there. */
-   const char *sql = "SELECT id, COALESCE(display_name,''), provider, is_enabled, "
-                     "COALESCE(last_used_at,0) FROM messaging_channels WHERE user_id = ? "
-                     "ORDER BY last_used_at DESC NULLS LAST, id ASC";
+    * the extra fields are harmless there.
+    *
+    * LEFT JOIN conversations surfaces the forever-conversation's per-channel
+    * LLM settings (conversation_id + llm_*) so the WebUI panel can show and
+    * edit the model/reasoning used for this channel.  COALESCE keeps unbound
+    * channels (no conversation yet) and never-customized fields as empties. */
+   const char *sql = "SELECT mc.id, COALESCE(mc.display_name,''), mc.provider, mc.is_enabled, "
+                     "COALESCE(mc.last_used_at,0), COALESCE(mc.conversation_id,0), "
+                     "COALESCE(c.llm_type,''), COALESCE(c.cloud_provider,''), "
+                     "COALESCE(c.model,''), COALESCE(c.thinking_mode,''), "
+                     "COALESCE(c.reasoning_effort,'') "
+                     "FROM messaging_channels mc "
+                     "LEFT JOIN conversations c ON c.id = mc.conversation_id "
+                     "AND c.user_id = mc.user_id "
+                     "WHERE mc.user_id = ? "
+                     "ORDER BY mc.last_used_at DESC NULLS LAST, mc.id ASC";
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
       while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -910,6 +937,12 @@ char *messaging_engine_list_channels_json(int user_id) {
          const unsigned char *prov = sqlite3_column_text(stmt, 2);
          int enabled = sqlite3_column_int(stmt, 3);
          int64_t last_used = sqlite3_column_int64(stmt, 4);
+         int64_t conv_id = sqlite3_column_int64(stmt, 5);
+         const unsigned char *llm_type = sqlite3_column_text(stmt, 6);
+         const unsigned char *cloud_provider = sqlite3_column_text(stmt, 7);
+         const unsigned char *model = sqlite3_column_text(stmt, 8);
+         const unsigned char *thinking_mode = sqlite3_column_text(stmt, 9);
+         const unsigned char *reasoning_effort = sqlite3_column_text(stmt, 10);
          json_object_object_add(obj, "id", json_object_new_int64(id));
          json_object_object_add(obj, "name",
                                 json_object_new_string(name ? (const char *)name : ""));
@@ -917,6 +950,20 @@ char *messaging_engine_list_channels_json(int user_id) {
                                 json_object_new_string(prov ? (const char *)prov : ""));
          json_object_object_add(obj, "enabled", json_object_new_boolean(enabled != 0));
          json_object_object_add(obj, "last_used_at", json_object_new_int64(last_used));
+         json_object_object_add(obj, "conversation_id", json_object_new_int64(conv_id));
+         json_object_object_add(obj, "llm_type",
+                                json_object_new_string(llm_type ? (const char *)llm_type : ""));
+         json_object_object_add(obj, "cloud_provider",
+                                json_object_new_string(cloud_provider ? (const char *)cloud_provider
+                                                                      : ""));
+         json_object_object_add(obj, "model",
+                                json_object_new_string(model ? (const char *)model : ""));
+         json_object_object_add(obj, "thinking_mode",
+                                json_object_new_string(thinking_mode ? (const char *)thinking_mode
+                                                                     : ""));
+         json_object_object_add(obj, "reasoning_effort",
+                                json_object_new_string(
+                                    reasoning_effort ? (const char *)reasoning_effort : ""));
          json_object_array_add(arr, obj);
       }
    }
@@ -924,6 +971,23 @@ char *messaging_engine_list_channels_json(int user_id) {
       sqlite3_finalize(stmt);
    }
    AUTH_DB_UNLOCK();
+
+   /* Annotate each channel with whether its provider's driver is currently
+    * loaded (find_driver != NULL — false when e.g. no bot token is configured,
+    * so the driver never self-registered).  A channel can be "linked" in the DB
+    * while its driver is down; the UI uses this to show "Not connected" instead
+    * of "Active".  Done AFTER releasing the auth_db lock so the drivers mutex
+    * (taken by find_driver) never nests under the auth_db leaf lock. */
+   size_t n = json_object_array_length(arr);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *obj = json_object_array_get_idx(arr, i);
+      struct json_object *pv = NULL;
+      const char *prov = json_object_object_get_ex(obj, "provider", &pv)
+                             ? json_object_get_string(pv)
+                             : "";
+      json_object_object_add(obj, "provider_available",
+                             json_object_new_boolean(find_driver(prov) != NULL));
+   }
 
    const char *json_str = json_object_to_json_string_ext(arr, JSON_C_TO_STRING_PLAIN);
    char *result = json_str ? strdup(json_str) : strdup("[]");

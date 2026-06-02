@@ -172,8 +172,12 @@ typedef struct {
  * turn," not a creation-time snapshot.
  */
 typedef struct {
-   char provider[16];      // "slack" / "telegram" / "discord" / "sms"
-   char channel_name[64];  // current display_name from messaging_channels (refreshed per turn)
+   char provider[16];        // "slack" / "telegram" / "discord" / "sms"
+   char channel_name[64];    // current display_name from messaging_channels (refreshed per turn)
+   int64_t conversation_id;  // forever-conversation row backing this channel (0 = none).
+                             // Lets switch_llm persist a per-conversation LLM change to the
+                             // conversations.llm_* columns, since session_t doesn't otherwise
+                             // track its conv_id.
 } messaging_identity_t;
 
 /**
