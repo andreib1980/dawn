@@ -263,7 +263,7 @@ void handle_email_update_account(ws_connection_t *conn, json_object *payload) {
    }
    if (json_object_object_get_ex(payload, "max_body_chars", &val)) {
       int mb = json_object_get_int(val);
-      if (mb >= 500 && mb <= 16000)
+      if (mb >= EMAIL_MIN_READ_BODY_LEN && mb <= EMAIL_MAX_READ_BODY_LEN)
          acct.max_body_chars = mb;
    }
 

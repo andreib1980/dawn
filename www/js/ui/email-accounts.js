@@ -9,6 +9,13 @@
    let callbacks = {};
    let pendingOAuthAccountKey = '';
 
+   /* Per-account "max body characters" bounds.  Mirror the server-side
+    * EMAIL_MAX_READ_BODY_LEN / EMAIL_MIN_READ_BODY_LEN in
+    * include/tools/email_types.h (and the WebUI clamp in src/webui/webui_email.c)
+    * — keep in sync. */
+   const EMAIL_MAX_BODY_CHARS = 50000;
+   const EMAIL_MIN_BODY_CHARS = 500;
+
    var GOOGLE_EMAIL_SCOPE =
       'https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email';
    var GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar';
@@ -684,8 +691,16 @@
          '" min="1" max="50"><span class="form-hint">Number of emails returned by "recent" action (1-50)</span></div>';
       html +=
          '  <div class="form-group"><label>Max body characters</label><input type="number" name="max_body_chars" value="' +
-         (acct.max_body_chars || 4000) +
-         '" min="500" max="16000"><span class="form-hint">Max email body length sent to AI (500-16000)</span></div>';
+         (acct.max_body_chars || EMAIL_MAX_BODY_CHARS) +
+         '" min="' +
+         EMAIL_MIN_BODY_CHARS +
+         '" max="' +
+         EMAIL_MAX_BODY_CHARS +
+         '"><span class="form-hint">Max email body length sent to AI (' +
+         EMAIL_MIN_BODY_CHARS +
+         '-' +
+         EMAIL_MAX_BODY_CHARS +
+         ')</span></div>';
       html += '</details>';
 
       html += '<div class="form-actions">';
@@ -935,7 +950,7 @@
          const maxRecentEl = form.querySelector('[name="max_recent"]');
          if (maxRecentEl) data.max_recent = parseInt(maxRecentEl.value, 10) || 10;
          const maxBodyEl = form.querySelector('[name="max_body_chars"]');
-         if (maxBodyEl) data.max_body_chars = parseInt(maxBodyEl.value, 10) || 4000;
+         if (maxBodyEl) data.max_body_chars = parseInt(maxBodyEl.value, 10) || EMAIL_MAX_BODY_CHARS;
 
          requestUpdateAccount(data);
       });

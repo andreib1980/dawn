@@ -28,6 +28,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "tools/email_types.h" /* EMAIL_MAX_READ_BODY_LEN */
+
 #define EMAIL_MAX_ACCOUNTS 16
 
 typedef struct {
@@ -49,7 +51,7 @@ typedef struct {
    bool enabled;
    bool read_only;     /* Blocks send/confirm_send actions */
    int max_recent;     /* Default 10 */
-   int max_body_chars; /* Default 4000 */
+   int max_body_chars; /* Default EMAIL_MAX_READ_BODY_LEN (50000) */
    time_t created_at;
 } email_account_t;
 

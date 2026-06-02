@@ -429,7 +429,14 @@ static bool looks_like_html(const char *text) {
    return false;
 }
 
-static char *extract_plain_body(const char *raw, int max_chars) {
+/* Extract the plain-text body, capped at max_chars.  Sets *out_truncated to
+ * reflect whether the EXTRACTED text (not the raw MIME) was clipped, so the
+ * caller's truncation flag matches the Gmail backend.  No "[truncated]" marker
+ * is appended here — the tool layer renders a single "[Message truncated]". */
+static char *extract_plain_body(const char *raw, int max_chars, bool *out_truncated) {
+   if (out_truncated)
+      *out_truncated = false;
+
    /* Check Content-Type header for HTML before splitting */
    const char *ct = find_header(raw, "Content-Type");
    bool is_html = (ct && strcasestr(ct, "text/html"));
@@ -453,23 +460,18 @@ static char *extract_plain_body(const char *raw, int max_chars) {
       char *extracted = NULL;
       if (html_extract_text_plain(body, body_len, &extracted) == HTML_PARSE_SUCCESS && extracted) {
          size_t ext_len = strlen(extracted);
-         bool truncated = false;
          if (max_chars > 0 && (int)ext_len > max_chars) {
             ext_len = max_chars;
-            truncated = true;
+            if (out_truncated)
+               *out_truncated = true;
          }
-         char *out = malloc(ext_len + 32);
+         char *out = malloc(ext_len + 1);
          if (!out) {
             free(extracted);
             return NULL;
          }
          memcpy(out, extracted, ext_len);
-         if (truncated) {
-            memcpy(out + ext_len, "\n[truncated]", 12);
-            out[ext_len + 12] = '\0';
-         } else {
-            out[ext_len] = '\0';
-         }
+         out[ext_len] = '\0';
          free(extracted);
          return out;
       }
@@ -478,23 +480,18 @@ static char *extract_plain_body(const char *raw, int max_chars) {
 
    /* Plain text: take text up to max_chars */
    size_t len = strlen(body);
-   bool truncated = false;
    if (max_chars > 0 && (int)len > max_chars) {
       len = max_chars;
-      truncated = true;
+      if (out_truncated)
+         *out_truncated = true;
    }
 
-   char *out = malloc(len + 32);
+   char *out = malloc(len + 1);
    if (!out)
       return NULL;
 
    memcpy(out, body, len);
-   if (truncated) {
-      memcpy(out + len, "\n[truncated]", 12);
-      out[len + 12] = '\0';
-   } else {
-      out[len] = '\0';
-   }
+   out[len] = '\0';
    return out;
 }
 
@@ -870,12 +867,14 @@ int email_read_message(const email_conn_t *conn,
    const char *date_val = find_header(buf.data, "Date");
    copy_header_value(date_val, out->date_str, sizeof(out->date_str));
 
-   /* Extract plain text body */
-   int max_chars = conn->max_body_chars > 0 ? conn->max_body_chars : 4000;
-   out->body = extract_plain_body(buf.data, max_chars);
+   /* Extract plain text body (defensive fallback; service layer always supplies
+    * a positive cap via build_conn_for_account) */
+   int max_chars = conn->max_body_chars > 0 ? conn->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
+   bool body_truncated = false;
+   out->body = extract_plain_body(buf.data, max_chars, &body_truncated);
    if (out->body) {
       out->body_len = strlen(out->body);
-      out->truncated = ((int)strlen(buf.data) > max_chars);
+      out->truncated = body_truncated;
    }
 
    /* Count attachments (rough heuristic — count Content-Disposition: attachment) */
@@ -1092,6 +1091,7 @@ int email_send(const email_conn_t *conn,
    CURLcode res = curl_easy_perform(curl);
 
    free(message);
+   message = NULL;
    curl_slist_free_all(recipients);
    curl_easy_cleanup(curl);
 
@@ -1134,7 +1134,6 @@ int email_test_connection(const email_conn_t *conn, bool *imap_ok, bool *smtp_ok
       curl_easy_cleanup(curl);
    }
 
-test_smtp:
    /* Test SMTP: EHLO only (CURLOPT_CONNECT_ONLY) */
    curl = create_smtp_handle(conn);
    if (curl) {

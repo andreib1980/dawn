@@ -705,107 +705,114 @@ static const char *SCHEMA_SQL =
     "  enabled INTEGER DEFAULT 1,"
     "  read_only INTEGER DEFAULT 0,"
     "  max_recent INTEGER DEFAULT 10,"
-    "  max_body_chars INTEGER DEFAULT 4000,"
-    "  created_at INTEGER NOT NULL,"
-    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_email_acct_user ON email_accounts(user_id);"
+    "  max_body_chars INTEGER DEFAULT " STRINGIFY(
+        EMAIL_DEFAULT_BODY_CHARS) ","
+                                  "  created_at INTEGER NOT NULL,"
+                                  "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+                                  ");"
+                                  "CREATE INDEX IF NOT EXISTS idx_email_acct_user ON "
+                                  "email_accounts(user_id);"
 
-    /* Phone call and SMS logs (v29) */
-    "CREATE TABLE IF NOT EXISTS phone_call_log ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  user_id INTEGER NOT NULL,"
-    "  direction INTEGER NOT NULL,"
-    "  number TEXT NOT NULL,"
-    "  contact_name TEXT DEFAULT '',"
-    "  duration_sec INTEGER DEFAULT 0,"
-    "  timestamp INTEGER NOT NULL,"
-    "  status INTEGER NOT NULL"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_phone_call_user_ts "
-    "  ON phone_call_log(user_id, timestamp DESC);"
-    "CREATE TABLE IF NOT EXISTS phone_sms_log ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  user_id INTEGER NOT NULL,"
-    "  direction INTEGER NOT NULL,"
-    "  number TEXT NOT NULL,"
-    "  contact_name TEXT DEFAULT '',"
-    "  body TEXT NOT NULL,"
-    "  timestamp INTEGER NOT NULL,"
-    "  read INTEGER DEFAULT 0,"
-    "  image_id TEXT DEFAULT NULL"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_phone_sms_user_ts "
-    "  ON phone_sms_log(user_id, timestamp DESC);"
-    "CREATE INDEX IF NOT EXISTS idx_phone_sms_unread "
-    "  ON phone_sms_log(user_id, read) WHERE read = 0;"
+                                  /* Phone call and SMS logs (v29) */
+                                  "CREATE TABLE IF NOT EXISTS phone_call_log ("
+                                  "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                  "  user_id INTEGER NOT NULL,"
+                                  "  direction INTEGER NOT NULL,"
+                                  "  number TEXT NOT NULL,"
+                                  "  contact_name TEXT DEFAULT '',"
+                                  "  duration_sec INTEGER DEFAULT 0,"
+                                  "  timestamp INTEGER NOT NULL,"
+                                  "  status INTEGER NOT NULL"
+                                  ");"
+                                  "CREATE INDEX IF NOT EXISTS idx_phone_call_user_ts "
+                                  "  ON phone_call_log(user_id, timestamp DESC);"
+                                  "CREATE TABLE IF NOT EXISTS phone_sms_log ("
+                                  "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                  "  user_id INTEGER NOT NULL,"
+                                  "  direction INTEGER NOT NULL,"
+                                  "  number TEXT NOT NULL,"
+                                  "  contact_name TEXT DEFAULT '',"
+                                  "  body TEXT NOT NULL,"
+                                  "  timestamp INTEGER NOT NULL,"
+                                  "  read INTEGER DEFAULT 0,"
+                                  "  image_id TEXT DEFAULT NULL"
+                                  ");"
+                                  "CREATE INDEX IF NOT EXISTS idx_phone_sms_user_ts "
+                                  "  ON phone_sms_log(user_id, timestamp DESC);"
+                                  "CREATE INDEX IF NOT EXISTS idx_phone_sms_unread "
+                                  "  ON phone_sms_log(user_id, read) WHERE read = 0;"
 
-    /* Messaging channels (v51) — per-user binding of an external chat
-     * platform identity (Telegram chat_id / Discord channel_id /
-     * Slack channel_id / SMS E.164) to a DAWN user.  See
-     * docs/MESSAGING_CHANNELS_DESIGN.md §5. */
-    "CREATE TABLE IF NOT EXISTS messaging_channels ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  user_id INTEGER NOT NULL,"
-    "  provider TEXT NOT NULL "
-    "    CHECK(provider IN ('telegram','discord','slack','sms')),"
-    "  provider_address TEXT NOT NULL,"
-    "  address_json TEXT NOT NULL,"
-    "  display_name TEXT,"
-    "  credentials_ref TEXT,"
-    "  is_enabled INTEGER NOT NULL DEFAULT 1,"
-    "  rate_limit_per_min INTEGER NOT NULL DEFAULT 10,"
-    "  rate_limit_per_day INTEGER NOT NULL DEFAULT 200,"
-    "  created_at INTEGER NOT NULL,"
-    "  last_used_at INTEGER,"
-    /* conversation_id (v52): forever-binding to a conversations row.
-     * NULL = no conversation yet (next inbound will create one).  Set
-     * non-NULL after the first inbound and reused for every subsequent
-     * turn on this channel until the user issues /new (which clears it
-     * back to NULL).  LCM handles context compaction in-place so a
-     * single conv row can live indefinitely; the recovery worker
-     * extracts memory incrementally via last_extracted_msg_id. */
-    "  conversation_id INTEGER DEFAULT NULL,"
-    "  UNIQUE(user_id, provider, provider_address),"
-    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
-    "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_messaging_channels_user "
-    "  ON messaging_channels(user_id);"
-    "CREATE INDEX IF NOT EXISTS idx_messaging_channels_provider_addr "
-    "  ON messaging_channels(provider, provider_address);"
-    "CREATE INDEX IF NOT EXISTS idx_messaging_channels_active "
-    "  ON messaging_channels(provider, provider_address) WHERE is_enabled = 1;"
+                                  /* Messaging channels (v51) — per-user binding of an external chat
+                                   * platform identity (Telegram chat_id / Discord channel_id /
+                                   * Slack channel_id / SMS E.164) to a DAWN user.  See
+                                   * docs/MESSAGING_CHANNELS_DESIGN.md §5. */
+                                  "CREATE TABLE IF NOT EXISTS messaging_channels ("
+                                  "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                  "  user_id INTEGER NOT NULL,"
+                                  "  provider TEXT NOT NULL "
+                                  "    CHECK(provider IN ('telegram','discord','slack','sms')),"
+                                  "  provider_address TEXT NOT NULL,"
+                                  "  address_json TEXT NOT NULL,"
+                                  "  display_name TEXT,"
+                                  "  credentials_ref TEXT,"
+                                  "  is_enabled INTEGER NOT NULL DEFAULT 1,"
+                                  "  rate_limit_per_min INTEGER NOT NULL DEFAULT 10,"
+                                  "  rate_limit_per_day INTEGER NOT NULL DEFAULT 200,"
+                                  "  created_at INTEGER NOT NULL,"
+                                  "  last_used_at INTEGER,"
+                                  /* conversation_id (v52): forever-binding to a conversations row.
+                                   * NULL = no conversation yet (next inbound will create one).  Set
+                                   * non-NULL after the first inbound and reused for every
+                                   * subsequent turn on this channel until the user issues /new
+                                   * (which clears it back to NULL).  LCM handles context compaction
+                                   * in-place so a single conv row can live indefinitely; the
+                                   * recovery worker extracts memory incrementally via
+                                   * last_extracted_msg_id. */
+                                  "  conversation_id INTEGER DEFAULT NULL,"
+                                  "  UNIQUE(user_id, provider, provider_address),"
+                                  "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
+                                  "  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON "
+                                  "DELETE SET NULL"
+                                  ");"
+                                  "CREATE INDEX IF NOT EXISTS idx_messaging_channels_user "
+                                  "  ON messaging_channels(user_id);"
+                                  "CREATE INDEX IF NOT EXISTS idx_messaging_channels_provider_addr "
+                                  "  ON messaging_channels(provider, provider_address);"
+                                  "CREATE INDEX IF NOT EXISTS idx_messaging_channels_active "
+                                  "  ON messaging_channels(provider, provider_address) WHERE "
+                                  "is_enabled = 1;"
 
-    /* Pending link codes (v51) — short-lived (10-minute TTL) one-time
-     * codes generated in the WebUI and claimed when the user sends
-     * `/link CODE` from the chat app. */
-    "CREATE TABLE IF NOT EXISTS messaging_link_codes ("
-    "  code TEXT PRIMARY KEY,"
-    "  user_id INTEGER NOT NULL,"
-    "  provider_hint TEXT "
-    "    CHECK(provider_hint IN ('telegram','discord','slack','sms') OR provider_hint IS NULL),"
-    "  created_at INTEGER NOT NULL,"
-    "  expires_at INTEGER NOT NULL,"
-    "  claimed_at INTEGER,"
-    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_messaging_link_codes_expires "
-    "  ON messaging_link_codes(expires_at);"
+                                  /* Pending link codes (v51) — short-lived (10-minute TTL) one-time
+                                   * codes generated in the WebUI and claimed when the user sends
+                                   * `/link CODE` from the chat app. */
+                                  "CREATE TABLE IF NOT EXISTS messaging_link_codes ("
+                                  "  code TEXT PRIMARY KEY,"
+                                  "  user_id INTEGER NOT NULL,"
+                                  "  provider_hint TEXT "
+                                  "    CHECK(provider_hint IN ('telegram','discord','slack','sms') "
+                                  "OR provider_hint IS NULL),"
+                                  "  created_at INTEGER NOT NULL,"
+                                  "  expires_at INTEGER NOT NULL,"
+                                  "  claimed_at INTEGER,"
+                                  "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+                                  ");"
+                                  "CREATE INDEX IF NOT EXISTS idx_messaging_link_codes_expires "
+                                  "  ON messaging_link_codes(expires_at);"
 
-    /* Link attempts audit log (v51) — every /link attempt, successful
-     * or not, for post-hoc abuse review.  7-day TTL via periodic
-     * sweep. */
-    "CREATE TABLE IF NOT EXISTS messaging_link_attempts ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  provider TEXT NOT NULL,"
-    "  sender_address TEXT NOT NULL,"
-    "  code_tried TEXT,"
-    "  result TEXT NOT NULL,"
-    "  created_at INTEGER NOT NULL"
-    ");"
-    "CREATE INDEX IF NOT EXISTS idx_messaging_link_attempts_recent "
-    "  ON messaging_link_attempts(provider, sender_address, created_at);";
+                                  /* Link attempts audit log (v51) — every /link attempt, successful
+                                   * or not, for post-hoc abuse review.  7-day TTL via periodic
+                                   * sweep. */
+                                  "CREATE TABLE IF NOT EXISTS messaging_link_attempts ("
+                                  "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                  "  provider TEXT NOT NULL,"
+                                  "  sender_address TEXT NOT NULL,"
+                                  "  code_tried TEXT,"
+                                  "  result TEXT NOT NULL,"
+                                  "  created_at INTEGER NOT NULL"
+                                  ");"
+                                  "CREATE INDEX IF NOT EXISTS idx_messaging_link_attempts_recent "
+                                  "  ON messaging_link_attempts(provider, sender_address, "
+                                  "created_at);";
 
 /* =============================================================================
  * Schema Version and Migration
@@ -2911,6 +2918,31 @@ int auth_db_create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v55 — raise email read body cap default to EMAIL_DEFAULT_BODY_CHARS.
+    * max_body_chars caps the per-email body length returned to the LLM on
+    * read.  The old 4000 default truncated ordinary newsletters mid-message;
+    * the new default (mirrors EMAIL_MAX_READ_BODY_LEN in email_types.h) reads
+    * virtually all real emails in full.  Per the maintainer's decision the cap
+    * is treated as a ceiling, not a per-account preference, so ALL existing
+    * accounts are bumped.  email_accounts is created (or recreated at current
+    * shape) by SCHEMA_SQL earlier in this pass, so the table always exists by
+    * the time this UPDATE runs. */
+   bool v55_ok = (current_version >= 55) || (current_version == 0);
+   if (current_version >= 18 && current_version < 55) {
+      const char *v55_sql = "UPDATE email_accounts SET max_body_chars = " STRINGIFY(
+          EMAIL_DEFAULT_BODY_CHARS);
+      rc = sqlite3_exec(s_db.db, v55_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v55 migration failed: %s", errmsg ? errmsg : "unknown");
+      } else {
+         OLOG_INFO("auth_db: v55 raised email_accounts.max_body_chars to %d",
+                   EMAIL_DEFAULT_BODY_CHARS);
+         v55_ok = true;
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3047,7 +3079,8 @@ int auth_db_create_schema(const char *db_path) {
     * statement prep, with no operator-visible recovery path.
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
-   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok;
+   const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
+                              v55_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

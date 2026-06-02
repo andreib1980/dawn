@@ -1131,9 +1131,9 @@ int gmail_read_message(const char *token,
    if (date)
       snprintf(out->date_str, sizeof(out->date_str), "%s", date);
 
-   /* Extract body */
+   /* Extract body (defensive fallback; service layer always supplies a positive cap) */
    if (max_body_chars <= 0)
-      max_body_chars = 4000;
+      max_body_chars = EMAIL_MAX_READ_BODY_LEN;
 
    char *body_buf = calloc(1, max_body_chars + 1);
    if (body_buf) {

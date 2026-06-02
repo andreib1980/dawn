@@ -203,12 +203,37 @@ static bool json_get_bool(struct json_object *obj, const char *key, bool def) {
    return json_object_get_boolean(val);
 }
 
+/* qsort comparators on email_summary_t.date (epoch seconds). */
+static int cmp_summary_date_desc(const void *a, const void *b) {
+   time_t da = ((const email_summary_t *)a)->date;
+   time_t db = ((const email_summary_t *)b)->date;
+   return (da < db) ? 1 : (da > db) ? -1 : 0;
+}
+
+static int cmp_summary_date_asc(const void *a, const void *b) {
+   time_t da = ((const email_summary_t *)a)->date;
+   time_t db = ((const email_summary_t *)b)->date;
+   return (da < db) ? -1 : (da > db) ? 1 : 0;
+}
+
+/* Sort summaries in place by date.  sort_mode "oldest" => ascending; anything
+ * else (NULL or "newest") => newest-first.  Applied after the service layer
+ * returns, so for a multi-account search the merged results interleave by date
+ * (single-account recent is simply ordered). */
+static void sort_summaries_by_date(email_summary_t *arr, int n, const char *sort_mode) {
+   if (n < 2)
+      return;
+   bool oldest = (sort_mode && strcasecmp(sort_mode, "oldest") == 0);
+   qsort(arr, (size_t)n, sizeof(*arr), oldest ? cmp_summary_date_asc : cmp_summary_date_desc);
+}
+
 static char *handle_recent(struct json_object *details, int user_id) {
    int count = json_get_int(details, "count", 10);
    const char *account = json_get_str(details, "account");
    const char *folder = json_get_str(details, "folder");
    bool unread_only = json_get_bool(details, "unread_only", false);
    const char *page_token = json_get_str(details, "page_token");
+   const char *sort = json_get_str(details, "sort");
 
    email_summary_t emails[MAX_EMAIL_RESULTS];
    int out_count = 0;
@@ -219,6 +244,8 @@ static char *handle_recent(struct json_object *details, int user_id) {
 
    if (rc != EMAIL_RC_OK)
       return email_rc_to_error(rc, "recent", account, folder);
+
+   sort_summaries_by_date(emails, out_count, sort);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -267,24 +294,32 @@ static char *handle_read(struct json_object *details, int user_id) {
    if (rc != EMAIL_RC_OK)
       return email_rc_to_error(rc, "read", account, NULL);
 
-   char *buf = malloc(RESULT_BUF_SIZE);
+   /* Size the buffer to the body — read bodies can be large (up to
+    * EMAIL_MAX_READ_BODY_LEN), so the fixed RESULT_BUF_SIZE would clip them.
+    * body_len == strlen(msg.body) by contract; guard the (impossible) negative
+    * so the cast to size_t can't wrap.  Header fields are bounded (from/to/
+    * subject 256, date 32); 1 KB slack covers them plus the labels and the
+    * "[Message truncated]" marker. */
+   size_t body_len = msg.body_len > 0 ? (size_t)msg.body_len : 0;
+   size_t buf_size = body_len + 1024;
+   char *buf = malloc(buf_size);
    if (!buf) {
       email_message_free(&msg);
       return strdup("Error: memory allocation failed");
    }
 
    int pos = 0;
-   pos += snprintf(buf, RESULT_BUF_SIZE, "From: %s%s%s%s\nTo: %s\nSubject: %s\nDate: %s\n",
-                   msg.from_name, msg.from_name[0] ? " <" : "", msg.from_addr,
-                   msg.from_name[0] ? ">" : "", msg.to, msg.subject, msg.date_str);
+   pos += snprintf(buf, buf_size, "From: %s%s%s%s\nTo: %s\nSubject: %s\nDate: %s\n", msg.from_name,
+                   msg.from_name[0] ? " <" : "", msg.from_addr, msg.from_name[0] ? ">" : "", msg.to,
+                   msg.subject, msg.date_str);
 
    if (msg.attachment_count > 0)
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "Attachments: %d\n", msg.attachment_count);
+      pos += snprintf(buf + pos, buf_size - pos, "Attachments: %d\n", msg.attachment_count);
 
-   pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n%s", msg.body ? msg.body : "(No body)");
+   pos += snprintf(buf + pos, buf_size - pos, "\n%s", msg.body ? msg.body : "(No body)");
 
    if (msg.truncated)
-      pos += snprintf(buf + pos, RESULT_BUF_SIZE - pos, "\n[Message truncated]");
+      pos += snprintf(buf + pos, buf_size - pos, "\n[Message truncated]");
 
    email_message_free(&msg);
    return buf;
@@ -325,6 +360,8 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    params.unread_only = json_get_bool(details, "unread_only", false);
 
+   const char *sort = json_get_str(details, "sort");
+
    email_summary_t emails[MAX_EMAIL_RESULTS];
    int out_count = 0;
    char next_page_token[256] = { 0 };
@@ -333,6 +370,8 @@ static char *handle_search(struct json_object *details, int user_id) {
 
    if (rc != EMAIL_RC_OK)
       return email_rc_to_error(rc, "search", account, folder);
+
+   sort_summaries_by_date(emails, out_count, sort);
 
    char *buf = malloc(RESULT_BUF_SIZE);
    if (!buf)
@@ -373,10 +412,10 @@ static char *handle_send(struct json_object *details, int user_id) {
       return strdup("Error: 'body' is required");
 
    /* Validate field lengths */
-   if (strlen(body) > EMAIL_MAX_BODY_LEN) {
+   if (strlen(body) > EMAIL_MAX_SEND_BODY_LEN) {
       char err[128];
       snprintf(err, sizeof(err), "Error: email body too long (%zu chars, max %d)", strlen(body),
-               EMAIL_MAX_BODY_LEN);
+               EMAIL_MAX_SEND_BODY_LEN);
       return strdup(err);
    }
    if (strlen(subject) > EMAIL_MAX_SUBJECT_LEN) {
@@ -696,10 +735,10 @@ static const treg_param_t email_params[] = {
        .name = "details",
        .description =
            "JSON (pass as JSON-encoded string): "
-           "recent {count? (up to 50), folder?, unread_only?, account?, page_token?}, "
+           "recent {count? (up to 50), folder?, unread_only?, account?, page_token?, sort?}, "
            "read {message_id, account?}, "
            "search {from?, subject?, text?, since?, before?, folder?, unread_only?, "
-           "account?, page_token?} (dates: YYYY-MM-DD, UTC, since=inclusive, "
+           "account?, page_token?, sort?} (dates: YYYY-MM-DD, UTC, since=inclusive, "
            "before=exclusive), "
            "folders {account?}, "
            "send {to, subject, body} (to: email or contact name), "
@@ -713,6 +752,7 @@ static const treg_param_t email_params[] = {
            "enabled accounts.\n"
            "  folder?: defaults to inbox; valid values listed in the top-level tool "
            "description.\n"
+           "  sort?: \"newest\" (default) or \"oldest\" — orders results by date.\n"
            "  page_token: opaque cursor from a previous response; pass back verbatim, do "
            "not parse or invent.\n"
            "Results include a page_token when more results are available — pass it in the "

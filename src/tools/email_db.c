@@ -151,7 +151,8 @@ int email_db_account_create(const email_account_t *acct, int64_t *id_out) {
    sqlite3_bind_int(st, 15, acct->enabled ? 1 : 0);
    sqlite3_bind_int(st, 16, acct->read_only ? 1 : 0);
    sqlite3_bind_int(st, 17, acct->max_recent > 0 ? acct->max_recent : 10);
-   sqlite3_bind_int(st, 18, acct->max_body_chars > 0 ? acct->max_body_chars : 4000);
+   sqlite3_bind_int(st, 18,
+                    acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN);
    sqlite3_bind_int64(st, 19, (int64_t)time(NULL));
 
    int result = FAILURE;

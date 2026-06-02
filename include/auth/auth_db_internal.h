@@ -49,7 +49,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 54
+#define AUTH_DB_SCHEMA_VERSION 55
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -58,6 +58,12 @@
 /* Helper macro for stringifying values in SQL */
 #define STRINGIFY_HELPER(x) #x
 #define STRINGIFY(x) STRINGIFY_HELPER(x)
+
+/* Default email read-body cap baked into the email_accounts schema column and
+ * applied by the v55 migration.  The auth layer cannot include tools/ headers,
+ * so this MIRRORS EMAIL_MAX_READ_BODY_LEN in include/tools/email_types.h (the
+ * runtime read-body fallback) — keep the two values in sync. */
+#define EMAIL_DEFAULT_BODY_CHARS 50000
 
 /* =============================================================================
  * Database State Structure (~408 bytes in BSS)

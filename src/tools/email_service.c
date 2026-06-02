@@ -159,7 +159,7 @@ static int build_conn_for_account(const email_account_t *acct, email_conn_t *con
 
    snprintf(conn->username, sizeof(conn->username), "%s", acct->username);
    snprintf(conn->display_name, sizeof(conn->display_name), "%s", acct->display_name);
-   conn->max_body_chars = acct->max_body_chars > 0 ? acct->max_body_chars : 4000;
+   conn->max_body_chars = acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
 
    /* Auth dispatch */
    if (strcmp(acct->auth_type, "oauth") == 0) {
@@ -626,7 +626,7 @@ static int read_single_account(email_account_t *acct,
          sodium_memzero(token, sizeof(token));
          return 1;
       }
-      int max_chars = acct->max_body_chars > 0 ? acct->max_body_chars : 4000;
+      int max_chars = acct->max_body_chars > 0 ? acct->max_body_chars : EMAIL_MAX_READ_BODY_LEN;
       int rc = gmail_read_message(token, message_id, max_chars, out);
       sodium_memzero(token, sizeof(token));
       return rc;
@@ -815,9 +815,9 @@ int email_service_create_draft(int user_id,
                                char *draft_id_out,
                                size_t draft_id_len) {
    /* Validate field lengths */
-   if (!body || strlen(body) > EMAIL_MAX_BODY_LEN) {
+   if (!body || strlen(body) > EMAIL_MAX_SEND_BODY_LEN) {
       OLOG_WARNING("email: draft body too long (%zu > %d)", body ? strlen(body) : 0,
-                   EMAIL_MAX_BODY_LEN);
+                   EMAIL_MAX_SEND_BODY_LEN);
       return 1;
    }
    if (!subject || strlen(subject) > EMAIL_MAX_SUBJECT_LEN)

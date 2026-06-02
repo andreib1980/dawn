@@ -32,6 +32,21 @@
  * 50 entries * ~1.3KB = ~65KB stack — well within Jetson limits. */
 #define EMAIL_MAX_FETCH_RESULTS 50
 
+/* Inbound (read) body cap — default fallback for both backends when an account
+ * sets no max_body_chars override, and the upper bound the WebUI accepts for the
+ * per-account override.  Read bodies are heap-allocated, so this can be large;
+ * only excessive messages truncate.  Shared here (rather than in the
+ * service-layer header) so both IMAP and Gmail backends reference one owner.
+ * The outbound (send) cap lives in email_service.h — it is bounded by the fixed
+ * email_draft_t.body[] buffer and is a service-layer concern.
+ * NOTE: the auth layer cannot include tools headers, so the email_accounts
+ * schema default + v55 migration mirror this value as EMAIL_DEFAULT_BODY_CHARS
+ * in include/auth/auth_db_internal.h — keep the two in sync. */
+#define EMAIL_MAX_READ_BODY_LEN 50000
+
+/* Lower bound the WebUI accepts for a per-account max_body_chars override. */
+#define EMAIL_MIN_READ_BODY_LEN 500
+
 typedef struct {
    uint32_t uid;
    char message_id[192]; /* Gmail hex ID or IMAP folder:uid composite */
@@ -51,8 +66,8 @@ typedef struct {
    char to[256];
    char subject[256];
    char date_str[32];
-   char *body; /* Heap-allocated, caller frees via email_message_free() */
-   int body_len;
+   char *body;   /* Heap-allocated, caller frees via email_message_free() */
+   int body_len; /* MUST equal strlen(body); callers size read buffers from it */
    int attachment_count;
    bool truncated;
 } email_message_t;

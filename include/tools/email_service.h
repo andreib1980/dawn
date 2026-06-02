@@ -33,7 +33,10 @@
 /* Draft / pending action limits */
 #define EMAIL_MAX_DRAFTS 4
 #define EMAIL_DRAFT_EXPIRY_SEC 300
-#define EMAIL_MAX_BODY_LEN 4000
+/* Outbound (send/draft) body cap — bounded by the fixed email_draft_t.body[4096]
+ * buffer; must stay well under 4096 to avoid silent truncation on send.
+ * The inbound (read) cap is EMAIL_MAX_READ_BODY_LEN in email_types.h. */
+#define EMAIL_MAX_SEND_BODY_LEN 4000
 #define EMAIL_MAX_SUBJECT_LEN 250
 #define EMAIL_CONFIRM_MAX_FAILURES 3
 #define EMAIL_CONFIRM_LOCKOUT_SEC 60
