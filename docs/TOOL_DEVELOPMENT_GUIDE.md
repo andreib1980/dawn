@@ -134,9 +134,13 @@ char *callback(const char *action, char *value, int *should_respond);
    .maps_to = TOOL_MAPS_TO_VALUE,
 }
 
-/* Enum parameter for action selection (optional with default) */
+/* Enum parameter for action selection (optional with default).
+ * Name a TOOL_MAPS_TO_ACTION param "action" — the generic action/value
+ * contract (and the scheduler's tool_action field) maps onto the param
+ * literally named "action", so a differently-named selector won't be
+ * filled correctly when the tool is scheduled. */
 {
-   .name = "category",
+   .name = "action",
    .description = "Search category: web, news, science, or images",
    .type = TOOL_PARAM_TYPE_ENUM,
    .required = false,

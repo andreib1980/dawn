@@ -1488,8 +1488,11 @@ static void build_tool_display_name(const char *tool_name,
 
    /* Tool-specific qualifier extraction */
    if (strcmp(tool_name, "search") == 0) {
-      /* For search: use category (news, social, science, etc.) */
-      if (json_object_object_get_ex(args, "category", &val)) {
+      /* For search: use the category (news, social, science, etc.).  The arg
+       * key is "action" (the search tool's action-mapped selector); accept the
+       * legacy "category" key too for any in-flight/historical tool calls. */
+      if (json_object_object_get_ex(args, "action", &val) ||
+          json_object_object_get_ex(args, "category", &val)) {
          qualifier = json_object_get_string(val);
       }
    } else if (strcmp(tool_name, "weather") == 0) {

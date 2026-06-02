@@ -47,7 +47,12 @@ static bool search_tool_is_available(void);
 
 static const treg_param_t search_params[] = {
    {
-       .name = "category",
+       /* Named "action" (not "category") so it maps cleanly onto the generic
+        * action/value contract every other tool uses — in particular the
+        * scheduler's tool_action field, which the LLM fills by the param named
+        * "action".  The value is still a search category; the description below
+        * keeps that framing. */
+       .name = "action",
        .description =
            "Search category. Pick the one that matches your INTENT:\n"
            "  'news'    — current events, headlines, product launches, releases. Best for "
