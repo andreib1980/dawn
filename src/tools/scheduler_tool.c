@@ -322,9 +322,16 @@ static char *handle_create(struct json_object *details,
           * silently store e.g. `{"$cmd":"..."}` as the literal tool_value
           * string.  Reject anything that isn't a JSON string outright. */
          struct json_object *jname = NULL, *jaction = NULL, *jvalue = NULL;
-         json_object_object_get_ex(step, "tool_name", &jname);
-         json_object_object_get_ex(step, "tool_action", &jaction);
-         json_object_object_get_ex(step, "tool_value", &jvalue);
+         /* Accept the short keys tool/action/value as aliases for
+          * tool_name/tool_action/tool_value. The LLM intermittently emits the
+          * short forms inside steps[] and would otherwise hit a validation
+          * error and retry; canonical keys win, short keys are the fallback. */
+         json_object_object_get_ex(step, "tool_name", &jname) ||
+             json_object_object_get_ex(step, "tool", &jname);
+         json_object_object_get_ex(step, "tool_action", &jaction) ||
+             json_object_object_get_ex(step, "action", &jaction);
+         json_object_object_get_ex(step, "tool_value", &jvalue) ||
+             json_object_object_get_ex(step, "value", &jvalue);
          if (jname && !json_object_is_type(jname, json_type_string)) {
             snprintf(result, sizeof(result), "Error: steps[%d].tool_name must be a string", i);
             return strdup(result);
@@ -974,7 +981,8 @@ static const tool_metadata_t scheduler_metadata = {
        "Briefings can be SINGLE-STEP (one tool, one summary) or MULTI-STEP (run several "
        "tools, summarize the combined output).  For multi-step, pass a `steps` array "
        "inside `details` and omit top-level tool_name; each step is "
-       "{tool_name, tool_action, tool_value}.  Each step's tool_value MUST be the literal "
+       "{tool_name, tool_action, tool_value} — use those exact key names, NOT the short "
+       "forms tool/action/value.  Each step's tool_value MUST be the literal "
        "arguments the tool receives (for `search`, that's the query string).  Empty "
        "tool_value for tools that require it (search, url_fetch) is rejected at create "
        "time.  Maximum 8 steps per briefing.\n\n"
