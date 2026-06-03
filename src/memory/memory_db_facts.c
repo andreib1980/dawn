@@ -783,7 +783,15 @@ int memory_db_fact_delete(int64_t fact_id, int user_id) {
    if (rc != SQLITE_DONE) {
       return MEMORY_DB_FAILURE;
    }
-   return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+   if (changes > 0) {
+      /* The embedding cache holds an (id, embedding) entry for this now-deleted
+       * fact — mark it dirty so the next access reloads (mirrors the invalidation
+       * in cleanup_meta_facts).  Without this, a deleted fact lingers in the cache
+       * and re-surfaces in cosine search / find_duplicates. */
+      memory_embeddings_invalidate_cache();
+      return MEMORY_DB_SUCCESS;
+   }
+   return MEMORY_DB_NOT_FOUND;
 }
 
 int memory_db_fact_find_similar(int user_id,

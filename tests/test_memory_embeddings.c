@@ -289,6 +289,63 @@ static void test_rescore_sentinel_value_invariant(void) {
 }
 
 /* ============================================================================
+ * Test: Duplicate-fact clustering (pure cluster_by_cosine)
+ * ============================================================================ */
+
+static void test_cluster_by_cosine(void) {
+   /* 2D unit vectors so the supplied norm (1.0) is exact.  Two tight pairs
+    * (~5deg apart, cos 0.9962) plus a zero-vector that must be skipped. */
+   const int dims = 2;
+   const int count = 5;
+   int64_t ids[5] = { 100, 101, 102, 103, 104 };
+   float embs[5 * 2] = {
+      1.0f,      0.0f,      /* fact0 */
+      0.996195f, 0.087156f, /* fact1: ~5deg from fact0 */
+      0.0f,      1.0f,      /* fact2 */
+      0.087156f, 0.996195f, /* fact3: ~5deg from fact2 */
+      0.0f,      0.0f,      /* fact4: zero vector → norm 0 → skipped */
+   };
+   float norms[5] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f };
+
+   memory_dup_cluster_t clusters[MEMORY_DUP_MAX_CLUSTERS];
+   int n = -1;
+
+   /* threshold 0.85: {100,101} and {102,103} cluster; fact4 skipped. */
+   int rc = memory_embeddings_cluster_by_cosine(ids, embs, norms, count, dims, 0.85f, clusters,
+                                                MEMORY_DUP_MAX_CLUSTERS, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(2, clusters[0].count);
+   TEST_ASSERT_EQUAL_INT(2, clusters[1].count);
+   TEST_ASSERT_EQUAL_INT64(100, clusters[0].ids[0]);
+   TEST_ASSERT_EQUAL_INT64(101, clusters[0].ids[1]);
+   TEST_ASSERT_EQUAL_INT64(102, clusters[1].ids[0]);
+   TEST_ASSERT_EQUAL_INT64(103, clusters[1].ids[1]);
+   /* min_similarity = the single seed-to-member cosine (~cos 5deg = 0.9962). */
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.9962f, clusters[0].min_similarity);
+
+   /* threshold 0.999: the 0.9962 pairs fall below → no clusters. */
+   n = -1;
+   rc = memory_embeddings_cluster_by_cosine(ids, embs, norms, count, dims, 0.999f, clusters,
+                                            MEMORY_DUP_MAX_CLUSTERS, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   /* max_clusters=1 → early-stop after the first cluster. */
+   n = -1;
+   rc = memory_embeddings_cluster_by_cosine(ids, embs, norms, count, dims, 0.85f, clusters, 1, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, n);
+
+   /* NULL guard → FAILURE, count zeroed. */
+   n = -1;
+   rc = memory_embeddings_cluster_by_cosine(NULL, embs, norms, count, dims, 0.85f, clusters,
+                                            MEMORY_DUP_MAX_CLUSTERS, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, rc);
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -307,5 +364,6 @@ int main(void) {
    RUN_TEST(test_rescore_null_query_emb_yields_all_sentinels);
    RUN_TEST(test_rescore_zero_query_norm_yields_all_sentinels);
    RUN_TEST(test_rescore_sentinel_value_invariant);
+   RUN_TEST(test_cluster_by_cosine);
    return UNITY_END();
 }

@@ -552,64 +552,18 @@ char *memory_action_search(int user_id,
    /* Search facts — keyword search first, then hybrid if embeddings available */
    memory_fact_t facts[10];
    int fact_count = 0;
-   bool category_filter_active = (category && *category);
-
-   if (category_filter_active) {
-      /* Category pre-filter is independent of token count — single SQL per query.
-       * Score-vs-time combinability deferred (see decision #7).  This path
-       * intentionally bypasses the shared `memory_fact_search_hybrid` helper
-       * because that helper has no category-filter codepath in 1c; v2 of the
-       * helper will subsume this branch (TODO 1d/1j). */
-      memory_db_fact_search_by_category(user_id, keywords, category, facts, 10, &fact_count);
-
-      if (memory_embeddings_available() && fact_count > 0) {
-         int64_t kw_ids[10];
-         int kw_scores[10];
-         for (int i = 0; i < fact_count; i++) {
-            kw_ids[i] = facts[i].id;
-            kw_scores[i] = 1;
-         }
-         embedding_search_result_t hybrid_results[10];
-         int hybrid_count = memory_embeddings_hybrid_search(user_id, keywords, kw_ids, kw_scores,
-                                                            fact_count,
-                                                            (token_count > 0) ? token_count : 1,
-                                                            hybrid_results, 10);
-         if (hybrid_count > 0) {
-            memory_fact_t reordered[10];
-            int reordered_count = 0;
-            for (int h = 0; h < hybrid_count && reordered_count < 10; h++) {
-               bool found = false;
-               for (int f = 0; f < fact_count; f++) {
-                  if (facts[f].id == hybrid_results[h].fact_id) {
-                     reordered[reordered_count++] = facts[f];
-                     found = true;
-                     break;
-                  }
-               }
-               if (!found) {
-                  /* memory_db_fact_get is now user-scoped at the SQL layer
-                   * (CWE-639 defense-in-depth) — wrong-user lookups return
-                   * MEMORY_DB_NOT_FOUND, so the explicit user_id post-check
-                   * is no longer needed. */
-                  memory_fact_t vec_fact;
-                  if (memory_db_fact_get(hybrid_results[h].fact_id, user_id, &vec_fact) ==
-                      MEMORY_DB_SUCCESS) {
-                     reordered[reordered_count++] = vec_fact;
-                  }
-               }
-            }
-            memcpy(facts, reordered, reordered_count * sizeof(memory_fact_t));
-            fact_count = reordered_count;
-         }
-      }
-   } else {
-      /* Non-category path: delegate to the unified retrieval primitive.
-       * `memory_search_execute` does hybrid + entity-graph + Phase 2 Step 1
-       * query-aware scoring + merge + score floor in a single call,
-       * shared with the bench harness to prevent drift. */
-      float scores[10];
-      memory_search_execute(user_id, keywords, since_ts, facts, scores, 10, &fact_count);
-   }
+   /* Category hard-filtering removed (was: pre-filter facts by exact category via
+    * memory_db_fact_search_by_category).  Extraction scatters one semantic cluster
+    * across multiple categories, so an LLM-guessed `category` systematically hid
+    * relevant facts (e.g. a single task list filed under general + professional +
+    * practical at once).  Always use the unified full-corpus path —
+    * `memory_search_execute` does hybrid + entity-graph + Phase 2 Step 1
+    * query-aware scoring + merge + score floor in one call, shared with the bench
+    * harness to prevent drift, and it strictly subsumes the old branch.
+    * `category` is still accepted but no longer narrows search results. */
+   (void)category;
+   float scores[10];
+   memory_search_execute(user_id, keywords, since_ts, facts, scores, 10, &fact_count);
 
    /* source_budget==0 from caller means "use default"; else honor caller's value
     * (bench harness uses this to sweep budget values).  Cap at
@@ -723,7 +677,7 @@ char *memory_action_search(int user_id,
          if (minimal) {
             /* Stripped per-fact line: just `- text`.  Date stays in fact_text
              * when extraction included it (Phase 0 prompt v2). */
-            strbuf_appendf(&sb, "- %s\n", facts[i].fact_text);
+            strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)facts[i].id, facts[i].fact_text);
             /* Capture provenance for the deferred global Source evidence block. */
             if (with_source && fact_conv[i] > 0 && min_src_count < MINIMAL_SOURCE_TOP_FACTS) {
                min_src_conv[min_src_count] = fact_conv[i];
@@ -1020,46 +974,188 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
  * Action: Forget
  * ============================================================================= */
 
+/* Max fact IDs accepted in one bulk 'forget' call — bounds the response size. */
+#define MAX_FORGET_IDS 50
+
 static char *memory_action_forget(int user_id, const char *fact_text) {
    if (!fact_text || strlen(fact_text) == 0) {
-      return strdup("Please specify the fact ID to forget. Use 'search' or 'recent' first to find "
-                    "the ID.");
+      return strdup("Please specify the fact ID(s) to forget (e.g. '42' or '42,57,91'). Use "
+                    "'search', 'recent', or 'find_duplicates' first to find the IDs.");
    }
 
-   /* Require numeric DB ID — prevents accidental deletion from fuzzy search */
-   char *endptr = NULL;
-   errno = 0;
-   long long id_val = strtoll(fact_text, &endptr, 10);
-   if (!endptr || *endptr != '\0' || id_val <= 0 || errno == ERANGE) {
-      return strdup("Please provide a numeric fact ID (e.g., '42'). Use 'search' or 'recent' first "
-                    "to find the ID of the memory you want to forget.");
-   }
+   /* Parse one or more comma-separated numeric fact IDs.  Numeric-only tokens are
+    * required (guards against accidental fuzzy-text deletion); non-numeric tokens
+    * are counted and ignored.  A single valid ID keeps the detailed response. */
+   int64_t ids[MAX_FORGET_IDS];
+   int id_count = 0;
+   int invalid_count = 0;
+   bool capped = false;
 
-   /* Look up fact by ID and verify ownership (SQL filters by user_id —
-    * wrong-user lookups return MEMORY_DB_NOT_FOUND with the same response
-    * the LLM/user would get for a legitimately-missing fact, no oracle). */
-   memory_fact_t fact;
-   int get_result = memory_db_fact_get((int64_t)id_val, user_id, &fact);
-   if (get_result != MEMORY_DB_SUCCESS) {
-      char *msg = malloc(128);
-      if (msg)
-         snprintf(msg, 128, "No fact found with ID %lld.", id_val);
-      return msg ? msg : strdup("Fact not found.");
-   }
-
-   int result = memory_db_fact_delete((int64_t)id_val, user_id);
-
-   if (result == MEMORY_DB_SUCCESS) {
-      char *msg = malloc(384);
-      if (msg) {
-         snprintf(msg, 384, "Forgotten (ID %lld): \"%.200s%s\"", id_val, fact.fact_text,
-                  strlen(fact.fact_text) > 200 ? "..." : "");
-         return msg;
+   const char *s = fact_text;
+   while (*s) {
+      while (*s == ',' || *s == ' ' || *s == '\t')
+         s++;
+      if (!*s)
+         break;
+      if (id_count >= MAX_FORGET_IDS) {
+         capped = true;
+         break;
       }
-      return strdup("Fact forgotten successfully.");
-   } else {
-      return strdup("Failed to forget the fact. Please try again.");
+      char *endptr = NULL;
+      errno = 0;
+      long long v = strtoll(s, &endptr, 10);
+      const char *after = endptr;
+      while (*after == ' ' || *after == '\t')
+         after++;
+      if (endptr == s || (*after != '\0' && *after != ',') || v <= 0 || errno == ERANGE) {
+         invalid_count++;
+         while (*s && *s != ',') /* skip the bad token */
+            s++;
+         continue;
+      }
+      ids[id_count++] = (int64_t)v;
+      s = after;
    }
+
+   if (id_count == 0) {
+      return strdup("Please provide numeric fact ID(s) (e.g. '42' or '42,57,91'). Use 'search', "
+                    "'recent', or 'find_duplicates' first to find the IDs.");
+   }
+
+   /* Delete each, tracking outcomes.  fact_get verifies existence + ownership
+    * (SQL filters by user_id — wrong-user lookups return NOT_FOUND, no oracle). */
+   int forgotten = 0;
+   int not_removed = 0;
+   char first_text[256] = "";
+   bool first_truncated = false;
+   char ok_ids[600] = "";
+   char nf_ids[400] = "";
+   size_t ok_pos = 0, nf_pos = 0;
+
+   for (int i = 0; i < id_count; i++) {
+      memory_fact_t fact;
+      bool removed = false;
+      if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS &&
+          memory_db_fact_delete(ids[i], user_id) == MEMORY_DB_SUCCESS) {
+         removed = true;
+         if (forgotten == 0) {
+            snprintf(first_text, sizeof(first_text), "%.200s", fact.fact_text);
+            first_truncated = strlen(fact.fact_text) > 200;
+         }
+         forgotten++;
+      }
+      char *list = removed ? ok_ids : nf_ids;
+      size_t *lp = removed ? &ok_pos : &nf_pos;
+      size_t cap = removed ? sizeof(ok_ids) : sizeof(nf_ids);
+      if (!removed)
+         not_removed++;
+      if (*lp < cap - 24)
+         *lp += (size_t)snprintf(list + *lp, cap - *lp, "%s%lld", *lp ? ", " : "",
+                                 (long long)ids[i]);
+   }
+
+   /* Single valid ID that succeeded → detailed response (back-compat). */
+   if (id_count == 1 && forgotten == 1) {
+      char *msg = malloc(384);
+      if (msg)
+         snprintf(msg, 384, "Forgotten (ID %lld): \"%s%s\"", (long long)ids[0], first_text,
+                  first_truncated ? "..." : "");
+      return msg ? msg : strdup("Fact forgotten successfully.");
+   }
+
+   /* Batched summary.  Clamp `pos` after each append so the `SZ - pos` size
+    * argument can never underflow to a huge size_t if the ok_ids/nf_ids caps
+    * are later enlarged (defense-in-depth — today's worst case is ~1099). */
+   enum {
+      FORGET_MSG_SZ = 1200
+   };
+   char *msg = malloc(FORGET_MSG_SZ);
+   if (!msg)
+      return strdup("Memory updated.");
+   int pos = snprintf(msg, FORGET_MSG_SZ, "Forgotten %d fact%s", forgotten,
+                      forgotten == 1 ? "" : "s");
+   if (pos < 0 || pos >= FORGET_MSG_SZ)
+      pos = FORGET_MSG_SZ - 1;
+   if (forgotten > 0) {
+      pos += snprintf(msg + pos, FORGET_MSG_SZ - pos, " (IDs %s)", ok_ids);
+      if (pos >= FORGET_MSG_SZ)
+         pos = FORGET_MSG_SZ - 1;
+   }
+   if (not_removed > 0) {
+      pos += snprintf(msg + pos, FORGET_MSG_SZ - pos, "; %d not found (%s)", not_removed, nf_ids);
+      if (pos >= FORGET_MSG_SZ)
+         pos = FORGET_MSG_SZ - 1;
+   }
+   if (invalid_count > 0) {
+      pos += snprintf(msg + pos, FORGET_MSG_SZ - pos, "; ignored %d non-numeric token%s",
+                      invalid_count, invalid_count == 1 ? "" : "s");
+      if (pos >= FORGET_MSG_SZ)
+         pos = FORGET_MSG_SZ - 1;
+   }
+   if (capped)
+      snprintf(msg + pos, FORGET_MSG_SZ - pos, " (capped at %d IDs per call)", MAX_FORGET_IDS);
+   return msg;
+}
+
+/* =============================================================================
+ * Action: Find Duplicates
+ *
+ * Surfaces clusters of near-duplicate facts (by embedding cosine) with their IDs
+ * so the user/assistant can review and 'forget' the redundant ones.  Optional
+ * `query` = similarity threshold (0.50-1.00, default 0.85 — below the 0.92
+ * paraphrase-dedup gate, to catch near-dups that escaped it at extraction).
+ * ============================================================================= */
+static char *memory_action_find_duplicates(int user_id, const char *value) {
+   float threshold = 0.85f;
+   if (value && *value) {
+      char *endptr = NULL;
+      float t = strtof(value, &endptr);
+      if (endptr != value && t >= 0.5f && t <= 1.0f)
+         threshold = t;
+   }
+
+   memory_dup_cluster_t clusters[MEMORY_DUP_MAX_CLUSTERS];
+   int cluster_count = 0;
+   if (memory_embeddings_find_duplicate_clusters(user_id, threshold, clusters,
+                                                 MEMORY_DUP_MAX_CLUSTERS,
+                                                 &cluster_count) != MEMORY_DB_SUCCESS) {
+      return strdup("Couldn't scan memories for duplicates (embeddings may be unavailable).");
+   }
+
+   if (cluster_count == 0) {
+      char *msg = malloc(160);
+      if (msg)
+         snprintf(msg, 160,
+                  "No near-duplicate fact clusters found (similarity >= %.2f). Memory looks clean.",
+                  (double)threshold);
+      return msg ? msg : strdup("No near-duplicate fact clusters found.");
+   }
+
+   strbuf_t sb;
+   strbuf_init(&sb, 4096);
+   strbuf_appendf(&sb,
+                  "Found %d near-duplicate cluster%s (similarity >= %.2f). Review each cluster and "
+                  "'forget' the redundant IDs (keep the best one):\n",
+                  cluster_count, cluster_count == 1 ? "" : "s", (double)threshold);
+   for (int c = 0; c < cluster_count; c++) {
+      strbuf_appendf(&sb, "\nCluster %d (%d facts, min similarity %.2f):\n", c + 1,
+                     clusters[c].count, (double)clusters[c].min_similarity);
+      for (int k = 0; k < clusters[c].count; k++) {
+         memory_fact_t fact;
+         /* Skip NOT_FOUND (a just-deleted fact / cache-vs-DB race). */
+         if (memory_db_fact_get(clusters[c].ids[k], user_id, &fact) == MEMORY_DB_SUCCESS) {
+            strbuf_appendf(&sb, "  - [ID:%lld] %.160s%s\n", (long long)clusters[c].ids[k],
+                           fact.fact_text, strlen(fact.fact_text) > 160 ? "..." : "");
+         }
+      }
+   }
+
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("Duplicate scan succeeded but the result was too large to render.");
+   }
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Memory updated.");
 }
 
 /* =============================================================================
@@ -1180,7 +1276,7 @@ char *memory_action_recent(int user_id,
       int elided = 0;
       for (int i = 0; i < fact_count; i++) {
          if (minimal) {
-            strbuf_appendf(&sb, "- %s\n", facts[i].fact_text);
+            strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)facts[i].id, facts[i].fact_text);
             if (with_source && fact_conv[i] > 0 &&
                 min_src_count < MINIMAL_RECENT_SOURCE_TOP_FACTS) {
                min_src_conv[min_src_count] = fact_conv[i];
@@ -1674,6 +1770,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
       return memory_action_remember(user_id, value);
    } else if (strcmp(actionName, "forget") == 0) {
       return memory_action_forget(user_id, value);
+   } else if (strcmp(actionName, "find_duplicates") == 0) {
+      return memory_action_find_duplicates(user_id, value);
    } else if (strcmp(actionName, "recent") == 0) {
       /* Bundle 3 (2026-05-13): extract the time-period window from the base
        * value, plus the new 'before' / 'sort' / 'limit' modifiers from

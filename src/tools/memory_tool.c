@@ -44,8 +44,10 @@ static const treg_param_t memory_params[] = {
        .name = "action",
        .description =
            "Memory action: 'remember' (store a fact), 'search' (find memories), "
-           "'forget' (delete a memory by numeric ID — use search/recent first to find the "
-           "ID), 'recent' (list recent memories), "
+           "'forget' (delete one or more memories by numeric ID — use search/recent/"
+           "find_duplicates first to find the IDs), 'recent' (list recent memories), "
+           "'find_duplicates' (list clusters of near-identical facts with their IDs so you "
+           "can forget the redundant ones), "
            "'save_contact' (store email/phone for a person), "
            "'find_contact' (look up contact info), "
            "'list_contacts' (list all contacts), "
@@ -55,9 +57,9 @@ static const treg_param_t memory_params[] = {
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "remember", "search", "forget", "recent", "save_contact", "find_contact",
-                        "list_contacts", "delete_contact", "merge_entities" },
-       .enum_count = 9,
+       .enum_values = { "remember", "search", "forget", "recent", "find_duplicates", "save_contact",
+                        "find_contact", "list_contacts", "delete_contact", "merge_entities" },
+       .enum_count = 10,
    },
    {
        .name = "query",
@@ -66,9 +68,13 @@ static const treg_param_t memory_params[] = {
            "Check the action you picked before filling this in:\n"
            "  remember:        STRING — the fact to store, e.g. 'User prefers dark mode'.\n"
            "  search:          STRING — keywords (3-8 words work best).\n"
-           "  forget:          NUMERIC STRING — the fact ID from a prior search/recent "
-           "result, e.g. '4711'. Non-numeric input is rejected; if you don't have the ID, "
-           "run 'search' or 'recent' first.\n"
+           "  forget:          NUMERIC ID(s) — one fact ID, or a comma-separated list to "
+           "bulk-delete, e.g. '4711' or '4711,4712,4713' (max 50). IDs come from a prior "
+           "search/recent/find_duplicates result; non-numeric tokens are ignored.\n"
+           "  find_duplicates: OPTIONAL NUMERIC — cosine similarity threshold 0.50-1.00 "
+           "(default 0.85). Omit to use the default; raise it for stricter (more-identical) "
+           "matches. To clean up, pass the redundant IDs to 'forget' (max 50 per call — "
+           "split larger sets across calls).\n"
            "  recent:          TIME WINDOW — how far back to look. Suffix-encoded: "
            "'24h', '7d', '2w', '90d', '1y', '10y' (default '7d', upper bound '10y'). "
            "Returns entries within [now − query, now]. Use 'sort' and 'before' params for "
@@ -156,9 +162,9 @@ static const treg_param_t memory_params[] = {
     * it via a runtime pointer would force a registry-shape change. */
    {
        .name = "category",
-       .description = "Optional category filter for 'search'/'recent'. Restricts results to "
-                      "facts in one topic area (e.g., ask only about professional or health "
-                      "memories). Improves retrieval precision on focused queries.",
+       .description = "Optional topic tag. No longer narrows 'search' results — semantic "
+                      "ranking covers all categories, so you do NOT need to guess a category "
+                      "to find a fact. Accepted for back-compat but safe to omit.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,

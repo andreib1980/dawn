@@ -787,6 +787,114 @@ int memory_embeddings_nearest_fact(int user_id,
 }
 
 /* =============================================================================
+ * Duplicate-fact clustering
+ * ============================================================================= */
+
+int memory_embeddings_cluster_by_cosine(const int64_t *ids,
+                                        const float *embs,
+                                        const float *norms,
+                                        int count,
+                                        int dims,
+                                        float threshold,
+                                        memory_dup_cluster_t *out,
+                                        int max_clusters,
+                                        int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!ids || !embs || !norms || !out || count <= 0 || dims <= 0 || max_clusters <= 0)
+      return MEMORY_DB_FAILURE;
+
+   bool *visited = calloc((size_t)count, sizeof(bool));
+   if (!visited)
+      return MEMORY_DB_FAILURE;
+
+   int n_clusters = 0;
+   for (int i = 0; i < count && n_clusters < max_clusters; i++) {
+      if (visited[i] || norms[i] < 1e-6f)
+         continue; /* already clustered, or no embedding */
+      visited[i] = true;
+      memory_dup_cluster_t cl;
+      cl.count = 0;
+      cl.min_similarity = 1.0f;
+      cl.ids[cl.count++] = ids[i];
+
+      const float *vi = embs + (size_t)i * (size_t)dims;
+      for (int j = i + 1; j < count && cl.count < MEMORY_DUP_MAX_PER_CLUSTER; j++) {
+         if (visited[j] || norms[j] < 1e-6f)
+            continue;
+         float cos = memory_embeddings_cosine_with_norms(vi, embs + (size_t)j * (size_t)dims, dims,
+                                                         norms[i], norms[j]);
+         if (cos >= threshold) {
+            visited[j] = true;
+            cl.ids[cl.count++] = ids[j];
+            if (cos < cl.min_similarity)
+               cl.min_similarity = cos;
+         }
+      }
+      if (cl.count >= 2)
+         out[n_clusters++] = cl;
+   }
+
+   free(visited);
+   if (out_count)
+      *out_count = n_clusters;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_embeddings_find_duplicate_clusters(int user_id,
+                                              float threshold,
+                                              memory_dup_cluster_t *out_clusters,
+                                              int max_clusters,
+                                              int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!out_clusters || max_clusters <= 0)
+      return MEMORY_DB_FAILURE;
+   if (threshold <= 0.0f || threshold > 1.0f)
+      threshold = 0.85f;
+
+   /* Snapshot the cache under the lock, then cluster on the copy: the O(N^2)
+    * scan must NOT hold s_cache.mutex (it gates the per-fact paraphrase-dedup
+    * gate and the recompute/backfill worker — a multi-hundred-ms hold would
+    * stall extraction). */
+   pthread_mutex_lock(&s_cache.mutex);
+   if (cache_load(user_id) != 0) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      return MEMORY_DB_FAILURE;
+   }
+   int count = s_cache.count;
+   int dims = s_cache.dims;
+   if (count < 2 || dims <= 0) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      return MEMORY_DB_SUCCESS; /* nothing to cluster */
+   }
+
+   int64_t *ids = malloc((size_t)count * sizeof(int64_t));
+   float *norms = malloc((size_t)count * sizeof(float));
+   float *embs = malloc((size_t)count * (size_t)dims * sizeof(float));
+   if (!ids || !norms || !embs) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      free(ids);
+      free(norms);
+      free(embs);
+      OLOG_ERROR("memory_embeddings: OOM snapshotting %d facts (%d dims) for dup-scan", count,
+                 dims);
+      return MEMORY_DB_FAILURE;
+   }
+   memcpy(ids, s_cache.ids, (size_t)count * sizeof(int64_t));
+   memcpy(norms, s_cache.norms, (size_t)count * sizeof(float));
+   memcpy(embs, s_cache.embeddings, (size_t)count * (size_t)dims * sizeof(float));
+   pthread_mutex_unlock(&s_cache.mutex);
+
+   int rc = memory_embeddings_cluster_by_cosine(ids, embs, norms, count, dims, threshold,
+                                                out_clusters, max_clusters, out_count);
+   free(ids);
+   free(norms);
+   free(embs);
+   return rc;
+}
+
+/* =============================================================================
  * Entity Embedding Support
  * ============================================================================= */
 

@@ -510,6 +510,69 @@ float memory_embeddings_cosine_with_norms(const float *a,
 /* Compute cosine similarity (computes norms internally) */
 float memory_embeddings_cosine(const float *a, const float *b, int dims);
 
+/* =============================================================================
+ * Duplicate-fact clustering (backs the 'find_duplicates' memory tool action)
+ * ============================================================================= */
+#define MEMORY_DUP_MAX_CLUSTERS 20
+#define MEMORY_DUP_MAX_PER_CLUSTER 12
+
+typedef struct {
+   int64_t ids[MEMORY_DUP_MAX_PER_CLUSTER];
+   int count;            /* facts in this cluster (always >= 2) */
+   float min_similarity; /* lowest seed-to-member cosine in the cluster */
+} memory_dup_cluster_t;
+
+/**
+ * @brief Find clusters of near-duplicate facts by embedding cosine.
+ *
+ * Snapshots the fact embedding cache under its mutex, then clusters on the copy
+ * so the O(N^2) scan never holds the cache lock (which gates the paraphrase-dedup
+ * gate and the recompute worker).  @p out_clusters is CALLER-ALLOCATED (at least
+ * @p max_clusters entries) — no free contract.  @p threshold in (0,1]; values
+ * <= 0 or > 1 default to 0.85.  Sets *@p out_count to the number of clusters
+ * found (each of size >= 2).  Returns MEMORY_DB_SUCCESS / MEMORY_DB_FAILURE.
+ *
+ * @param user_id      User whose fact cache to scan.
+ * @param threshold    Cosine similarity threshold in (0,1]; <= 0 or > 1 -> 0.85.
+ * @param out_clusters Caller-allocated array of at least @p max_clusters entries.
+ * @param max_clusters Maximum clusters to emit; the scan early-stops when reached.
+ * @param out_count    Set to the number of clusters found (>= 0); zeroed on error.
+ * @return MEMORY_DB_SUCCESS (including the 0-cluster case) or MEMORY_DB_FAILURE.
+ */
+int memory_embeddings_find_duplicate_clusters(int user_id,
+                                              float threshold,
+                                              memory_dup_cluster_t *out_clusters,
+                                              int max_clusters,
+                                              int *out_count);
+
+/**
+ * @brief Pure greedy clusterer over caller-supplied embeddings.
+ *
+ * No cache/DB access — exposed for unit testing.  Greedy: each unvisited fact
+ * (skip norm < 1e-6) seeds a cluster of all later facts with cosine >= threshold;
+ * emits clusters of size >= 2; early-stops at @p max_clusters.
+ *
+ * @param ids         Fact IDs, parallel to @p embs / @p norms (length @p count).
+ * @param embs        Flat row-major embeddings (@p count * @p dims floats).
+ * @param norms       Pre-computed L2 norms, parallel to @p ids.
+ * @param count       Number of facts.
+ * @param dims        Embedding dimensionality.
+ * @param threshold   Cosine similarity threshold for cluster membership.
+ * @param out         Caller-allocated array of at least @p max_clusters entries.
+ * @param max_clusters Maximum clusters to emit (early-stop bound).
+ * @param out_count   Set to the number of clusters found; zeroed on error.
+ * @return MEMORY_DB_SUCCESS, or MEMORY_DB_FAILURE on bad args / OOM.
+ */
+int memory_embeddings_cluster_by_cosine(const int64_t *ids,
+                                        const float *embs,
+                                        const float *norms,
+                                        int count,
+                                        int dims,
+                                        float threshold,
+                                        memory_dup_cluster_t *out,
+                                        int max_clusters,
+                                        int *out_count);
+
 #ifdef __cplusplus
 }
 #endif
