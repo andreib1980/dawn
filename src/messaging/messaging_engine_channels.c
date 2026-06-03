@@ -865,12 +865,38 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
 
    /* Pass the typed provider_address (chat_id / channel_id / E.164)
     * so the driver can skip the JSON parse on the hot path.  Empty
-    * string acts as NULL — driver falls back to parsing address_json. */
+    * string acts as NULL — driver falls back to parsing address_json.
+    *
+    * Routed through messaging_deliver (not drv->send_text directly) so
+    * scheduler / tool fan-out gets the same per-channel markdown conversion
+    * + cap-aware splitting as the inbound reply path.  `text` is canonical
+    * markdown authored by the LLM or a scheduler payload. */
    const char *pa_arg = provider_address[0] ? provider_address : NULL;
-   int rc = drv->send_text(user_id, pa_arg, address_json, text);
+   int rc = messaging_deliver(drv, user_id, pa_arg, address_json, text);
    free(address_json);
 
-   if (rc == SUCCESS) {
+   if (rc == MESSAGING_SUCCESS) {
+      /* Persist the delivered message to the channel's forever-conversation so
+       * it appears in the WebUI log and is part of the channel's history on the
+       * next turn — symmetric with the inbound reply path (process_inbound).
+       * Covers both the messaging.send tool and scheduler fan-out.  The
+       * canonical markdown is stored (the WebUI renders it); per-channel
+       * formatting was a throwaway copy inside messaging_deliver.  Best-effort:
+       * a persistence failure does not undo the successful send.  Done outside
+       * the last_used lock below — resolve_channel_conversation_id and
+       * conv_db_add_message_ex take the auth_db leaf lock themselves. */
+      if (provider_address[0]) {
+         int64_t conv_id = resolve_channel_conversation_id(provider, provider_address, user_id);
+         if (conv_id > 0) {
+            int64_t msg_id = 0;
+            if (conv_db_add_message_ex(conv_id, user_id, "assistant", text, &msg_id) ==
+                    AUTH_DB_SUCCESS &&
+                msg_id > 0) {
+               webui_broadcast_conversation_messages_appended(user_id, conv_id);
+            }
+         }
+      }
+
       /* Bump last_used_at. */
       AUTH_DB_LOCK_OR_RETURN(MESSAGING_SUCCESS); /* if lock fails just skip */
       sqlite3_stmt *stmt = NULL;

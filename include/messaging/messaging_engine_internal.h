@@ -105,6 +105,21 @@ typedef struct {
    int64_t last_known_msg_id;
 } session_slot_t;
 
+/* Per-provider outbound shaping policy.  `max_outbound_chars` is the
+ * engine-side cap (measured on the CONVERTED, per-channel output — see
+ * messaging_deliver) before the driver hits the provider's own limit; 0 means
+ * no engine cap.  `split_oversize` routes an oversize reply through the
+ * formatter/splitter (all v1 providers); false selects hard-truncate (no v1
+ * provider).  `max_parts` rejects a reply that would need more than N messages
+ * (SMS=3; 0=unlimited).  `channel_hint` is appended to the per-turn system
+ * prompt.  Defined in messaging_engine_inbound.c. */
+typedef struct {
+   size_t max_outbound_chars;
+   bool split_oversize;
+   int max_parts;
+   const char *channel_hint;
+} provider_outbound_t;
+
 /* =============================================================================
  * Module state — DEFINED in messaging_engine.c (core), shared across files.
  *
@@ -151,6 +166,20 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
 
 /* core (driver registry) */
 const messaging_driver_t *find_driver(const char *name);
+
+/* core (outbound delivery): render `canonical_markdown` into drv->out_format,
+ * split to the provider cap (measured on converted output), and deliver each
+ * part via drv->send_text with a "(N/M) " prefix + 100ms pacing.  The single
+ * funnel every LLM-authored outbound reply passes through.  Does NOT mutate
+ * `canonical_markdown`.  Returns MESSAGING_SUCCESS / MESSAGING_FAILURE. */
+int messaging_deliver(const messaging_driver_t *drv,
+                      int user_id,
+                      const char *provider_address,
+                      const char *address_json,
+                      const char *canonical_markdown);
+
+/* inbound (per-provider outbound shaping policy; defined in _inbound.c). */
+provider_outbound_t provider_outbound_for(const char *provider);
 
 /* channels (lookup / binding / outbound shaping helpers) */
 int lookup_channel_user(const char *provider,

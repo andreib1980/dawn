@@ -31,6 +31,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "messaging/messaging_format.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -72,6 +74,13 @@ typedef struct messaging_driver_s {
    /** Driver name — used as the `provider` column value
     *  ("telegram" / "discord" / "slack" / "sms"). */
    const char *name;
+
+   /** Wire format this driver consumes.  The engine renders every outbound
+    *  message into this dialect (via messaging_deliver / engine_send_async)
+    *  BEFORE calling send_text(), so the driver may statically rely on
+    *  receiving its own format — e.g. the Telegram driver hardcodes
+    *  parse_mode=HTML.  See include/messaging/messaging_format.h. */
+   messaging_format_t out_format;
 
    /**
     * Initialize the driver.  Spawns the listener thread, opens the

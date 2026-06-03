@@ -1231,6 +1231,7 @@ static int dc_reconnect(void) {
 
 static const messaging_driver_t s_discord_driver = {
    .name = "discord",
+   .out_format = MSG_FMT_DISCORD,
    .init = dc_init,
    .shutdown = dc_shutdown,
    .send_text = dc_send_text,

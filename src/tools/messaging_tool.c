@@ -196,7 +196,11 @@ static const treg_param_t messaging_params[] = {
    {
        .name = "action",
        .description = "The messaging action: 'list_channels' (show linked channels for the "
-                      "current user), 'send' (deliver a text message to a named channel), "
+                      "current user), 'send' (deliver a text message to a named channel — use "
+                      "ONLY to reach a channel OTHER than the one you are currently chatting on, "
+                      "or to message proactively when not in a chat; to answer the channel you "
+                      "are already talking on, just reply normally — your reply is delivered "
+                      "there automatically, and 'send'-ing to it would duplicate your reply), "
                       "'link_status' (check whether a pending link code has been claimed), "
                       "'reset_conversation' (close the current forever-thread on a channel and "
                       "start fresh next message; prior history is preserved in the WebUI)",
@@ -332,8 +336,11 @@ static const tool_metadata_t messaging_metadata = {
    .description = "Send and manage messages across linked chat platforms (Telegram, "
                   "Discord, Slack) and SMS. Use 'list_channels' to see what's linked, "
                   "'send' to deliver text to a named channel, 'link_status' to check "
-                  "pending link codes. Each user manages their own channels via the "
-                  "WebUI Settings panel.",
+                  "pending link codes. IMPORTANT: when you are already conversing on a "
+                  "messaging channel, do NOT use 'send' to reply to that same channel — "
+                  "just answer normally and your reply is delivered there. Reserve 'send' "
+                  "for reaching a DIFFERENT channel or for proactive/unprompted messages. "
+                  "Each user manages their own channels via the WebUI Settings panel.",
    .params = messaging_params,
    .param_count = 2,
 

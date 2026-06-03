@@ -183,6 +183,7 @@ static int sms_reconnect(void) {
 
 static const messaging_driver_t s_sms_driver = {
    .name = "sms",
+   .out_format = MSG_FMT_PLAIN,
    .init = sms_init,
    .shutdown = sms_shutdown_impl,
    .send_text = sms_send_text,

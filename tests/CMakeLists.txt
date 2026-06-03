@@ -307,6 +307,15 @@ dawn_add_unit_test(test_messaging_split
    LIBS    dawn_common unity
    LABEL   ci)
 
+dawn_add_unit_test(test_messaging_format
+   SOURCES test_messaging_format.c
+           ${SRC_ROOT}/src/messaging/messaging_format.c
+           ${SRC_ROOT}/src/messaging/messaging_format_telegram.c
+           ${SRC_ROOT}/src/messaging/messaging_split.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_instruction_loader
    SOURCES test_instruction_loader.c
            ${SRC_ROOT}/src/tools/instruction_loader.c

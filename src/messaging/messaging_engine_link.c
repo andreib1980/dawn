@@ -45,6 +45,7 @@
 #include "logging.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
+#include "messaging/messaging_format.h"
 
 /* =============================================================================
  * Module-local constants and types
@@ -53,14 +54,6 @@
 /* Crockford base32 alphabet — excludes I/L/O/U to avoid typing
  * confusion. */
 static const char CROCKFORD_ALPHABET[32] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-/* Bounded stack buffer for the engine's async-send confirmation text
- * (/link confirm, /new confirm).  Current callers send ~80-90-char
- * messages; the cap is well above that with margin for future
- * confirmation strings.  Oversize content is truncated by snprintf;
- * callers must NOT assume arbitrary-length delivery through
- * engine_send_async. */
-#define MESSAGING_ASYNC_SEND_TEXT_MAX 1024
 
 /* Async outbound send item.  Used when we need to call drv->send_text()
  * from a thread that cannot block waiting for the response —
@@ -82,7 +75,11 @@ typedef struct {
    int user_id;
    char provider_address[128];
    char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
-   char text[MESSAGING_ASYNC_SEND_TEXT_MAX];
+   /* Heap-owned, already rendered into drv->out_format by engine_send_async.
+    * Heap (not a fixed buffer) so HTML escaping/expansion can't truncate a
+    * tag mid-stream and trip Telegram's HTTP-400 reject.  Freed by the
+    * async-send thread. */
+   char *text;
 } async_send_item_t;
 
 static int generate_random_code(char *out, size_t out_buf_size) {
@@ -219,11 +216,35 @@ messaging_link_state_t messaging_engine_link_status(const char *code) {
 
 static void *async_send_thread(void *arg) {
    async_send_item_t *item = (async_send_item_t *)arg;
-   if (item && item->drv && item->drv->send_text) {
+   if (item && item->drv && item->drv->send_text && item->text) {
       item->drv->send_text(item->user_id, item->provider_address, item->address_json, item->text);
+   }
+   if (item) {
+      free(item->text);
    }
    free(item);
    return NULL;
+}
+
+/* Render an engine-authored system string (link / new confirmation) into the
+ * driver's native format.  These are short and never split, so we render with
+ * a generous single-message cap and take the first part.  Returns a heap
+ * string (caller owns), or a raw strdup fallback if formatting fails. */
+static char *format_system_text(const messaging_driver_t *drv, const char *text) {
+   char **parts = NULL;
+   size_t nparts = 0;
+   char err[256] = { 0 };
+   char *out = NULL;
+   if (messaging_format_render_split(text, drv->out_format, 1u << 20, &parts, &nparts, err,
+                                     sizeof(err)) == SUCCESS &&
+       nparts >= 1) {
+      out = strdup(parts[0]);
+   }
+   messaging_format_free_parts(parts, nparts);
+   if (!out) {
+      out = strdup(text);
+   }
+   return out;
 }
 
 void engine_send_async(const messaging_driver_t *drv,
@@ -252,7 +273,18 @@ void engine_send_async(const messaging_driver_t *drv,
    if (address_json) {
       snprintf(item->address_json, sizeof(item->address_json), "%s", address_json);
    }
-   snprintf(item->text, sizeof(item->text), "%s", text);
+   /* Render into the driver's native format here (not at the call sites) so
+    * every async confirmation — /link, Telegram /new, SMS /new — is escaped
+    * and converted exactly once.  Critical for Telegram: a stray & or < in a
+    * confirmation string would otherwise reach the parse_mode=HTML send and
+    * get the whole message rejected. */
+   item->text = format_system_text(drv, text);
+   if (!item->text) {
+      OLOG_WARNING("messaging: async-send format failed; dropping send to %s",
+                   provider_address ? provider_address : "(no addr)");
+      free(item);
+      return;
+   }
 
    pthread_attr_t attr;
    pthread_attr_init(&attr);
@@ -264,6 +296,7 @@ void engine_send_async(const messaging_driver_t *drv,
    pthread_attr_destroy(&attr);
    if (rc != 0) {
       OLOG_WARNING("messaging: async-send pthread_create failed (rc=%d); dropping send", rc);
+      free(item->text);
       free(item);
    }
 }

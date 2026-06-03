@@ -29,6 +29,25 @@ jobs:
       - name: Check formatting
         run: ./format_code.sh --check
 
+      # Outbound markdown funnel invariant: every driver->send_text() CALL must
+      # go through the messaging_deliver / engine_send_async funnel (which
+      # renders the canonical markdown into the driver's out_format + escapes
+      # it).  A direct call from anywhere else would ship raw markdown and, for
+      # Telegram (parse_mode=HTML), get the whole message rejected with HTTP
+      # 400.  Drivers are not reachable outside src/messaging (find_driver is
+      # engine-internal), so only these three files may call send_text.
+      - name: Messaging send_text funnel invariant
+        run: |
+          bad=$(grep -rn -- '->send_text(' src/messaging/ \
+            | grep -vE 'messaging_engine\.c|messaging_engine_link\.c|messaging_engine_inbound\.c' \
+            || true)
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            echo "ERROR: driver->send_text() called outside the messaging_deliver funnel."
+            echo "Route outbound replies through messaging_deliver() or messaging_engine_send()."
+            exit 1
+          fi
+
   # -------------------------------------------------------------------------
   # Job 2: Unit Tests (~2 min)
   # Uses ci CMake preset: WEBUI=OFF, TUI=OFF, AEC=OFF, VOSK=ON

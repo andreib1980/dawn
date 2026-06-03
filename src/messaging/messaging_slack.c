@@ -1008,6 +1008,7 @@ static int sk_reconnect(void) {
 
 static const messaging_driver_t s_slack_driver = {
    .name = "slack",
+   .out_format = MSG_FMT_SLACK_MRKDWN,
    .init = sk_init,
    .shutdown = sk_shutdown,
    .send_text = sk_send_text,

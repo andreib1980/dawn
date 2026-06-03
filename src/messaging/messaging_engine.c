@@ -28,13 +28,18 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_engine_internal.h"
+#include "messaging/messaging_format.h"
+#include "messaging/messaging_split.h"
 
 /* =============================================================================
  * Internal constants and types
@@ -339,6 +344,97 @@ const messaging_driver_t *find_driver(const char *name) {
    }
    pthread_mutex_unlock(&s_drivers_mutex);
    return result;
+}
+
+/* Engine-cap headroom for the "(NN/NN) " split prefix.  Mirrors the 20-char
+ * margin provider_outbound_for leaves below each provider's hard limit. */
+#define MESSAGING_PREFIX_HEADROOM 20
+
+int messaging_deliver(const messaging_driver_t *drv,
+                      int user_id,
+                      const char *provider_address,
+                      const char *address_json,
+                      const char *canonical_markdown) {
+   if (!drv || !drv->send_text || !canonical_markdown) {
+      return MESSAGING_FAILURE;
+   }
+
+   provider_outbound_t cfg = provider_outbound_for(drv->name);
+   size_t cap = cfg.max_outbound_chars;
+   if (cap == 0) {
+      /* No engine cap configured for this provider.  Every registered v1
+       * driver sets one; a zero means a driver was added without a
+       * provider_outbound_for branch — warn so it's caught, and fall back to
+       * a generous single-message cap so formatting still happens. */
+      if (drv->out_format != MSG_FMT_PLAIN) {
+         OLOG_WARNING("messaging: driver '%s' has no outbound cap — add a provider_outbound_for "
+                      "branch",
+                      drv->name);
+      }
+      cap = 1u << 20; /* 1 MiB: effectively single-message */
+   }
+
+   /* INVARIANT: the err / reject strings sent on the failure paths below go
+    * straight to send_text WITHOUT passing through the formatter, so they MUST
+    * stay plain ASCII (no <, >, & or markdown).  A special char would reach
+    * the Telegram parse_mode=HTML body unescaped and get the whole message
+    * rejected (HTTP 400).  Keep these messages literal English. */
+   char **parts = NULL;
+   size_t nparts = 0;
+   char err[256] = { 0 };
+   if (messaging_format_render_split(canonical_markdown, drv->out_format, cap, &parts, &nparts, err,
+                                     sizeof(err)) != SUCCESS) {
+      OLOG_WARNING("messaging: format/split failed for %s:%s — %s", drv->name,
+                   provider_address ? provider_address : "?", err);
+      drv->send_text(user_id, provider_address, address_json, err);
+      return MESSAGING_FAILURE;
+   }
+
+   /* Parts-cap rejection (SMS max_parts=3): deliver the full reply across N
+    * messages or an explicit WebUI pointer — never silent partial loss. */
+   if (cfg.max_parts > 0 && nparts > (size_t)cfg.max_parts) {
+      OLOG_WARNING("messaging: reply exceeds max_parts for %s:%s (%zu > %d), rejecting", drv->name,
+                   provider_address ? provider_address : "?", nparts, cfg.max_parts);
+      char reject[256];
+      snprintf(reject, sizeof(reject),
+               "This reply is too long for %s (would take %zu messages, limit %d).  "
+               "Open the WebUI to see the full response.",
+               drv->name, nparts, cfg.max_parts);
+      messaging_format_free_parts(parts, nparts);
+      drv->send_text(user_id, provider_address, address_json, reject);
+      return MESSAGING_FAILURE;
+   }
+
+   /* Deliver each part with a "(N/M) " prefix when split, 100ms pacing.  The
+    * prefix is plain ASCII (digits/slash/parens/space) — safe to prepend even
+    * to Telegram HTML without escaping or unbalancing tags. */
+   for (size_t i = 0; i < nparts; i++) {
+      char prefix[16] = { 0 };
+      if (nparts > 1) {
+         snprintf(prefix, sizeof(prefix), "(%zu/%zu) ", i + 1, nparts);
+      }
+      size_t prefix_len = strlen(prefix);
+      size_t part_len = strlen(parts[i]);
+      char *send_buf = NULL;
+      const char *to_send = parts[i];
+      if (prefix_len > 0 && prefix_len + part_len <= cap + MESSAGING_PREFIX_HEADROOM) {
+         send_buf = (char *)malloc(prefix_len + part_len + 1);
+         if (send_buf) {
+            memcpy(send_buf, prefix, prefix_len);
+            memcpy(send_buf + prefix_len, parts[i], part_len);
+            send_buf[prefix_len + part_len] = '\0';
+            to_send = send_buf;
+         }
+      }
+      drv->send_text(user_id, provider_address, address_json, to_send);
+      free(send_buf);
+      if (i + 1 < nparts) {
+         usleep(MESSAGING_SPLIT_INTER_PART_USEC);
+      }
+   }
+
+   messaging_format_free_parts(parts, nparts);
+   return MESSAGING_SUCCESS;
 }
 
 /* =============================================================================

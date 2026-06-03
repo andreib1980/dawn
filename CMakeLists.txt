@@ -627,6 +627,8 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_discord.c
         src/messaging/messaging_slack.c
         src/messaging/messaging_split.c
+        src/messaging/messaging_format.c
+        src/messaging/messaging_format_telegram.c
         src/messaging/ws_reconnect.c
         src/tools/messaging_tool.c
     )

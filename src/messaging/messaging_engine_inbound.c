@@ -240,25 +240,23 @@ static int enqueue_inbound(const char *provider,
  * Session map and worker thread
  * ============================================================================= */
 
-/* Per-provider outbound shaping.
- *
- * `max_outbound_chars` is the engine-side cap before the driver hits
- * the provider's own limit.  Set conservatively below the documented
- * provider ceilings so concat-segment encoding (UCS-2 on emoji, GSM-7
- * vs Unicode, etc.) doesn't push us over.
- *
- * `channel_hint` is appended to the per-turn system prompt so the LLM
- * shapes its response to the channel.  NULL means "no special
- * channel constraints" (Telegram has 4096 chars and renders markdown,
- * close enough to WebUI/voice that we don't constrain). */
-typedef struct {
-   size_t max_outbound_chars; /* 0 = no engine-side cap */
-   bool split_oversize;       /* true = route oversize through splitter, false = hard-truncate */
-   int max_parts;             /* 0 = unlimited; >0 = reject if splitter produces more chunks */
-   const char *channel_hint;
-} provider_outbound_t;
+/* Per-provider outbound shaping.  The provider_outbound_t shape lives in
+ * messaging_engine_internal.h (shared with messaging_deliver in core); this
+ * function is the policy table.  Set the caps conservatively below the
+ * documented provider ceilings, leaving 20-char headroom for the "(NN/NN) "
+ * split prefix.  `channel_hint` is appended to the per-turn system prompt so
+ * the LLM shapes its response to the channel. */
+/* Light formatting nudge for chat channels that DO render markdown (Discord /
+ * Telegram / Slack).  The formatter handles correctness deterministically;
+ * this just steers the LLM away from wide tables (which flatten to fenced
+ * monospace on every chat surface) at the source.  SMS keeps its own stricter
+ * plain-text hint instead — appending this would contradict it. */
+#define MESSAGING_CHAT_FORMAT_NUDGE                                                                \
+   "[Formatting for chat delivery: prefer concise prose and short '- ' bullet lists over wide "    \
+   "markdown tables — tables render poorly on chat channels.  Keep code in fenced blocks.  The " \
+   "full richly-formatted version is always available in the WebUI.]"
 
-static provider_outbound_t provider_outbound_for(const char *provider) {
+provider_outbound_t provider_outbound_for(const char *provider) {
    if (provider && strcmp(provider, "sms") == 0) {
       /* ECHO's hard ceiling (echo/include/pdu.h:42-43):
        *   PDU_MAX_SEGMENTS       = 10
@@ -303,7 +301,7 @@ static provider_outbound_t provider_outbound_for(const char *provider) {
          .max_outbound_chars = 1980,
          .split_oversize = true,
          .max_parts = 0,
-         .channel_hint = NULL,
+         .channel_hint = MESSAGING_CHAT_FORMAT_NUDGE,
       };
    }
    if (provider && strcmp(provider, "telegram") == 0) {
@@ -313,7 +311,7 @@ static provider_outbound_t provider_outbound_for(const char *provider) {
          .max_outbound_chars = 4076,
          .split_oversize = true,
          .max_parts = 0,
-         .channel_hint = NULL,
+         .channel_hint = MESSAGING_CHAT_FORMAT_NUDGE,
       };
    }
    if (provider && strcmp(provider, "slack") == 0) {
@@ -323,10 +321,14 @@ static provider_outbound_t provider_outbound_for(const char *provider) {
          .max_outbound_chars = 3980,
          .split_oversize = true,
          .max_parts = 0,
-         .channel_hint = NULL,
+         .channel_hint = MESSAGING_CHAT_FORMAT_NUDGE,
       };
    }
-   /* Unknown provider — no cap.  Driver enforces if it has its own. */
+   /* Unknown provider — no cap.  Driver enforces if it has its own.  This is
+    * the ONLY split_oversize=false return: it pairs with the hard-truncate
+    * branch in process_inbound (truncate_outbound_in_place).  No v1 provider
+    * hits it (all four set split_oversize=true), but the branch is kept as a
+    * documented extension point for a future hard-truncate provider. */
    return (provider_outbound_t){ .max_outbound_chars = 0,
                                  .split_oversize = false,
                                  .max_parts = 0,
@@ -648,98 +650,19 @@ static void process_inbound(inbound_item_t *item) {
       build_address_json_for(item->provider, item->provider_address, address_json,
                              sizeof(address_json));
 
-      size_t response_len = strlen(response);
-      if (cfg.split_oversize && cfg.max_outbound_chars > 0 &&
-          response_len > cfg.max_outbound_chars) {
-         char **parts = NULL;
-         size_t parts_count = 0;
-         char err_msg[256] = { 0 };
-         int split_rc = messaging_split_at_breaks(response, cfg.max_outbound_chars, &parts,
-                                                  &parts_count, err_msg, sizeof(err_msg));
-
-         /* Post-split parts-cap check.  SMS sets max_parts=3 to bound
-          * segment-billing worst case.  Treating "too many parts" as
-          * a reject (rather than truncating to N parts) keeps the user
-          * signal honest — either they get the FULL reply across N
-          * posts, or they get the explicit "open the WebUI" note;
-          * never silent loss. */
-         if (split_rc == SUCCESS && cfg.max_parts > 0 && parts_count > (size_t)cfg.max_parts) {
-            OLOG_WARNING("messaging: split exceeded max_parts for %s:%s (%zu > %d), rejecting",
-                         item->provider, item->provider_address, parts_count, cfg.max_parts);
-            snprintf(err_msg, sizeof(err_msg),
-                     "This reply is too long for %s (would take %zu messages, limit %d).  "
-                     "Open the WebUI to see the full response.",
-                     item->provider, parts_count, cfg.max_parts);
-            for (size_t i = 0; i < parts_count; i++) {
-               free(parts[i]);
-            }
-            free(parts);
-            parts = NULL;
-            parts_count = 0;
-            split_rc = FAILURE;
-         }
-
-         if (split_rc == SUCCESS) {
-            /* Deliver each part.  (N/M) prefix when more than one
-             * part, computed into a stack buffer that holds prefix +
-             * part text.  The 20-char engine-cap headroom sizes for
-             * "(NN/NN) " plus margin; if a degenerate case (100+
-             * parts) overflowed the headroom, send the part WITHOUT
-             * the prefix to stay under the provider hard limit.
-             *
-             * Pacing: 100ms between sends.  Worker thread is single
-             * and synchronous here; inbound queue absorbs the
-             * (parts_count - 1) × 100ms blocking — depth 32 is well
-             * above realistic chat rates.  If pacing ever needs to
-             * exceed ~250ms per part (stricter per-channel limit),
-             * migrate remaining-parts tail to an async enqueue. */
-            for (size_t i = 0; i < parts_count; i++) {
-               char prefix[16] = { 0 };
-               if (parts_count > 1) {
-                  snprintf(prefix, sizeof(prefix), "(%zu/%zu) ", i + 1, parts_count);
-               }
-               size_t prefix_len = strlen(prefix);
-               size_t part_len = strlen(parts[i]);
-               char *send_buf = NULL;
-               char *to_send = parts[i];
-               if (prefix_len > 0) {
-                  /* Prefix clamp: keep prefix + part ≤ engine cap +
-                   * the 20-byte headroom we left for this prefix.
-                   * If somehow combined > provider hard limit, send
-                   * the part without the prefix (rare; degraded
-                   * legibility, but content is preserved). */
-                  if (prefix_len + part_len <= cfg.max_outbound_chars + 20) {
-                     send_buf = (char *)malloc(prefix_len + part_len + 1);
-                     if (send_buf) {
-                        memcpy(send_buf, prefix, prefix_len);
-                        memcpy(send_buf + prefix_len, parts[i], part_len);
-                        send_buf[prefix_len + part_len] = '\0';
-                        to_send = send_buf;
-                     }
-                  } else {
-                     OLOG_DEBUG("messaging: split prefix dropped on %s:%s part %zu (would "
-                                "overflow provider cap)",
-                                item->provider, item->provider_address, i + 1);
-                  }
-               }
-               drv->send_text(item->user_id, item->provider_address, address_json, to_send);
-               free(send_buf);
-               if (i + 1 < parts_count) {
-                  usleep(MESSAGING_SPLIT_INTER_PART_USEC);
-               }
-               free(parts[i]);
-            }
-            free(parts);
-         } else {
-            /* Splitter rejected (either no break or parts cap).  Send
-             * err_msg as a single short message so the user has
-             * actionable feedback.  Logged at WARNING for operator
-             * visibility. */
-            OLOG_WARNING("messaging: split rejected for %s:%s — %s", item->provider,
-                         item->provider_address, err_msg);
-            drv->send_text(item->user_id, item->provider_address, address_json, err_msg);
-         }
+      if (cfg.split_oversize) {
+         /* Render the canonical markdown into the driver's native format
+          * (SMS plain / Telegram HTML / Discord / Slack mrkdwn), split it to
+          * the provider cap measured on the CONVERTED output, and deliver
+          * each part with the (N/M) prefix.  `response` is passed read-only —
+          * the stored conversation copy stays canonical CommonMark for the
+          * WebUI.  No raw-length pre-gate: an expanding conversion (e.g.
+          * Discord table→fence, Slack &→&amp;) could cross the cap only after
+          * conversion, so the decision lives inside the formatter. */
+         messaging_deliver(drv, item->user_id, item->provider_address, address_json, response);
       } else {
+         /* Hard-truncate providers (none in v1): `response` was already
+          * truncated in place above; send it as a single raw message. */
          drv->send_text(item->user_id, item->provider_address, address_json, response);
       }
    }

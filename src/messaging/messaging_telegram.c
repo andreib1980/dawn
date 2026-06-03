@@ -202,6 +202,13 @@ static int tg_send_text(int user_id,
    }
    json_object_object_add(body, "chat_id", json_object_new_string(chat_id));
    json_object_object_add(body, "text", json_object_new_string(text));
+   /* PRECONDITION: `text` MUST already be valid, balanced Telegram HTML — the
+    * engine renders every outbound message into the driver's out_format
+    * (MSG_FMT_TELEGRAM_HTML) via messaging_deliver / engine_send_async before
+    * calling send_text.  Telegram returns HTTP 400 and rejects the WHOLE
+    * message on an unclosed/overlapping tag or an unescaped <, > or &, so this
+    * must never be called with raw markdown or unescaped user text. */
+   json_object_object_add(body, "parse_mode", json_object_new_string("HTML"));
    const char *body_str = json_object_to_json_string_ext(body, JSON_C_TO_STRING_PLAIN);
 
    char url[TG_BASE_URL_MAX + 32];
@@ -646,6 +653,7 @@ static int tg_reconnect(void) {
 
 static const messaging_driver_t s_telegram_driver = {
    .name = "telegram",
+   .out_format = MSG_FMT_TELEGRAM_HTML,
    .init = tg_init,
    .shutdown = tg_shutdown,
    .send_text = tg_send_text,
