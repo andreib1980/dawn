@@ -197,6 +197,89 @@ int memory_embeddings_nearest_fact(int user_id,
                                    int64_t *matched_id_out,
                                    float *score_out);
 
+/* Max advisory neighbors the write-time 'remember' band lookup returns.  Sized
+ * to span a full duplicate cluster (>= the find_duplicates per-cluster cap) so a
+ * fresh save next to an existing dup pile surfaces all of them, not a truncation. */
+#define MEMORY_BAND_NEIGHBORS_MAX 12
+
+/**
+ * @brief Find existing facts whose embedding falls in a cosine BAND against a
+ * precomputed query vector: @p low <= cosine < @p high.  Top-@p max by score.
+ *
+ * Backs the interactive 'remember' write-time dedup advisory.  The lower bound
+ * filters unrelated facts; the upper bound excludes near-identical matches that
+ * the extraction-time paraphrase gate (paraphrase_dedup_threshold) already
+ * auto-merges — pass that threshold as @p high so the band stays in sync.  Same
+ * lock-and-scan shape as memory_embeddings_nearest_fact() (single O(N) scan, lock
+ * held only for the scan); facts without embeddings (norm < 1e-6) are skipped.
+ *
+ * Results are returned in descending-score order.  @p out_ids / @p out_scores are
+ * CALLER-ALLOCATED parallel arrays of at least @p max entries — no free contract.
+ * Unlike memory_embeddings_find_duplicate_clusters(), this does NOT clamp @p low /
+ * @p high — the caller owns bound validation (e.g. defaulting @p high to
+ * MEMORY_PARAPHRASE_DEDUP_DEFAULT when the config threshold is out of range).
+ *
+ * @param user_id    User whose fact cache to scan.
+ * @param query_vec  Pre-computed query embedding (caller embeds outside any lock).
+ * @param query_dims Query embedding dimensions (must match cache dims).
+ * @param low        Inclusive lower cosine bound (e.g. 0.80).
+ * @param high       Exclusive upper cosine bound (e.g. paraphrase_dedup_threshold).
+ * @param out_ids    Caller-allocated, >= @p max entries; matched fact IDs.
+ * @param out_scores Caller-allocated, >= @p max entries; matched cosine scores.
+ * @param max        Capacity of the out arrays (<= MEMORY_BAND_NEIGHBORS_MAX).
+ * @param out_count  Set to the number of neighbors returned (>= 0); zeroed on error.
+ * @return MEMORY_DB_SUCCESS (including the 0-neighbor case), or MEMORY_DB_FAILURE
+ *         on cache load error / dim mismatch.
+ */
+int memory_embeddings_band_neighbors(int user_id,
+                                     const float *query_vec,
+                                     int query_dims,
+                                     float low,
+                                     float high,
+                                     int64_t *out_ids,
+                                     float *out_scores,
+                                     int max,
+                                     int *out_count);
+
+/**
+ * @brief Pure top-K band filter over caller-supplied embeddings.
+ *
+ * No cache/DB access — exposed for unit testing.  Collects facts with
+ * @p low <= cosine < @p high against @p query_vec, keeping the top-@p max by
+ * descending score (insertion-sorted window, drops the weakest).  Facts with
+ * @p norms[i] < 1e-6 are skipped.  @p out_ids / @p out_scores are caller-
+ * allocated parallel arrays of at least @p max entries — no free contract.
+ *
+ * @param ids        Fact IDs, parallel to @p embs / @p norms (length @p count).
+ * @param embs       Flat row-major embeddings (@p count * @p dims floats).
+ * @param norms      Pre-computed L2 norms, parallel to @p ids.
+ * @param count      Number of facts.
+ * @param dims       Embedding dimensionality.
+ * @param query_vec  Query embedding (length @p dims).
+ * @param query_norm Pre-computed L2 norm of @p query_vec.
+ * @param low        Inclusive lower cosine bound.
+ * @param high       Exclusive upper cosine bound.
+ * @param out_ids    Caller-allocated, >= @p max entries; matched fact IDs.
+ * @param out_scores Caller-allocated, >= @p max entries; matched cosine scores.
+ * @param max        Capacity of the out arrays.
+ * @param out_count  Set to the number of neighbors returned; zeroed on error.
+ * @return MEMORY_DB_SUCCESS (including the 0-neighbor case), or MEMORY_DB_FAILURE
+ *         on bad args.
+ */
+int memory_embeddings_band_neighbors_scan(const int64_t *ids,
+                                          const float *embs,
+                                          const float *norms,
+                                          int count,
+                                          int dims,
+                                          const float *query_vec,
+                                          float query_norm,
+                                          float low,
+                                          float high,
+                                          int64_t *out_ids,
+                                          float *out_scores,
+                                          int max,
+                                          int *out_count);
+
 /**
  * @brief Perform hybrid keyword + vector search
  *

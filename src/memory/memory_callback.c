@@ -877,6 +877,11 @@ char *memory_action_search(int user_id,
  * Action: Remember
  * ============================================================================= */
 
+/* Lower cosine bound for the write-time 'remember' dedup advisory.  Below this,
+ * facts are unrelated; the band's upper bound is paraphrase_dedup_threshold (the
+ * extraction auto-merge cutoff), so this flags only the uncertain middle. */
+#define MEMORY_REMEMBER_BAND_LOW 0.80f
+
 static char *memory_action_remember(int user_id, const char *fact_text) {
    if (!fact_text || strlen(fact_text) == 0) {
       return strdup("Please provide the fact to remember.");
@@ -949,6 +954,33 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
       }
    }
 
+   /* Stage 3: Semantic band lookup for a write-time dedup advisory.  Lexical
+    * stages above catch exact/near-exact paraphrases; this surfaces facts that
+    * are SEMANTICALLY close but lexically distinct (cosine in [low, high)) so the
+    * model can choose to 'forget' any the new fact supersedes.  The band's upper
+    * bound is the extraction paraphrase-dedup threshold: matches >= that get
+    * auto-merged by extraction anyway, so we only flag the uncertain middle band.
+    * Computed BEFORE the new fact is stored, so it never self-matches. */
+   float query_vec[MAX_EMBEDDING_DIMS];
+   int query_dims = 0;
+   bool have_vec = false;
+   int64_t neighbor_ids[MEMORY_BAND_NEIGHBORS_MAX];
+   float neighbor_scores[MEMORY_BAND_NEIGHBORS_MAX];
+   int neighbor_count = 0;
+   if (memory_embeddings_available() &&
+       memory_embeddings_embed(fact_text, query_vec, &query_dims) == 0 && query_dims > 0) {
+      have_vec = true;
+      float high = g_config.memory.paraphrase_dedup_threshold;
+      if (high <= 0.0f || high > 1.0f)
+         high = MEMORY_PARAPHRASE_DEDUP_DEFAULT;
+      /* Failure (cache load / dim mismatch) degrades to no advisory — neighbor_count
+       * stays 0, so the cast-away return is intentional, not an unchecked call. */
+      (void)memory_embeddings_band_neighbors(user_id, query_vec, query_dims,
+                                             MEMORY_REMEMBER_BAND_LOW, high, neighbor_ids,
+                                             neighbor_scores, MEMORY_BAND_NEIGHBORS_MAX,
+                                             &neighbor_count);
+   }
+
    /* No duplicates found - store the new fact (no provenance: user-initiated) */
    int64_t fact_id = 0;
    int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, NULL,
@@ -958,16 +990,43 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
       return strdup("Failed to store the fact. Please try again.");
    }
 
-   /* Generate and store embedding (non-blocking, ~5-10ms for ONNX) */
-   if (memory_embeddings_available()) {
+   /* Store the embedding we already computed (avoids a second embed call) when
+    * available; otherwise fall back to the embed-and-store convenience path. */
+   if (have_vec) {
+      memory_embeddings_store_precomputed(user_id, fact_id, query_vec, query_dims);
+   } else if (memory_embeddings_available()) {
       memory_embeddings_embed_and_store(user_id, fact_id, fact_text);
    }
 
-   char *result = malloc(256);
-   if (result) {
-      snprintf(result, 256, "Remembered: \"%s\"", fact_text);
+   /* Build the response: confirmation line + (only when present) an advisory
+    * block listing the semantically-similar existing facts the model may want to
+    * supersede.  Advisory only — 'forget' is a hard delete, so never auto-act. */
+   strbuf_t sb;
+   strbuf_init(&sb, 256);
+   strbuf_appendf(&sb, "Remembered: \"%s\" (ID:%lld)", fact_text, (long long)fact_id);
+
+   if (neighbor_count > 0) {
+      strbuf_appendf(&sb,
+                     "\n\nSimilar facts already in memory — if this fact fully replaces any of "
+                     "them, 'forget' that ID (comma-separate to remove several). Leave the rest:");
+      /* The embedding cache holds only ids/embeddings/norms, not fact_text, so the
+       * text must be fetched per neighbor (bounded by MEMORY_BAND_NEIGHBORS_MAX).
+       * Deliberate — don't "fix" by widening the cache with text it doesn't need. */
+      for (int i = 0; i < neighbor_count; i++) {
+         memory_fact_t nf;
+         if (memory_db_fact_get(neighbor_ids[i], user_id, &nf) != MEMORY_DB_SUCCESS)
+            continue; /* vanished between scan and render — skip */
+         strbuf_appendf(&sb, "\n  - [ID:%lld] %.200s (sim %.2f)", (long long)neighbor_ids[i],
+                        nf.fact_text, neighbor_scores[i]);
+      }
    }
-   return result ? result : strdup("Fact stored successfully.");
+
+   char *result = strbuf_steal(&sb);
+   if (!result) {
+      strbuf_free(&sb);
+      result = strdup("Fact stored successfully.");
+   }
+   return result;
 }
 
 /* =============================================================================

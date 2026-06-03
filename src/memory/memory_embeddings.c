@@ -786,6 +786,98 @@ int memory_embeddings_nearest_fact(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
+int memory_embeddings_band_neighbors_scan(const int64_t *ids,
+                                          const float *embs,
+                                          const float *norms,
+                                          int count,
+                                          int dims,
+                                          const float *query_vec,
+                                          float query_norm,
+                                          float low,
+                                          float high,
+                                          int64_t *out_ids,
+                                          float *out_scores,
+                                          int max,
+                                          int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!ids || !embs || !norms || !query_vec || count < 0 || dims <= 0 || !out_ids || !out_scores ||
+       max <= 0)
+      return MEMORY_DB_FAILURE;
+   if (query_norm < 1e-6f)
+      return MEMORY_DB_SUCCESS; /* zero query vector — no neighbors, not an error */
+
+   /* Single O(N) scan collecting band matches into a tiny insertion-sorted
+    * top-@p max by descending score.  max <= MEMORY_BAND_NEIGHBORS_MAX keeps the
+    * per-insert shift cheap (no heap, no full sort). */
+   int n = 0;
+   for (int i = 0; i < count; i++) {
+      if (norms[i] < 1e-6f)
+         continue; /* no embedding yet (pre-swap row) */
+      float cosine = memory_embeddings_cosine_with_norms(query_vec, embs + (size_t)i * (size_t)dims,
+                                                         dims, query_norm, norms[i]);
+      if (cosine < low || cosine >= high)
+         continue;
+      if (n == max && cosine <= out_scores[n - 1])
+         continue; /* window full and weaker than the current weakest — skip */
+      /* Insertion-sort into the descending-score window, dropping the weakest. */
+      int pos = (n < max) ? n : max - 1;
+      while (pos > 0 && out_scores[pos - 1] < cosine) {
+         out_scores[pos] = out_scores[pos - 1];
+         out_ids[pos] = out_ids[pos - 1];
+         pos--;
+      }
+      out_scores[pos] = cosine;
+      out_ids[pos] = ids[i];
+      if (n < max)
+         n++;
+   }
+
+   if (out_count)
+      *out_count = n;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_embeddings_band_neighbors(int user_id,
+                                     const float *query_vec,
+                                     int query_dims,
+                                     float low,
+                                     float high,
+                                     int64_t *out_ids,
+                                     float *out_scores,
+                                     int max,
+                                     int *out_count) {
+   if (out_count)
+      *out_count = 0;
+   if (!query_vec || query_dims <= 0 || !out_ids || !out_scores || max <= 0)
+      return MEMORY_DB_FAILURE;
+
+   float query_norm = memory_embeddings_l2_norm(query_vec, query_dims);
+   if (query_norm < 1e-6f)
+      return MEMORY_DB_SUCCESS; /* zero vector — no neighbors, but not an error */
+
+   /* Lock-and-scan (NOT snapshot): this is a single O(N) pass like nearest_fact,
+    * sub-ms at the dev's scale, so the brief lock hold is fine — no need for the
+    * O(N^2) dup-finder's snapshot dance.  The pure scan reads the cache arrays. */
+   pthread_mutex_lock(&s_cache.mutex);
+   if (cache_load(user_id) != 0) {
+      pthread_mutex_unlock(&s_cache.mutex);
+      return MEMORY_DB_FAILURE;
+   }
+   if (s_cache.dims != query_dims) {
+      /* Dimension mismatch — provider swap mid-flight or stale cache.  Treat as
+       * no-neighbors rather than failing; the recompute worker resyncs shortly. */
+      pthread_mutex_unlock(&s_cache.mutex);
+      return MEMORY_DB_SUCCESS;
+   }
+   int rc = memory_embeddings_band_neighbors_scan(s_cache.ids, s_cache.embeddings, s_cache.norms,
+                                                  s_cache.count, s_cache.dims, query_vec,
+                                                  query_norm, low, high, out_ids, out_scores, max,
+                                                  out_count);
+   pthread_mutex_unlock(&s_cache.mutex);
+   return rc;
+}
+
 /* =============================================================================
  * Duplicate-fact clustering
  * ============================================================================= */

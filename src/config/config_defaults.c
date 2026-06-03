@@ -401,7 +401,7 @@ void config_set_defaults(dawn_config_t *config) {
     * than false misses).  Tune via benchmarks/bench_paraphrase_calibration.py
     * if the embedder is swapped. */
    config->memory.paraphrase_dedup_enabled = true;
-   config->memory.paraphrase_dedup_threshold = 0.92f;
+   config->memory.paraphrase_dedup_threshold = MEMORY_PARAPHRASE_DEDUP_DEFAULT;
 
    /* Extraction recovery: re-extract conversations stuck idle past the threshold. */
    config->memory.recovery_enabled = true;

@@ -74,6 +74,13 @@ extern "C" {
 #define AUDIO_DEVICE_ALIAS_MAX 10 /* Max aliases per device */
 #define AUDIO_ALIAS_LEN 64        /* Max length of each alias */
 
+/* Default for memory.paraphrase_dedup_threshold — the extraction-time cosine
+ * cutoff above which a new fact is merged into an existing one rather than
+ * stored.  Single source of truth: config_defaults.c seeds the field with it,
+ * and the interactive 'remember' write-time advisory uses it as the upper bound
+ * of its near-duplicate band (and as the fallback when the config is invalid). */
+#define MEMORY_PARAPHRASE_DEDUP_DEFAULT 0.92f
+
 /* =============================================================================
  * General Configuration
  * ============================================================================= */

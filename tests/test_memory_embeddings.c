@@ -345,6 +345,91 @@ static void test_cluster_by_cosine(void) {
    TEST_ASSERT_EQUAL_INT(0, n);
 }
 
+static void test_band_neighbors_scan(void) {
+   /* 2D unit vectors against query (1,0): cosine == the x-component exactly.
+    * Arranged weakest-in-band first so the descending-score insertion sort has
+    * to bubble later/stronger matches to the front. */
+   const int dims = 2;
+   const int count = 6;
+   int64_t ids[6] = { 10, 11, 12, 13, 14, 15 };
+   float embs[6 * 2] = {
+      1.0f,  0.0f,     /* id10: cos 1.00 → >= high, excluded */
+      0.82f, 0.57237f, /* id11: cos 0.82 → in band */
+      0.85f, 0.52678f, /* id12: cos 0.85 → in band */
+      0.90f, 0.43589f, /* id13: cos 0.90 → in band */
+      0.70f, 0.71414f, /* id14: cos 0.70 → < low, excluded */
+      0.0f,  0.0f,     /* id15: zero vector → norm 0 → skipped */
+   };
+   float norms[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f };
+   float query[2] = { 1.0f, 0.0f };
+
+   int64_t out_ids[MEMORY_BAND_NEIGHBORS_MAX];
+   float out_scores[MEMORY_BAND_NEIGHBORS_MAX];
+   int n = -1;
+
+   /* band [0.80, 0.92): id13(0.90), id12(0.85), id11(0.82) — descending. */
+   int rc = memory_embeddings_band_neighbors_scan(ids, embs, norms, count, dims, query, 1.0f, 0.80f,
+                                                  0.92f, out_ids, out_scores,
+                                                  MEMORY_BAND_NEIGHBORS_MAX, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT64(13, out_ids[0]);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.90f, out_scores[0]);
+   TEST_ASSERT_EQUAL_INT64(12, out_ids[1]);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.85f, out_scores[1]);
+   TEST_ASSERT_EQUAL_INT64(11, out_ids[2]);
+   TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.82f, out_scores[2]);
+
+   /* max=2 → top-2 by score; the weakest in-band (id11) is dropped. */
+   n = -1;
+   rc = memory_embeddings_band_neighbors_scan(ids, embs, norms, count, dims, query, 1.0f, 0.80f,
+                                              0.92f, out_ids, out_scores, 2, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT64(13, out_ids[0]);
+   TEST_ASSERT_EQUAL_INT64(12, out_ids[1]);
+
+   /* Narrow band [0.84, 0.86): only id12(0.85). */
+   n = -1;
+   rc = memory_embeddings_band_neighbors_scan(ids, embs, norms, count, dims, query, 1.0f, 0.84f,
+                                              0.86f, out_ids, out_scores, MEMORY_BAND_NEIGHBORS_MAX,
+                                              &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(12, out_ids[0]);
+
+   /* Zero query norm → no neighbors, but SUCCESS (not an error). */
+   n = -1;
+   rc = memory_embeddings_band_neighbors_scan(ids, embs, norms, count, dims, query, 0.0f, 0.80f,
+                                              0.92f, out_ids, out_scores, MEMORY_BAND_NEIGHBORS_MAX,
+                                              &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   /* Inverted band (low >= high): no element satisfies [low, high) → 0, SUCCESS. */
+   n = -1;
+   rc = memory_embeddings_band_neighbors_scan(ids, embs, norms, count, dims, query, 1.0f, 0.92f,
+                                              0.80f, out_ids, out_scores, MEMORY_BAND_NEIGHBORS_MAX,
+                                              &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   /* Empty cache (count == 0): valid args, nothing to scan → 0, SUCCESS. */
+   n = -1;
+   rc = memory_embeddings_band_neighbors_scan(ids, embs, norms, 0, dims, query, 1.0f, 0.80f, 0.92f,
+                                              out_ids, out_scores, MEMORY_BAND_NEIGHBORS_MAX, &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   /* NULL guard → FAILURE, count zeroed. */
+   n = -1;
+   rc = memory_embeddings_band_neighbors_scan(NULL, embs, norms, count, dims, query, 1.0f, 0.80f,
+                                              0.92f, out_ids, out_scores, MEMORY_BAND_NEIGHBORS_MAX,
+                                              &n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, rc);
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -365,5 +450,6 @@ int main(void) {
    RUN_TEST(test_rescore_zero_query_norm_yields_all_sentinels);
    RUN_TEST(test_rescore_sentinel_value_invariant);
    RUN_TEST(test_cluster_by_cosine);
+   RUN_TEST(test_band_neighbors_scan);
    return UNITY_END();
 }
