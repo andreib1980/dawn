@@ -207,6 +207,80 @@ static void add_cloud_reasoning_effort(json_object *root,
    }
 }
 
+/* ── Anthropic prompt-cache breakpoints (OpenRouter gateway only) ────────── */
+
+/* OpenRouter forwards Anthropic prompt-cache breakpoints to Claude only when they
+ * are present in the request.  The OpenAI chat-completions format we use for the
+ * gateway carries none by default, so a Claude model fronted by OpenRouter never
+ * caches — every tool-loop iteration reprocesses the full prompt (observed: 0
+ * cached_tokens across 6 iters, ~25K input + images re-sent each time).
+ *
+ * Mirror the native llm_claude_format.c breakpoints (system block + last tool — 2 of
+ * Anthropic's 4 allowed) in OpenAI-format shape: cache_control on the last tool, and
+ * the first system message converted to a single-part content array carrying
+ * cache_control.  Anthropic caches everything up to and including a marked block, so
+ * the stable system prompt and the tools array each become their own cache prefix.
+ *
+ * Gated to openrouter + anthropic/* — OpenRouter slugs are "vendor/model", and sending
+ * cache_control to a non-Anthropic upstream is at best ignored, at worst rejected. */
+static void add_openrouter_anthropic_cache(json_object *root,
+                                           const char *model_name,
+                                           const char *base_url) {
+   if (!root || !base_url || !model_name)
+      return;
+   if (strstr(base_url, "openrouter.ai") == NULL)
+      return;
+   if (strncmp(model_name, "anthropic/", 10) != 0)
+      return;
+
+   /* Breakpoint 1: last tool — caches the entire tools array as one prefix. */
+   json_object *tools = NULL;
+   if (json_object_object_get_ex(root, "tools", &tools) &&
+       json_object_is_type(tools, json_type_array)) {
+      int tool_count = json_object_array_length(tools);
+      if (tool_count > 0) {
+         json_object *last_tool = json_object_array_get_idx(tools, tool_count - 1);
+         if (last_tool != NULL && json_object_is_type(last_tool, json_type_object)) {
+            json_object *cc = json_object_new_object();
+            json_object_object_add(cc, "type", json_object_new_string("ephemeral"));
+            json_object_object_add(last_tool, "cache_control", cc);
+         }
+      }
+   }
+
+   /* Breakpoint 2: first system message — convert its plain-string content to a
+    * single-element parts array carrying cache_control.  json_object_get() bumps the
+    * string's refcount so it survives the json_object_object_add() that replaces the
+    * "content" value (which releases the old string ref). */
+   json_object *messages = NULL;
+   if (json_object_object_get_ex(root, "messages", &messages) &&
+       json_object_is_type(messages, json_type_array)) {
+      int msg_count = json_object_array_length(messages);
+      for (int i = 0; i < msg_count; i++) {
+         json_object *msg = json_object_array_get_idx(messages, i);
+         json_object *role_obj = NULL;
+         if (msg == NULL || !json_object_object_get_ex(msg, "role", &role_obj))
+            continue;
+         if (strcmp(json_object_get_string(role_obj), "system") != 0)
+            continue;
+         json_object *content_obj = NULL;
+         if (json_object_object_get_ex(msg, "content", &content_obj) &&
+             json_object_is_type(content_obj, json_type_string)) {
+            json_object *part = json_object_new_object();
+            json_object_object_add(part, "type", json_object_new_string("text"));
+            json_object_object_add(part, "text", json_object_get(content_obj));
+            json_object *cc = json_object_new_object();
+            json_object_object_add(cc, "type", json_object_new_string("ephemeral"));
+            json_object_object_add(part, "cache_control", cc);
+            json_object *content_array = json_object_new_array();
+            json_object_array_add(content_array, part);
+            json_object_object_add(msg, "content", content_array);
+         }
+         break; /* first system message only */
+      }
+   }
+}
+
 /* ── Non-streaming chat completion ──────────────────────────────────────── */
 
 char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
@@ -309,6 +383,9 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                    llm_tools_get_enabled_count_filtered(is_remote), is_remote ? "remote" : "local");
       }
    }
+
+   /* Anthropic prompt-cache breakpoints (no-op unless OpenRouter + anthropic/*). */
+   add_openrouter_anthropic_cache(root, model_name, base_url);
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -681,6 +758,9 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
       OLOG_INFO("OpenAI streaming: Skipping tools (forcing text response at iteration %d)",
                 iteration);
    }
+
+   /* Anthropic prompt-cache breakpoints (no-op unless OpenRouter + anthropic/*). */
+   add_openrouter_anthropic_cache(root, model_name, base_url);
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -1261,6 +1341,9 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
          json_object_object_add(root, "tool_choice", json_object_new_string("auto"));
       }
    }
+
+   /* Anthropic prompt-cache breakpoints (no-op unless OpenRouter + anthropic/*). */
+   add_openrouter_anthropic_cache(root, model_name, base_url);
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
