@@ -1764,6 +1764,69 @@ cleanup:
    return NULL;
 }
 
+/* Return a message for the extraction transcript with inline base64 image data
+ * replaced by a "[image]" text placeholder.  Vision turns store content as an OpenAI
+ * multi-part array ({type:"image_url",image_url:{url:"data:image/...;base64,..."}});
+ * serializing that verbatim into the extraction prompt injects ~250 KB of base64 per
+ * image, overflowing the model context (observed: ~333K-token payload → HTTP 400) for
+ * zero extraction value — extraction mines text, not pixels.
+ *
+ * Never mutates @p msg (it is a live reference into the session's conversation history):
+ * builds a NEW object only when stripping is needed, copying top-level keys and sharing
+ * immutable child refs.  Returns an owned (+1) reference in every case, so the caller
+ * adds it to the array unconditionally. */
+static struct json_object *extraction_message_strip_images(struct json_object *msg) {
+   struct json_object *content = NULL;
+   if (!json_object_object_get_ex(msg, "content", &content) ||
+       !json_object_is_type(content, json_type_array)) {
+      return json_object_get(msg); /* plain-string content — no images to strip */
+   }
+
+   int part_count = json_object_array_length(content);
+   bool has_image = false;
+   for (int i = 0; i < part_count; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      struct json_object *type_obj = NULL;
+      if (part != NULL && json_object_object_get_ex(part, "type", &type_obj) &&
+          strcmp(json_object_get_string(type_obj), "image_url") == 0) {
+         has_image = true;
+         break;
+      }
+   }
+   if (!has_image) {
+      return json_object_get(msg); /* multi-part but text-only — share untouched */
+   }
+
+   struct json_object *clean = json_object_new_object();
+   if (clean == NULL) {
+      return json_object_get(msg); /* OOM — fall back to original (oversized but valid) */
+   }
+
+   json_object_object_foreach(msg, key, val) {
+      if (strcmp(key, "content") == 0) {
+         struct json_object *clean_content = json_object_new_array();
+         for (int i = 0; i < part_count; i++) {
+            struct json_object *part = json_object_array_get_idx(content, i);
+            struct json_object *type_obj = NULL;
+            bool is_image = part != NULL && json_object_object_get_ex(part, "type", &type_obj) &&
+                            strcmp(json_object_get_string(type_obj), "image_url") == 0;
+            if (is_image) {
+               struct json_object *placeholder = json_object_new_object();
+               json_object_object_add(placeholder, "type", json_object_new_string("text"));
+               json_object_object_add(placeholder, "text", json_object_new_string("[image]"));
+               json_object_array_add(clean_content, placeholder);
+            } else {
+               json_object_array_add(clean_content, json_object_get(part));
+            }
+         }
+         json_object_object_add(clean, "content", clean_content);
+      } else {
+         json_object_object_add(clean, key, json_object_get(val));
+      }
+   }
+   return clean;
+}
+
 /* =============================================================================
  * Public API
  * ============================================================================= */
@@ -1891,7 +1954,7 @@ int memory_trigger_extraction(int user_id,
       if (json_object_object_get_ex(msg, "id", &id_obj))
          msg_id = json_object_get_int64(id_obj);
       if (msg_id == 0 || msg_id > last_msg_id)
-         json_object_array_add(filtered, json_object_get(msg));
+         json_object_array_add(filtered, extraction_message_strip_images(msg));
    }
 
    ctx->conversation_json = strdup(
