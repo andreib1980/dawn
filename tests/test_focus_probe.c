@@ -249,7 +249,7 @@ void setUp(void) {
     * differences are invisible unless the test sets them.  This isolates
     * each property to one test. */
    g_config.memory.focus_injection.enabled = true;
-   g_config.memory.focus_injection.focus_budget_tokens = 4096;
+   g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 8;
    g_config.memory.focus_injection.min_score = 0.0f;
    g_config.memory.focus_injection.weight_semantic = 1.0f;
@@ -463,11 +463,11 @@ static void test_dedup_uplift_admits(void) {
  * ============================================================================= */
 
 static void test_budget_force_keep_first_only(void) {
-   /* FOCUS_TEXT_MAX_BYTES = 4096, approx_token_cost ≈ 1024 tokens for a
-    * full-sized candidate.  Set focus_budget_tokens = 100 so even one
+   /* FOCUS_TEXT_MAX_BYTES = 4608, so the byte cost of a full-sized
+    * candidate is ~4608.  Set focus_budget_bytes = 400 so even one
     * candidate is well over budget — force-keep triggers on the first,
     * the second drops cleanly. */
-   g_config.memory.focus_injection.focus_budget_tokens = 100;
+   g_config.memory.focus_injection.focus_budget_bytes = 400;
    g_config.memory.focus_injection.weight_semantic = 1.0f;
 
    fake_register("memory_fact", FOCUS_SOURCE_INTERNAL, false);

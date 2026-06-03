@@ -47,7 +47,7 @@ static void config_defaults_for_test(void) {
     * is 1.0 so the ranker doesn't reorder by source. */
    memset(&g_config, 0, sizeof(g_config));
    g_config.memory.focus_injection.enabled = true;
-   g_config.memory.focus_injection.focus_budget_tokens = 4096;
+   g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 32;
    g_config.memory.focus_injection.min_score = 0.0f;
    g_config.memory.focus_injection.weight_semantic = 1.0f;

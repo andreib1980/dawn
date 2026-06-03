@@ -1275,14 +1275,14 @@
                      hint: 'Master switch for the focus-injection framework. No effect until adapters register.',
                      configPath: 'memory.focus_injection.enabled',
                   },
-                  focus_budget_tokens: {
+                  focus_budget_bytes: {
                      type: 'number',
-                     label: 'Focus block token budget',
-                     min: 256,
-                     max: 4096,
-                     step: 64,
-                     hint: 'Maximum tokens of injected context per turn. Default 1024.',
-                     configPath: 'memory.focus_injection.focus_budget_tokens',
+                     label: 'Focus block byte budget',
+                     min: 1024,
+                     max: 65536,
+                     step: 256,
+                     hint: 'Maximum bytes of injected context per turn (≈ 4 bytes/token). Default 10240.',
+                     configPath: 'memory.focus_injection.focus_budget_bytes',
                   },
                   focus_top_k: {
                      type: 'number',

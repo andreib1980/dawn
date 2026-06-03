@@ -215,15 +215,12 @@ static int ranker_cmp(const void *a, const void *b) {
    return 0;
 }
 
-/* Approximate token cost.  English: ~4 chars/token; UTF-8 multibyte
- * undercounts (~15% English, worse for emoji-heavy content).
- * Acceptable for v1; 1j tightens after bench shows actual budget
- * breaches. */
-static int approx_token_cost(const char *text) {
+/* Byte cost of a candidate's rendered text.  The focus budget is
+ * measured in bytes (focus_budget_bytes) — exact, no token estimate. */
+static int candidate_byte_cost(const char *text) {
    if (text == NULL)
       return 0;
-   size_t n = strlen(text);
-   return (int)((n + 3) / 4);
+   return (int)strlen(text);
 }
 
 /* =============================================================================
@@ -463,7 +460,7 @@ int focus_compose(int user_id,
     * ===================================================================== */
    const focus_injection_config_t *fi = &g_config.memory.focus_injection;
    int kept = 0;
-   int budget_left = fi->focus_budget_tokens;
+   int budget_left = fi->focus_budget_bytes;
    const int top_k = (fi->top_k > 0) ? fi->top_k : pool_count;
 
    /* `keep[]` marks pool indices that survive trimming. */
@@ -484,24 +481,23 @@ int focus_compose(int user_id,
       if (e->score < fi->min_score)
          break; /* Sorted desc — once below, all rest are below. */
 
-      const int cost = approx_token_cost(pool[e->idx].text);
+      const int cost = candidate_byte_cost(pool[e->idx].text);
       if (cost > budget_left) {
          /* Budget exceeded.  Subtle case: when this is the FIRST
           * candidate (kept == 0), a strict break produces an empty
           * focus block even though the highest-ranked item barely
-          * exceeded the budget.  At FOCUS_TEXT_MAX_BYTES = 4096
-          * (≈ 1024 tokens), a single max-sized candidate plus the
-          * "[source_id] " framing prefix can land just above the
-          * default 1024-token budget; dropping it leaves the LLM
-          * with no focus context at all.  Force-keep the first
-          * candidate (the per-candidate truncation cap already
-          * bounds it) and let the next iteration cleanly break on
-          * the second candidate's cost.  Subsequent candidates
-          * honor the budget normally.
+          * exceeded the budget.  At FOCUS_TEXT_MAX_BYTES = 4608, a
+          * single max-sized candidate plus the "[source_id] " framing
+          * prefix can land just above a small focus_budget_bytes;
+          * dropping it leaves the LLM with no focus context at all.
+          * Force-keep the first candidate (the per-candidate
+          * truncation cap already bounds it) and let the next
+          * iteration cleanly break on the second candidate's cost.
+          * Subsequent candidates honor the budget normally.
           *
           * Termination invariant: focus_candidate_init rejects NULL
           * / empty text, so every surviving candidate has length ≥ 1
-          * and approx_token_cost ≥ 1.  After saturating budget_left
+          * and candidate_byte_cost ≥ 1.  After saturating budget_left
           * to 0, the next iteration's `cost > budget_left` is true
           * and the regular `break` fires — no infinite loop. */
          if (kept == 0) {

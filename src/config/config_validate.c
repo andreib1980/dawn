@@ -177,8 +177,8 @@ int config_validate(const dawn_config_t *config,
     * Float weights use the same [0, 5] band as memory.temporal_weight precedent;
     * the band intentionally permits weights >1.0 so a stage can be deliberately
     * over-emphasized during tuning without re-touching this file. */
-   VALIDATE_RANGE_INT("memory.focus_injection.focus_budget_tokens",
-                      config->memory.focus_injection.focus_budget_tokens, 256, 4096);
+   VALIDATE_RANGE_INT("memory.focus_injection.focus_budget_bytes",
+                      config->memory.focus_injection.focus_budget_bytes, 1024, 65536);
    VALIDATE_RANGE_INT("memory.focus_injection.top_k", config->memory.focus_injection.top_k, 1, 64);
    VALIDATE_RANGE_INT("memory.focus_injection.summary_max_scan",
                       config->memory.focus_injection.summary_max_scan, 256, 16384);

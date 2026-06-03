@@ -36,6 +36,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_candidate_helpers.h" /* FOCUS_TEXT_MAX_BYTES */
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
@@ -52,7 +53,7 @@ static void config_defaults_for_test(void) {
     * min_score / token-budget trimming.  Per-source weights all 1.0. */
    memset(&g_config, 0, sizeof(g_config));
    g_config.memory.focus_injection.enabled = true;
-   g_config.memory.focus_injection.focus_budget_tokens = 4096;
+   g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 32;
    g_config.memory.focus_injection.min_score = 0.0f;
    g_config.memory.focus_injection.weight_semantic = 1.0f;
@@ -743,25 +744,25 @@ static void test_document_3kb_chunk_passthrough(void) {
    free(big_text);
 }
 
-static void test_document_oversize_chunk_truncated_not_rejected(void) {
+static void test_document_max_chunk_delivered_in_full(void) {
    /* Seed the maximum chunk text the stub's strncpy can accept
-    * (DOC_CHUNK_TEXT_MAX - 1 = 4095 bytes).  Combined with a
-    * deliberately long filename, the rendered "[filename] text"
-    * string exceeds FOCUS_TEXT_MAX_BYTES (4096), so
-    * focus_candidate_init's truncation handler fires and clips to
-    * exactly 4096 bytes.  The adapter must surface the candidate
-    * with truncated text — NOT pre-reject and drop it (the bug
-    * this test guards against). */
+    * (DOC_CHUNK_TEXT_MAX - 1 = 4095 bytes) plus a deliberately long
+    * filename.  FOCUS_TEXT_MAX_BYTES (4608) is sized to exceed the
+    * largest possible document candidate (DOC_CHUNK_TEXT_MAX 4096 +
+    * DOC_FILENAME_MAX 256 + "[] " framing 3 = 4355), so the rendered
+    * candidate is delivered IN FULL — no truncation.  The adapter must
+    * surface it (NOT pre-reject — the bug this test guards against), and
+    * the sizing invariant must hold: lowering the cap below 4355 would
+    * re-introduce truncation and trip assertion (b). */
    const size_t text_size = 4095;
    char *big_text = malloc(text_size + 1);
    TEST_ASSERT_NOT_NULL(big_text);
    memset(big_text, 'Y', text_size);
    big_text[text_size] = '\0';
 
-   /* Filename "really_long_filename_to_force_overflow.pdf" (42 chars)
-    * + brackets + space (3 chars) + 4095 chars of text = 4140 chars
-    * rendered, well over the 4096 cap, guaranteeing the truncation
-    * path is exercised. */
+   /* "[" + "really_long_filename_to_force_overflow.pdf" (42) + "] " +
+    * 4095 chars of text = 4140 bytes rendered — over the old 4096 cap,
+    * comfortably under the new 4608 cap. */
    seed_chunk(0, 100, 1, big_text, "really_long_filename_to_force_overflow.pdf", embed_v1,
               1700000000);
    s_ext_mock.chunk_count = 1;
@@ -777,15 +778,15 @@ static void test_document_oversize_chunk_truncated_not_rejected(void) {
       if (strcmp(result.candidates[i].source_id, "document_chunk") == 0)
          fc = &result.candidates[i];
    /* (a) candidate surfaces (NOT pre-rejected by adapter) */
-   TEST_ASSERT_NOT_NULL_MESSAGE(fc, "oversize chunk must surface — adapter must NOT pre-reject; "
-                                    "framework's focus_candidate_init must truncate cleanly");
-   /* (b) truncation actually happened — text is exactly
-    * FOCUS_TEXT_MAX_BYTES bytes (NOT just "≤", which would also
-    * pass on a no-truncation regression).  Proves the framework,
-    * not the adapter, does the size-bounding. */
-   TEST_ASSERT_EQUAL_INT_MESSAGE(4096, (int)strlen(fc->text),
-                                 "rendered text must be truncated to exactly "
-                                 "FOCUS_TEXT_MAX_BYTES — proves framework-side truncation");
+   TEST_ASSERT_NOT_NULL_MESSAGE(fc, "max-size chunk must surface — adapter must NOT pre-reject");
+   /* (b) delivered in full — exactly the 4140-byte rendered string,
+    * and within the per-candidate cap.  Proves the cap accommodates a
+    * full document candidate (guards the 4608 sizing invariant). */
+   TEST_ASSERT_EQUAL_INT_MESSAGE(4140, (int)strlen(fc->text),
+                                 "rendered text must be delivered in full (no truncation) — "
+                                 "FOCUS_TEXT_MAX_BYTES must fit a max chunk + long filename");
+   TEST_ASSERT_TRUE_MESSAGE((int)strlen(fc->text) <= FOCUS_TEXT_MAX_BYTES,
+                            "rendered candidate must fit within FOCUS_TEXT_MAX_BYTES");
    /* (c) opening "[filename]" prefix retained — content kept from
     * the head, not garbled by partial render. */
    TEST_ASSERT_TRUE(strstr(fc->text, "really_long_filename") != NULL);
@@ -865,7 +866,7 @@ int main(void) {
 
    /* Document-chunk size handling */
    RUN_TEST(test_document_3kb_chunk_passthrough);
-   RUN_TEST(test_document_oversize_chunk_truncated_not_rejected);
+   RUN_TEST(test_document_max_chunk_delivered_in_full);
 
    /* Memory ownership cycle (ASan target) */
    RUN_TEST(test_memory_cycle_1000x);

@@ -414,7 +414,10 @@ void config_set_defaults(dawn_config_t *config) {
     * prompt-builder integration ships in 1e.  Defaults match the design
     * doc §"Phase 1 — Per-Turn Focus" TOML block. */
    config->memory.focus_injection.enabled = false;
-   config->memory.focus_injection.focus_budget_tokens = 1024;
+   /* Per-turn focus-block budget in BYTES (same unit as FOCUS_TEXT_MAX_BYTES).
+    * 10240 ≈ two full document chunks plus several small fact/summary
+    * candidates — the multi-source coexistence target. */
+   config->memory.focus_injection.focus_budget_bytes = 10240;
    /* top_k bumped 8 → 12 (May 2026, post-Step-3 semantic summary adapter).
     * With summaries newly competing for the per-turn budget, top_k=8 was
     * filled by facts alone and starved every other source.  Live testing

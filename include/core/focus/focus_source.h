@@ -318,8 +318,8 @@ int focus_register_source(const focus_source_adapter_t *adapter);
  *      ties broken by `item_timestamp` descending.
  *   3. Drop everything below `g_config.memory.focus_injection.min_score`.
  *   4. Trim to `g_config.memory.focus_injection.top_k`.
- *   5. Truncate to fit `g_config.memory.focus_injection.focus_budget_tokens`
- *      (approximate `(strlen(text) + 3) / 4`).
+ *   5. Truncate to fit `g_config.memory.focus_injection.focus_budget_bytes`
+ *      (exact byte cost = `strlen(text)` per candidate).
  *
  * Empty registry returns SUCCESS with `candidate_count=0`,
  * `rejection_count=0` — production state in 1b before adapters land in

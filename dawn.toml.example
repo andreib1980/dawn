@@ -610,8 +610,8 @@
 # as a budget-bounded "current context" block in the LLM prompt.
 # Currently disabled by default — adapters land in Phase 1c/1d.
 # enabled = false                     # Master enable
-# focus_budget_tokens = 1024          # Token cap on the assembled focus block.
-                                      # Range: 256 - 4096
+# focus_budget_bytes = 10240          # Byte cap on the assembled focus block (per turn).
+                                      # Range: 1024 - 65536  (~4 bytes/token; exact byte budget)
 # top_k = 12                          # Maximum candidates retained after ranking.
                                       # Range: 1 - 64.  Bumped 8 → 12 (May 2026,
                                       # post-Step-3 semantic summary adapter):

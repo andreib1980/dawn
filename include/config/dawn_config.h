@@ -497,7 +497,7 @@ typedef struct {
 
 typedef struct {
    bool enabled;            /* Master enable; default false until 1c/1d ship */
-   int focus_budget_tokens; /* Token cap on the assembled focus block */
+   int focus_budget_bytes;  /* Byte cap on the assembled focus block (per turn) */
    int top_k;               /* Maximum candidates retained after ranking */
    float min_score;         /* Floor — anything below is dropped */
    bool classifier_enabled; /* RAGRoute-style source classifier;

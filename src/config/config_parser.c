@@ -1343,7 +1343,8 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    toml_table_t *focus = toml_table_in(table, "focus_injection");
    if (focus) {
       static const char *const focus_keys[] = { "enabled",
-                                                "focus_budget_tokens",
+                                                "focus_budget_bytes",
+                                                "focus_budget_tokens", /* deprecated alias */
                                                 "top_k",
                                                 "summary_max_scan",
                                                 "min_score",
@@ -1360,7 +1361,19 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
 
       focus_injection_config_t *fi = &config->focus_injection;
       PARSE_BOOL(focus, "enabled", fi->enabled);
-      PARSE_INT(focus, "focus_budget_tokens", fi->focus_budget_tokens);
+      PARSE_INT(focus, "focus_budget_bytes", fi->focus_budget_bytes);
+      /* Back-compat: the focus budget was renamed from the (estimated)
+       * token unit to exact bytes.  If the new key is absent but the old
+       * one is present, convert (1 token ≈ 4 bytes) and warn once. */
+      if (!toml_int_in(focus, "focus_budget_bytes").ok) {
+         toml_datum_t legacy = toml_int_in(focus, "focus_budget_tokens");
+         if (legacy.ok) {
+            fi->focus_budget_bytes = (int)(legacy.u.i * 4);
+            OLOG_WARNING("config: 'focus_budget_tokens' is deprecated — use "
+                         "'focus_budget_bytes'.  Converted %lld tokens → %d bytes.",
+                         (long long)legacy.u.i, fi->focus_budget_bytes);
+         }
+      }
       PARSE_INT(focus, "top_k", fi->top_k);
       PARSE_INT(focus, "summary_max_scan", fi->summary_max_scan);
       PARSE_DOUBLE(focus, "min_score", fi->min_score);

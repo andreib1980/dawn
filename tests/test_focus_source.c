@@ -195,7 +195,7 @@ dawn_config_t g_config;
 static void reset_config_defaults(void) {
    memset(&g_config, 0, sizeof(g_config));
    g_config.memory.focus_injection.enabled = true;
-   g_config.memory.focus_injection.focus_budget_tokens = 4096;
+   g_config.memory.focus_injection.focus_budget_bytes = 16384;
    g_config.memory.focus_injection.top_k = 16;
    g_config.memory.focus_injection.min_score = 0.0f;
    g_config.memory.focus_injection.weight_semantic = 1.0f;
@@ -520,11 +520,11 @@ static void test_requires_embedding_skipped_without_query(void) {
    focus_result_free(&result);
 }
 
-/* 8. token-budget truncation — focus_budget_tokens caps result, last
+/* 8. byte-budget truncation — focus_budget_bytes caps result, last
  *    over-budget candidate dropped. */
-static void test_token_budget_truncation(void) {
-   /* Each text is exactly 40 chars → ~10 tokens.  Budget=15 admits one
-    * candidate, second pushes over the budget and is dropped. */
+static void test_byte_budget_truncation(void) {
+   /* Each text is exactly 40 bytes.  Budget=60 admits one candidate (40),
+    * the second pushes the total to 80 > 60 and is dropped. */
    static char body[2][41];
    const char *texts[] = { body[0], body[1] };
    memset(body[0], 'a', 40);
@@ -546,7 +546,7 @@ static void test_token_budget_truncation(void) {
    g_config.memory.focus_injection.weight_recency = 0.0f;
    g_config.memory.focus_injection.weight_importance = 0.0f;
    g_config.memory.focus_injection.weight_source = 0.0f;
-   g_config.memory.focus_injection.focus_budget_tokens = 15;
+   g_config.memory.focus_injection.focus_budget_bytes = 60;
 
    focus_compose_result_t result = { 0 };
    TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
@@ -769,7 +769,7 @@ int main(void) {
    RUN_TEST(test_filter_on_retrieval_skips_internal);
    RUN_TEST(test_filter_on_retrieval_skips_external);
    RUN_TEST(test_requires_embedding_skipped_without_query);
-   RUN_TEST(test_token_budget_truncation);
+   RUN_TEST(test_byte_budget_truncation);
    RUN_TEST(test_memory_ownership_cycle);
    RUN_TEST(test_double_register_same_source_id_fails);
    RUN_TEST(test_na_score_contributes_zero);

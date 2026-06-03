@@ -67,7 +67,7 @@ static void set_valid_defaults(void) {
    /* focus_injection.* added in Phase 1b — needs valid defaults so
     * config_validate doesn't short-circuit on this field before
     * reaching the field the individual test is exercising. */
-   s_config.memory.focus_injection.focus_budget_tokens = 1024;
+   s_config.memory.focus_injection.focus_budget_bytes = 10240;
    s_config.memory.focus_injection.top_k = 8;
    s_config.memory.focus_injection.summary_max_scan = 4096;
    s_config.memory.focus_injection.min_score = 0.4f;

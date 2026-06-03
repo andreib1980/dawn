@@ -892,7 +892,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (json_object_object_get_ex(section, "focus_injection", &focus_obj)) {
          focus_injection_config_t *fi = &config->memory.focus_injection;
          JSON_TO_CONFIG_BOOL(focus_obj, "enabled", fi->enabled);
-         JSON_TO_CONFIG_INT(focus_obj, "focus_budget_tokens", fi->focus_budget_tokens);
+         JSON_TO_CONFIG_INT(focus_obj, "focus_budget_bytes", fi->focus_budget_bytes);
          JSON_TO_CONFIG_INT(focus_obj, "top_k", fi->top_k);
          JSON_TO_CONFIG_DOUBLE(focus_obj, "min_score", fi->min_score);
          JSON_TO_CONFIG_BOOL(focus_obj, "classifier_enabled", fi->classifier_enabled);
@@ -927,7 +927,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                                   fi->dominant_token_heuristic.base_penalty);
          }
 
-         CONFIG_CLAMP(fi->focus_budget_tokens, 256, 4096);
+         CONFIG_CLAMP(fi->focus_budget_bytes, 1024, 65536);
          CONFIG_CLAMP(fi->top_k, 1, 64);
          CONFIG_CLAMP(fi->min_score, 0.0f, 1.0f);
          CONFIG_CLAMP(fi->weight_semantic, 0.0f, 5.0f);
