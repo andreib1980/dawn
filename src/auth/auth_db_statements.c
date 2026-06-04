@@ -700,22 +700,6 @@ int auth_db_prepare_statements(void) {
       s_db.stmt_memory_facts_fts_delete = NULL;
    }
 
-   /* Category-filtered keyword search (v34).  Pre-filters fact-ID set so hybrid
-    * scoring downstream operates only on facts in the requested category. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL AND category = ? "
-       "AND fact_text LIKE ? ESCAPE '\\' "
-       "ORDER BY confidence DESC LIMIT ?",
-       -1, &s_db.stmt_memory_fact_search_by_category, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("auth_db: prepare memory_fact_search_by_category failed: %s",
-                 sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
-
    /* Per-fact category UPDATE used by the centroid backfill pass (v34).
     * CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
     * rowid cannot overwrite another user's category. */
@@ -2295,8 +2279,6 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_summary_list_window_desc);
 
    /* Category-filtered fact statements (v34) */
-   if (s_db.stmt_memory_fact_search_by_category)
-      sqlite3_finalize(s_db.stmt_memory_fact_search_by_category);
    if (s_db.stmt_memory_fact_update_category)
       sqlite3_finalize(s_db.stmt_memory_fact_update_category);
    if (s_db.stmt_memory_fact_list_general)

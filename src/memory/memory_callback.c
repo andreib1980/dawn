@@ -27,6 +27,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -552,8 +553,8 @@ char *memory_action_search(int user_id,
    /* Search facts — keyword search first, then hybrid if embeddings available */
    memory_fact_t facts[10];
    int fact_count = 0;
-   /* Category hard-filtering removed (was: pre-filter facts by exact category via
-    * memory_db_fact_search_by_category).  Extraction scatters one semantic cluster
+   /* Category hard-filtering removed (was: pre-filter facts by exact category via the
+    * now-deleted memory_db_fact_search_by_category).  Extraction scatters one semantic cluster
     * across multiple categories, so an LLM-guessed `category` systematically hid
     * relevant facts (e.g. a single task list filed under general + professional +
     * practical at once).  Always use the unified full-corpus path —
@@ -882,7 +883,16 @@ char *memory_action_search(int user_id,
  * extraction auto-merge cutoff), so this flags only the uncertain middle. */
 #define MEMORY_REMEMBER_BAND_LOW 0.80f
 
-static char *memory_action_remember(int user_id, const char *fact_text) {
+/* Max facts accepted in one batched 'remember' call (JSON-array form).  Bounds the
+ * per-call work (each fact runs the full dedup + embed + advisory pipeline) and the
+ * aggregate response size. */
+#define MAX_REMEMBER_FACTS 25
+
+/* Store ONE fact: injection check → multi-stage dedup → store → embed → similarity
+ * advisory.  Returns a malloc'd, caller-freed result line.  The batch dispatcher
+ * (memory_action_remember) calls this once per fact; single-fact callers reach it
+ * through that dispatcher's non-array fall-through, so behavior is unchanged. */
+static char *memory_action_remember_single(int user_id, const char *fact_text) {
    if (!fact_text || strlen(fact_text) == 0) {
       return strdup("Please provide the fact to remember.");
    }
@@ -1027,6 +1037,70 @@ static char *memory_action_remember(int user_id, const char *fact_text) {
       result = strdup("Fact stored successfully.");
    }
    return result;
+}
+
+/* 'remember' entry point.  Accepts either a single fact string (the common case,
+ * unchanged) or a JSON array of fact strings for a one-round-trip batch dump, e.g.
+ * ["Jon uses a Jetson", "Jon prefers dark mode"].  Each element runs the full
+ * single-fact pipeline (dedup + embed + advisory); results are concatenated.  A value
+ * that is not a JSON array (parse failure or any non-array type) falls through to the
+ * single-fact path, so existing single-fact callers — and any ordinary fact text — are
+ * unaffected.  Capped at MAX_REMEMBER_FACTS per call. */
+static char *memory_action_remember(int user_id, const char *value) {
+   if (!value || !*value) {
+      return strdup("Please provide the fact to remember.");
+   }
+
+   struct json_object *arr = json_tokener_parse(value);
+   if (arr && json_object_is_type(arr, json_type_array)) {
+      int n = json_object_array_length(arr);
+      strbuf_t sb;
+      strbuf_init(&sb, 512);
+      int stored = 0;
+      int processed = 0;
+      for (int i = 0; i < n && processed < MAX_REMEMBER_FACTS; i++) {
+         struct json_object *elem = json_object_array_get_idx(arr, i);
+         const char *fact = (elem && json_object_is_type(elem, json_type_string))
+                                ? json_object_get_string(elem)
+                                : NULL;
+         if (!fact || !*fact) {
+            continue; /* skip empty / non-string elements */
+         }
+         char *one = memory_action_remember_single(user_id, fact);
+         if (one) {
+            if (stored > 0) {
+               strbuf_append(&sb, "\n\n");
+            }
+            strbuf_append(&sb, one);
+            free(one);
+            stored++;
+         }
+         processed++;
+      }
+      if (n > MAX_REMEMBER_FACTS) {
+         strbuf_appendf(&sb,
+                        "\n\n(Stored the first %d facts; %d more were not processed — send the "
+                        "rest in another 'remember' call.)",
+                        MAX_REMEMBER_FACTS, n - MAX_REMEMBER_FACTS);
+      }
+      json_object_put(arr);
+      if (stored == 0) {
+         strbuf_free(&sb);
+         return strdup("No valid facts found in the list to remember.");
+      }
+      char *result = strbuf_steal(&sb);
+      if (!result) {
+         strbuf_free(&sb);
+         return strdup("Stored the facts successfully.");
+      }
+      return result;
+   }
+   if (arr) {
+      json_object_put(arr);
+   }
+
+   /* Single fact (backward-compatible default). */
+   return memory_action_remember_single(user_id, value);
 }
 
 /* =============================================================================

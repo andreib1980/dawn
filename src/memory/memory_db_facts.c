@@ -186,45 +186,6 @@ int memory_db_fact_create(int user_id,
                                    /*created_at_override*/ 0, id_out);
 }
 
-/* Category-filtered keyword search.  Pre-filters at the SQL level so the embedding
- * cache and hybrid scoring downstream only see facts in the requested category. */
-int memory_db_fact_search_by_category(int user_id,
-                                      const char *keywords,
-                                      const char *category,
-                                      memory_fact_t *out_facts,
-                                      int max_facts,
-                                      int *count_out) {
-   if (count_out)
-      *count_out = 0;
-   if (!keywords || !category || !out_facts || max_facts <= 0) {
-      return MEMORY_DB_FAILURE;
-   }
-
-   char pattern[MEMORY_FACT_TEXT_MAX];
-   memory_db_internal_build_like_pattern(keywords, pattern, sizeof(pattern));
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_search_by_category;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_text(stmt, 2, category, -1, SQLITE_STATIC);
-   sqlite3_bind_text(stmt, 3, pattern, -1, SQLITE_STATIC);
-   sqlite3_bind_int(stmt, 4, max_facts);
-
-   int count = 0;
-   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
-      populate_fact_from_row(stmt, &out_facts[count]);
-      count++;
-   }
-
-   sqlite3_reset(stmt);
-   AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
-   return MEMORY_DB_SUCCESS;
-}
-
 /* Per-fact category UPDATE used by the centroid backfill pass (v34).
  * Caller batches these inside a transaction to amortize lock cost. */
 int memory_db_fact_update_category(int64_t fact_id, int user_id, const char *category) {

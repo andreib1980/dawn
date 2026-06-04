@@ -98,27 +98,6 @@ int memory_db_fact_create_at(int user_id,
                              int64_t *id_out);
 
 /**
- * @brief Search facts by keyword, restricted to one category (v34).
- *
- * Pre-filters at the SQL level so hybrid scoring downstream only sees facts
- * in the requested category — gives up to 34% R@K lift on category-aligned queries.
- *
- * @param user_id User ID
- * @param keywords Search terms (wrapped in %...%)
- * @param category One of MEMORY_FACT_CATEGORIES (must match exactly)
- * @param out_facts Output array (caller allocates)
- * @param max_facts Maximum facts to return
- * @param count_out Output: number of facts found
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_search_by_category(int user_id,
-                                      const char *keywords,
-                                      const char *category,
-                                      memory_fact_t *out_facts,
-                                      int max_facts,
-                                      int *count_out);
-
-/**
  * @brief Update a fact's category in place (v34).  Used by the embedding-centroid
  * backfill pass and the future LLM recategorize-all admin command.
  *
