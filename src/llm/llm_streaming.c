@@ -648,6 +648,18 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
             }
             ctx->stream_complete = 1;
 
+            /* If reasoning never transitioned to a text response — e.g. the model
+             * reasoned and then went straight to tool_calls (no visible text), so the
+             * reasoning→response transition above never ran — close the thinking display
+             * now.  Otherwise the WebUI reasoning indicator hangs open ("stuck thinking")
+             * until the next iteration. */
+            if (ctx->thinking_active && !ctx->inside_think_tag) {
+               ctx->thinking_active = 0;
+               if (has_ws_session) {
+                  webui_send_thinking_end(ws_session, ctx->thinking_size > 0);
+               }
+            }
+
             // Finalize tool call arguments
             if (ctx->has_tool_calls) {
                for (int i = 0; i < ctx->tool_calls.count; i++) {
