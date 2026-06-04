@@ -58,9 +58,21 @@ char *core_text_input_dispatch(session_t *session,
    /* Step 2: persist to conv_db if requested.  The conv_db row ID is
     * stamped back into the in-memory history entry so subsequent
     * memory-extraction / context-injection code paths can reference
-    * it. */
+    * it.
+    *
+    * EXCEPTION — vision turns: skip the server-side persist when the turn
+    * carries images and defer to the browser's client save.  The daemon
+    * only has the raw text here, not the image IDs (the browser holds them
+    * from the /api/images upload), so a server save would write a text-only
+    * row AND its server_saved=true echo would make the browser skip its own
+    * richer save — dropping the [IMAGE:img_id] markers.  Letting the client
+    * save win keeps the image references in the persisted message so they
+    * re-render on reload (and can later be rehydrated into the LLM history).
+    * The client save path (handle_save_message) stamps the msg_id itself, so
+    * nothing is lost by skipping it here.  Non-WebUI callers (messaging) pass
+    * vision_image_count == 0 and are unaffected. */
    bool persisted = false;
-   if (opts && opts->conversation_id > 0) {
+   if (opts && opts->conversation_id > 0 && vision_image_count == 0) {
       int64_t msg_id = 0;
       if (conv_db_add_message_ex(opts->conversation_id, opts->auth_user_id, "user", text,
                                  &msg_id) == AUTH_DB_SUCCESS) {

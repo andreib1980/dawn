@@ -246,6 +246,18 @@ int image_store_update_retention(const char *id, int user_id, image_retention_t 
  */
 int image_store_count_user(int user_id, int *count_out);
 
+/**
+ * @brief Delete ALL images owned by a user (rows + files).
+ *
+ * For account deletion: the images table FK cascades rows on user delete but
+ * leaks the files, so this purges both. Self-contained (own lock); call it
+ * before deleting the user so the rows are still present to enumerate.
+ *
+ * @param user_id User whose images to purge (> 0).
+ * @return IMAGE_STORE_SUCCESS (best-effort), IMAGE_STORE_INVALID, or IMAGE_STORE_FAILURE.
+ */
+int image_store_delete_user(int user_id);
+
 /* =============================================================================
  * Validation
  * ============================================================================= */

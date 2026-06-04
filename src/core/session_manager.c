@@ -1281,6 +1281,47 @@ void session_add_message_with_images(session_t *session,
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+void session_add_message_multipart(session_t *session, struct json_object *message) {
+   if (!session || !message) {
+      if (message) {
+         json_object_put(message);
+      }
+      return;
+   }
+
+   pthread_mutex_lock(&session->history_mutex);
+
+   /* Guard against corrupted or NULL history (mirrors add_message_with_images). */
+   if (!session->conversation_history ||
+       !json_object_is_type(session->conversation_history, json_type_array)) {
+      OLOG_ERROR("Session %u: conversation_history corrupt in add_message_multipart, recreating",
+                 session->session_id);
+      if (session->conversation_history) {
+         json_object_put(session->conversation_history);
+      }
+      session->conversation_history = json_object_new_array();
+      if (!session->conversation_history) {
+         pthread_mutex_unlock(&session->history_mutex);
+         json_object_put(message);
+         return;
+      }
+   }
+
+   json_object_array_add(session->conversation_history, message); /* takes ownership */
+
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+void session_set_tool_persist_hook(session_t *session, session_tool_persist_fn cb, void *userdata) {
+   if (!session) {
+      return;
+   }
+   /* Read/written only on the worker thread that owns the turn (set before the LLM
+    * call, cleared after) — no lock needed, and no other thread fires the hook. */
+   session->tool_persist_cb = cb;
+   session->tool_persist_userdata = userdata;
+}
+
 struct json_object *session_get_history(session_t *session) {
    if (!session) {
       return NULL;

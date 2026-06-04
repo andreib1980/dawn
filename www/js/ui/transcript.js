@@ -785,9 +785,14 @@
          return;
       }
 
-      // Route tool role messages to debug entries (server sends role:"tool" for tool results)
+      // Route tool role messages to debug entries. The server sends BOTH native tool
+      // calls (combined "[Tool Call: name(args) -> result]") and plain results under
+      // role:"tool", so label by content — a call gets the 'tool call' badge, anything
+      // else (e.g. legacy device "[Tool Result: ...]") gets 'tool result' — instead of
+      // blanket-labeling every role:tool message as a result. Keeps the live view
+      // consistent with the reloaded view (history.js renders calls as 'tool call').
       if (role === 'tool') {
-         addDebugEntry('tool result', text);
+         addDebugEntry(text.startsWith('[Tool Call:') ? 'tool call' : 'tool result', text);
          transcript.scrollTop = transcript.scrollHeight;
          return;
       }

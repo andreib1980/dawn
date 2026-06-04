@@ -65,6 +65,16 @@ bool ocp_sha256_compute(const unsigned char *data, size_t len, char *hex_out);
 bool ocp_sha256_file(const char *filepath, char *hex_out);
 
 /**
+ * @brief Encode binary data to a base64 string (no line breaks)
+ *
+ * @param input Binary data to encode
+ * @param len Number of bytes to encode (must be > 0)
+ * @return Allocated NUL-terminated base64 string, or NULL on error (NULL/empty
+ *         input, oversized input, or allocation failure). Caller must free.
+ */
+char *ocp_base64_encode(const unsigned char *input, size_t len);
+
+/**
  * @brief Decode base64 string to binary data
  *
  * @param input Base64-encoded string

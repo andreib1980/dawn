@@ -42,6 +42,7 @@
 #include "config/dawn_config.h"
 #include "core/command_executor.h"
 #include "core/component_status.h"
+#include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
@@ -108,62 +109,10 @@ static unsigned char *read_file(const char *filename, size_t *length) {
    return content;
 }
 
+/* Thin wrapper over the shared encoder (src/core/ocp_helpers.c) — kept as a
+ * static alias so existing call sites stay unchanged. */
 static char *base64_encode(const unsigned char *buffer, size_t length) {
-   if (buffer == NULL || length == 0) {
-      OLOG_ERROR("Invalid input to base64_encode.");
-      return NULL;
-   }
-
-   BIO *bio = NULL, *b64 = NULL;
-   BUF_MEM *bufferPtr = NULL;
-
-   b64 = BIO_new(BIO_f_base64());
-   if (b64 == NULL) {
-      OLOG_ERROR("Failed to create Base64 BIO.");
-      return NULL;
-   }
-
-   bio = BIO_new(BIO_s_mem());
-   if (bio == NULL) {
-      OLOG_ERROR("Failed to create memory BIO.");
-      BIO_free_all(b64);
-      return NULL;
-   }
-
-   bio = BIO_push(b64, bio);
-   BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-
-   if (BIO_write(bio, buffer, length) <= 0) {
-      OLOG_ERROR("Failed to write data to BIO.");
-      BIO_free_all(bio);
-      return NULL;
-   }
-
-   if (BIO_flush(bio) <= 0) {
-      OLOG_ERROR("Failed to flush BIO.");
-      BIO_free_all(bio);
-      return NULL;
-   }
-
-   BIO_get_mem_ptr(bio, &bufferPtr);
-   if (bufferPtr == NULL || bufferPtr->data == NULL) {
-      OLOG_ERROR("Failed to get pointer to BIO memory.");
-      BIO_free_all(bio);
-      return NULL;
-   }
-
-   char *b64text = malloc(bufferPtr->length + 1);
-   if (b64text == NULL) {
-      OLOG_ERROR("Memory allocation failed for Base64 text.");
-      BIO_free_all(bio);
-      return NULL;
-   }
-
-   memcpy(b64text, bufferPtr->data, bufferPtr->length);
-   b64text[bufferPtr->length] = '\0';
-
-   BIO_free_all(bio);
-   return b64text;
+   return ocp_base64_encode(buffer, length);
 }
 
 /* Timeout for viewing MQTT responses (10 seconds) */

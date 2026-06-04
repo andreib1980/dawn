@@ -39,6 +39,7 @@
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_openai.h"
+#include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -91,6 +92,61 @@ bool llm_tool_loop_did_skip_followup(void) {
  * Appends the assistant message containing tool_calls array, then adds
  * tool result messages. Handles Gemini thought_signature if present.
  */
+/* Persist the tool messages just appended to history in [before_len, end) via the
+ * session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
+ * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
+ * OpenAI-format history is already canonical; Claude-format is normalized through the
+ * shared converter so the stored shape is provider-neutral. */
+static void persist_appended_tool_turn(llm_tool_loop_params_t *params, int before_len) {
+   session_t *s = session_get(params->session_id);
+   if (!s) {
+      return;
+   }
+   session_tool_persist_fn cb = s->tool_persist_cb;
+   void *ud = s->tool_persist_userdata;
+   if (!cb) {
+      session_release(s);
+      return;
+   }
+
+   int after = json_object_array_length(params->conversation_history);
+   struct json_object *canonical = json_object_new_array();
+   if (!canonical) {
+      session_release(s);
+      return;
+   }
+
+   for (int i = before_len; i < after; i++) {
+      struct json_object *msg = json_object_array_get_idx(params->conversation_history, i);
+      if (params->history_format == LLM_HISTORY_CLAUDE) {
+         convert_claude_tool_to_openai(msg, canonical);
+      } else {
+         json_object_array_add(canonical, json_object_get(msg));
+      }
+   }
+
+   int n = json_object_array_length(canonical);
+   for (int i = 0; i < n; i++) {
+      struct json_object *m = json_object_array_get_idx(canonical, i);
+      struct json_object *role_obj, *content_obj, *tc_obj, *tcid_obj;
+      if (!json_object_object_get_ex(m, "role", &role_obj)) {
+         continue;
+      }
+      const char *role = json_object_get_string(role_obj);
+      const char *content = json_object_object_get_ex(m, "content", &content_obj)
+                                ? json_object_get_string(content_obj)
+                                : "";
+      if (json_object_object_get_ex(m, "tool_calls", &tc_obj)) {
+         cb(ud, role, content ? content : "", json_object_to_json_string(tc_obj), NULL);
+      } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
+         cb(ud, role, content ? content : "", NULL, json_object_get_string(tcid_obj));
+      }
+   }
+
+   json_object_put(canonical);
+   session_release(s);
+}
+
 static void append_openai_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
                                        const tool_result_list_t *results) {
@@ -553,11 +609,14 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       }
 
       /* Step 8: Append assistant message + tool results to history */
+      int hist_before = json_object_array_length(params->conversation_history);
       if (params->history_format == LLM_HISTORY_CLAUDE) {
          append_claude_tool_history(params->conversation_history, &result, results);
       } else {
          append_openai_tool_history(params->conversation_history, &result, results);
       }
+      /* Step 8a: Persist the just-appended structured tool messages (E2). */
+      persist_appended_tool_turn(params, hist_before);
 
       /* Step 8b: All-silent check — tools handled their own output */
       if (followup.all_silent) {

@@ -139,8 +139,10 @@ typedef struct {
     * Ensures balanced decrement even if session is detached before disconnect. */
    bool counted;
 
-   /* Active conversation tracking (for memory extraction on switch) */
-   int64_t active_conversation_id;
+   /* Active conversation tracking (for memory extraction on switch).
+    * Atomic: written by the lws thread (new_conversation / load / reset), read by the
+    * text worker thread (tool-turn persistence, focus injection, auto-compaction). */
+   _Atomic int64_t active_conversation_id;
    bool active_conversation_private; /* If true, skip memory extraction */
 
    /* Music streaming state (per-session, owned by webui_music.c) */

@@ -148,6 +148,42 @@ bool ocp_sha256_file(const char *filepath, char *hex_out) {
 }
 
 /* =============================================================================
+ * Base64 Encoding
+ * ============================================================================= */
+
+char *ocp_base64_encode(const unsigned char *input, size_t len) {
+   if (!input || len == 0) {
+      return NULL;
+   }
+
+   /* EVP_EncodeBlock takes an int source length; guard the cast. */
+   if (len > INT_MAX) {
+      OLOG_ERROR("ocp_base64_encode: Input too large");
+      return NULL;
+   }
+
+   /* Encoded size = 4 * ceil(len/3) + 1 (NUL).  No overflow: len <= INT_MAX so
+    * the 4/3 expansion stays well within size_t. */
+   size_t out_cap = 4 * ((len + 2) / 3) + 1;
+   char *out = malloc(out_cap);
+   if (!out) {
+      OLOG_ERROR("ocp_base64_encode: Memory allocation failed");
+      return NULL;
+   }
+
+   /* EVP_EncodeBlock writes base64 with no line breaks and NUL-terminates;
+    * returns the encoded length excluding the NUL. */
+   int written = EVP_EncodeBlock((unsigned char *)out, input, (int)len);
+   if (written < 0) {
+      OLOG_ERROR("ocp_base64_encode: EVP_EncodeBlock failed");
+      free(out);
+      return NULL;
+   }
+
+   return out;
+}
+
+/* =============================================================================
  * Base64 Decoding
  * ============================================================================= */
 

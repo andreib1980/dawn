@@ -1059,8 +1059,10 @@ typedef struct {
 typedef struct {
    int64_t id;
    int64_t conversation_id;
-   char role[CONV_ROLE_MAX]; /**< "system", "user", or "assistant" */
-   char *content;            /**< Dynamically allocated, caller must free */
+   char role[CONV_ROLE_MAX]; /**< "system", "user", "assistant", or "tool" */
+   char *content;            /**< Borrowed column pointer; valid only during the callback */
+   char *tool_calls;   /**< assistant rows: OpenAI tool_calls JSON array, else NULL (borrowed) */
+   char *tool_call_id; /**< role='tool' rows: matching tool_call id, else NULL (borrowed) */
    time_t created_at;
 } conversation_message_t;
 
@@ -1468,6 +1470,22 @@ int conv_db_add_message_ex(int64_t conv_id,
                            const char *role,
                            const char *content,
                            int64_t *msg_id_out);
+
+/**
+ * @brief Add a message with structured tool fields (OpenAI-canonical).
+ *
+ * Like conv_db_add_message_ex() but also persists the two structured tool columns:
+ * @p tool_calls (assistant rows — the OpenAI tool_calls JSON array) and
+ * @p tool_call_id (role='tool' rows — the matching call id). Pass NULL for either
+ * when not applicable; conv_db_add_message_ex() delegates here with both NULL.
+ */
+int conv_db_add_message_with_tools(int64_t conv_id,
+                                   int user_id,
+                                   const char *role,
+                                   const char *content,
+                                   const char *tool_calls,
+                                   const char *tool_call_id,
+                                   int64_t *msg_id_out);
 
 /**
  * @brief Get all messages in a conversation

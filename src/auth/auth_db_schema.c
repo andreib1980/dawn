@@ -187,6 +187,8 @@ static const char *SCHEMA_SQL =
     "   conversation_id INTEGER NOT NULL,"
     "   role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),"
     "   content TEXT NOT NULL,"
+    "   tool_calls TEXT,"   /* assistant rows: OpenAI tool_calls JSON array (v56) */
+    "   tool_call_id TEXT," /* role='tool' rows: matching tool_call id (v56) */
     "   created_at INTEGER NOT NULL,"
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
@@ -2943,6 +2945,58 @@ int auth_db_create_schema(const char *db_path) {
       errmsg = NULL;
    }
 
+   /* v56 — messages.tool_calls + messages.tool_call_id (structured tool-turn
+    * persistence).  Two nullable TEXT columns: assistant rows store the OpenAI
+    * tool_calls JSON array, role='tool' rows store the matching tool_call id.
+    * Both NULL for the vast majority of rows (zero payload bytes), so behavior is
+    * byte-identical pre/post migration.  Nullable ADD COLUMN is the O(1) fast path
+    * (no table rebuild — the 'tool' role already exists in the CHECK constraint).
+    * Duplicate-column handling mirrors v52/v53. */
+   bool v56_ok = (current_version >= 56) || (current_version == 0);
+   if (current_version >= 18 && current_version < 56) {
+      bool v56_calls_ok = false;
+      bool v56_id_ok = false;
+      bool v56_fresh = false; /* true if either ALTER actually added a column */
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE messages ADD COLUMN tool_calls TEXT", NULL, NULL,
+                        &errmsg);
+      if (rc == SQLITE_OK) {
+         v56_calls_ok = true;
+         v56_fresh = true;
+      } else if (errmsg && strstr(errmsg, "duplicate column")) {
+         v56_calls_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v56 messages.tool_calls migration failed: %s",
+                    errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE messages ADD COLUMN tool_call_id TEXT", NULL, NULL,
+                        &errmsg);
+      if (rc == SQLITE_OK) {
+         v56_id_ok = true;
+         v56_fresh = true;
+      } else if (errmsg && strstr(errmsg, "duplicate column")) {
+         v56_id_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v56 messages.tool_call_id migration failed: %s",
+                    errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      if (v56_calls_ok && v56_id_ok) {
+         if (v56_fresh) {
+            OLOG_INFO("auth_db: v56 added messages.tool_calls + tool_call_id "
+                      "(structured tool-turn persistence)");
+         } else {
+            OLOG_INFO("auth_db: v56 messages.tool_call columns already present "
+                      "(applied by SCHEMA_SQL during multi-step migration)");
+         }
+         v56_ok = true;
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3080,7 +3134,7 @@ int auth_db_create_schema(const char *db_path) {
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
-                              v55_ok;
+                              v55_ok && v56_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

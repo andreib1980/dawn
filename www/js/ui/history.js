@@ -555,12 +555,54 @@
 
          // Display messages (sequentially to preserve order with async image loading)
          const messages = payload.messages || [];
+         // Pre-index tool results by tool_call_id so each call can be rendered PAIRED
+         // with its result — reproducing the live "[Tool Call: name(args) -> result]"
+         // display (live sends call+result combined; on reload they're stored separately).
+         const toolResultsById = {};
+         for (const m of messages) {
+            if (m.role === 'tool' && m.tool_call_id) {
+               toolResultsById[m.tool_call_id] = m.content || '';
+            }
+         }
+         const consumedResultIds = new Set();
          (async () => {
             for (const msg of messages) {
                if (msg.role === 'system') continue;
-               if (typeof DawnTranscript !== 'undefined') {
-                  await DawnTranscript.addEntry(msg.role, msg.content);
+               if (msg.role === 'tool') continue; // rendered paired with its call, below
+               if (typeof DawnTranscript === 'undefined') continue;
+
+               // Assistant turn that made tool calls: show the pre-tool text bubble first
+               // (model speaks, then calls fire), then each call paired with its result as
+               // one debug entry — matching the live "[Tool Call: name(args) -> result]".
+               if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                  if (msg.content && msg.content.trim()) {
+                     await DawnTranscript.addEntry(msg.role, msg.content);
+                  }
+                  for (const tc of msg.tool_calls) {
+                     const fn = tc.function || {};
+                     const name = fn.name || 'tool';
+                     const args = fn.arguments || ''; // already a compact JSON string
+                     const result = toolResultsById[tc.id];
+                     if (result !== undefined) consumedResultIds.add(tc.id);
+                     const combined =
+                        result !== undefined
+                           ? `[Tool Call: ${name}(${args}) -> ${result}]`
+                           : `[Tool Call: ${name}(${args})]`;
+                     // Label as a call (the entry IS the call, with its result inlined) so
+                     // the debug badge/colour matches the live 'tool call' rendering.
+                     DawnTranscript.addDebug('tool call', combined);
+                  }
+                  continue;
                }
+
+               await DawnTranscript.addEntry(msg.role, msg.content);
+            }
+
+            // Surface any tool results that had no matching call (data drift / partial
+            // save) so they aren't silently dropped — live shows them as their own entry.
+            for (const [id, content] of Object.entries(toolResultsById)) {
+               if (consumedResultIds.has(id)) continue;
+               DawnTranscript.addDebug('tool result', `[Tool Result: ${content}]`);
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)

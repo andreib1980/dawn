@@ -33,11 +33,13 @@
 #include "config/dawn_config.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
+#include "image_store.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "memory/memory_extraction.h"
 #include "version.h"
+#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_BASE64 */
 
@@ -575,6 +577,17 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
    json_object_object_add(msg_obj, "content",
                           json_object_new_string(msg->content ? msg->content : ""));
    json_object_object_add(msg_obj, "created_at", json_object_new_int64(msg->created_at));
+   /* Surface structured tool fields so the browser can render tool calls/results
+    * under debug-mode on reload (E2). tool_calls is sent as parsed JSON. */
+   if (msg->tool_calls && msg->tool_calls[0]) {
+      json_object *tc = json_tokener_parse(msg->tool_calls);
+      if (tc) {
+         json_object_object_add(msg_obj, "tool_calls", tc);
+      }
+   }
+   if (msg->tool_call_id && msg->tool_call_id[0]) {
+      json_object_object_add(msg_obj, "tool_call_id", json_object_new_string(msg->tool_call_id));
+   }
 
    json_object_array_add(msg_array, msg_obj);
    return 0;
@@ -921,6 +934,46 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
 /**
  * @brief Delete a conversation
  */
+/* Accumulator for the conversation's referenced image ids.  We must NOT call
+ * image_store_delete() from inside the conv_db_get_messages() callback: that
+ * function holds the (non-recursive) auth_db mutex during iteration, and
+ * image_store_delete() re-acquires it → deadlock.  So the callback only collects
+ * ids (string copy, no lock), and the deletes run after the lock is released. */
+typedef struct {
+   char (*ids)[IMAGE_ID_LEN];
+   int count;
+   int cap;
+} conv_image_id_acc_t;
+
+static int collect_conv_images_cb(const conversation_message_t *msg, void *ctx) {
+   conv_image_id_acc_t *acc = (conv_image_id_acc_t *)ctx;
+   if (!msg || !msg->content) {
+      return 0;
+   }
+   /* Per-message scan: the collect cap equals the per-turn upload cap
+    * (WEBUI_MAX_VISION_IMAGES_CAP), so a single message can never carry more ids than
+    * this buffer holds — no markers are missed for the cascade-delete. */
+   char ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+   int count = 0;
+   if (webui_collect_image_ids(msg->content, ids, WEBUI_MAX_VISION_IMAGES_CAP, &count) != SUCCESS) {
+      return 0;
+   }
+   for (int i = 0; i < count; i++) {
+      if (acc->count == acc->cap) {
+         int new_cap = acc->cap ? acc->cap * 2 : 16;
+         char(*grown)[IMAGE_ID_LEN] = realloc(acc->ids, (size_t)new_cap * IMAGE_ID_LEN);
+         if (!grown) {
+            return 0; /* OOM — delete what we collected; never block the conv delete */
+         }
+         acc->ids = grown;
+         acc->cap = new_cap;
+      }
+      memcpy(acc->ids[acc->count], ids[i], IMAGE_ID_LEN);
+      acc->count++;
+   }
+   return 0; /* continue iteration */
+}
+
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload) {
    if (!conn_require_auth(conn)) {
       return;
@@ -943,6 +996,19 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
    }
 
    int64_t conv_id = json_object_get_int64(id_obj);
+
+   /* Cascade-delete referenced images BEFORE the row cascade removes the markers
+    * (referenced images are conversation-lifecycle-owned, bumped to PERMANENT at save).
+    * Collect ids UNDER conv_db_get_messages' lock, then delete AFTER it returns —
+    * image_store_delete re-takes the same non-recursive auth_db mutex, so calling it
+    * from inside the callback would deadlock. */
+   conv_image_id_acc_t img_acc = { 0 };
+   conv_db_get_messages(conv_id, conn->auth_user_id, collect_conv_images_cb, &img_acc);
+   for (int i = 0; i < img_acc.count; i++) {
+      image_store_delete(img_acc.ids[i], conn->auth_user_id);
+   }
+   free(img_acc.ids);
+
    int result = conv_db_delete(conv_id, conn->auth_user_id);
 
    if (result == AUTH_DB_SUCCESS) {
@@ -1212,6 +1278,18 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
    if (result == AUTH_DB_SUCCESS) {
       if (conn->session && msg_id > 0)
          session_stamp_last_message_id(conn->session, role, msg_id);
+      /* Promote any referenced images to PERMANENT so they survive age/LRU eviction
+       * for the life of the conversation (conversation-lifecycle-owned).  Owner-checked
+       * via conn->auth_user_id; an injected foreign id no-ops.  Per-message scan: the
+       * collect cap equals the per-turn upload cap, so no referenced id is missed. */
+      char img_ids[WEBUI_MAX_VISION_IMAGES_CAP][IMAGE_ID_LEN];
+      int img_count = 0;
+      if (webui_collect_image_ids(content, img_ids, WEBUI_MAX_VISION_IMAGES_CAP, &img_count) ==
+          SUCCESS) {
+         for (int i = 0; i < img_count; i++) {
+            image_store_update_retention(img_ids[i], conn->auth_user_id, IMAGE_RETAIN_PERMANENT);
+         }
+      }
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
    } else if (result == AUTH_DB_FORBIDDEN) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));

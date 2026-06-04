@@ -46,6 +46,7 @@
 #include "core/focus/focus_source.h"            /* focus_compose_result_t */
 #include "memory/memory_db_aliases.h"           /* memory_db_proposal_count_pending */
 #include "webui/build_focus_block.h"
+#include "webui/webui_image_rehydrate.h"
 #include "webui/webui_internal.h"
 
 #ifdef ENABLE_WEBUI_AUDIO
@@ -2723,6 +2724,17 @@ static int webui_session_restore_msg_cb(const conversation_message_t *msg, void 
    json_object *obj = json_object_new_object();
    json_object_object_add(obj, "role", json_object_new_string(msg->role));
    json_object_object_add(obj, "content", json_object_new_string(msg->content ? msg->content : ""));
+   /* Carry structured tool fields so the restore loop can rebuild OpenAI-canonical
+    * tool messages (assistant tool_calls / role:tool) for the LLM (E2). */
+   if (msg->tool_calls && msg->tool_calls[0]) {
+      json_object *tc = json_tokener_parse(msg->tool_calls);
+      if (tc) {
+         json_object_object_add(obj, "tool_calls", tc);
+      }
+   }
+   if (msg->tool_call_id && msg->tool_call_id[0]) {
+      json_object_object_add(obj, "tool_call_id", json_object_new_string(msg->tool_call_id));
+   }
    json_object_array_add(arr, obj);
    return 0;
 }
@@ -2789,8 +2801,31 @@ int webui_restore_conversation_context(ws_connection_t *conn,
       json_object *role_obj, *content_obj;
       if (json_object_object_get_ex(msg, "role", &role_obj) &&
           json_object_object_get_ex(msg, "content", &content_obj)) {
-         session_add_message(conn->session, json_object_get_string(role_obj),
-                             json_object_get_string(content_obj));
+         const char *role = json_object_get_string(role_obj);
+         const char *content = json_object_get_string(content_obj);
+         json_object *tc_obj, *tcid_obj;
+         bool has_tc = json_object_object_get_ex(msg, "tool_calls", &tc_obj);
+         bool has_tcid = json_object_object_get_ex(msg, "tool_call_id", &tcid_obj);
+         if (has_tc || has_tcid) {
+            /* Rebuild the OpenAI-canonical tool message in-memory so the LLM sees the
+             * structured call/result on reload.  Orphans (a tool result whose call
+             * didn't restore, etc.) are dropped later by filter_orphaned_tool_messages
+             * at request-build time. */
+            json_object *m = json_object_new_object();
+            json_object_object_add(m, "role", json_object_new_string(role));
+            json_object_object_add(m, "content", json_object_new_string(content ? content : ""));
+            if (has_tc) {
+               json_object_object_add(m, "tool_calls", json_object_get(tc_obj));
+            }
+            if (has_tcid) {
+               json_object_object_add(m, "tool_call_id", json_object_get(tcid_obj));
+            }
+            session_add_message_multipart(conn->session, m);
+         } else {
+            /* Rehydrate [IMAGE:img_id] markers into LLM-faithful image_url content
+             * (owner-checked); no-marker messages fall back to a plain text add. */
+            webui_rehydrate_message_into_session(conn->session, conn->auth_user_id, role, content);
+         }
       }
    }
 

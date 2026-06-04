@@ -636,6 +636,79 @@ int image_store_count_user(int user_id, int *count_out) {
    return IMAGE_STORE_SUCCESS;
 }
 
+int image_store_delete_user(int user_id) {
+   if (user_id <= 0) {
+      return IMAGE_STORE_INVALID;
+   }
+   if (!s_store.initialized) {
+      return IMAGE_STORE_SUCCESS;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Collect filenames first (heap, grows as needed) so the files can be unlinked
+    * after the row delete + lock release.  Bounded by the per-user image cap. */
+   sqlite3_stmt *sel = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT filename FROM images WHERE user_id = ?", -1, &sel,
+                          NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return IMAGE_STORE_FAILURE;
+   }
+   sqlite3_bind_int(sel, 1, user_id);
+
+   char(*filenames)[IMAGE_FILENAME_MAX] = NULL;
+   int n = 0;
+   int cap = 0;
+   while (sqlite3_step(sel) == SQLITE_ROW) {
+      const char *fn = (const char *)sqlite3_column_text(sel, 0);
+      if (!fn || !validate_db_filename(fn)) {
+         continue;
+      }
+      if (n == cap) {
+         int new_cap = cap ? cap * 2 : 32;
+         char(*grown)[IMAGE_FILENAME_MAX] = realloc(filenames,
+                                                    (size_t)new_cap * IMAGE_FILENAME_MAX);
+         if (!grown) {
+            break; /* OOM — unlink what we collected; rows still deleted below */
+         }
+         filenames = grown;
+         cap = new_cap;
+      }
+      strncpy(filenames[n], fn, IMAGE_FILENAME_MAX - 1);
+      filenames[n][IMAGE_FILENAME_MAX - 1] = '\0';
+      n++;
+   }
+   sqlite3_finalize(sel);
+
+   /* Delete all of the user's image rows. */
+   sqlite3_stmt *del = NULL;
+   int deleted = 0;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM images WHERE user_id = ?", -1, &del, NULL) ==
+       SQLITE_OK) {
+      sqlite3_bind_int(del, 1, user_id);
+      if (sqlite3_step(del) == SQLITE_DONE) {
+         deleted = sqlite3_changes(s_db.db);
+      }
+      sqlite3_finalize(del);
+   }
+
+   AUTH_DB_UNLOCK();
+
+   /* Unlink files outside the lock. */
+   for (int i = 0; i < n; i++) {
+      char filepath[IMAGE_PATH_MAX];
+      build_filepath(filenames[i], filepath, sizeof(filepath));
+      if (unlink(filepath) != 0 && errno != ENOENT) {
+         OLOG_WARNING("Image store: delete_user failed to unlink %s: %s", filepath,
+                      strerror(errno));
+      }
+   }
+   free(filenames);
+
+   OLOG_INFO("Image store: deleted %d image(s) for user %d", deleted, user_id);
+   return IMAGE_STORE_SUCCESS;
+}
+
 /* =============================================================================
  * Maintenance
  * ============================================================================= */

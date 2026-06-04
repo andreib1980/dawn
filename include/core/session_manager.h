@@ -273,6 +273,20 @@ typedef struct {
 } async_compaction_t;
 
 /**
+ * @brief Tool-turn persist callback (E2 structured tool-call persistence).
+ *
+ * Fired by the LLM tool loop once per appended tool message, in OpenAI-canonical
+ * form. @p tool_calls_json is the assistant's tool_calls JSON array (NULL for
+ * non-assistant rows); @p tool_call_id is the matching id on role="tool" rows
+ * (NULL otherwise). The implementation persists to conv_db.
+ */
+typedef void (*session_tool_persist_fn)(void *userdata,
+                                        const char *role,
+                                        const char *content,
+                                        const char *tool_calls_json,
+                                        const char *tool_call_id);
+
+/**
  * @brief Session structure
  * @ownership Session manager owns all sessions
  * @thread_safety Protected by session_manager_rwlock
@@ -398,6 +412,14 @@ typedef struct session {
     * session_update_system_messages).  See the prompt-cache design doc. */
    uint32_t stable_prefix_hash;
    bool stable_prefix_drift_logged;
+
+   /* Tool-turn persist hook (E2).  Set by the WebUI around a turn so the LLM tool
+    * loop can durably persist structured tool messages (assistant tool_calls +
+    * role:tool results) via conv_db, keeping the LLM layer decoupled from the DB.
+    * Used synchronously on the worker thread that owns the turn; cleared after.
+    * NULL when the turn shouldn't persist tool structure (no conversation, etc.). */
+   session_tool_persist_fn tool_persist_cb;
+   void *tool_persist_userdata;
 } session_t;
 
 // =============================================================================
@@ -863,6 +885,33 @@ void session_add_message_with_images(session_t *session,
                                      const char *text,
                                      const char *const *vision_images,
                                      int vision_image_count);
+
+/**
+ * @brief Append a pre-built message object to conversation history.
+ *
+ * Takes ownership of @p message (a complete `{role, content, ...}` json_object,
+ * e.g. a multi-part vision message or a reconstructed tool message) and appends
+ * it under history_mutex.  On any error (NULL args, OOM) @p message is freed.
+ * Used by conversation-reload rehydration where the caller builds the exact
+ * LLM-faithful shape (real per-image mime, tool_calls fields) itself.
+ *
+ * @param session Target session
+ * @param message Owned json_object to append (consumed in all paths)
+ *
+ * @locks session->history_mutex
+ * @lock_order 3
+ */
+void session_add_message_multipart(session_t *session, struct json_object *message);
+
+/**
+ * @brief Set (or clear) the tool-turn persist hook for a session.
+ *
+ * The WebUI sets this around a turn so the LLM tool loop can persist structured
+ * tool messages. @p cb and @p userdata are read synchronously on the worker thread
+ * that owns the turn; pass NULL/NULL to clear after the turn completes. @p userdata
+ * lifetime must cover the turn (the caller owns it).
+ */
+void session_set_tool_persist_hook(session_t *session, session_tool_persist_fn cb, void *userdata);
 
 /**
  * @brief Get conversation history JSON (for LLM API calls)

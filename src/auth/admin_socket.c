@@ -51,6 +51,7 @@
 #include "auth/auth_db.h"
 #include "core/path_utils.h"
 #include "dawn_error.h"
+#include "image_store.h"
 #include "logging.h"
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
@@ -1020,6 +1021,16 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
 
    char target[ADMIN_USERNAME_MAX_LEN + 1] = { 0 };
    memcpy(target, target_ptr, target_len);
+
+   /* Purge the user's images (rows + files) BEFORE the user delete: the images FK
+    * cascades the rows on user delete but leaks the files, and after the cascade
+    * there are no rows left to enumerate.  Edge: if the delete is then rejected
+    * (last admin), the images are gone but the account survives — acceptable, since
+    * deleting the last admin is a blocked misuse anyway. */
+   auth_user_t del_user;
+   if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0) {
+      image_store_delete_user(del_user.id);
+   }
 
    /* Delete the user */
    int rc = auth_db_delete_user(target);

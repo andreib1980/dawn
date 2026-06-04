@@ -107,6 +107,18 @@ const char *llm_openai_clamp_effort_for_model(const char *model_name, const char
  */
 json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history);
 
+/**
+ * @brief Reconstruct a Claude-shaped tool message into OpenAI-canonical entries.
+ *
+ * Appends to @p out_array: a Claude assistant {content:[text, tool_use...]} →
+ * one OpenAI assistant with a tool_calls array; a Claude user {content:[tool_result...]}
+ * → one OpenAI {role:"tool", tool_call_id, content} per result (fan-out). Returns
+ * the number of messages appended, or 0 if @p msg has no tool blocks. Shared by the
+ * request-build path and the tool-turn persist path (normalizing Claude history to
+ * the OpenAI-canonical storage shape).
+ */
+int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *out_array);
+
 /* ── Chat-completions implementation (llm_openai_chat_completions.c) ────── */
 
 /**

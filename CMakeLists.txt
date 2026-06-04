@@ -580,6 +580,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_settings.c
         src/webui/webui_tools.c
         src/webui/webui_images.c
+        src/webui/webui_image_rehydrate.c
         src/webui/webui_documents.c
         src/webui/webui_doc_library.c
         src/webui/webui_satellite.c

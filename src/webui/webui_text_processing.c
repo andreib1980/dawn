@@ -310,6 +310,44 @@ char *webui_process_commands(const char *llm_response, session_t *session) {
 
 /* REQUEST_SUPERSEDED macro now defined in webui_internal.h */
 
+/* Context + callback for the LLM tool loop's structured tool-turn persistence (E2).
+ * The daemon owns the structured tool data (the browser only saves the final visible
+ * assistant text); this writes the assistant tool_calls + role:tool rows to conv_db.
+ *
+ * Holds the retained `session` (NOT a raw `conn`): the hook fires seconds into the turn
+ * when tools resolve, and a client disconnect on the lws thread frees `conn` after
+ * LWS_CALLBACK_CLOSED — so caching `conn` here would be a use-after-free.  The worker
+ * already holds a session reference for the whole turn, so the session is lifetime-safe.
+ * The conv_id is read live via webui_get_active_conversation_id() (which goes through
+ * session->client_data, NULLed on disconnect) because a brand-new chat's conversation is
+ * created a moment AFTER the turn starts (the browser's new_conversation message), still
+ * well before the LLM emits tool calls; a setup-time snapshot would be 0.  auth_user_id is
+ * stable for the connection, so it is snapshotted at setup. */
+typedef struct {
+   session_t *session;
+   int auth_user_id;
+} webui_tool_persist_ctx_t;
+
+static void webui_tool_persist_cb(void *userdata,
+                                  const char *role,
+                                  const char *content,
+                                  const char *tool_calls_json,
+                                  const char *tool_call_id) {
+   webui_tool_persist_ctx_t *ctx = (webui_tool_persist_ctx_t *)userdata;
+   if (!ctx || !ctx->session || !role) {
+      return;
+   }
+   int64_t conv_id = webui_get_active_conversation_id(ctx->session);
+   if (conv_id <= 0) {
+      return; /* conversation not established yet — skip (rare; tools fire seconds in) */
+   }
+   if (conv_db_add_message_with_tools(conv_id, ctx->auth_user_id, role, content ? content : "",
+                                      tool_calls_json, tool_call_id, NULL) != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("WebUI: failed to persist tool-turn %s row to conv %lld (may orphan on reload)",
+                   role, (long long)conv_id);
+   }
+}
+
 /* Callback fired by core_text_input_dispatch after the user message is
  * added to history + (optionally) persisted to conv_db, but before
  * focus injection and the LLM call.  Preserves the WebUI's "transcript
@@ -403,10 +441,24 @@ static void *text_worker_thread(void *arg) {
       .user_msg_added_ctx = session,
    };
 
+   /* Install the tool-turn persist hook for the duration of the (synchronous) LLM
+    * call so the tool loop can durably persist structured assistant tool_calls +
+    * role:tool rows.  persist_ctx is stack-scoped and the hook fires on THIS thread
+    * during core_text_input_dispatch, so it's valid throughout; cleared right after.
+    * Installed whenever we have a connection — the callback reads the conversation id
+    * live (it may still be 0 here for a brand-new chat, but is set before tools fire). */
+   webui_tool_persist_ctx_t persist_ctx = { .session = session,
+                                            .auth_user_id = conn ? conn->auth_user_id : 0 };
+   if (conn) {
+      session_set_tool_persist_hook(session, webui_tool_persist_cb, &persist_ctx);
+   }
+
    char *response = core_text_input_dispatch(
        session, text, (const char **)work->vision_images, work->vision_image_sizes,
        (const char(*)[WEBUI_VISION_MIME_MAX])work->vision_mimes, work->vision_image_count,
        &dispatch_opts);
+
+   session_set_tool_persist_hook(session, NULL, NULL); /* persist_ctx goes out of scope below */
 
    /* Free vision data after LLM call (it's been sent over HTTP, no longer needed) */
    for (int i = 0; i < work->vision_image_count; i++) {

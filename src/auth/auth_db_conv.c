@@ -1270,11 +1270,13 @@ int conv_db_update_llm_settings(int64_t conv_id,
  * Message Operations
  * ============================================================================= */
 
-int conv_db_add_message_ex(int64_t conv_id,
-                           int user_id,
-                           const char *role,
-                           const char *content,
-                           int64_t *msg_id_out) {
+int conv_db_add_message_with_tools(int64_t conv_id,
+                                   int user_id,
+                                   const char *role,
+                                   const char *content,
+                                   const char *tool_calls,
+                                   const char *tool_call_id,
+                                   int64_t *msg_id_out) {
    if (msg_id_out)
       *msg_id_out = 0;
 
@@ -1297,9 +1299,17 @@ int conv_db_add_message_ex(int64_t conv_id,
    sqlite3_bind_int64(s_db.stmt_msg_add, 1, conv_id);
    sqlite3_bind_text(s_db.stmt_msg_add, 2, role, -1, SQLITE_STATIC);
    sqlite3_bind_text(s_db.stmt_msg_add, 3, content, -1, SQLITE_STATIC);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 4, (int64_t)now);
-   sqlite3_bind_int64(s_db.stmt_msg_add, 5, conv_id); /* For ownership check */
-   sqlite3_bind_int(s_db.stmt_msg_add, 6, user_id);   /* For ownership check */
+   if (tool_calls)
+      sqlite3_bind_text(s_db.stmt_msg_add, 4, tool_calls, -1, SQLITE_STATIC);
+   else
+      sqlite3_bind_null(s_db.stmt_msg_add, 4);
+   if (tool_call_id)
+      sqlite3_bind_text(s_db.stmt_msg_add, 5, tool_call_id, -1, SQLITE_STATIC);
+   else
+      sqlite3_bind_null(s_db.stmt_msg_add, 5);
+   sqlite3_bind_int64(s_db.stmt_msg_add, 6, (int64_t)now);
+   sqlite3_bind_int64(s_db.stmt_msg_add, 7, conv_id); /* For ownership check */
+   sqlite3_bind_int(s_db.stmt_msg_add, 8, user_id);   /* For ownership check */
 
    int rc = sqlite3_step(s_db.stmt_msg_add);
    sqlite3_reset(s_db.stmt_msg_add);
@@ -1349,8 +1359,26 @@ int conv_db_add_message_ex(int64_t conv_id,
    return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
+int conv_db_add_message_ex(int64_t conv_id,
+                           int user_id,
+                           const char *role,
+                           const char *content,
+                           int64_t *msg_id_out) {
+   return conv_db_add_message_with_tools(conv_id, user_id, role, content, NULL, NULL, msg_id_out);
+}
+
 int conv_db_add_message(int64_t conv_id, int user_id, const char *role, const char *content) {
    return conv_db_add_message_ex(conv_id, user_id, role, content, NULL);
+}
+
+/* Read the content + tool columns + created_at from a message-SELECT row whose
+ * projection is (id, conversation_id, role, content, tool_calls, tool_call_id,
+ * created_at).  All pointers are borrowed (valid only during the callback). */
+static void msg_read_columns(conversation_message_t *msg, sqlite3_stmt *stmt) {
+   msg->content = (char *)sqlite3_column_text(stmt, 3);
+   msg->tool_calls = (char *)sqlite3_column_text(stmt, 4);
+   msg->tool_call_id = (char *)sqlite3_column_text(stmt, 5);
+   msg->created_at = (time_t)sqlite3_column_int64(stmt, 6);
 }
 
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx) {
@@ -1378,9 +1406,8 @@ int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callba
          msg.role[CONV_ROLE_MAX - 1] = '\0';
       }
 
-      /* Content pointer is only valid during callback */
-      msg.content = (char *)sqlite3_column_text(s_db.stmt_msg_get, 3);
-      msg.created_at = (time_t)sqlite3_column_int64(s_db.stmt_msg_get, 4);
+      /* Column pointers are only valid during the callback */
+      msg_read_columns(&msg, s_db.stmt_msg_get);
 
       if (callback(&msg, ctx) != 0) {
          break;
@@ -1457,15 +1484,15 @@ int conv_db_get_messages_paginated(int64_t conv_id,
    char sql[512];
    if (before_id > 0) {
       snprintf(sql, sizeof(sql),
-               "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-               "FROM messages m "
+               "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
+               "m.created_at FROM messages m "
                "INNER JOIN conversations c ON m.conversation_id = c.id "
                "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id < ? "
                "ORDER BY m.id DESC LIMIT ?");
    } else {
       snprintf(sql, sizeof(sql),
-               "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-               "FROM messages m "
+               "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
+               "m.created_at FROM messages m "
                "INNER JOIN conversations c ON m.conversation_id = c.id "
                "WHERE m.conversation_id = ? AND c.user_id = ? "
                "ORDER BY m.id DESC LIMIT ?");
@@ -1500,9 +1527,8 @@ int conv_db_get_messages_paginated(int64_t conv_id,
          msg.role[CONV_ROLE_MAX - 1] = '\0';
       }
 
-      /* Content pointer is only valid during callback */
-      msg.content = (char *)sqlite3_column_text(stmt, 3);
-      msg.created_at = (time_t)sqlite3_column_int64(stmt, 4);
+      /* Column pointers are only valid during the callback */
+      msg_read_columns(&msg, stmt);
 
       if (callback(&msg, ctx) != 0) {
          break;
@@ -1538,8 +1564,7 @@ int conv_db_get_messages_admin(int64_t conv_id, message_callback_t callback, voi
          msg.role[CONV_ROLE_MAX - 1] = '\0';
       }
 
-      msg.content = (char *)sqlite3_column_text(s_db.stmt_msg_get_admin, 3);
-      msg.created_at = (time_t)sqlite3_column_int64(s_db.stmt_msg_get_admin, 4);
+      msg_read_columns(&msg, s_db.stmt_msg_get_admin);
 
       if (callback(&msg, ctx) != 0) {
          break;

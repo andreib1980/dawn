@@ -685,6 +685,56 @@
    }
 
    /**
+    * Evict the oldest cached images from localStorage.
+    * localStorage.key() iterates in insertion order, so keys[0..] are oldest-first,
+    * giving an LRU-ish eviction. Only touches our own dawn_img_ entries.
+    * @param {number} maxRemove - Max entries to remove this pass
+    * @returns {number} - Number actually removed
+    */
+   function evictOldImageCacheEntries(maxRemove) {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+         const k = localStorage.key(i);
+         if (k && k.startsWith(IMAGE_CACHE_PREFIX)) {
+            keys.push(k);
+         }
+      }
+      const removeCount = Math.min(maxRemove, keys.length);
+      for (let i = 0; i < removeCount; i++) {
+         localStorage.removeItem(keys[i]);
+      }
+      return removeCount;
+   }
+
+   /**
+    * Cache an image data URL, evicting old cached images on quota errors and
+    * retrying — so a full cache no longer permanently disables caching.
+    * @param {string} cacheKey - localStorage key
+    * @param {string} dataUrl - Data URL to cache
+    * @returns {boolean} - true if cached, false if skipped
+    */
+   function cacheImageDataUrl(cacheKey, dataUrl) {
+      for (let attempt = 0; attempt < 6; attempt++) {
+         try {
+            localStorage.setItem(cacheKey, dataUrl);
+            return true;
+         } catch (e) {
+            // Quota exceeded — free space by evicting older cached images, then retry.
+            // Quota is a function of BYTES, not entry count: a few large recent entries
+            // can dwarf many tiny old ones, so escalate the batch each pass (8,16,32,...)
+            // until the write fits or every cached image is gone. evict==0 means nothing
+            // is left to free, so this single image alone exceeds the quota.
+            if (evictOldImageCacheEntries(8 << attempt) === 0) {
+               console.warn('Image cache: item too large for localStorage, skipping cache');
+               return false;
+            }
+         }
+      }
+      console.warn('Image cache: could not free enough localStorage, skipping cache');
+      return false;
+   }
+
+   /**
     * Load an image from server by ID (with localStorage caching)
     * @param {string} imageId - Image ID (e.g., "img_a1b2c3d4e5f6")
     * @returns {Promise<string|null>} - Data URL or null if not found
@@ -715,12 +765,9 @@
          const blob = await response.blob();
          const dataUrl = await readAsDataURL(blob);
 
-         // Cache in localStorage (with error handling for quota)
-         try {
-            localStorage.setItem(cacheKey, dataUrl);
-         } catch (e) {
-            console.warn('localStorage cache full, continuing without caching');
-         }
+         // Cache in localStorage, evicting old entries on quota errors so a full
+         // cache self-heals instead of permanently refetching every image.
+         cacheImageDataUrl(cacheKey, dataUrl);
 
          return dataUrl;
       } catch (err) {
