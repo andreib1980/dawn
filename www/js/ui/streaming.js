@@ -209,7 +209,51 @@
          return;
       }
 
+      // Tool-loop iteration boundary (server reason; must match webui_text_processing.c):
+      // seal the current bubble so this iteration's tool entries render after its text and
+      // the next iteration opens a fresh bubble — but DON'T go idle or save (the turn
+      // continues; the daemon persists intermediate tool-turn text, and only the final
+      // stream_end saves the visible answer).
+      if (payload.reason === 'tool_iteration') {
+         finalizeStreamBubble();
+         return;
+      }
+
       finalizeStream();
+   }
+
+   /**
+    * Lightweight finalize for an iteration-boundary bubble: render its final content and
+    * mark the stream inactive so the next iteration's stream_start opens a new bubble.
+    * Unlike finalizeStream() it does NOT transition to idle or save to the conversation.
+    */
+   function finalizeStreamBubble() {
+      if (!DawnState.streamingState.active) {
+         return;
+      }
+
+      if (DawnState.streamingState.textElement && DawnState.streamingState.content) {
+         var finalContent = DawnState.streamingState.content.replace(
+            /<thinking>[\s\S]*?<\/thinking>\s*/g,
+            ''
+         );
+         DawnState.streamingState.textElement.innerHTML = DawnFormat.markdown(finalContent);
+         DawnFormat.addCopyButtons(DawnState.streamingState.textElement);
+         DawnState.streamingState.textElement.setAttribute('data-raw-text', finalContent);
+      }
+
+      if (DawnState.streamingState.entryElement) {
+         DawnState.streamingState.entryElement.classList.remove('streaming');
+      }
+
+      // Reset so the next iteration's stream_start creates a fresh bubble. Matches the
+      // fields handleStreamStart re-initializes, plus preVisualContent so intermediate
+      // content never leaks into the final saved message.
+      DawnState.streamingState.active = false;
+      DawnState.streamingState.entryElement = null;
+      DawnState.streamingState.textElement = null;
+      DawnState.streamingState.content = '';
+      DawnState.streamingState.preVisualContent = '';
    }
 
    /**

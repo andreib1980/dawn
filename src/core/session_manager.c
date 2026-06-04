@@ -1322,6 +1322,17 @@ void session_set_tool_persist_hook(session_t *session, session_tool_persist_fn c
    session->tool_persist_userdata = userdata;
 }
 
+void session_set_tool_iteration_hook(session_t *session,
+                                     session_tool_iteration_fn cb,
+                                     void *userdata) {
+   if (!session) {
+      return;
+   }
+   /* Same threading contract as the persist hook above: worker-thread-only. */
+   session->tool_iteration_cb = cb;
+   session->tool_iteration_userdata = userdata;
+}
+
 struct json_object *session_get_history(session_t *session) {
    if (!session) {
       return NULL;

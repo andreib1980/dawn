@@ -26,6 +26,7 @@
 #include "webui/webui_server.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <ifaddrs.h>
@@ -2197,9 +2198,26 @@ static inline void update_stream_last_char(session_t *session, const char *text)
  * This callback adapts the shared text_filter's signature to WebUI needs.
  * Session is passed via ctx parameter.
  */
+/* True if [text, text+len) is empty or only whitespace.  Used to avoid opening a
+ * streaming bubble for whitespace-only content (e.g. the "\n\n" tool-iteration flush
+ * on a tool-only iteration), which would otherwise leave an empty bubble. */
+static bool stream_text_is_all_whitespace(const char *text, size_t len) {
+   for (size_t i = 0; i < len; i++) {
+      if (!isspace((unsigned char)text[i])) {
+         return false;
+      }
+   }
+   return true;
+}
+
 static void webui_filter_output(const char *text, size_t len, void *ctx) {
    session_t *session = (session_t *)ctx;
    if (!session || !text || len == 0) {
+      return;
+   }
+
+   /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
+   if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, len)) {
       return;
    }
 
@@ -2281,6 +2299,10 @@ void webui_send_stream_delta(session_t *session, const char *text) {
 
    /* If native tools are enabled, pass through without filtering */
    if (session->cmd_tag_filter_bypass) {
+      /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
+      if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, strlen(text))) {
+         return;
+      }
       if (!session->llm_streaming_active) {
          webui_send_stream_start(session);
       }

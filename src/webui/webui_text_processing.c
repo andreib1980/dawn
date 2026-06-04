@@ -348,6 +348,18 @@ static void webui_tool_persist_cb(void *userdata,
    }
 }
 
+/* Iteration-boundary hook: close the current streaming bubble (if one is open) so this
+ * iteration's tool entries render after its text and the next iteration opens a fresh
+ * bubble.  reason="tool_iteration" tells the browser to seal the bubble WITHOUT going
+ * idle or saving it (only the final stream_end does that).  Must stay in sync with the
+ * matching reason string in www/js/ui/streaming.js. */
+static void webui_tool_iteration_cb(session_t *session, void *userdata) {
+   (void)userdata;
+   if (session && atomic_load(&session->llm_streaming_active)) {
+      webui_send_stream_end(session, "tool_iteration");
+   }
+}
+
 /* Callback fired by core_text_input_dispatch after the user message is
  * added to history + (optionally) persisted to conv_db, but before
  * focus injection and the LLM call.  Preserves the WebUI's "transcript
@@ -451,6 +463,9 @@ static void *text_worker_thread(void *arg) {
                                             .auth_user_id = conn ? conn->auth_user_id : 0 };
    if (conn) {
       session_set_tool_persist_hook(session, webui_tool_persist_cb, &persist_ctx);
+      /* Live-transcript reorder: segment the streaming bubble per tool-loop iteration.
+       * Stateless (acts on the session), so no userdata needed. */
+      session_set_tool_iteration_hook(session, webui_tool_iteration_cb, NULL);
    }
 
    char *response = core_text_input_dispatch(
@@ -459,6 +474,7 @@ static void *text_worker_thread(void *arg) {
        &dispatch_opts);
 
    session_set_tool_persist_hook(session, NULL, NULL); /* persist_ctx goes out of scope below */
+   session_set_tool_iteration_hook(session, NULL, NULL);
 
    /* Free vision data after LLM call (it's been sent over HTTP, no longer needed) */
    for (int i = 0; i < work->vision_image_count; i++) {

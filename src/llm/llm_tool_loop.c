@@ -147,6 +147,21 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params, int befor
    session_release(s);
 }
 
+/* Fire the per-session iteration-boundary hook (if installed).  Called when an
+ * iteration produced tool calls, just before the tools execute, so the WebUI can
+ * close the current streaming bubble — the next iteration's text then opens a fresh
+ * bubble below the tool entries.  No-op for satellite / local-mic turns (hook NULL). */
+static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
+   session_t *s = session_get(params->session_id);
+   if (!s) {
+      return;
+   }
+   if (s->tool_iteration_cb) {
+      s->tool_iteration_cb(s, s->tool_iteration_userdata);
+   }
+   session_release(s);
+}
+
 static void append_openai_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
                                        const tool_result_list_t *results) {
@@ -524,6 +539,11 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          typedef void (*text_chunk_cb)(const char *, void *);
          ((text_chunk_cb)params->chunk_callback)("\n\n", params->callback_userdata);
       }
+
+      /* Close the current streaming bubble at the iteration boundary so this
+       * iteration's tool call/result entries render after its text, and the next
+       * iteration opens a fresh bubble below them (live order matches reload order). */
+      fire_tool_iteration_boundary(params);
 
       OLOG_INFO("Tool loop: %d tool call(s) at iteration %d/%d", result.tool_calls.count, iteration,
                 LLM_TOOLS_MAX_ITERATIONS);

@@ -287,6 +287,18 @@ typedef void (*session_tool_persist_fn)(void *userdata,
                                         const char *tool_call_id);
 
 /**
+ * @brief Tool-loop iteration-boundary callback.
+ *
+ * Fired by the LLM tool loop after an iteration produces tool calls (just before
+ * the tools execute), so the WebUI can close the current streaming bubble — the next
+ * iteration's text then opens a fresh bubble below the tool entries, matching the
+ * reloaded-conversation order.  Opt-in per session: only installed by the WebUI text
+ * path, so satellite / local-mic turns (which never set it) are unaffected.
+ */
+struct session; /* defined below; forward-declared for the callback typedef */
+typedef void (*session_tool_iteration_fn)(struct session *session, void *userdata);
+
+/**
  * @brief Session structure
  * @ownership Session manager owns all sessions
  * @thread_safety Protected by session_manager_rwlock
@@ -420,6 +432,14 @@ typedef struct session {
     * NULL when the turn shouldn't persist tool structure (no conversation, etc.). */
    session_tool_persist_fn tool_persist_cb;
    void *tool_persist_userdata;
+
+   /* Tool-loop iteration-boundary hook (live-transcript reorder).  Set by the WebUI
+    * around a turn so the streaming bubble can be closed at each tool-calling iteration
+    * boundary, keeping the live view's call/result order aligned with the reloaded view.
+    * Opt-in (NULL for satellite / local-mic turns); used on the worker thread; cleared
+    * after the turn. */
+   session_tool_iteration_fn tool_iteration_cb;
+   void *tool_iteration_userdata;
 } session_t;
 
 // =============================================================================
@@ -912,6 +932,19 @@ void session_add_message_multipart(session_t *session, struct json_object *messa
  * lifetime must cover the turn (the caller owns it).
  */
 void session_set_tool_persist_hook(session_t *session, session_tool_persist_fn cb, void *userdata);
+
+/**
+ * @brief Set (or clear) the tool-loop iteration-boundary hook for a session.
+ *
+ * The WebUI sets this around a turn so the live streaming bubble is closed at each
+ * tool-calling iteration boundary (so call/result entries interleave with text the
+ * way a reloaded conversation does). @p cb / @p userdata are read on the worker thread
+ * that owns the turn; pass NULL/NULL to clear after the turn. Opt-in: satellite and
+ * local-mic turns never set it and are unaffected.
+ */
+void session_set_tool_iteration_hook(session_t *session,
+                                     session_tool_iteration_fn cb,
+                                     void *userdata);
 
 /**
  * @brief Get conversation history JSON (for LLM API calls)
