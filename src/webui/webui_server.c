@@ -2737,6 +2737,89 @@ void webui_force_disconnect_satellite(const char *uuid) {
  * JSON Message Handler Implementation
  * ============================================================================= */
 
+/* Skip leading ASCII whitespace; returns the first non-whitespace char. */
+static const char *restore_skip_ws(const char *s) {
+   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+      s++;
+   }
+   return s;
+}
+
+/* If @p s begins with "<dawn:" then (optional whitespace) @p kw, return a pointer just past
+ * @p kw; else NULL.  Whitespace-tolerant so a malformed imitated marker ("<dawn: reasoning")
+ * still matches. */
+static const char *restore_match_dawn_open(const char *s, const char *kw) {
+   static const char prefix[] = "<dawn:";
+   if (strncmp(s, prefix, sizeof(prefix) - 1) != 0) {
+      return NULL;
+   }
+   const char *p = restore_skip_ws(s + sizeof(prefix) - 1);
+   size_t klen = strlen(kw);
+   return (strncmp(p, kw, klen) == 0) ? p + klen : NULL;
+}
+
+/* Find the position just past the next "</dawn:" (ws?) "thinking" (ws?) ">" close tag, or
+ * NULL if none.  Whitespace-tolerant to match the imitated-marker variants. */
+static const char *restore_find_dawn_close_thinking(const char *s) {
+   for (const char *c = strstr(s, "</dawn:"); c; c = strstr(c + 1, "</dawn:")) {
+      const char *p = restore_skip_ws(c + 7); /* strlen("</dawn:") */
+      if (strncmp(p, "thinking", 8) != 0) {
+         continue;
+      }
+      p = restore_skip_ws(p + 8);
+      if (*p == '>') {
+         return p + 1;
+      }
+   }
+   return NULL;
+}
+
+/*
+ * Strip ONLY leading legacy display markers from assistant content before it enters the
+ * session's LLM-facing history.  The pre-E3 client persistence path prepended
+ * "<dawn:reasoning .../>" and "<dawn:thinking ...>...</dawn:thinking>" blocks to assistant
+ * content; they are a DISPLAY artifact (the reload path extracts them into a panel) and must
+ * never reach the LLM — a reasoning model restored onto such a conversation imitates the
+ * marker format in its own output (observed 2026-06-04 after a provider switch, where the
+ * model emitted a fabricated "<dawn: reasoning tokens=...">).
+ *
+ * Scope is deliberately tight: only the LEADING marker block(s) (the legacy prepend
+ * position), and the caller applies this to ASSISTANT messages only.  A mid-message mention
+ * of these tags (e.g. discussing DAWN's code) is left untouched.  Returns a newly-allocated
+ * cleaned copy, or NULL if nothing was stripped (caller keeps the original pointer).
+ */
+static char *restore_strip_leading_dawn_markers(const char *content) {
+   if (!content) {
+      return NULL;
+   }
+   const char *p = content;
+   for (;;) {
+      const char *q = restore_skip_ws(p);
+      if (restore_match_dawn_open(q, "reasoning")) {
+         /* Self-closing tag: advance past its '>'. */
+         const char *gt = strchr(q, '>');
+         if (!gt) {
+            break; /* malformed/unterminated — stop, keep the remainder intact */
+         }
+         p = gt + 1;
+         continue;
+      }
+      if (restore_match_dawn_open(q, "thinking")) {
+         const char *close = restore_find_dawn_close_thinking(q);
+         if (!close) {
+            break; /* unterminated block — stop, don't eat the real answer */
+         }
+         p = close;
+         continue;
+      }
+      break;
+   }
+   if (p == content) {
+      return NULL; /* no leading markers */
+   }
+   return strdup(restore_skip_ws(p)); /* trim the blank line before the real answer */
+}
+
 /**
  * @brief Message callback for session context restoration.
  * Builds JSON objects with role + content for iterating into session_add_message.
@@ -2825,6 +2908,18 @@ int webui_restore_conversation_context(ws_connection_t *conn,
           json_object_object_get_ex(msg, "content", &content_obj)) {
          const char *role = json_object_get_string(role_obj);
          const char *content = json_object_get_string(content_obj);
+
+         /* Strip leading legacy <dawn:reasoning/>/<dawn:thinking> display markers from
+          * assistant content so the LLM never sees them (and stops imitating the format).
+          * Assistant-only, leading-only — see restore_strip_leading_dawn_markers. */
+         char *stripped_content = NULL;
+         if (role && strcmp(role, "assistant") == 0) {
+            stripped_content = restore_strip_leading_dawn_markers(content);
+            if (stripped_content) {
+               content = stripped_content;
+            }
+         }
+
          json_object *tc_obj, *tcid_obj;
          bool has_tc = json_object_object_get_ex(msg, "tool_calls", &tc_obj);
          bool has_tcid = json_object_object_get_ex(msg, "tool_call_id", &tcid_obj);
@@ -2848,6 +2943,7 @@ int webui_restore_conversation_context(ws_connection_t *conn,
              * (owner-checked); no-marker messages fall back to a plain text add. */
             webui_rehydrate_message_into_session(conn->session, conn->auth_user_id, role, content);
          }
+         free(stripped_content);
       }
    }
 

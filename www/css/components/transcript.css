@@ -23,62 +23,6 @@
    font-style: italic;
 }
 
-/* Load more indicator for pagination */
-.load-more-indicator {
-   text-align: center;
-   padding: 0.75rem;
-   margin-bottom: 1rem;
-}
-
-.load-more-btn {
-   background: var(--accent-subtle);
-   border: 1px solid var(--accent-border);
-   border-radius: var(--border-radius);
-   padding: 0.5rem 1rem;
-   color: var(--accent-primary);
-   font-size: 0.85rem;
-   cursor: pointer;
-   transition: all var(--transition-fast);
-}
-
-.load-more-btn:hover:not(:disabled) {
-   background: var(--accent-border);
-   border-color: var(--accent-primary);
-}
-
-.load-more-btn:disabled {
-   opacity: 0.6;
-   cursor: not-allowed;
-}
-
-/* Loading spinner for pagination button */
-.load-more-btn.loading::before {
-   content: '';
-   display: inline-block;
-   width: 0.8em;
-   height: 0.8em;
-   margin-right: 0.5em;
-   border: 2px solid var(--accent-primary);
-   border-top-color: transparent;
-   border-radius: 50%;
-   animation: spin 0.8s linear infinite;
-   vertical-align: middle;
-}
-
-@keyframes spin {
-   to {
-      transform: rotate(360deg);
-   }
-}
-
-/* Reduced motion: disable spinner animation */
-@media (prefers-reduced-motion: reduce) {
-   .load-more-btn.loading::before {
-      animation: none;
-      border-color: var(--accent-primary);
-   }
-}
-
 /* Continuation banner for continued conversations */
 .continuation-banner {
    background: var(--accent-subtle);
@@ -374,6 +318,15 @@ body.debug-mode .transcript-entry.debug {
 .transcript-entry.debug .text {
    white-space: pre-wrap;
    word-break: break-word;
+}
+
+/* Inline highlight tags inside debug text (formatCommandText) — theme tokens, not hex. */
+.cmd-tag {
+   color: var(--accent);
+}
+
+.tool-result-tag {
+   color: var(--success);
 }
 
 /* Tool result specific styling (green theme) */
@@ -722,8 +675,17 @@ body.debug-mode .transcript-entry.debug {
 }
 
 .thinking-header:focus-visible {
-   outline: 2px solid #fff;
+   outline: 2px solid var(--accent);
    outline-offset: 2px;
+}
+
+/* Static (non-interactive) header — reasoning-only summary notes have nothing to expand. */
+.thinking-header.static {
+   cursor: default;
+}
+
+.thinking-header.static:hover {
+   background: transparent;
 }
 
 .thinking-icon {
@@ -759,13 +721,25 @@ body.debug-mode .transcript-entry.debug {
    font-size: 0.8rem;
    line-height: 1.5;
    color: var(--text-secondary);
-   white-space: pre-wrap;
+   /* Content is rendered markdown (marked + DOMPurify) — block elements handle their own
+      layout, so no pre-wrap (which would surface the source whitespace between HTML tags). */
+   white-space: normal;
    word-break: break-word;
    transition:
       max-height var(--transition-fast),
       padding var(--transition-fast),
       opacity var(--transition-fast),
       border-top-color var(--transition-fast);
+}
+
+/* Trim outer margins of the rendered-markdown block children so the panel padding controls
+   spacing rather than the first/last paragraph's default margin. */
+.thinking-content > :first-child {
+   margin-top: 0;
+}
+
+.thinking-content > :last-child {
+   margin-bottom: 0;
 }
 
 /* Collapsed state */

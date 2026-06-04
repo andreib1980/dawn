@@ -701,6 +701,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
           &result, reasoning_provider_label(params->llm_type, params->cloud_provider));
       persist_appended_tool_turn(params, hist_before, reasoning_json);
       free(reasoning_json);
+      reasoning_json = NULL;
 
       /* Step 8b: All-silent check — tools handled their own output */
       if (followup.all_silent) {

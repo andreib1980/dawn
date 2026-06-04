@@ -32,6 +32,11 @@
 #include "llm/llm_openai_internal.h"
 #include "logging.h"
 
+/* Stack buffer for accumulating concatenated Claude text blocks during conversion.
+ * Sized generously for a single assistant turn's text; the two converters below
+ * (convert_claude_tool_to_openai and the vision-strip pass) must stay in sync. */
+#define CLAUDE_TOOL_TEXT_BUF_MAX 8192
+
 /* ── Content block helpers ──────────────────────────────────────────────── */
 
 /* Lossless reconstruction of a Claude-shaped tool message into OpenAI-canonical
@@ -81,7 +86,7 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
       json_object_object_add(asst, "role", json_object_new_string("assistant"));
       struct json_object *tool_calls = json_object_new_array();
 
-      char text_buf[8192] = ""; /* matches the sibling converter buffer below */
+      char text_buf[CLAUDE_TOOL_TEXT_BUF_MAX] = "";
       size_t toff = 0;
       for (int i = 0; i < arr_len; i++) {
          struct json_object *elem = json_object_array_get_idx(content_obj, i);
@@ -159,12 +164,12 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
          json_object_object_add(tool_msg, "role", json_object_new_string("tool"));
          json_object_object_add(tool_msg, "tool_call_id", json_object_get(tuid));
          /* Claude tool_result content may be a string or an array of blocks. */
-         struct json_object *rc;
+         struct json_object *content_obj;
          const char *result = "";
-         if (json_object_object_get_ex(elem, "content", &rc)) {
-            result = (json_object_get_type(rc) == json_type_string)
-                         ? json_object_get_string(rc)
-                         : json_object_to_json_string(rc);
+         if (json_object_object_get_ex(elem, "content", &content_obj)) {
+            result = (json_object_get_type(content_obj) == json_type_string)
+                         ? json_object_get_string(content_obj)
+                         : json_object_to_json_string(content_obj);
          }
          json_object_object_add(tool_msg, "content", json_object_new_string(result));
          json_object_array_add(out_array, tool_msg);
@@ -589,7 +594,7 @@ static struct json_object *strip_vision_content(struct json_object *history) {
       if (json_object_object_get_ex(msg, "content", &content_obj) &&
           json_object_get_type(content_obj) == json_type_array) {
          int arr_len = json_object_array_length(content_obj);
-         char text_buffer[8192] = "";
+         char text_buffer[CLAUDE_TOOL_TEXT_BUF_MAX] = "";
          size_t text_len = 0;
          bool found_image = false;
 

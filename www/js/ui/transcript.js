@@ -75,6 +75,11 @@
     * @returns {HTMLElement}
     */
    function createThinkingBlock(thinking) {
+      // SECURITY: on reload, `thinking` is parsed from the persisted (attacker-controllable)
+      // `reasoning` column. `thinking.content` is rendered as markdown via DawnFormat.markdown,
+      // which runs marked + DOMPurify (the same sanitized pipeline as message bodies). It MUST
+      // stay on that DOMPurify-sanitized path — never assign raw content or unsanitized
+      // marked output to innerHTML, which would be stored XSS.
       const entry = document.createElement('div');
       entry.className = 'thinking-block collapsed completed';
       entry.setAttribute('role', 'region');
@@ -87,7 +92,7 @@
       // "thought" when there's a summary, "reasoned" when only token counts (no summary).
       const verb = hasContent ? 'thought' : 'reasoned';
       const contentHtml = hasContent
-         ? DawnFormat.escapeHtml(thinking.content).replace(/\n/g, '<br>')
+         ? DawnFormat.markdown(thinking.content)
          : '<em>No reasoning summary available for this turn.</em>';
       const contentClass = hasContent ? 'thinking-content' : 'thinking-content no-summary';
 
@@ -172,35 +177,27 @@
     * @returns {HTMLElement}
     */
    function createReasoningBlock(reasoning) {
+      // Opaque reasoning has no summary text to reveal, so this is a static,
+      // non-interactive note (token count only) — no fake expand button.
+      // SECURITY: `reasoning` is attacker-controllable persisted JSON; every value
+      // interpolated below MUST go through escapeHtml (never markdown()/raw innerHTML),
+      // or a crafted reasoning blob becomes stored XSS. Keep this block on the escaped path.
+      // Must stay markup-identical to streaming.js Case 2 so live and reload match.
       const entry = document.createElement('div');
-      entry.className = 'thinking-block collapsed completed reasoning-only';
-      entry.setAttribute('role', 'region');
-      entry.setAttribute('aria-label', 'AI reasoning summary');
+      entry.className = 'thinking-block completed reasoning-only';
+      entry.setAttribute('role', 'note');
+      entry.setAttribute('aria-label', `${DawnFormat.assistantName()} reasoning summary`);
 
       const tokens = reasoning.tokens || 0;
       const stats = DawnFormat.escapeHtml(formatThinkingStats(null, tokens));
       const safeLabel = DawnFormat.escapeHtml(`${DawnFormat.assistantName()} reasoned`);
       entry.innerHTML = `
-      <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
+      <div class="thinking-header static">
         <span class="thinking-icon" aria-hidden="true">🧠</span>
         <span class="thinking-label">${safeLabel}</span>
         <span class="thinking-duration">${stats}</span>
-        <span class="thinking-toggle" aria-hidden="true">▼</span>
-      </div>
-      <div class="thinking-content no-summary">
-        <em>No reasoning summary available for this turn.</em>
       </div>
     `;
-
-      // Add click handler for toggle
-      const header = entry.querySelector('.thinking-header');
-      header.addEventListener('click', () => toggleThinkingBlock(entry));
-      header.addEventListener('keydown', (e) => {
-         if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggleThinkingBlock(entry);
-         }
-      });
 
       return entry;
    }
@@ -367,13 +364,13 @@
     * @returns {string}
     */
    function formatCommandText(text) {
-      // Highlight <command> tags in cyan, tool results in green
+      // Highlight <command> tags (accent) and tool results (success) via theme tokens.
       return text
-         .replace(/(<command>)/g, '<span style="color:#22d3ee">$1</span>')
-         .replace(/(<\/command>)/g, '<span style="color:#22d3ee">$1</span>')
+         .replace(/(<command>)/g, '<span class="cmd-tag">$1</span>')
+         .replace(/(<\/command>)/g, '<span class="cmd-tag">$1</span>')
          .replace(
             /(\[Tool Result:[\s\S]*?(?:\](?=\s*$)|$))/g,
-            '<span style="color:#22c55e">$1</span>'
+            '<span class="tool-result-tag">$1</span>'
          );
    }
 
@@ -532,197 +529,6 @@
                firstTextEl.appendChild(imagesContainer);
                // Scroll again after images are added (they increase height)
                transcript.scrollTop = transcript.scrollHeight;
-            }
-         }
-      }
-   }
-
-   /**
-    * Prepend a transcript entry (for loading older messages)
-    * @param {string} role - Message role
-    * @param {string} text - Message text
-    * @param {HTMLElement|null} beforeElement - Element to insert before (null = append)
-    */
-   async function prependTranscriptEntry(role, text, beforeElement, reasoning) {
-      const transcript = DawnElements.transcript;
-      if (!transcript) return;
-
-      // Handle thinking + reasoning in assistant messages. E3 delivers a structured
-      // `reasoning` field (preferred); legacy rows carry inline <dawn:thinking>/
-      // <dawn:reasoning> markers in content (the fallback). When both content + tokens
-      // are present, one merged panel shows both stats.
-      let thinkingBlock = null;
-      let reasoningBlock = null;
-      if (role === 'assistant') {
-         let thinkingData = null;
-         let reasoningData = null;
-         if (reasoning && typeof reasoning === 'object') {
-            if (reasoning.content) {
-               thinkingData = {
-                  duration: coerceReasoningDuration(reasoning.duration),
-                  content: reasoning.content,
-                  tokens: reasoning.tokens || 0,
-               };
-            } else if (reasoning.tokens) {
-               reasoningData = { tokens: reasoning.tokens };
-            }
-         } else {
-            if (containsThinkingContent(text)) {
-               const r = extractThinkingContent(text);
-               thinkingData = r.thinking;
-               text = r.remaining;
-            }
-            if (containsReasoningContent(text)) {
-               const r = extractReasoningContent(text);
-               reasoningData = r.reasoning;
-               text = r.remaining;
-            }
-         }
-         if (thinkingData) {
-            if (reasoningData) thinkingData.tokens = reasoningData.tokens;
-            thinkingBlock = createThinkingBlock(thinkingData);
-         } else if (reasoningData) {
-            // Opaque reasoning (legacy chat-completions o-series): standalone block.
-            reasoningBlock = createReasoningBlock(reasoningData);
-         }
-         if ((thinkingBlock || reasoningBlock) && text.length === 0) {
-            const block = thinkingBlock || reasoningBlock;
-            if (beforeElement) {
-               transcript.insertBefore(block, beforeElement);
-            } else {
-               transcript.appendChild(block);
-            }
-            return;
-         }
-      }
-
-      // Skip debug/tool content for prepend (keeping it simple)
-      if (role === 'tool' || text.startsWith('[Tool Result:') || text.startsWith('[Tool Call:')) {
-         return;
-      }
-
-      // Extract user-facing text if mixed content
-      if (containsCommandTags(text)) {
-         if (isOnlyDebugContent(text)) {
-            return; // Skip pure debug content
-         }
-         text = extractUserFacingText(text);
-         if (!text) return;
-      }
-
-      // Parse document markers (strip from display, extract for chips)
-      let docData = { cleanText: text, documents: [] };
-      if (DawnDocuments && DawnDocuments.parseDocumentMarkers) {
-         docData = DawnDocuments.parseDocumentMarkers(text);
-      }
-
-      // Parse image markers if present (user messages may have embedded images)
-      let parsed = null;
-      let displayText = docData.cleanText;
-
-      if (DawnVision && DawnVision.parseImageMarkers) {
-         parsed = DawnVision.parseImageMarkers(displayText);
-         displayText = parsed.text;
-      }
-
-      // Split text around visual tags iteratively for inline positioning
-      let visualBlocks = [];
-      let segments = [];
-      if (typeof DawnVisualRender !== 'undefined') {
-         const extracted = DawnVisualRender.extractVisuals(displayText);
-         visualBlocks = extracted.visuals;
-         if (visualBlocks.length > 0) {
-            const tagRe =
-               /<dawn-visual\s+title="[^"]*"\s+type="(?:svg|html)">[\s\S]*?<\/dawn-visual>/g;
-            let lastIdx = 0;
-            let match;
-            let vi = 0;
-            while ((match = tagRe.exec(displayText)) !== null) {
-               const before = displayText.substring(lastIdx, match.index).trim();
-               if (before) segments.push({ type: 'text', content: before });
-               if (vi < visualBlocks.length) {
-                  segments.push({ type: 'visual', visual: visualBlocks[vi++] });
-               }
-               lastIdx = match.index + match[0].length;
-            }
-            const after = displayText.substring(lastIdx).trim();
-            if (after) segments.push({ type: 'text', content: after });
-         } else {
-            segments.push({ type: 'text', content: extracted.cleanText });
-         }
-      } else {
-         segments.push({ type: 'text', content: displayText });
-      }
-
-      // Create the entry with first text segment
-      const entry = document.createElement('div');
-      entry.className = `transcript-entry ${role}`;
-      const firstText =
-         segments.length > 0 && segments[0].type === 'text' ? segments[0].content : '';
-      entry.innerHTML = `
-      <div class="role">${DawnFormat.escapeHtml(role)}</div>
-      <div class="text">${DawnFormat.markdown(firstText)}</div>
-    `;
-
-      // Append remaining segments (visuals + text blocks)
-      for (let i = firstText ? 1 : 0; i < segments.length; i++) {
-         if (segments[i].type === 'visual') {
-            DawnVisualRender.renderVisuals(entry, [segments[i].visual]);
-         } else if (segments[i].content) {
-            const textDiv = document.createElement('div');
-            textDiv.className = 'text';
-            textDiv.innerHTML = DawnFormat.markdown(segments[i].content);
-            entry.appendChild(textDiv);
-         }
-      }
-
-      // Store raw text and add copy buttons on all .text elements
-      const firstTextEl = entry.querySelector('.text');
-      entry.querySelectorAll('.text').forEach(function (el) {
-         if (!el.getAttribute('data-raw-text')) {
-            el.setAttribute('data-raw-text', docData.cleanText);
-         }
-         DawnFormat.addCopyButtons(el);
-         DawnFormat.addMessageCopyButton(el);
-      });
-
-      // Render document chips if any documents were attached
-      if (docData.documents.length > 0 && firstTextEl) {
-         firstTextEl.appendChild(createDocumentChips(docData.documents));
-      }
-
-      // Insert thinking/reasoning block first if present (only one will be set —
-      // they're mutually exclusive in the merged-render flow above)
-      const auxBlock = thinkingBlock || reasoningBlock;
-      if (auxBlock) {
-         if (beforeElement) {
-            transcript.insertBefore(auxBlock, beforeElement);
-         } else {
-            transcript.appendChild(auxBlock);
-         }
-      }
-
-      // Insert the entry FIRST (before loading images) for immediate visibility
-      if (beforeElement) {
-         transcript.insertBefore(entry, beforeElement);
-      } else {
-         transcript.appendChild(entry);
-      }
-
-      // Load and add images AFTER entry is visible (async, may involve network requests)
-      if (parsed && DawnVision.loadParsedImages) {
-         const imageDataUrls = await DawnVision.loadParsedImages(parsed);
-         if (imageDataUrls.length > 0) {
-            const imagesContainer = document.createElement('div');
-            imagesContainer.className = 'transcript-images-container';
-            for (const dataUrl of imageDataUrls) {
-               const imageEl = createImageElement(dataUrl);
-               if (imageEl) {
-                  imagesContainer.appendChild(imageEl);
-               }
-            }
-            if (imagesContainer.children.length > 0 && firstTextEl) {
-               firstTextEl.appendChild(imagesContainer);
             }
          }
       }
@@ -989,7 +795,6 @@
       addEntry: addTranscriptEntry,
       addDebug: addDebugEntry,
       addNormal: addNormalEntry,
-      prependEntry: prependTranscriptEntry,
       // Expose helpers for other modules
       containsCommandTags: containsCommandTags,
       isOnlyDebugContent: isOnlyDebugContent,

@@ -1506,30 +1506,6 @@ int conv_db_add_message_with_tools(int64_t conv_id,
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx);
 
 /**
- * @brief Get messages for a conversation with pagination (cursor-based)
- *
- * Returns messages in reverse chronological order (newest first) for efficient
- * "scroll up to load more" pagination. The caller should reverse the results
- * for display in chronological order.
- *
- * @param conv_id Conversation ID
- * @param user_id User ID (for authorization check)
- * @param limit Maximum number of messages to return
- * @param before_id Only return messages with ID < before_id (0 for latest messages)
- * @param callback Function called for each message (newest first)
- * @param ctx User-provided context passed to callback
- * @param total_out Output: total number of messages in conversation (can be NULL)
- * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
- */
-int conv_db_get_messages_paginated(int64_t conv_id,
-                                   int user_id,
-                                   int limit,
-                                   int64_t before_id,
-                                   message_callback_t callback,
-                                   void *ctx,
-                                   int *total_out);
-
-/**
  * @brief Get messages for a conversation (admin only, no ownership check)
  *
  * For admin CLI tools that need to view any conversation.

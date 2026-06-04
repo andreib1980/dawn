@@ -1029,7 +1029,12 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
     * deleting the last admin is a blocked misuse anyway. */
    auth_user_t del_user;
    if (auth_db_get_user(target, &del_user) == AUTH_DB_SUCCESS && del_user.id > 0) {
-      image_store_delete_user(del_user.id);
+      if (image_store_delete_user(del_user.id) != IMAGE_STORE_SUCCESS) {
+         /* Surface an incomplete purge — rows or files may have leaked, which matters
+          * for a deletion guarantee.  The FK cascade still removes rows on user delete. */
+         OLOG_WARNING("DELETE_USER: image purge for user %d incomplete (rows/files may remain)",
+                      del_user.id);
+      }
    }
 
    /* Delete the user */

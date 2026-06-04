@@ -24,10 +24,6 @@
       // concurrent renders (e.g. on reconnect) from interleaving messages, misplacing
       // the system-prompt block, or orphaning a turn's tool results.
       loadRenderToken: 0,
-      // Pagination state for current conversation
-      oldestMessageId: null,
-      hasMoreMessages: false,
-      loadingMoreMessages: false,
       // Reassign modal state
       usersList: [],
       reassignModalConvId: null,
@@ -267,24 +263,6 @@
       });
    }
 
-   function requestLoadMoreMessages() {
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      if (!historyState.activeConversationId) return;
-      if (!historyState.hasMoreMessages) return;
-      if (historyState.loadingMoreMessages) return;
-      if (!historyState.oldestMessageId) return;
-
-      historyState.loadingMoreMessages = true;
-
-      DawnWS.send({
-         type: 'load_conversation',
-         payload: {
-            conversation_id: historyState.activeConversationId,
-            before_id: historyState.oldestMessageId,
-         },
-      });
-   }
-
    function requestDeleteConversation(convId) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
 
@@ -429,59 +407,19 @@
 
    function handleLoadConversationResponse(payload) {
       if (!payload.success) {
-         historyState.loadingMoreMessages = false;
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to load conversation', 'error');
          }
          return;
       }
 
-      const isLoadMore = payload.is_load_more || false;
       const transcript = document.getElementById('transcript');
 
       // Bump the render token: any earlier in-flight async render will see a newer token
       // and bail, so this load's render runs alone (no interleaving on reconnect/refresh).
       const renderToken = ++historyState.loadRenderToken;
 
-      // Update pagination state
-      historyState.oldestMessageId = payload.oldest_id || null;
-      historyState.hasMoreMessages = payload.has_more || false;
-      historyState.loadingMoreMessages = false;
-
-      if (isLoadMore) {
-         // Load more: prepend older messages to existing transcript
-         if (transcript) {
-            const messages = payload.messages || [];
-            // Get the first child after any banners to insert before
-            const firstMessage = transcript.querySelector('.transcript-entry');
-            const scrollHeightBefore = transcript.scrollHeight;
-
-            // Process messages sequentially to preserve order with async image loading
-            (async () => {
-               for (const msg of messages) {
-                  if (msg.role === 'system') continue;
-                  if (typeof DawnTranscript !== 'undefined') {
-                     await DawnTranscript.prependEntry(
-                        msg.role,
-                        msg.content,
-                        firstMessage,
-                        msg.reasoning
-                     );
-                  }
-               }
-
-               // Preserve scroll position after prepending
-               const scrollHeightAfter = transcript.scrollHeight;
-               transcript.scrollTop = scrollHeightAfter - scrollHeightBefore;
-
-               // Update "load more" indicator
-               updateLoadMoreIndicator();
-            })();
-         }
-         return;
-      }
-
-      // Initial load: full setup
+      // Full conversation load (the daemon sends every message in one response — no pagination).
       setActiveConversationId(payload.conversation_id);
 
       // Update privacy toggle state
@@ -496,9 +434,7 @@
       const isArchived = payload.is_archived || false;
       const continuedBy = payload.continued_by || null;
 
-      console.log(
-         `Load conversation: id=${payload.conversation_id}, total=${payload.total}, has_more=${payload.has_more}`
-      );
+      console.log(`Load conversation: id=${payload.conversation_id}, total=${payload.total}`);
 
       // Update input area state based on archived status
       setArchivedMode(isArchived);
@@ -517,16 +453,6 @@
       // Clear transcript
       if (transcript) {
          transcript.innerHTML = '';
-
-         // Add "load more" indicator at top if there are more messages
-         if (payload.has_more) {
-            const loadMoreHtml = `
-          <div class="load-more-indicator" id="load-more-indicator">
-            <button class="load-more-btn" id="load-more-btn">Load earlier messages</button>
-          </div>
-        `;
-            transcript.insertAdjacentHTML('beforeend', loadMoreHtml);
-         }
 
          // Add archived notice at top for archived conversations
          if (isArchived) {
@@ -639,9 +565,6 @@
             transcript.scrollTop = transcript.scrollHeight;
          })();
 
-         // Setup scroll detection for loading more
-         setupScrollDetection(transcript);
-
          // If debug mode is on (persisted across refreshes), (re-)request the System Prompt
          // AFTER this load. The load just cleared the transcript, which wipes a system-prompt
          // block requested earlier (e.g. on connect); requesting here lets its response
@@ -699,51 +622,6 @@
          : `Loaded: ${payload.title}`;
       if (typeof DawnToast !== 'undefined') {
          DawnToast.show(statusMsg, 'info');
-      }
-   }
-
-   function updateLoadMoreIndicator() {
-      const indicator = document.getElementById('load-more-indicator');
-      if (indicator) {
-         if (historyState.hasMoreMessages) {
-            const btn = indicator.querySelector('.load-more-btn');
-            if (btn) {
-               btn.textContent = 'Load earlier messages';
-               btn.classList.remove('loading');
-               btn.disabled = false;
-            }
-         } else {
-            indicator.remove();
-         }
-      }
-   }
-
-   function setupScrollDetection(transcript) {
-      // Remove any existing listener
-      transcript.removeEventListener('scroll', handleTranscriptScroll);
-      transcript.addEventListener('scroll', handleTranscriptScroll);
-
-      // Setup click handler for load more button
-      const loadMoreBtn = document.getElementById('load-more-btn');
-      if (loadMoreBtn) {
-         loadMoreBtn.addEventListener('click', () => {
-            loadMoreBtn.textContent = 'Loading...';
-            loadMoreBtn.classList.add('loading');
-            loadMoreBtn.disabled = true;
-            requestLoadMoreMessages();
-         });
-      }
-   }
-
-   function handleTranscriptScroll(e) {
-      const transcript = e.target;
-      // Load more when scrolled near the top (within 100px)
-      if (
-         transcript.scrollTop < 100 &&
-         historyState.hasMoreMessages &&
-         !historyState.loadingMoreMessages
-      ) {
-         requestLoadMoreMessages();
       }
    }
 
@@ -2050,7 +1928,6 @@
       startNewChat: startNewChat,
       requestUpdateContext: requestUpdateContext,
       getActiveConversationId: getActiveConversationId,
-      requestLoadMoreMessages: requestLoadMoreMessages,
       setKnownContextMax: setKnownContextMax,
       getContextGuard: getContextGuard,
       clearContextGuard: clearContextGuard,

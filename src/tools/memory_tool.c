@@ -68,6 +68,7 @@ static const treg_param_t memory_params[] = {
            "Check the action you picked before filling this in:\n"
            "  remember:        STRING — one fact, e.g. 'User prefers dark mode'. To store "
            "SEVERAL facts at once in a single call, pass a JSON array of strings instead, e.g. "
+           /* "max 25" mirrors MAX_REMEMBER_FACTS (src/memory/memory_callback.c) — keep in sync. */
            "[\"User prefers dark mode\", \"User uses a Jetson\"] (max 25); one fact per element.\n"
            "  search:          STRING — keywords (3-8 words work best).\n"
            "  forget:          NUMERIC ID(s) — one fact ID, or a comma-separated list to "
@@ -222,6 +223,7 @@ static const tool_metadata_t memory_metadata = {
 
    .description = "Store and retrieve persistent memories about the user. "
                   "Use 'remember' to store facts (preferences, information shared by user). "
+                  /* "511" mirrors MEMORY_FACT_TEXT_MAX - 1 (include/memory/memory_types.h). */
                   "Each fact is ONE concise statement, max 511 characters. To store several "
                   "facts at once, pass a JSON array of strings to 'remember' (one fact per "
                   "element) — preferred over many separate calls for a multi-fact dump. For "

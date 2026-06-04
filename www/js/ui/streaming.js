@@ -358,7 +358,7 @@
           * session_add_message(), so the DB copy already includes it.
           * The client save_message is a backup that may be skipped on
           * server_saved replay. Visual rendering on replay is handled by
-          * extractVisuals() in addNormalEntry/prependTranscriptEntry. */
+          * extractVisuals() in addNormalEntry. */
 
          callbacks.onSaveMessage('assistant', fullContent, reasoning);
 
@@ -515,9 +515,11 @@
    function renderThinkingContent() {
       if (!DawnState.thinkingState.contentElement) return;
 
-      // Render as plain text with line breaks during streaming
-      const escapedContent = DawnFormat.escapeHtml(DawnState.thinkingState.content);
-      DawnState.thinkingState.contentElement.innerHTML = escapedContent.replace(/\n/g, '<br>');
+      // Render thinking as sanitized markdown (marked + DOMPurify), matching the finalized/
+      // reload block and the message-body pipeline. Caller debounces this (100ms).
+      DawnState.thinkingState.contentElement.innerHTML = DawnFormat.markdown(
+         DawnState.thinkingState.content
+      );
 
       // Auto-scroll transcript
       if (DawnElements.transcript) {
@@ -686,7 +688,7 @@
       // Case 1: merge into the current turn's finalized thinking-block (Responses API).
       // Scope to blocks after the last .entry.user to avoid merging into a prior
       // turn's thinking panel when the provider changes mid-conversation.
-      const lastUserEntry = Array.from(transcript.querySelectorAll('.entry.user')).pop();
+      const lastUserEntry = Array.from(transcript.querySelectorAll('.transcript-entry.user')).pop();
       const candidates = transcript.querySelectorAll(
          '.thinking-block.completed:not(.reasoning-only)'
       );
@@ -710,32 +712,23 @@
          return;
       }
 
-      // Case 2: no thinking-block — opaque reasoning, create a standalone summary.
+      // Case 2: no thinking-block — opaque reasoning (no summary text to reveal), so this
+      // is a static, non-interactive note: token count only, no expand affordance. Must stay
+      // markup-identical to createReasoningBlock (transcript.js) so live and reload match.
       const entry = document.createElement('div');
-      entry.className = 'thinking-block collapsed completed reasoning-only';
-      entry.setAttribute('role', 'region');
-      entry.setAttribute('aria-label', 'AI reasoning summary');
+      entry.className = 'thinking-block completed reasoning-only';
+      entry.setAttribute('role', 'note');
+      entry.setAttribute('aria-label', `${DawnFormat.assistantName()} reasoning summary`);
 
+      const stats = DawnFormat.escapeHtml(formatThinkingStats(null, tokens));
+      const safeLabel = DawnFormat.escapeHtml(`${DawnFormat.assistantName()} reasoned`);
       entry.innerHTML = `
-      <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
+      <div class="thinking-header static">
         <span class="thinking-icon" aria-hidden="true">🧠</span>
-        <span class="thinking-label">OpenAI reasoned</span>
-        <span class="thinking-duration">${formatThinkingStats(null, tokens)}</span>
-      </div>
-      <div class="thinking-content no-summary">
-        <em>No reasoning summary available for this turn.</em>
+        <span class="thinking-label">${safeLabel}</span>
+        <span class="thinking-duration">${stats}</span>
       </div>
     `;
-
-      // Add click handler for toggle (shows the "not accessible" message)
-      const header = entry.querySelector('.thinking-header');
-      header.addEventListener('click', () => toggleThinking(entry));
-      header.addEventListener('keydown', (e) => {
-         if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggleThinking(entry);
-         }
-      });
 
       // Find the most recent assistant entry and insert before it
       const assistantEntries = transcript.querySelectorAll('.transcript-entry.assistant');

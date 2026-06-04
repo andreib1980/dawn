@@ -704,6 +704,7 @@ int image_store_delete_user(int user_id) {
       }
    }
    free(filenames);
+   filenames = NULL;
 
    OLOG_INFO("Image store: deleted %d image(s) for user %d", deleted, user_id);
    return IMAGE_STORE_SUCCESS;

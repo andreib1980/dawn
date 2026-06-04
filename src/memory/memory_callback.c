@@ -888,6 +888,11 @@ char *memory_action_search(int user_id,
  * aggregate response size. */
 #define MAX_REMEMBER_FACTS 25
 
+/* Initial strbuf capacity for the batch-remember advisory: ~1 advisory line per fact
+ * (~160 chars) across the MAX_REMEMBER_FACTS bound, so a full batch usually avoids any
+ * realloc; strbuf still grows on overflow. */
+#define MEMORY_REMEMBER_BATCH_BUF_INIT 4096
+
 /* Store ONE fact: injection check → multi-stage dedup → store → embed → similarity
  * advisory.  Returns a malloc'd, caller-freed result line.  The batch dispatcher
  * (memory_action_remember) calls this once per fact; single-fact callers reach it
@@ -1055,7 +1060,7 @@ static char *memory_action_remember(int user_id, const char *value) {
    if (arr && json_object_is_type(arr, json_type_array)) {
       int n = json_object_array_length(arr);
       strbuf_t sb;
-      strbuf_init(&sb, 512);
+      strbuf_init(&sb, MEMORY_REMEMBER_BATCH_BUF_INIT);
       int stored = 0;
       int processed = 0;
       for (int i = 0; i < n && processed < MAX_REMEMBER_FACTS; i++) {
@@ -1073,6 +1078,7 @@ static char *memory_action_remember(int user_id, const char *value) {
             }
             strbuf_append(&sb, one);
             free(one);
+            one = NULL;
             stored++;
          }
          processed++;

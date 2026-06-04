@@ -40,7 +40,9 @@ extern "C" {
 
 /* Companion crash backstop on the number of image parts materialized per restored
  * message — bounds the part array independently of the byte ceiling (e.g. many tiny
- * images).  Far above the per-turn upload cap; pathological excess degrades to a note. */
+ * images).  Far above WEBUI_MAX_VISION_IMAGES_CAP (the per-turn upload cap in
+ * include/webui/webui_server.h); if that cap is ever raised past this value, bump this
+ * one too or restored messages will degrade to "[earlier image omitted]". */
 #define WEBUI_MAX_REHYDRATE_IMAGES 64
 
 /**
