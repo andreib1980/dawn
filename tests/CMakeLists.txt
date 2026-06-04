@@ -779,6 +779,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/core/iso8601.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
            ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_defaults.c
