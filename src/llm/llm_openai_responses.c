@@ -1213,6 +1213,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    }
    result->text = llm_stream_get_response(rctx.stream_ctx);
    result->thinking_content = llm_stream_get_thinking(rctx.stream_ctx);
+   result->reasoning_tokens = rctx.reasoning_tokens;
    if (rctx.stream_ctx->finish_reason[0] != '\0') {
       strncpy(result->finish_reason, rctx.stream_ctx->finish_reason,
               sizeof(result->finish_reason) - 1);

@@ -15,7 +15,14 @@
    // Simple State Variables
    // =============================================================================
    let currentState = 'idle';
-   let debugMode = false;
+   // Persisted across hard refreshes (localStorage); see setDebugMode.
+   let debugMode = (() => {
+      try {
+         return localStorage.getItem('dawn_debug_mode') === 'true';
+      } catch (e) {
+         return false;
+      }
+   })();
    let isRecording = false;
    let audioSupported = false;
 
@@ -139,6 +146,11 @@
       getDebugMode: () => debugMode,
       setDebugMode: (mode) => {
          debugMode = mode;
+         try {
+            localStorage.setItem('dawn_debug_mode', mode ? 'true' : 'false');
+         } catch (e) {
+            /* localStorage unavailable — keep in-memory only */
+         }
       },
 
       getIsRecording: () => isRecording,

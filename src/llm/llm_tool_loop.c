@@ -86,18 +86,71 @@ bool llm_tool_loop_did_skip_followup(void) {
  * Extracted from llm_openai.c and llm_claude.c recursion blocks.
  * ============================================================================= */
 
-/**
- * @brief Add assistant message with tool calls in OpenAI format
- *
- * Appends the assistant message containing tool_calls array, then adds
- * tool result messages. Handles Gemini thought_signature if present.
- */
+/* Map the active provider to a short label stored as METADATA in the reasoning JSON.
+ * The WebUI does NOT display this — the "AI thought" panel is labelled with the
+ * assistant's name (DawnFormat.assistantName) — but it's kept for debugging/provenance
+ * (which provider produced a stored reasoning blob). */
+static const char *reasoning_provider_label(llm_type_t llm_type, cloud_provider_t cloud_provider) {
+   if (llm_type == LLM_LOCAL) {
+      return "local";
+   }
+   switch (cloud_provider) {
+      case CLOUD_PROVIDER_CLAUDE:
+         return "claude";
+      case CLOUD_PROVIDER_GEMINI:
+         return "gemini";
+      case CLOUD_PROVIDER_OPENROUTER:
+         return "openrouter";
+      case CLOUD_PROVIDER_OPENAI:
+      default:
+         return "openai";
+   }
+}
+
+/* Build the display-only reasoning JSON ({provider, content?, tokens?}) for an iteration's
+ * assistant message, or NULL if there's nothing to show.  Duration is intentionally omitted
+ * (the daemon doesn't track per-iteration thinking wall-clock; the panel degrades to
+ * "(N tokens)").  Caller frees with free(). */
+static char *build_reasoning_json(const llm_tool_response_t *result, const char *provider_label) {
+   bool has_content = result->thinking_content && result->thinking_content[0] != '\0';
+   if (!has_content && result->reasoning_tokens <= 0) {
+      return NULL;
+   }
+   struct json_object *obj = json_object_new_object();
+   if (!obj) {
+      return NULL;
+   }
+   json_object_object_add(obj, "provider", json_object_new_string(provider_label));
+   if (has_content) {
+      json_object_object_add(obj, "content", json_object_new_string(result->thinking_content));
+   }
+   if (result->reasoning_tokens > 0) {
+      json_object_object_add(obj, "tokens", json_object_new_int(result->reasoning_tokens));
+   }
+   /* PLAIN: no inter-token whitespace — trims the persisted blob (reasoning content can
+    * be multi-KB). Re-parsed as JSON on reload, so the formatting is immaterial. */
+   char *out = strdup(json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN));
+   json_object_put(obj);
+   if (!out) {
+      OLOG_WARNING("build_reasoning_json: strdup OOM — reasoning will not persist for this turn");
+   }
+   return out;
+}
+
 /* Persist the tool messages just appended to history in [before_len, end) via the
  * session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
  * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
  * OpenAI-format history is already canonical; Claude-format is normalized through the
- * shared converter so the stored shape is provider-neutral. */
-static void persist_appended_tool_turn(llm_tool_loop_params_t *params, int before_len) {
+ * shared converter so the stored shape is provider-neutral.
+ *
+ * @p reasoning_json is the display-only reasoning JSON for THIS iteration's assistant
+ * message (NULL if none).  It attaches to the single assistant row this iteration
+ * appended — guaranteed unique because convert_claude_tool_to_openai() and
+ * append_openai_tool_history() collapse text + all tool_use into exactly one assistant
+ * row and fan out only role:tool result rows. */
+static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
+                                       int before_len,
+                                       const char *reasoning_json) {
    session_t *s = session_get(params->session_id);
    if (!s) {
       return;
@@ -137,9 +190,10 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params, int befor
                                 ? json_object_get_string(content_obj)
                                 : "";
       if (json_object_object_get_ex(m, "tool_calls", &tc_obj)) {
-         cb(ud, role, content ? content : "", json_object_to_json_string(tc_obj), NULL);
+         cb(ud, role, content ? content : "", json_object_to_json_string(tc_obj), NULL,
+            reasoning_json);
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
-         cb(ud, role, content ? content : "", NULL, json_object_get_string(tcid_obj));
+         cb(ud, role, content ? content : "", NULL, json_object_get_string(tcid_obj), NULL);
       }
    }
 
@@ -162,6 +216,12 @@ static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
    session_release(s);
 }
 
+/**
+ * @brief Add assistant message with tool calls in OpenAI format
+ *
+ * Appends the assistant message containing tool_calls array, then adds
+ * tool result messages. Handles Gemini thought_signature if present.
+ */
 static void append_openai_tool_history(struct json_object *history,
                                        const llm_tool_response_t *response,
                                        const tool_result_list_t *results) {
@@ -635,8 +695,12 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       } else {
          append_openai_tool_history(params->conversation_history, &result, results);
       }
-      /* Step 8a: Persist the just-appended structured tool messages (E2). */
-      persist_appended_tool_turn(params, hist_before);
+      /* Step 8a: Persist the just-appended structured tool messages (E2) + this iteration's
+       * display-only reasoning (E3) attached to its assistant row. */
+      char *reasoning_json = build_reasoning_json(
+          &result, reasoning_provider_label(params->llm_type, params->cloud_provider));
+      persist_appended_tool_turn(params, hist_before, reasoning_json);
+      free(reasoning_json);
 
       /* Step 8b: All-silent check — tools handled their own output */
       if (followup.all_silent) {

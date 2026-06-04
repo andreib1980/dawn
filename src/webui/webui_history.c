@@ -588,6 +588,15 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
    if (msg->tool_call_id && msg->tool_call_id[0]) {
       json_object_object_add(msg_obj, "tool_call_id", json_object_new_string(msg->tool_call_id));
    }
+   /* Surface display-only reasoning JSON as a parsed `reasoning` field so the browser
+    * reconstructs the "AI thought" panel at this row's position (E3).  Display-only —
+    * delivered here but NOT in webui_session_restore_msg_cb (the LLM-context path). */
+   if (msg->reasoning && msg->reasoning[0]) {
+      json_object *r = json_tokener_parse(msg->reasoning);
+      if (r) {
+         json_object_object_add(msg_obj, "reasoning", r);
+      }
+   }
 
    json_object_array_add(msg_array, msg_obj);
    return 0;
@@ -719,16 +728,19 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
          if (result == AUTH_DB_SUCCESS) {
             total_messages = json_object_array_length(all_msgs);
 
-            /* Extract last 'limit' messages for UI display */
-            int start_idx = (total_messages > limit) ? (total_messages - limit) : 0;
-            for (int i = start_idx; i < total_messages; i++) {
+            /* Send ALL messages for display (no pagination): text is cheap and the
+             * daemon already fetched the full conversation above for context restore.
+             * Paging split tool call/result pairs (and their reasoning panels) across the
+             * 50-message boundary — sending the whole conversation keeps every pair intact
+             * and matches the full-history load the LLM context already uses. */
+            for (int i = 0; i < total_messages; i++) {
                json_object *msg = json_object_array_get_idx(all_msgs, i);
                json_object_get(msg); /* Increment ref count before adding to new array */
                json_object_array_add(msg_array, msg);
             }
             returned_count = json_object_array_length(msg_array);
 
-            /* Get oldest message ID for cursor (first message in display array) */
+            /* Oldest message ID = first message (used only as a cursor; has_more is false). */
             if (returned_count > 0) {
                json_object *first_msg = json_object_array_get_idx(msg_array, 0);
                json_object *id_field;
@@ -737,13 +749,29 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
                }
             }
 
-            /* has_more is true if we couldn't show all messages */
-            has_more = (total_messages > limit);
+            has_more = false;
+         }
+      } else if (!is_load_more) {
+         /* Archived / no-session INITIAL load: full conversation, no pagination (same
+          * rationale as the active path above — never split a tool call/result pair). */
+         result = conv_db_get_messages(conv_id, conn->auth_user_id, load_msg_callback, msg_array);
+         if (result == AUTH_DB_SUCCESS) {
+            total_messages = json_object_array_length(msg_array);
+            returned_count = total_messages;
+            has_more = false;
+            /* conv_db_get_messages returns oldest-first — no reverse needed. */
+            if (returned_count > 0) {
+               json_object *first_msg = json_object_array_get_idx(msg_array, 0);
+               json_object *id_field;
+               if (json_object_object_get_ex(first_msg, "id", &id_field)) {
+                  oldest_id = json_object_get_int64(id_field);
+               }
+            }
          }
       } else {
-         /* For load-more requests or archived/no-session cases, use paginated query.
-          * Fetch limit+1 to determine has_more accurately (avoid false positive when
-          * exactly 'limit' messages remain). */
+         /* Explicit load-more (before_id) — retained for compatibility, but initial loads
+          * now return the whole conversation, so has_more is false and this rarely fires.
+          * Fetch limit+1 to determine has_more accurately. */
          result = conv_db_get_messages_paginated(conv_id, conn->auth_user_id, limit + 1, before_id,
                                                  load_msg_callback, msg_array, &total_messages);
 
@@ -1251,6 +1279,19 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
    const char *role = json_object_get_string(role_obj);
    const char *content = json_object_get_string(content_obj);
 
+   /* Optional display-only reasoning JSON for the final answer (E3).  Bounded by the same
+    * limit as message content; over-limit is dropped (the "AI thought" panel simply won't
+    * render for that message rather than storing an unbounded blob). */
+   const char *reasoning = NULL;
+   json_object *reasoning_obj;
+   if (json_object_object_get_ex(payload, "reasoning", &reasoning_obj) &&
+       json_object_is_type(reasoning_obj, json_type_string)) {
+      const char *r = json_object_get_string(reasoning_obj);
+      if (r && r[0] && strlen(r) <= CONV_MESSAGE_MAX) {
+         reasoning = r;
+      }
+   }
+
    /* SECURITY: Validate any embedded image thumbnails (size limit, safe prefix) */
    if (!validate_image_marker(content)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -1273,7 +1314,8 @@ void handle_save_message(ws_connection_t *conn, struct json_object *payload) {
    }
 
    int64_t msg_id = 0;
-   int result = conv_db_add_message_ex(conv_id, conn->auth_user_id, role, content, &msg_id);
+   int result = conv_db_add_message_with_tools(conv_id, conn->auth_user_id, role, content, NULL,
+                                               NULL, reasoning, &msg_id);
 
    if (result == AUTH_DB_SUCCESS) {
       if (conn->session && msg_id > 0)

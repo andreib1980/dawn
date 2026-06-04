@@ -1516,6 +1516,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    result->text = llm_stream_get_response(stream_ctx);
    result->thinking_content = llm_stream_get_thinking(stream_ctx);
+   result->reasoning_tokens = stream_ctx->reasoning_tokens;
 
    if (stream_ctx->finish_reason[0] != '\0') {
       strncpy(result->finish_reason, stream_ctx->finish_reason, sizeof(result->finish_reason) - 1);

@@ -189,6 +189,7 @@ static const char *SCHEMA_SQL =
     "   content TEXT NOT NULL,"
     "   tool_calls TEXT,"   /* assistant rows: OpenAI tool_calls JSON array (v56) */
     "   tool_call_id TEXT," /* role='tool' rows: matching tool_call id (v56) */
+    "   reasoning TEXT,"    /* assistant rows: display-only reasoning JSON (v57) */
     "   created_at INTEGER NOT NULL,"
     "   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
     ");"
@@ -2997,6 +2998,37 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v57 — messages.reasoning (display-only LLM reasoning/thinking JSON, persisted server-side
+    * so the "AI thought" panel reconstructs at the correct position on reload).  Nullable for
+    * nearly all rows; never read into the LLM context (only load_msg_callback delivers it to the
+    * browser).  Single nullable ADD COLUMN — O(1) fast path.  Mirrors v56. */
+   bool v57_ok = (current_version >= 57) || (current_version == 0);
+   if (current_version >= 18 && current_version < 57) {
+      bool v57_fresh = false;
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE messages ADD COLUMN reasoning TEXT", NULL, NULL,
+                        &errmsg);
+      if (rc == SQLITE_OK) {
+         v57_ok = true;
+         v57_fresh = true;
+      } else if (errmsg && strstr(errmsg, "duplicate column")) {
+         v57_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v57 messages.reasoning migration failed: %s",
+                    errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      if (v57_ok) {
+         if (v57_fresh) {
+            OLOG_INFO("auth_db: v57 added messages.reasoning (server-side reasoning persistence)");
+         } else {
+            OLOG_INFO("auth_db: v57 messages.reasoning already present "
+                      "(applied by SCHEMA_SQL during multi-step migration)");
+         }
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3134,7 +3166,7 @@ int auth_db_create_schema(const char *db_path) {
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
-                              v55_ok && v56_ok;
+                              v55_ok && v56_ok && v57_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

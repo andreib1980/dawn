@@ -1063,6 +1063,8 @@ typedef struct {
    char *content;            /**< Borrowed column pointer; valid only during the callback */
    char *tool_calls;   /**< assistant rows: OpenAI tool_calls JSON array, else NULL (borrowed) */
    char *tool_call_id; /**< role='tool' rows: matching tool_call id, else NULL (borrowed) */
+   char *reasoning;    /**< assistant rows: display-only reasoning JSON, else NULL (borrowed).
+                            Delivered to the browser only — never read into the LLM context. */
    time_t created_at;
 } conversation_message_t;
 
@@ -1474,10 +1476,11 @@ int conv_db_add_message_ex(int64_t conv_id,
 /**
  * @brief Add a message with structured tool fields (OpenAI-canonical).
  *
- * Like conv_db_add_message_ex() but also persists the two structured tool columns:
- * @p tool_calls (assistant rows — the OpenAI tool_calls JSON array) and
- * @p tool_call_id (role='tool' rows — the matching call id). Pass NULL for either
- * when not applicable; conv_db_add_message_ex() delegates here with both NULL.
+ * Like conv_db_add_message_ex() but also persists the structured tool columns:
+ * @p tool_calls (assistant rows — the OpenAI tool_calls JSON array), @p tool_call_id
+ * (role='tool' rows — the matching call id), and @p reasoning (assistant rows —
+ * display-only reasoning JSON; never read into the LLM context). Pass NULL for any
+ * when not applicable; conv_db_add_message_ex() delegates here with all NULL.
  */
 int conv_db_add_message_with_tools(int64_t conv_id,
                                    int user_id,
@@ -1485,6 +1488,7 @@ int conv_db_add_message_with_tools(int64_t conv_id,
                                    const char *content,
                                    const char *tool_calls,
                                    const char *tool_call_id,
+                                   const char *reasoning,
                                    int64_t *msg_id_out);
 
 /**

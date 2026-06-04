@@ -356,6 +356,72 @@ static void test_conversation_add_message(void) {
    conv_free(&conv);
 }
 
+/* E3: pin the messages.reasoning column round-trip + the canonical projection order
+ * (id, conversation_id, role, content, tool_calls, tool_call_id, reasoning, created_at).
+ * A future column edit that shifts indices wrong would land reasoning/created_at on the
+ * wrong field and silently corrupt every reload — this test catches that. */
+struct reasoning_rt_ctx {
+   int count;
+   char content[64];
+   char reasoning[96];
+   bool reasoning_was_null;
+   time_t created_at;
+};
+
+static int reasoning_rt_cb(const conversation_message_t *msg, void *ctx_ptr) {
+   struct reasoning_rt_ctx *ctx = (struct reasoning_rt_ctx *)ctx_ptr;
+   if (strcmp(msg->role, "assistant") == 0 && ctx->count == 0) {
+      ctx->count++;
+      snprintf(ctx->content, sizeof(ctx->content), "%s", msg->content ? msg->content : "");
+      ctx->reasoning_was_null = (msg->reasoning == NULL);
+      snprintf(ctx->reasoning, sizeof(ctx->reasoning), "%s", msg->reasoning ? msg->reasoning : "");
+      ctx->created_at = msg->created_at;
+   }
+   return 0;
+}
+
+static void test_message_reasoning_round_trip(void) {
+   int user_id = create_and_get_id("reasoning_user", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "Reasoning chat", &conv_id);
+
+   const char *reasoning = "{\"provider\":\"openai\",\"tokens\":42}";
+   int rc = conv_db_add_message_with_tools(conv_id, user_id, "assistant", "Visible answer", NULL,
+                                           NULL, reasoning, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+
+   struct reasoning_rt_ctx ctx;
+   memset(&ctx, 0, sizeof(ctx));
+   rc = conv_db_get_messages(conv_id, user_id, reasoning_rt_cb, &ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, ctx.count);
+   /* content + reasoning land on the right fields (projection order intact). */
+   TEST_ASSERT_EQUAL_STRING("Visible answer", ctx.content);
+   TEST_ASSERT_FALSE(ctx.reasoning_was_null);
+   TEST_ASSERT_EQUAL_STRING(reasoning, ctx.reasoning);
+   /* created_at moved 6→7 in E3 — must be a real timestamp, not reasoning text misread. */
+   TEST_ASSERT_TRUE(ctx.created_at > 0);
+}
+
+static void test_message_reasoning_null(void) {
+   int user_id = create_and_get_id("reasoning_null_user", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "No-reasoning chat", &conv_id);
+
+   int rc = conv_db_add_message_with_tools(conv_id, user_id, "assistant", "Plain answer", NULL,
+                                           NULL, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+
+   struct reasoning_rt_ctx ctx;
+   memset(&ctx, 0, sizeof(ctx));
+   rc = conv_db_get_messages(conv_id, user_id, reasoning_rt_cb, &ctx);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
+   TEST_ASSERT_EQUAL_INT(1, ctx.count);
+   TEST_ASSERT_EQUAL_STRING("Plain answer", ctx.content);
+   TEST_ASSERT_TRUE(ctx.reasoning_was_null);
+   TEST_ASSERT_TRUE(ctx.created_at > 0);
+}
+
 /* Phase B defense-in-depth: conv_db_get_messages_by_range must suppress rows
  * from private conversations when include_private=false, even though the
  * caller passes ownership-correct user_id.  Rationale lives in PROVENANCE.md
@@ -773,6 +839,8 @@ int main(void) {
    RUN_TEST(test_delete_conversation);
    RUN_TEST(test_conversation_user_isolation);
    RUN_TEST(test_conversation_add_message);
+   RUN_TEST(test_message_reasoning_round_trip);
+   RUN_TEST(test_message_reasoning_null);
    RUN_TEST(test_get_messages_by_range_filters_private_by_default);
    RUN_TEST(test_get_messages_by_range_returns_private_when_opted_in);
 

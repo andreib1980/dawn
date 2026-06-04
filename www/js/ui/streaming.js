@@ -19,24 +19,16 @@
    };
 
    /**
-    * Display label for an LLM provider in the thinking-block header.
-    * Used at two sites within this module (handleThinkingStart + finalizeThinking).
-    * The reload path lives in transcript.js's IIFE and duplicates this mapping
-    * inline — keep the two in sync when adding new providers.
+    * Header label for the live thinking block — the assistant's name (via
+    * DawnFormat.assistantName()), matching the reload path in transcript.js. No
+    * provider vocabulary to keep in sync any more.
     */
    function providerDisplayLabel(provider) {
-      switch (provider) {
-         case 'claude':
-            return 'Claude';
-         case 'local':
-            return 'Local LLM';
-         case 'openai':
-            return 'OpenAI';
-         case 'gemini':
-            return 'Gemini';
-         default:
-            return 'AI';
-      }
+      // Label by the assistant's name (e.g. "Friday"), never the model/provider —
+      // provider is mutable infrastructure the user shouldn't see. `provider` is
+      // accepted for call-site compatibility but ignored.
+      void provider;
+      return DawnFormat.assistantName();
    }
 
    // =============================================================================
@@ -254,6 +246,25 @@
       DawnState.streamingState.textElement = null;
       DawnState.streamingState.content = '';
       DawnState.streamingState.preVisualContent = '';
+
+      // E3: clear this iteration's finalized reasoning so it doesn't leak into the final
+      // answer's save. The intermediate iteration's reasoning is persisted server-side on
+      // its own tool_calls row, so nothing is lost by clearing here.
+      clearReasoningState();
+   }
+
+   /**
+    * Clear the finalized-reasoning state so a tool-calling iteration's reasoning (which is
+    * persisted server-side on its tool_calls row) is NOT also saved by the browser on the
+    * final answer. Called at every iteration boundary: by finalizeStreamBubble for an
+    * iteration that streamed text, AND on tool-call arrival for a reasoning-only iteration
+    * that never opened a text bubble (so finalizeStreamBubble doesn't run).
+    */
+   function clearReasoningState() {
+      DawnState.streamingState.reasoningTokens = 0;
+      DawnState.thinkingState.finalizedContent = '';
+      DawnState.thinkingState.finalizedDuration = '0';
+      DawnState.thinkingState.finalizedProvider = null;
    }
 
    /**
@@ -326,39 +337,20 @@
       /* Strip self-inserted <thinking> tags from save content */
       fullContent = fullContent.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '');
       if (fullContent && callbacks.onSaveMessage) {
-         let contentToSave = fullContent;
-
-         // Persist thinking marker. Two cases:
-         //   (a) Finalized thinking content present → save normally with content.
-         //   (b) Empty content but provider emitted reasoning tokens (OpenAI Responses
-         //       case where the model didn't emit a summary) → still save an empty
-         //       thinking marker so the reload path produces ONE merged panel rather
-         //       than a standalone "OpenAI reasoned" fallback block.
+         // E3: reasoning is persisted server-side as a structured field (NOT inline
+         // <dawn:thinking>/<dawn:reasoning> markers in content). Build the reasoning object
+         // {provider, duration, content?, tokens?} from the finalized thinking state; the
+         // server writes it to the messages.reasoning column on this (final-answer) row.
          const finContent = DawnState.thinkingState.finalizedContent;
          const finProvider = DawnState.thinkingState.finalizedProvider || 'unknown';
          const finDuration = DawnState.thinkingState.finalizedDuration || '0';
          const hasThinkingContent = finContent && finContent.trim();
          const hasReasoningTokens = DawnState.streamingState.reasoningTokens > 0;
-         if (hasThinkingContent) {
-            contentToSave =
-               `<dawn:thinking provider="${finProvider}" duration="${finDuration}">\n` +
-               finContent +
-               '\n</dawn:thinking>\n' +
-               contentToSave;
-         } else if (hasReasoningTokens && finProvider !== 'unknown') {
-            /* Empty thinking marker — preserves provider/duration for the merged
-             * render. Token count attaches via the dawn:reasoning marker below. */
-            contentToSave =
-               `<dawn:thinking provider="${finProvider}" duration="${finDuration}">\n` +
-               '\n</dawn:thinking>\n' +
-               contentToSave;
-         }
-
-         // Include reasoning tokens if present (OpenAI Responses + o-series)
-         if (hasReasoningTokens) {
-            contentToSave =
-               `<dawn:reasoning tokens="${DawnState.streamingState.reasoningTokens}"/>\n` +
-               contentToSave;
+         let reasoning = null;
+         if (hasThinkingContent || hasReasoningTokens) {
+            reasoning = { provider: finProvider, duration: finDuration };
+            if (hasThinkingContent) reasoning.content = finContent;
+            if (hasReasoningTokens) reasoning.tokens = DawnState.streamingState.reasoningTokens;
          }
 
          /* Note: visual content is NOT appended here for client-side save.
@@ -368,7 +360,7 @@
           * server_saved replay. Visual rendering on replay is handled by
           * extractVisuals() in addNormalEntry/prependTranscriptEntry. */
 
-         callbacks.onSaveMessage('assistant', contentToSave);
+         callbacks.onSaveMessage('assistant', fullContent, reasoning);
 
          // Clear finalized thinking content after saving
          DawnState.thinkingState.finalizedContent = '';
@@ -775,5 +767,7 @@
       finalizeThinking: finalizeThinking,
       // Reasoning summary (OpenAI o-series)
       handleReasoningSummary: handleReasoningSummary,
+      // Clear finalized reasoning at an iteration boundary (E3, called on tool-call arrival)
+      clearReasoningState: clearReasoningState,
    };
 })(window);

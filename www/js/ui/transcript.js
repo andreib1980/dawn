@@ -59,6 +59,17 @@
    }
 
    /**
+    * Coerce a persisted reasoning duration to a clean positive numeric string, or '0'.
+    * Guards against a malformed/corrupted server-delivered value rendering verbatim.
+    * @param {*} d - raw duration from the reasoning field
+    * @returns {string}
+    */
+   function coerceReasoningDuration(d) {
+      const n = parseFloat(d);
+      return Number.isFinite(n) && n > 0 ? String(n) : '0';
+   }
+
+   /**
     * Create a thinking block element for display
     * @param {Object} thinking - Thinking data {provider, duration, content, tokens?}
     * @returns {HTMLElement}
@@ -69,35 +80,20 @@
       entry.setAttribute('role', 'region');
       entry.setAttribute('aria-label', 'AI thinking process');
 
-      // Keep in sync with providerDisplayLabel() in streaming.js. Separate IIFEs
-      // can't share the helper without a shared module, so the mapping is
-      // duplicated here — update both sites when adding a new provider.
-      const providerLabel =
-         thinking.provider === 'claude'
-            ? 'Claude'
-            : thinking.provider === 'local'
-              ? 'Local LLM'
-              : thinking.provider === 'openai'
-                ? 'OpenAI'
-                : thinking.provider === 'gemini'
-                  ? 'Gemini'
-                  : 'AI';
-
+      // Label by the assistant's name (e.g. "Friday"), never the model/provider —
+      // provider is mutable infrastructure detail the user shouldn't see.
       const stats = formatThinkingStats(thinking.duration, thinking.tokens || 0);
       const hasContent = thinking.content && thinking.content.trim().length > 0;
-      // "reasoned" when there's no summary text but the provider was OpenAI
-      // (Responses path keeps an empty thinking marker so the merged token count
-      // has somewhere to land — see streaming.js finalizeThinking).
-      const verb = hasContent ? 'thought' : thinking.provider === 'openai' ? 'reasoned' : 'thought';
+      // "thought" when there's a summary, "reasoned" when only token counts (no summary).
+      const verb = hasContent ? 'thought' : 'reasoned';
       const contentHtml = hasContent
          ? DawnFormat.escapeHtml(thinking.content).replace(/\n/g, '<br>')
          : '<em>No reasoning summary available for this turn.</em>';
       const contentClass = hasContent ? 'thinking-content' : 'thinking-content no-summary';
 
-      // Defense-in-depth: thinking.duration / thinking.provider come from a regex
-      // capture on persisted text and could in principle contain HTML — escape.
+      // Defense-in-depth: thinking.duration could in principle contain HTML — escape.
       const safeDuration = DawnFormat.escapeHtml(stats);
-      const safeLabel = DawnFormat.escapeHtml(`${providerLabel} ${verb}`);
+      const safeLabel = DawnFormat.escapeHtml(`${DawnFormat.assistantName()} ${verb}`);
 
       entry.innerHTML = `
       <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
@@ -183,11 +179,13 @@
 
       const tokens = reasoning.tokens || 0;
       const stats = DawnFormat.escapeHtml(formatThinkingStats(null, tokens));
+      const safeLabel = DawnFormat.escapeHtml(`${DawnFormat.assistantName()} reasoned`);
       entry.innerHTML = `
       <div class="thinking-header" role="button" tabindex="0" aria-expanded="false">
         <span class="thinking-icon" aria-hidden="true">🧠</span>
-        <span class="thinking-label">OpenAI reasoned</span>
+        <span class="thinking-label">${safeLabel}</span>
         <span class="thinking-duration">${stats}</span>
+        <span class="thinking-toggle" aria-hidden="true">▼</span>
       </div>
       <div class="thinking-content no-summary">
         <em>No reasoning summary available for this turn.</em>
@@ -545,28 +543,40 @@
     * @param {string} text - Message text
     * @param {HTMLElement|null} beforeElement - Element to insert before (null = append)
     */
-   async function prependTranscriptEntry(role, text, beforeElement) {
+   async function prependTranscriptEntry(role, text, beforeElement, reasoning) {
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
-      // Handle thinking + reasoning markers in assistant messages.
-      // Persistence stores them as separate <dawn:thinking> and <dawn:reasoning>
-      // tags. When both are present (Responses API), merge the token count into
-      // the thinking block so the user sees one panel with both stats.
+      // Handle thinking + reasoning in assistant messages. E3 delivers a structured
+      // `reasoning` field (preferred); legacy rows carry inline <dawn:thinking>/
+      // <dawn:reasoning> markers in content (the fallback). When both content + tokens
+      // are present, one merged panel shows both stats.
       let thinkingBlock = null;
       let reasoningBlock = null;
       if (role === 'assistant') {
          let thinkingData = null;
          let reasoningData = null;
-         if (containsThinkingContent(text)) {
-            const r = extractThinkingContent(text);
-            thinkingData = r.thinking;
-            text = r.remaining;
-         }
-         if (containsReasoningContent(text)) {
-            const r = extractReasoningContent(text);
-            reasoningData = r.reasoning;
-            text = r.remaining;
+         if (reasoning && typeof reasoning === 'object') {
+            if (reasoning.content) {
+               thinkingData = {
+                  duration: coerceReasoningDuration(reasoning.duration),
+                  content: reasoning.content,
+                  tokens: reasoning.tokens || 0,
+               };
+            } else if (reasoning.tokens) {
+               reasoningData = { tokens: reasoning.tokens };
+            }
+         } else {
+            if (containsThinkingContent(text)) {
+               const r = extractThinkingContent(text);
+               thinkingData = r.thinking;
+               text = r.remaining;
+            }
+            if (containsReasoningContent(text)) {
+               const r = extractReasoningContent(text);
+               reasoningData = r.reasoning;
+               text = r.remaining;
+            }
          }
          if (thinkingData) {
             if (reasoningData) thinkingData.tokens = reasoningData.tokens;
@@ -723,7 +733,7 @@
     * @param {string} role - Message role
     * @param {string} text - Message text
     */
-   async function addTranscriptEntry(role, text) {
+   async function addTranscriptEntry(role, text, reasoning) {
       const transcript = DawnElements.transcript;
       if (!transcript) return;
 
@@ -751,15 +761,30 @@
       if (role === 'assistant') {
          let thinkingData = null;
          let reasoningData = null;
-         if (containsThinkingContent(text)) {
-            const r = extractThinkingContent(text);
-            thinkingData = r.thinking;
-            text = r.remaining;
-         }
-         if (containsReasoningContent(text)) {
-            const r = extractReasoningContent(text);
-            reasoningData = r.reasoning;
-            text = r.remaining;
+         if (reasoning && typeof reasoning === 'object') {
+            // E3: server-provided structured reasoning ({provider, duration?, content?, tokens?}).
+            // Prefer this over inline-marker parsing; markers are the legacy fallback below.
+            if (reasoning.content) {
+               thinkingData = {
+                  duration: coerceReasoningDuration(reasoning.duration),
+                  content: reasoning.content,
+                  tokens: reasoning.tokens || 0,
+               };
+            } else if (reasoning.tokens) {
+               reasoningData = { tokens: reasoning.tokens };
+            }
+         } else {
+            // Legacy: parse inline <dawn:thinking>/<dawn:reasoning> markers from content.
+            if (containsThinkingContent(text)) {
+               const r = extractThinkingContent(text);
+               thinkingData = r.thinking;
+               text = r.remaining;
+            }
+            if (containsReasoningContent(text)) {
+               const r = extractReasoningContent(text);
+               reasoningData = r.reasoning;
+               text = r.remaining;
+            }
          }
          let block = null;
          if (thinkingData) {

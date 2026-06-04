@@ -13,6 +13,10 @@
    // UI state
    let visualizerCollapsed = false;
    let pendingIdleState = false; // Server sent "idle" but audio still playing
+   // The conversation already restored for this connection. The server emits multiple
+   // 'session' messages per (re)connect (reconnect + capability-update), and each would
+   // otherwise re-issue a full load_conversation. Reset on disconnect (updateConnectionStatus).
+   let restoredConvIdThisConnection = null;
    let pendingThumbnailsForSave = []; // Thumbnails to attach when saving user message
    let pendingVisualsForSave = []; // <dawn-visual> content to attach to next assistant message
 
@@ -73,7 +77,19 @@
                      console.error('Failed to parse LLM state update:', e);
                   }
                } else if (msg.payload.role === 'tool') {
-                  // Tool debug messages - display only, don't save to history
+                  // Tool debug messages - display only, don't save to history.
+                  // E3: a native tool call means the preceding iteration's reasoning is
+                  // persisted server-side (on its tool_calls row), so discard the browser's
+                  // copy — otherwise a reasoning-only iteration (which never opened a text
+                  // bubble, so finalizeStreamBubble didn't run) leaks its reasoning into the
+                  // final answer's save, producing a duplicate "AI thought" panel on reload.
+                  if (
+                     typeof DawnStreaming !== 'undefined' &&
+                     typeof msg.payload.text === 'string' &&
+                     msg.payload.text.startsWith('[Tool Call:')
+                  ) {
+                     DawnStreaming.clearReasoningState();
+                  }
                   DawnTranscript.addEntry(msg.payload.role, msg.payload.text);
                } else if (msg.payload.role === 'visual') {
                   // Render visual inline. If a progress placeholder exists (from
@@ -236,7 +252,14 @@
                // This loads the conversation history into the LLM context so subsequent
                // messages have proper context
                const savedConvId = DawnHistory.getActiveConversationId();
-               if (savedConvId && DawnState.authState.authenticated) {
+               if (
+                  savedConvId &&
+                  DawnState.authState.authenticated &&
+                  savedConvId !== restoredConvIdThisConnection
+               ) {
+                  // First 'session' of this connection for this conversation — restore once.
+                  // Later duplicate 'session' messages (capability update) are skipped.
+                  restoredConvIdThisConnection = savedConvId;
                   console.log('Restoring active conversation:', savedConvId);
                   DawnWS.send({
                      type: 'load_conversation',
@@ -976,10 +999,20 @@
    // UI Updates
    // =============================================================================
    function updateConnectionStatus(status, reason) {
+      // A new (re)connect: allow the next 'session' message to restore the active
+      // conversation once (the duplicate-restore guard in the session handler).
+      if (status !== 'connected') {
+         restoredConvIdThisConnection = null;
+      }
       DawnElements.connectionStatus.className = status;
       DawnElements.connectionStatus.title = ''; // Clear any previous tooltip
       if (status === 'connected') {
          DawnElements.connectionStatus.textContent = 'Connected';
+         // Debug mode persists across refreshes; re-request the System Prompt block on
+         // (re)connect so it reappears when debug is restored on.
+         if (typeof DawnState !== 'undefined' && DawnState.getDebugMode()) {
+            DawnWS.send({ type: 'get_system_prompt' });
+         }
          if (typeof DawnSatellites !== 'undefined') {
             DawnSatellites.handleReconnect();
          }
@@ -1519,6 +1552,18 @@
          // Scroll to bottom to see newly visible entries
          DawnElements.transcript.scrollTop = DawnElements.transcript.scrollHeight;
       });
+
+      // Restore persisted debug mode across hard refreshes. Tool-call/result entries are
+      // already in the DOM, CSS-gated by body.debug-mode, so applying the class reveals
+      // them; the system prompt is (re-)requested here and on (re)connect (see
+      // updateConnectionStatus).
+      if (DawnState.getDebugMode()) {
+         DawnElements.debugBtn.classList.add('active');
+         document.body.classList.add('debug-mode');
+         if (DawnWS.isConnected()) {
+            DawnWS.send({ type: 'get_system_prompt' });
+         }
+      }
 
       // Visualizer collapse/expand setup
       // Restore state from localStorage (mobile defaults to collapsed on first visit)

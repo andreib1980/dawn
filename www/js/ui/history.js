@@ -19,6 +19,11 @@
       searchTimeout: null,
       pendingMessages: [], // Messages to save once conversation is created
       creatingConversation: false, // Prevent duplicate creation
+      // Monotonic token bumped on every conversation load. The async message-render
+      // loop captures it and bails if a newer load starts mid-render — prevents two
+      // concurrent renders (e.g. on reconnect) from interleaving messages, misplacing
+      // the system-prompt block, or orphaning a turn's tool results.
+      loadRenderToken: 0,
       // Pagination state for current conversation
       oldestMessageId: null,
       hasMoreMessages: false,
@@ -205,18 +210,20 @@
       });
    }
 
-   function requestSaveMessage(convId, role, content) {
+   function requestSaveMessage(convId, role, content, reasoning) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
       if (!convId || !role || !content) return;
 
-      DawnWS.send({
-         type: 'save_message',
-         payload: {
-            conversation_id: convId,
-            role: role,
-            content: content,
-         },
-      });
+      const payload = {
+         conversation_id: convId,
+         role: role,
+         content: content,
+      };
+      // E3: display-only reasoning persisted server-side as a JSON string field.
+      if (reasoning && typeof reasoning === 'object') {
+         payload.reasoning = JSON.stringify(reasoning);
+      }
+      DawnWS.send({ type: 'save_message', payload });
    }
 
    function requestUpdateContext(convId, contextTokens, contextMax) {
@@ -401,7 +408,7 @@
       // Process any pending messages
       if (historyState.pendingMessages.length > 0) {
          historyState.pendingMessages.forEach((msg) => {
-            requestSaveMessage(payload.conversation_id, msg.role, msg.content);
+            requestSaveMessage(payload.conversation_id, msg.role, msg.content, msg.reasoning);
          });
          historyState.pendingMessages = [];
       }
@@ -432,6 +439,10 @@
       const isLoadMore = payload.is_load_more || false;
       const transcript = document.getElementById('transcript');
 
+      // Bump the render token: any earlier in-flight async render will see a newer token
+      // and bail, so this load's render runs alone (no interleaving on reconnect/refresh).
+      const renderToken = ++historyState.loadRenderToken;
+
       // Update pagination state
       historyState.oldestMessageId = payload.oldest_id || null;
       historyState.hasMoreMessages = payload.has_more || false;
@@ -450,7 +461,12 @@
                for (const msg of messages) {
                   if (msg.role === 'system') continue;
                   if (typeof DawnTranscript !== 'undefined') {
-                     await DawnTranscript.prependEntry(msg.role, msg.content, firstMessage);
+                     await DawnTranscript.prependEntry(
+                        msg.role,
+                        msg.content,
+                        firstMessage,
+                        msg.reasoning
+                     );
                   }
                }
 
@@ -567,16 +583,31 @@
          const consumedResultIds = new Set();
          (async () => {
             for (const msg of messages) {
+               // A newer conversation load started — abandon this stale render so the two
+               // don't interleave (the awaits below yield, letting a new load slip in).
+               if (renderToken !== historyState.loadRenderToken) return;
                if (msg.role === 'system') continue;
-               if (msg.role === 'tool') continue; // rendered paired with its call, below
                if (typeof DawnTranscript === 'undefined') continue;
+               if (msg.role === 'tool') {
+                  // Normally skipped — rendered paired with its assistant call above. But if
+                  // that call fell into an earlier, not-yet-loaded page (pagination split a
+                  // tool turn at the 50-message boundary), there's no call in this page to
+                  // pair with — render the result inline at its real position rather than
+                  // dropping it or dumping it out of order at the end of the transcript.
+                  if (msg.tool_call_id && !consumedResultIds.has(msg.tool_call_id)) {
+                     DawnTranscript.addDebug('tool result', `[Tool Result: ${msg.content || ''}]`);
+                  }
+                  continue;
+               }
 
                // Assistant turn that made tool calls: show the pre-tool text bubble first
                // (model speaks, then calls fire), then each call paired with its result as
                // one debug entry — matching the live "[Tool Call: name(args) -> result]".
                if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-                  if (msg.content && msg.content.trim()) {
-                     await DawnTranscript.addEntry(msg.role, msg.content);
+                  // Render the pre-tool text bubble and/or the AI-thought panel (E3): a
+                  // reasoning-only iteration has empty content but still has reasoning to show.
+                  if ((msg.content && msg.content.trim()) || msg.reasoning) {
+                     await DawnTranscript.addEntry(msg.role, msg.content || '', msg.reasoning);
                   }
                   for (const tc of msg.tool_calls) {
                      const fn = tc.function || {};
@@ -595,14 +626,7 @@
                   continue;
                }
 
-               await DawnTranscript.addEntry(msg.role, msg.content);
-            }
-
-            // Surface any tool results that had no matching call (data drift / partial
-            // save) so they aren't silently dropped — live shows them as their own entry.
-            for (const [id, content] of Object.entries(toolResultsById)) {
-               if (consumedResultIds.has(id)) continue;
-               DawnTranscript.addDebug('tool result', `[Tool Result: ${content}]`);
+               await DawnTranscript.addEntry(msg.role, msg.content, msg.reasoning);
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)
@@ -617,6 +641,14 @@
 
          // Setup scroll detection for loading more
          setupScrollDetection(transcript);
+
+         // If debug mode is on (persisted across refreshes), (re-)request the System Prompt
+         // AFTER this load. The load just cleared the transcript, which wipes a system-prompt
+         // block requested earlier (e.g. on connect); requesting here lets its response
+         // prepend to the freshly-rendered transcript and survive.
+         if (typeof DawnState !== 'undefined' && DawnState.getDebugMode() && DawnWS.isConnected()) {
+            DawnWS.send({ type: 'get_system_prompt' });
+         }
       }
 
       // Reset metrics averages for loaded conversation (fresh start)
@@ -1438,7 +1470,7 @@
    /**
     * Save a message to the current conversation (auto-creates conversation if needed)
     */
-   function saveMessageToHistory(role, content) {
+   function saveMessageToHistory(role, content, reasoning) {
       if (role !== 'user' && role !== 'assistant' && role !== 'tool') return;
       if (!content || !content.trim()) return;
 
@@ -1450,7 +1482,7 @@
          if (role === 'user' && typeof DawnSettings !== 'undefined') {
             DawnSettings.lockConversationLlmSettings(historyState.activeConversationId);
          }
-         requestSaveMessage(historyState.activeConversationId, role, content);
+         requestSaveMessage(historyState.activeConversationId, role, content, reasoning);
          return;
       }
 
@@ -1463,7 +1495,7 @@
             requestNewConversation(title);
          }
       } else {
-         historyState.pendingMessages.push({ role, content });
+         historyState.pendingMessages.push({ role, content, reasoning });
       }
    }
 

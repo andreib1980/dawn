@@ -1076,6 +1076,7 @@ int llm_claude_streaming_single_shot(struct json_object *conversation_history,
    /* Extract thinking content and signature for follow-up history */
    result->thinking_content = llm_stream_get_thinking(stream_ctx);
    result->thinking_signature = llm_stream_get_thinking_signature(stream_ctx);
+   result->reasoning_tokens = stream_ctx->reasoning_tokens;
 
    sse_parser_free(sse_parser);
    llm_stream_free(stream_ctx);

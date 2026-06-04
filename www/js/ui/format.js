@@ -169,6 +169,20 @@
       return date.toLocaleDateString();
    }
 
+   /**
+    * The configured assistant display name (capitalized), e.g. "Friday".
+    * Used for the "AI thought / reasoned" panel header so we never surface the
+    * underlying model/provider name (which is mutable infrastructure detail).
+    * Falls back to "AI" when the config isn't available yet.
+    * @returns {string}
+    */
+   function assistantName() {
+      const cfg = typeof DawnSettings !== 'undefined' ? DawnSettings.getConfig() : null;
+      const name = cfg?.general?.ai_name;
+      if (!name) return 'AI';
+      return name.charAt(0).toUpperCase() + name.slice(1);
+   }
+
    // Expose globally
    global.DawnFormat = {
       escapeHtml: escapeHtml,
@@ -177,5 +191,6 @@
       relativeTime: formatRelativeTime,
       addCopyButtons: addCopyButtons,
       addMessageCopyButton: addMessageCopyButton,
+      assistantName: assistantName,
    };
 })(window);

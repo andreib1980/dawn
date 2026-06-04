@@ -219,6 +219,7 @@ typedef struct llm_tool_response {
    /* Extended thinking fields (Claude/Gemini) */
    char *thinking_content;   /**< Extended thinking text (caller must free) */
    char *thinking_signature; /**< Thinking signature for follow-up (caller must free) */
+   int reasoning_tokens;     /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
    /* OpenAI Responses API round-trip fields (NULL for chat-completions / Claude paths) */
    char *response_id;         /**< response.id from /v1/responses (Mode A future use) */
    char *provider_state_json; /**< Opaque JSON blob to attach as _provider_state on the
