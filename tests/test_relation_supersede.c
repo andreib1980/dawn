@@ -223,6 +223,33 @@ static int64_t insert_entity(int user_id, const char *name, const char *type) {
    return id;
 }
 
+/* Count facts in the canonical recall set — mirrors the `superseded_by IS NULL`
+ * filter every production retrieval query carries (e.g. memory_embeddings.c). */
+static int count_active_facts(int user_id) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(
+       s_db.db, "SELECT COUNT(*) FROM memory_facts WHERE user_id = ? AND superseded_by IS NULL", -1,
+       &stmt, NULL);
+   sqlite3_bind_int(stmt, 1, user_id);
+   int n = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      n = sqlite3_column_int(stmt, 0);
+   sqlite3_finalize(stmt);
+   return n;
+}
+
+/* Raw row existence by id (harness-independent — proves the row survived a supersede). */
+static int count_rows_with_id(int64_t fact_id) {
+   sqlite3_stmt *stmt = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM memory_facts WHERE id = ?", -1, &stmt, NULL);
+   sqlite3_bind_int64(stmt, 1, fact_id);
+   int n = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      n = sqlite3_column_int(stmt, 0);
+   sqlite3_finalize(stmt);
+   return n;
+}
+
 static int64_t get_fact_superseded_by(int64_t fact_id) {
    sqlite3_stmt *stmt = NULL;
    sqlite3_prepare_v2(s_db.db, "SELECT superseded_by FROM memory_facts WHERE id = ?", -1, &stmt,
@@ -631,6 +658,43 @@ static void test_supersede_to_different_object_starts_fresh_mention_count(void) 
  * Main
  * ============================================================================ */
 
+/* C4: the dedup-merge path ('forget ... replaced_by: keeper') supersedes a fact into a
+ * keeper.  Pins the invariants that make the merge safe: the merged fact drops out of the
+ * canonical recall set, points at its survivor, and its row survives (recoverable). */
+static void test_fact_supersede_hides_from_recall_but_keeps_row(void) {
+   int user_id = 7;
+   int64_t keep = insert_fact(user_id, "Jon prefers direct tool execution");
+   int64_t dupe = insert_fact(user_id, "Jon prefers direct action execution");
+
+   TEST_ASSERT_EQUAL_INT(2, count_active_facts(user_id)); /* both active to start */
+
+   int rc = memory_db_fact_supersede(dupe, keep, user_id);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
+
+   /* Hidden from recall (superseded_by IS NULL filter), keeper still active. */
+   TEST_ASSERT_EQUAL_INT(1, count_active_facts(user_id));
+   /* Points at the survivor. */
+   TEST_ASSERT_EQUAL_INT64(keep, get_fact_superseded_by(dupe));
+
+   /* Row survives -> recoverable: the merge soft-hides, never deletes. */
+   TEST_ASSERT_EQUAL_INT(1, count_rows_with_id(dupe));
+}
+
+/* C4 / CWE-639: a user superseding their fact into ANOTHER user's fact must not create a
+ * cross-user pointer.  The supersede SQL's EXISTS-ownership guard makes it a no-op (it still
+ * returns SUCCESS — it checks step==DONE, not changes()); the real guarantee is that no
+ * pointer is written and the fact stays in recall.  The handler also guards by fetching the
+ * keeper up front, so this is the DB-layer backstop. */
+static void test_fact_supersede_no_cross_user_pointer(void) {
+   int64_t mine = insert_fact(1, "fact owned by user 1");
+   insert_fact(2, "fact owned by user 2");
+   int64_t theirs = sqlite3_last_insert_rowid(s_db.db);
+
+   memory_db_fact_supersede(mine, theirs, 1);
+   TEST_ASSERT_EQUAL_INT64(0, get_fact_superseded_by(mine)); /* no cross-user pointer */
+   TEST_ASSERT_EQUAL_INT(1, count_active_facts(1));          /* still in recall */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_exclusive_supersede_returns_old_fact_id);
@@ -647,5 +711,7 @@ int main(void) {
    RUN_TEST(test_supersede_dedup_takes_latest_provenance);
    RUN_TEST(test_supersede_dedup_coalesces_fact_id);
    RUN_TEST(test_supersede_to_different_object_starts_fresh_mention_count);
+   RUN_TEST(test_fact_supersede_hides_from_recall_but_keeps_row);
+   RUN_TEST(test_fact_supersede_no_cross_user_pointer);
    return UNITY_END();
 }

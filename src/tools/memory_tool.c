@@ -210,6 +210,19 @@ static const treg_param_t memory_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "with_source",
    },
+   /* Merge mode for 'forget': supersede the listed IDs into a keeper instead of deleting. */
+   {
+       .name = "replaced_by",
+       .description =
+           "For 'forget' ONLY: the fact ID you are KEEPING. When set, the IDs being "
+           "forgotten are MERGED into this keeper — hidden from recall but recoverable, "
+           "instead of permanently deleted. Use when cleaning duplicates "
+           "(from 'find_duplicates') so a mistake is reversible. Omit to delete outright.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "replaced_by",
+   },
 };
 
 /* ========== Tool Metadata ========== */
@@ -231,8 +244,10 @@ static const tool_metadata_t memory_metadata = {
                   "Call 'remember' directly; it cannot be used inside execute_plan. "
                   "Use 'search' to find relevant stored memories (optionally filtered by "
                   "time_range like '24h', '7d', '2w'). "
-                  "Use 'forget' to delete a specific memory by its numeric ID (you MUST use "
-                  "'search' or 'recent' first to find the ID). "
+                  "Use 'forget' to delete a memory by its numeric ID (you MUST use 'search', "
+                  "'recent', or 'find_duplicates' first to find the ID); pass a comma-separated "
+                  "list to remove several. To MERGE duplicates instead of deleting, set "
+                  "'replaced_by' to the ID you're keeping — the rest are hidden but recoverable. "
                   "Use 'recent' to list recently stored memories. "
                   "Use 'save_contact' to store contact info (email, phone) for a person "
                   "(query: person name, field_type: email/phone, value: the address/number, "
@@ -250,7 +265,7 @@ static const tool_metadata_t memory_metadata = {
                   "excerpts for each fact (v40+, 16 KB budget; older facts omit excerpts). "
                   "Memories persist across sessions and are private to each user.",
    .params = memory_params,
-   .param_count = 11,
+   .param_count = 12,
 
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = TOOL_CAP_FILESYSTEM,
