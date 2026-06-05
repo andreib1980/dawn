@@ -44,8 +44,9 @@ static const treg_param_t memory_params[] = {
        .name = "action",
        .description =
            "Memory action: 'remember' (store a fact), 'search' (find memories), "
-           "'forget' (delete one or more memories by numeric ID — use search/recent/"
-           "find_duplicates first to find the IDs), 'recent' (list recent memories), "
+           "'forget' (remove memories by numeric ID — DELETE permanently, or MERGE duplicates "
+           "while keeping one by also setting 'replaced_by'; use search/recent/find_duplicates "
+           "first to find the IDs), 'recent' (list recent memories), "
            "'find_duplicates' (list clusters of near-identical facts with their IDs so you "
            "can forget the redundant ones), "
            "'save_contact' (store email/phone for a person), "
@@ -214,10 +215,12 @@ static const treg_param_t memory_params[] = {
    {
        .name = "replaced_by",
        .description =
-           "For 'forget' ONLY: the fact ID you are KEEPING. When set, the IDs being "
-           "forgotten are MERGED into this keeper — hidden from recall but recoverable, "
-           "instead of permanently deleted. Use when cleaning duplicates "
-           "(from 'find_duplicates') so a mistake is reversible. Omit to delete outright.",
+           "For 'forget' ONLY: the fact ID you are KEEPING. Setting this turns 'forget' into a "
+           "MERGE — the IDs being forgotten are hidden from recall but stay RECOVERABLE, pointing "
+           "at this keeper, instead of being permanently deleted. THIS is how you merge/dedupe: "
+           "whenever the goal is to consolidate duplicates while keeping one (the user says "
+           "'merge', or you're cleaning a find_duplicates cluster), set 'replaced_by' rather than "
+           "plain-deleting the redundant IDs. Omit ONLY when the facts should be gone for good.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -244,10 +247,14 @@ static const tool_metadata_t memory_metadata = {
                   "Call 'remember' directly; it cannot be used inside execute_plan. "
                   "Use 'search' to find relevant stored memories (optionally filtered by "
                   "time_range like '24h', '7d', '2w'). "
-                  "Use 'forget' to delete a memory by its numeric ID (you MUST use 'search', "
-                  "'recent', or 'find_duplicates' first to find the ID); pass a comma-separated "
-                  "list to remove several. To MERGE duplicates instead of deleting, set "
-                  "'replaced_by' to the ID you're keeping — the rest are hidden but recoverable. "
+                  "Use 'forget' to remove memories by numeric ID (you MUST use 'search', 'recent', "
+                  "or 'find_duplicates' first to find the ID); pass a comma-separated list for "
+                  "several. 'forget' has TWO modes — pick deliberately: (1) DELETE (default, "
+                  "permanent) for facts that are wrong or unwanted; (2) MERGE (recoverable) for "
+                  "duplicates — when the user asks to merge/consolidate/dedupe while keeping one, "
+                  "OR you are cleaning duplicates, set 'replaced_by' to the keeper's ID so the "
+                  "rest are hidden-but-recoverable rather than permanently deleted. Prefer MERGE "
+                  "for duplicate cleanup so a wrong call is reversible. "
                   "Use 'recent' to list recently stored memories. "
                   "Use 'save_contact' to store contact info (email, phone) for a person "
                   "(query: person name, field_type: email/phone, value: the address/number, "

@@ -246,8 +246,24 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
       }
       // Fallback for non-streaming LLMs
       if (response && !session->stream_had_content && session->cmd_tag_filter.nesting_depth == 0) {
-         OLOG_INFO("Session %u: LLM didn't stream, sending full transcript", session->session_id);
-         webui_send_transcript(session, "assistant", response);
+         if (*response) {
+            OLOG_INFO("Session %u: LLM didn't stream, sending full transcript",
+                      session->session_id);
+            webui_send_transcript(session, "assistant", response);
+         } else {
+            /* Empty completion AND nothing streamed — the model produced no text and no
+             * user-visible tool output (observed with some preview models returning an empty
+             * completion after a tool call). The all-tools-silent case takes a different path,
+             * so reaching here means the user genuinely got nothing. Surface a brief notice
+             * instead of dead air. Display-only: the empty response is not added to history
+             * below, so this never re-enters LLM context or a reload. */
+            OLOG_WARNING("Session %u: empty completion with no streamed output — surfacing "
+                         "fallback notice",
+                         session->session_id);
+            webui_send_transcript(session, "assistant",
+                                  "Hmm, I didn't generate a response that time — mind trying "
+                                  "again or rephrasing?");
+         }
       }
    }
 #endif
