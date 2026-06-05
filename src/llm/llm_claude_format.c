@@ -962,7 +962,12 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
             json_object *last_content;
             if (json_object_object_get_ex(last_message, "content", &last_content) &&
                 json_object_is_type(last_content, json_type_array)) {
-               json_object_array_add(last_content, result_block);
+               /* result_block is already owned by result_array (added above); take a second
+                * reference for last_content before freeing the wrapper, otherwise the put()
+                * below frees result_block out from under last_content — a use-after-free /
+                * double-free that crashes on consecutive tool results (e.g. parallel tool
+                * calls producing several tool_result messages in a row). */
+               json_object_array_add(last_content, json_object_get(result_block));
                json_object_put(result_array);  // Don't need the wrapper array
             } else {
                // Replace string content with array

@@ -316,6 +316,12 @@ dawn_add_unit_test(test_messaging_format
    LIBS    dawn_common unity
    LABEL   ci)
 
+dawn_add_unit_test(test_claude_format
+   SOURCES test_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_instruction_loader
    SOURCES test_instruction_loader.c
            ${SRC_ROOT}/src/tools/instruction_loader.c
