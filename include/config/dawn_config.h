@@ -559,7 +559,7 @@ typedef struct {
    float prune_stale_min_confidence; /* Only prune stale facts below this confidence */
 
    /* Fact expiry / ephemerality settings (v58, C3).  Off by default until the
-    * recall check validates it on a live DB.  See MEMORY_EPHEMERALITY_DESIGN.md. */
+    * recall check validates it on a live DB.  See atlas/dawn/memory/EPHEMERALITY_DESIGN.md. */
    bool expire_enabled;    /* Gate: extraction sets expires_at, retrieval guard + nightly
                             * prune_expired honor it.  Off → expires_at never written and the
                             * retrieval guard admits everything (instant, non-mutating). */

@@ -99,7 +99,7 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
  * instant and non-mutating.  When on, returns wall-clock now so facts past their
  * expires_at drop out of retrieval (soft phase; the nightly prune_expired pass
  * does the hard delete).  Centralized so every guarded statement binds the same
- * value.  See MEMORY_EPHEMERALITY_DESIGN.md (C3). */
+ * value.  See atlas/dawn/memory/EPHEMERALITY_DESIGN.md (C3). */
 static int64_t fact_expiry_guard_now(void) {
    return g_config.memory.expire_enabled ? (int64_t)time(NULL) : 0;
 }
