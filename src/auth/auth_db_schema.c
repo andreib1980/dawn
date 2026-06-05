@@ -288,6 +288,14 @@ static const char *SCHEMA_SQL =
      * rest).  Tightens to NOT NULL in a follow-up migration once backfill
      * completes.  See PHASE_0_EXTRACTION_PROMPT_DRAFT.md. */
     "   subject_entity_id      INTEGER DEFAULT NULL,"
+    /* v58: expires_at — fact-lifecycle expiry (ephemerality / C3).  NULL =
+     * durable (the default for every existing and most new rows).  When set
+     * (unix seconds), the fact is hidden from retrieval once now >= expires_at
+     * (a non-mutating retrieval guard, fully reversible) and hard-pruned by the
+     * nightly prune_expired pass after a grace+retention window.  Distinct from
+     * relations' valid_to: that bounds a subject→predicate→object triple; this
+     * bounds a free-text fact (forecasts, scheduled-not-yet-happened). */
+    "   expires_at             INTEGER DEFAULT NULL,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
@@ -3029,6 +3037,38 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v58 — memory_facts.expires_at (fact-lifecycle expiry / ephemerality, C3).
+    * Nullable (NULL = durable, the default for every existing row), so no
+    * back-fill and nothing breaks — Phase 1 is preventive: only new extractions
+    * set expires_at.  Single nullable ADD COLUMN — O(1) fast path.  Mirrors v57. */
+   bool v58_ok = (current_version >= 58) || (current_version == 0);
+   if (current_version >= 18 && current_version < 58) {
+      bool v58_fresh = false;
+      rc = sqlite3_exec(s_db.db,
+                        "ALTER TABLE memory_facts ADD COLUMN expires_at INTEGER DEFAULT NULL", NULL,
+                        NULL, &errmsg);
+      if (rc == SQLITE_OK) {
+         v58_ok = true;
+         v58_fresh = true;
+      } else if (errmsg && strstr(errmsg, "duplicate column")) {
+         v58_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v58 memory_facts.expires_at migration failed: %s",
+                    errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+
+      if (v58_ok) {
+         if (v58_fresh) {
+            OLOG_INFO("auth_db: v58 added memory_facts.expires_at (fact-lifecycle expiry)");
+         } else {
+            OLOG_INFO("auth_db: v58 memory_facts.expires_at already present "
+                      "(applied by SCHEMA_SQL during multi-step migration)");
+         }
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3063,6 +3103,22 @@ int auth_db_create_schema(const char *db_path) {
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: could not create memory_facts subject index: %s",
+                   errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v58 post-migration index: idx_memory_facts_expires keeps both the nightly
+    * prune_expired scan and the retrieval guard's expiry predicate cheap.
+    * Partial (WHERE expires_at IS NOT NULL) because the transient set is a
+    * minority — the index stays tiny and durable (NULL) rows never enter it. */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_expires "
+                     "ON memory_facts(user_id, expires_at) "
+                     "WHERE expires_at IS NOT NULL",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create memory_facts expires index: %s",
                    errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
@@ -3166,7 +3222,7 @@ int auth_db_create_schema(const char *db_path) {
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
-                              v55_ok && v56_ok && v57_ok;
+                              v55_ok && v56_ok && v57_ok && v58_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

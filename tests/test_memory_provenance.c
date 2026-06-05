@@ -33,6 +33,7 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_provenance.h"
@@ -108,6 +109,7 @@ static const char *DDL =
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
+   "  expires_at             INTEGER DEFAULT NULL,"  /* v58 */
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
    ");"
@@ -188,7 +190,7 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, category, expires_at FROM memory_facts "
        "WHERE id = ? AND user_id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK)
@@ -221,6 +223,28 @@ static int prepare_statements(void) {
 
    /* conv_set_last_extracted — not used in these tests but must be valid */
    rc = sqlite3_prepare_v2(s_db.db, "SELECT 1", -1, &s_db.stmt_conv_set_last_extracted, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
+   /* v58 expiry-guard tests: mirror the production fact_list (with the
+    * expires_at retrieval guard, numbered params) + prune_expired statements
+    * so memory_db_fact_list / memory_db_fact_prune_expired exercise their real
+    * bind logic against this DB.  Keep in sync with auth_db_statements.c. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
+       "access_count, superseded_by, category FROM memory_facts "
+       "WHERE user_id = ?1 AND superseded_by IS NULL "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
+       -1, &s_db.stmt_memory_fact_list, NULL);
+   if (rc != SQLITE_OK)
+      return FAILURE;
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM memory_facts WHERE user_id = ? "
+                           "AND expires_at IS NOT NULL AND expires_at < ?",
+                           -1, &s_db.stmt_memory_fact_prune_expired, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
 
@@ -258,11 +282,17 @@ static void close_db(void) {
       sqlite3_finalize(s_db.stmt_memory_summary_create);
    if (s_db.stmt_conv_set_last_extracted)
       sqlite3_finalize(s_db.stmt_conv_set_last_extracted);
+   if (s_db.stmt_memory_fact_list)
+      sqlite3_finalize(s_db.stmt_memory_fact_list);
+   if (s_db.stmt_memory_fact_prune_expired)
+      sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
    s_db.stmt_memory_fact_create = NULL;
    s_db.stmt_memory_fact_get = NULL;
    s_db.stmt_memory_pref_upsert = NULL;
    s_db.stmt_memory_summary_create = NULL;
    s_db.stmt_conv_set_last_extracted = NULL;
+   s_db.stmt_memory_fact_list = NULL;
+   s_db.stmt_memory_fact_prune_expired = NULL;
    sqlite3_close(s_db.db);
    s_db.db = NULL;
 }
@@ -854,6 +884,79 @@ void test_cleanup_meta_facts_no_match_returns_zero(void) {
    TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(id, 1, &got));
 }
 
+/* =============================================================================
+ * v58 (C3) — fact-expiry retrieval guard + prune
+ * ============================================================================= */
+
+/* The expiry retrieval guard hides a past-expiry fact only when enabled, leaves
+ * the by-id fetch un-guarded (carrying expires_at), and restores instantly on
+ * disable with no row mutation.  Pins the numbered-param guard binds. */
+void test_expiry_guard_hides_and_restores(void) {
+   g_config.memory.expire_enabled = false; /* known starting state */
+
+   int64_t durable_id = 0, transient_id = 0;
+   memory_db_fact_create(1, "Jon lives in Atlanta", 0.9f, "explicit", "personal", NULL,
+                         &durable_id);
+   memory_db_fact_create(1, "Forecast for 2026-04-12: clear", 0.9f, "explicit", "general", NULL,
+                         &transient_id);
+   TEST_ASSERT_TRUE(durable_id > 0 && transient_id > 0);
+
+   int64_t past = (int64_t)time(NULL) - 86400; /* expired one day ago */
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_set_expires_at(transient_id, 1, past));
+
+   memory_fact_t facts[8];
+   int n = 0;
+
+   /* Disabled → guard admits everything. */
+   memory_db_fact_list(1, facts, 8, 0, &n);
+   TEST_ASSERT_EQUAL(2, n);
+
+   /* Enabled → expired fact hidden, durable remains. */
+   g_config.memory.expire_enabled = true;
+   memory_db_fact_list(1, facts, 8, 0, &n);
+   TEST_ASSERT_EQUAL(1, n);
+   TEST_ASSERT_EQUAL(durable_id, facts[0].id);
+
+   /* By-id fetch stays un-guarded and carries expires_at (col 10). */
+   memory_fact_t got = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(transient_id, 1, &got));
+   TEST_ASSERT_EQUAL_INT64(past, got.expires_at);
+
+   /* Consumer-side predicate mirrors the SQL guard. */
+   TEST_ASSERT_TRUE(memory_db_fact_expiry_hidden(past));
+   TEST_ASSERT_FALSE(memory_db_fact_expiry_hidden((int64_t)time(NULL) + 86400)); /* future */
+   TEST_ASSERT_FALSE(memory_db_fact_expiry_hidden(0));                           /* durable */
+
+   /* Disable → instant restore, no row mutation. */
+   g_config.memory.expire_enabled = false;
+   TEST_ASSERT_FALSE(memory_db_fact_expiry_hidden(past));
+   memory_db_fact_list(1, facts, 8, 0, &n);
+   TEST_ASSERT_EQUAL(2, n);
+}
+
+/* prune_expired hard-deletes facts past their reference date (retention 0) and
+ * leaves durable + future-expiry facts intact. */
+void test_prune_expired_removes_past_only(void) {
+   int64_t durable_id = 0, transient_id = 0, future_id = 0;
+   memory_db_fact_create(1, "Jon works at Acme", 0.9f, "explicit", "professional", NULL,
+                         &durable_id);
+   memory_db_fact_create(1, "Event on 2026-01-01", 0.9f, "explicit", "general", NULL,
+                         &transient_id);
+   memory_db_fact_create(1, "Launch on 2030-01-01", 0.9f, "explicit", "general", NULL, &future_id);
+
+   memory_db_fact_set_expires_at(transient_id, 1, (int64_t)time(NULL) - 86400);
+   memory_db_fact_set_expires_at(future_id, 1, (int64_t)time(NULL) + 30 * 86400);
+
+   int deleted = 0;
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_prune_expired(1, 0, &deleted));
+   TEST_ASSERT_EQUAL(1, deleted); /* only the past-expiry fact */
+
+   memory_fact_t got = { 0 };
+   TEST_ASSERT_EQUAL(MEMORY_DB_NOT_FOUND, memory_db_fact_get(transient_id, 1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(durable_id, 1, &got));
+   TEST_ASSERT_EQUAL(MEMORY_DB_SUCCESS, memory_db_fact_get(future_id, 1, &got));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_fact_create_with_source_roundtrip);
@@ -898,6 +1001,10 @@ int main(void) {
    RUN_TEST(test_cleanup_meta_facts_dry_run_counts_without_delete);
    RUN_TEST(test_cleanup_meta_facts_commit_deletes_matches_only);
    RUN_TEST(test_cleanup_meta_facts_no_match_returns_zero);
+
+   /* v58 fact-expiry guard + prune — 2 cases. */
+   RUN_TEST(test_expiry_guard_hides_and_restores);
+   RUN_TEST(test_prune_expired_removes_past_only);
 
    return UNITY_END();
 }

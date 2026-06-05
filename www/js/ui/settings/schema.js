@@ -9,7 +9,7 @@
 
    // Schema version — bump when adding/removing/reordering fields or sections.
    // When this changes, the settings DOM is rebuilt from scratch.
-   const SCHEMA_VERSION = 7;
+   const SCHEMA_VERSION = 8;
 
    // Track whether DOM has been rendered and which schema version it represents
    let renderedSchemaVersion = null;
@@ -945,6 +945,28 @@
                max: 1,
                step: 0.1,
                hint: 'Only prune stale facts with confidence below this value (0-1)',
+               advanced: true,
+            },
+            expire_enabled: {
+               type: 'checkbox',
+               label: 'Enable Fact Expiry',
+               hint: 'Auto-expire transient dated facts (weather forecasts, scheduled-not-yet-happened events). Leave off until validated on your data.',
+               advanced: true,
+            },
+            expire_grace_days: {
+               type: 'number',
+               label: 'Expiry Grace (days)',
+               min: 0,
+               max: 365,
+               hint: 'Keep an expiring fact visible this many days past its reference date',
+               advanced: true,
+            },
+            prune_expired_days: {
+               type: 'number',
+               label: 'Expired Retention (days)',
+               min: 0,
+               max: 365,
+               hint: 'Recoverable buffer before an expired fact is hard-deleted (0 = delete on the reference date)',
                advanced: true,
             },
             conversation_idle_timeout_min: {

@@ -458,6 +458,13 @@
 # prune_superseded_days = 30      # Keep superseded facts for N days before deletion
 # prune_stale_days = 180          # Delete low-confidence facts not accessed in N days
 # prune_stale_min_confidence = 0.50  # Only prune stale facts with confidence below this
+# Fact expiry / ephemerality (C3) — auto-expire transient dated facts (weather
+# forecasts, scheduled-not-yet-happened events).  Off by default.  When on,
+# extraction tags such facts with an expires_at; they leave retrieval once it
+# passes (reversible) and are hard-deleted by the nightly prune after the window.
+# expire_enabled = false          # Master gate for fact expiry
+# expire_grace_days = 7           # Keep an expiring fact visible N days past its reference date
+# prune_expired_days = 30         # Recoverable buffer before hard-delete (0 = delete on expiry)
 # conversation_idle_timeout_min = 15  # Auto-save voice conversations after N minutes idle
                                   # (0 = disabled, minimum 10 if enabled)
 # default_voice_user_id = 1       # User account for local microphone and DAP conversations

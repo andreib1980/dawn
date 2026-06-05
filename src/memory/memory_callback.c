@@ -36,6 +36,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/iso8601.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/time_query_parser.h"
@@ -897,7 +898,13 @@ char *memory_action_search(int user_id,
  * advisory.  Returns a malloc'd, caller-freed result line.  The batch dispatcher
  * (memory_action_remember) calls this once per fact; single-fact callers reach it
  * through that dispatcher's non-array fall-through, so behavior is unchanged. */
-static char *memory_action_remember_single(int user_id, const char *fact_text) {
+/* expires_ref: AI-decided expiry reference date (unix sec) for a transient dated
+ * fact, or 0 for durable.  When set and [memory] expire_enabled is on, a fresh
+ * fact gets expires_at = expires_ref + grace (v58/C3).  The AI is the judge — we
+ * never derive this; it only fires when the model attaches a date. */
+static char *memory_action_remember_single(int user_id,
+                                           const char *fact_text,
+                                           int64_t expires_ref) {
    if (!fact_text || strlen(fact_text) == 0) {
       return strdup("Please provide the fact to remember.");
    }
@@ -1005,6 +1012,17 @@ static char *memory_action_remember_single(int user_id, const char *fact_text) {
       return strdup("Failed to store the fact. Please try again.");
    }
 
+   /* AI-decided expiry (v58/C3): if the model attached a reference date and
+    * expiry is enabled, set expires_at = ref + grace so this transient fact
+    * leaves retrieval after its date.  Durable facts (expires_ref == 0) are
+    * untouched. */
+   if (g_config.memory.expire_enabled && expires_ref > 0) {
+      int64_t cutoff = expires_ref + (int64_t)g_config.memory.expire_grace_days * 86400;
+      memory_db_fact_set_expires_at(fact_id, user_id, cutoff);
+      OLOG_INFO("memory_callback: remember set expires_at=%ld (ref+grace=%dd) on fact %lld",
+                (long)cutoff, g_config.memory.expire_grace_days, (long long)fact_id);
+   }
+
    /* Store the embedding we already computed (avoids a second embed call) when
     * available; otherwise fall back to the embed-and-store convenience path. */
    if (have_vec) {
@@ -1045,12 +1063,16 @@ static char *memory_action_remember_single(int user_id, const char *fact_text) {
 }
 
 /* 'remember' entry point.  Accepts either a single fact string (the common case,
- * unchanged) or a JSON array of fact strings for a one-round-trip batch dump, e.g.
- * ["Jon uses a Jetson", "Jon prefers dark mode"].  Each element runs the full
- * single-fact pipeline (dedup + embed + advisory); results are concatenated.  A value
- * that is not a JSON array (parse failure or any non-array type) falls through to the
- * single-fact path, so existing single-fact callers — and any ordinary fact text — are
- * unaffected.  Capped at MAX_REMEMBER_FACTS per call. */
+ * unchanged) or a JSON array for a one-round-trip batch dump.  Each array element is
+ * EITHER a plain string (durable fact) OR an object {"text": "...", "expires_at":
+ * "YYYY-MM-DD"} where expires_at marks a transient dated fact the AI judged should
+ * expire after that date (v58/C3).  Mixed forms are allowed, e.g.
+ * ["Jon prefers dark mode", {"text": "Movie tonight 6:30 PM", "expires_at":
+ * "2026-06-05"}].  Each element runs the full single-fact pipeline (dedup + embed +
+ * advisory); results are concatenated.  A value that is not a JSON array (parse
+ * failure or any non-array type) falls through to the single-fact path, so existing
+ * callers — and any ordinary fact text — are unaffected.  Capped at
+ * MAX_REMEMBER_FACTS per call. */
 static char *memory_action_remember(int user_id, const char *value) {
    if (!value || !*value) {
       return strdup("Please provide the fact to remember.");
@@ -1065,13 +1087,27 @@ static char *memory_action_remember(int user_id, const char *value) {
       int processed = 0;
       for (int i = 0; i < n && processed < MAX_REMEMBER_FACTS; i++) {
          struct json_object *elem = json_object_array_get_idx(arr, i);
-         const char *fact = (elem && json_object_is_type(elem, json_type_string))
-                                ? json_object_get_string(elem)
-                                : NULL;
-         if (!fact || !*fact) {
-            continue; /* skip empty / non-string elements */
+         /* Element may be a plain string (durable) or {text, expires_at} (transient). */
+         const char *fact = NULL;
+         int64_t expires_ref = 0;
+         if (elem && json_object_is_type(elem, json_type_string)) {
+            fact = json_object_get_string(elem);
+         } else if (elem && json_object_is_type(elem, json_type_object)) {
+            struct json_object *text_obj, *exp_obj;
+            if (json_object_object_get_ex(elem, "text", &text_obj)) {
+               fact = json_object_get_string(text_obj);
+            }
+            if (json_object_object_get_ex(elem, "expires_at", &exp_obj)) {
+               const char *exp_str = json_object_get_string(exp_obj);
+               if (exp_str && *exp_str) {
+                  expires_ref = iso8601_parse_date_utc(exp_str);
+               }
+            }
          }
-         char *one = memory_action_remember_single(user_id, fact);
+         if (!fact || !*fact) {
+            continue; /* skip empty / unrecognized elements */
+         }
+         char *one = memory_action_remember_single(user_id, fact, expires_ref);
          if (one) {
             if (stored > 0) {
                strbuf_append(&sb, "\n\n");
@@ -1105,8 +1141,9 @@ static char *memory_action_remember(int user_id, const char *value) {
       json_object_put(arr);
    }
 
-   /* Single fact (backward-compatible default). */
-   return memory_action_remember_single(user_id, value);
+   /* Single fact (backward-compatible default).  No expiry on the bare-string
+    * form — transient facts use the array-of-objects form above. */
+   return memory_action_remember_single(user_id, value, 0);
 }
 
 /* =============================================================================

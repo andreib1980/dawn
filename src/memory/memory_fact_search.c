@@ -256,6 +256,13 @@ static int fact_search_hybrid_impl(int user_id,
                int rc = memory_db_fact_get(hybrid[h].fact_id, user_id, &vec_fact);
                if (rc != MEMORY_DB_SUCCESS)
                   continue;
+               /* Expiry retrieval guard (v58): the keyword/list statements filter
+                * expired rows in SQL, but this by-id semantic fetch is un-guarded
+                * (it must return the row so we can decide).  The fact-embedding
+                * cache is shared with extraction-time dedup, so it intentionally
+                * still holds expiring rows — drop them here, not at cache load. */
+               if (memory_db_fact_expiry_hidden(vec_fact.expires_at))
+                  continue;
                out_facts[produced] = vec_fact;
                out_scores[produced] = hybrid[h].score;
                produced++;

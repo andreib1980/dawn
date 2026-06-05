@@ -257,6 +257,14 @@ int memory_graph_expand_fact_linked(int user_id,
          memory_fact_t fact = { 0 };
          if (memory_db_fact_get(fid, user_id, &fact) != MEMORY_DB_SUCCESS)
             continue;
+         /* Expiry retrieval guard (v58): this 1-hop graph expansion is a
+          * second by-id retrieval materialization that feeds the LLM focus
+          * block (mirrors the vector-only path in memory_fact_search.c).  The
+          * fact-embedding seed pool is shared with maintenance, so drop expired
+          * facts here rather than at the source — a scheduled-not-yet-happened
+          * event reachable via a relation triple is exactly the C3 target. */
+         if (memory_db_fact_expiry_hidden(fact.expires_at))
+            continue;
 
          out_facts[produced] = fact;
          out_scores[produced] = bonus;

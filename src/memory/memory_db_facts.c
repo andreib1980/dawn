@@ -84,6 +84,32 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
       strncpy(fact->category, "general", MEMORY_CATEGORY_MAX - 1);
       fact->category[MEMORY_CATEGORY_MAX - 1] = '\0';
    }
+
+   /* expires_at (v58) is NOT in the shared 10-column projection — the
+    * keyword/list retrieval statements filter expired rows in SQL via the
+    * expiry guard, so anything reaching this reader is non-expired.  Default to
+    * 0 (durable); only memory_db_fact_get's by-id projection carries the column
+    * and overwrites this after the call (the un-guarded semantic-path fetch). */
+   fact->expires_at = 0;
+}
+
+/* Expiry retrieval guard: the timestamp the guarded retrieval statements compare
+ * memory_facts.expires_at against.  When [memory] expire_enabled is off, returns
+ * 0 so `(expires_at IS NULL OR expires_at >= 0)` admits every fact — disabling is
+ * instant and non-mutating.  When on, returns wall-clock now so facts past their
+ * expires_at drop out of retrieval (soft phase; the nightly prune_expired pass
+ * does the hard delete).  Centralized so every guarded statement binds the same
+ * value.  See MEMORY_EPHEMERALITY_DESIGN.md (C3). */
+static int64_t fact_expiry_guard_now(void) {
+   return g_config.memory.expire_enabled ? (int64_t)time(NULL) : 0;
+}
+
+bool memory_db_fact_expiry_hidden(int64_t expires_at) {
+   /* Mirror the SQL guard: kept when (expires_at IS NULL OR expires_at >= now);
+    * hidden otherwise.  Disabled config or durable (0) fact → never hidden. */
+   if (!g_config.memory.expire_enabled || expires_at <= 0)
+      return false;
+   return expires_at < (int64_t)time(NULL);
 }
 
 /* v48 FTS5 maintenance helpers — caller must hold AUTH_DB_LOCK.  Forward
@@ -279,6 +305,11 @@ int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact) {
    int result = MEMORY_DB_NOT_FOUND;
    if (sqlite3_step(stmt) == SQLITE_ROW) {
       populate_fact_from_row(stmt, out_fact);
+      /* This statement's projection carries expires_at as col 10 (the only
+       * fact reader that does — see stmt_memory_fact_get).  populate_fact_from_row
+       * defaulted it to 0; overwrite with the stored value (NULL → 0) so the
+       * semantic-path expiry guard can decide.  v58. */
+      out_fact->expires_at = sqlite3_column_int64(stmt, 10);
       result = MEMORY_DB_SUCCESS;
    }
 
@@ -305,6 +336,7 @@ int memory_db_fact_list(int user_id,
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int(stmt, 2, max_facts);
    sqlite3_bind_int(stmt, 3, offset);
+   sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
    while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
@@ -515,8 +547,10 @@ int memory_db_fact_search_bm25_since(int user_id,
    if (windowed) {
       sqlite3_bind_int64(stmt, 3, (int64_t)since_ts);
       sqlite3_bind_int(stmt, 4, max_facts);
+      sqlite3_bind_int64(stmt, 5, fact_expiry_guard_now()); /* expiry guard (v58) */
    } else {
       sqlite3_bind_int(stmt, 3, max_facts);
+      sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
    }
 
    int count = 0;
@@ -558,6 +592,7 @@ int memory_db_fact_search(int user_id,
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 3, max_facts);
+   sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
    while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
@@ -641,6 +676,39 @@ int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t enti
    sqlite3_bind_int(stmt, 3, user_id);
    sqlite3_bind_int64(stmt, 4, entity_id);
    sqlite3_bind_int(stmt, 5, user_id);
+   int step_rc = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (step_rc != SQLITE_DONE)
+      return MEMORY_DB_FAILURE;
+   return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_at) {
+   if (fact_id <= 0 || user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   /* Ad-hoc prepare (mirrors set_subject_entity) — the expiry-set path runs at
+    * most once per freshly-extracted transient fact, not on the hot retrieval
+    * path, so a cached statement isn't warranted.  CWE-639: (id, user_id) scope.
+    * expires_at <= 0 stores NULL (clears any expiry → durable). */
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db, "UPDATE memory_facts SET expires_at = ? WHERE id = ? AND user_id = ?", -1, &stmt,
+       NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare fact_set_expires_at failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   if (expires_at > 0)
+      sqlite3_bind_int64(stmt, 1, expires_at);
+   else
+      sqlite3_bind_null(stmt, 1);
+   sqlite3_bind_int64(stmt, 2, fact_id);
+   sqlite3_bind_int(stmt, 3, user_id);
    int step_rc = sqlite3_step(stmt);
    int changes = sqlite3_changes(s_db.db);
    sqlite3_finalize(stmt);
@@ -908,6 +976,46 @@ int memory_db_fact_prune_stale(int user_id, int stale_days, float min_confidence
    return MEMORY_DB_SUCCESS;
 }
 
+/* v58 (C3): hard-delete facts whose expiry passed more than @p retention_days
+ * ago — the "hard phase" of fact ephemerality.  The retrieval guard already
+ * hides them (soft phase) the moment expires_at < now; this reclaims the row
+ * after the recoverable window.  retention_days = 0 collapses to hard-expire on
+ * the reference date (cutoff == now).  Leaf-lock single DELETE, copies nothing
+ * out — mirrors prune_superseded.  Carries the same known FTS5-orphan debt as
+ * prune_superseded / prune_stale (see the block comment above prune_superseded);
+ * close all three together when pruning is exercised in production. */
+int memory_db_fact_prune_expired(int user_id, int retention_days, int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   time_t cutoff = time(NULL) - (retention_days * 24 * 60 * 60);
+
+   sqlite3_stmt *stmt = s_db.stmt_memory_fact_prune_expired;
+   sqlite3_reset(stmt);
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, (int64_t)cutoff);
+
+   int rc = sqlite3_step(stmt);
+   int deleted = sqlite3_changes(s_db.db);
+   sqlite3_reset(stmt);
+
+   AUTH_DB_UNLOCK();
+
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: prune_expired failed: %s", sqlite3_errmsg(s_db.db));
+      return MEMORY_DB_FAILURE;
+   }
+
+   if (count_out)
+      *count_out = deleted;
+   if (deleted > 0) {
+      OLOG_INFO("memory_db: pruned %d expired facts for user %d", deleted, user_id);
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_facts_delete_by_patterns(int user_id,
                                        const char *const *patterns,
                                        int n_patterns,
@@ -1097,6 +1205,7 @@ int memory_db_fact_search_since(int user_id,
    sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC);
    sqlite3_bind_int64(stmt, 3, (int64_t)since_ts);
    sqlite3_bind_int(stmt, 4, max_facts);
+   sqlite3_bind_int64(stmt, 5, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
    while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1129,6 +1238,7 @@ int memory_db_fact_list_since(int user_id,
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int64(stmt, 2, (int64_t)since_ts);
    sqlite3_bind_int(stmt, 3, max_facts);
+   sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
    while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1170,6 +1280,7 @@ int memory_db_fact_list_window(int user_id,
    sqlite3_bind_int64(stmt, 2, (int64_t)since_ts);
    sqlite3_bind_int64(stmt, 3, until_resolved);
    sqlite3_bind_int(stmt, 4, max_facts);
+   sqlite3_bind_int64(stmt, 5, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
    while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {

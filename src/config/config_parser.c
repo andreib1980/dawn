@@ -1079,6 +1079,9 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "prune_superseded_days",
                                              "prune_stale_days",
                                              "prune_stale_min_confidence",
+                                             "expire_enabled",
+                                             "expire_grace_days",
+                                             "prune_expired_days",
                                              "conversation_idle_timeout_min",
                                              "default_voice_user_id",
                                              "pruning",
@@ -1120,6 +1123,11 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       PARSE_DOUBLE(pruning, "stale_min_confidence", config->prune_stale_min_confidence);
    }
 
+   /* Parse fact-expiry / ephemerality settings (v58, C3) */
+   PARSE_BOOL(table, "expire_enabled", config->expire_enabled);
+   PARSE_INT(table, "expire_grace_days", config->expire_grace_days);
+   PARSE_INT(table, "prune_expired_days", config->prune_expired_days);
+
    /* Parse voice conversation idle timeout settings */
    PARSE_INT(table, "conversation_idle_timeout_min", config->conversation_idle_timeout_min);
    PARSE_INT(table, "default_voice_user_id", config->default_voice_user_id);
@@ -1157,6 +1165,19 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       config->prune_stale_min_confidence = 0.0f;
    } else if (config->prune_stale_min_confidence > 1.0f) {
       config->prune_stale_min_confidence = 1.0f;
+   }
+
+   /* Clamp expiry windows.  Grace 0-365 days (0 = expire on the reference date).
+    * prune_expired 0-365 days (0 = hard-expire on the reference date, no buffer). */
+   if (config->expire_grace_days < 0) {
+      config->expire_grace_days = 0;
+   } else if (config->expire_grace_days > 365) {
+      config->expire_grace_days = 365;
+   }
+   if (config->prune_expired_days < 0) {
+      config->prune_expired_days = 0;
+   } else if (config->prune_expired_days > 365) {
+      config->prune_expired_days = 365;
    }
 
    /* Clamp conversation idle timeout (0 = disabled, otherwise 10-60 min) */

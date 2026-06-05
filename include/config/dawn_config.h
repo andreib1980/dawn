@@ -558,6 +558,15 @@ typedef struct {
    int prune_stale_days;             /* Delete stale facts not accessed in N days */
    float prune_stale_min_confidence; /* Only prune stale facts below this confidence */
 
+   /* Fact expiry / ephemerality settings (v58, C3).  Off by default until the
+    * recall check validates it on a live DB.  See MEMORY_EPHEMERALITY_DESIGN.md. */
+   bool expire_enabled;    /* Gate: extraction sets expires_at, retrieval guard + nightly
+                            * prune_expired honor it.  Off → expires_at never written and the
+                            * retrieval guard admits everything (instant, non-mutating). */
+   int expire_grace_days;  /* Days past a fact's reference date before it expires (soft-hides) */
+   int prune_expired_days; /* Days an expired fact stays (recoverable) before hard delete;
+                            * 0 = hard-expire on the reference date (no buffer) */
+
    /* Voice conversation idle timeout */
    int conversation_idle_timeout_min; /* Minutes before auto-save (default: 15, 0=disabled) */
    int default_voice_user_id;         /* User ID for local/DAP conversations (default: 1) */

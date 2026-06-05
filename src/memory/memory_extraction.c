@@ -325,6 +325,7 @@ const char *MEMORY_EXTRACTION_PROMPT_TEMPLATE =
     "\"lived in Boston 2015-2020\", \"member of club 2019-present\"), not "
     "single moments.  If you're tempted to emit valid_from == valid_to, "
     "the event is instantaneous — drop the bounds and rely on fact_text.\n\n"
+    "%s" /* Optional FACT EXPIRY block — empty unless [memory] expire_enabled */
     "OUTPUT:\n"
     "- Generate a concise title (under 40 characters) that captures the main topic(s)\n"
     "- Title should be human-friendly, not a sentence — more like a label\n"
@@ -1094,6 +1095,32 @@ static void process_extraction_response(int user_id,
          if (fact_id <= 0)
             continue; /* fact insert/match failed; skip to next fact */
 
+         /* Fact expiry (v58, C3) — AI-decided.  Apply whenever the extraction LLM
+          * attached an expires_at to THIS fact, for BOTH fresh creates AND
+          * paraphrase/LIKE merges.  Adopting on merge is deliberate: a transient
+          * fact often arrives first via the 'remember' tool (or a prior session)
+          * and is then re-stated, so the merge path is exactly where a transient
+          * fact gets reinforced — skipping it would leave it immortal (the failure
+          * the 2026-06-05 live test surfaced).  We only ever SET from an inbound
+          * date, never clear, so a durable fact keeps its state unless the AI
+          * explicitly marked this inbound transient.  expires_at is a reference
+          * date; the stored cutoff adds the grace window. */
+         if (g_config.memory.expire_enabled) {
+            struct json_object *exp_obj;
+            if (json_object_object_get_ex(fact, "expires_at", &exp_obj)) {
+               const char *exp_str = json_object_get_string(exp_obj);
+               int64_t ref = (exp_str && *exp_str) ? iso8601_parse_date_utc(exp_str) : 0;
+               if (ref > 0) {
+                  int64_t cutoff = ref + (int64_t)g_config.memory.expire_grace_days * 86400;
+                  memory_db_fact_set_expires_at(fact_id, user_id, cutoff);
+                  OLOG_INFO("memory_extraction: fact %lld set expires_at=%ld "
+                            "(ref=%s + grace=%dd, origin=%s): %s",
+                            (long long)fact_id, (long)cutoff, exp_str,
+                            g_config.memory.expire_grace_days, fact_id_origin, text);
+               }
+            }
+         }
+
          /* Phase 0: resolve fact.subject text → entity_id and set the FK
           * on the fact row.  Map-then-upsert: check entity_map first (the
           * entities[] array was processed above so the LLM's named entities
@@ -1543,11 +1570,35 @@ static void *extraction_thread(void *arg) {
              (extraction_config.model && extraction_config.model[0]) ? extraction_config.model
                                                                      : "(default)");
 
+   /* Fact-expiry teaching (v58, C3).  Empty unless expire_enabled, so the
+    * off-by-default gate also keeps the extra tokens (and the new fact-vs-relation
+    * confusion axis) off the prompt when the feature is dormant. */
+   const char *expiry_block =
+       g_config.memory.expire_enabled
+           ? "FACT EXPIRY — set \"expires_at\" on transient dated facts:\n"
+             "- Add an \"expires_at\": \"YYYY-MM-DD\" field to any fact that LOSES VALUE after a "
+             "specific date: a movie/show/event happening on a given day, a weather forecast, a "
+             "scheduled appointment, a \"happening tomorrow/next week\" with no lasting record. "
+             "The date is when the fact stops being useful; resolve relative phrases against the "
+             "anchor.\n"
+             "- IMPORTANT — this INCLUDES instantaneous point-in-time events.  The TIME BOUNDS "
+             "rule above says such events get NO relation valid_from/valid_to (that is still "
+             "true), but they DO get a fact \"expires_at\".  Shape:\n"
+             "  {\"text\": \"Jon is seeing Supergirl on 2026-06-29 at 6:50 PM\", "
+             "\"subject\": \"Jon\", \"expires_at\": \"2026-06-29\", \"relations\": [...]}\n"
+             "- Do NOT set expires_at on durable facts: preferences, traits, relationships, or "
+             "RECORDS of things that happened.  Note the phrasing: \"Jon went to Savannah in "
+             "June 2026\" is a permanent record (no expiry); \"Jon is planning a trip to "
+             "Savannah June 21-28\" is transient (set expires_at to the end date, 2026-06-28).\n"
+             "- When in doubt, OMIT expires_at — the fact stays durable.\n\n"
+           : "";
+
    /* Build extraction prompt.  + 100 covers snprintf overhead consuming the
-    * three "%s" format specifiers plus a small safety margin; expand if more
+    * four "%s" format specifiers plus a small safety margin; expand if more
     * placeholders are added to MEMORY_EXTRACTION_PROMPT_TEMPLATE. */
    size_t prompt_size = strlen(MEMORY_EXTRACTION_PROMPT_TEMPLATE) + strlen(anchor_line) +
-                        strlen(ctx->conversation_json) + strlen(existing_profile) + 100;
+                        strlen(ctx->conversation_json) + strlen(existing_profile) +
+                        strlen(expiry_block) + 100;
    char *prompt = malloc(prompt_size);
    if (!prompt) {
       OLOG_ERROR("memory_extraction: failed to allocate prompt");
@@ -1555,7 +1606,7 @@ static void *extraction_thread(void *arg) {
    }
 
    snprintf(prompt, prompt_size, MEMORY_EXTRACTION_PROMPT_TEMPLATE, anchor_line,
-            ctx->conversation_json, existing_profile);
+            ctx->conversation_json, existing_profile, expiry_block);
 
    /* Call LLM for extraction using configured provider/model */
    char *response = NULL;

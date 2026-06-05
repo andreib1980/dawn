@@ -738,6 +738,20 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_INT(section, "prune_stale_days", config->memory.prune_stale_days);
       JSON_TO_CONFIG_DOUBLE(section, "prune_stale_min_confidence",
                             config->memory.prune_stale_min_confidence);
+      JSON_TO_CONFIG_BOOL(section, "expire_enabled", config->memory.expire_enabled);
+      JSON_TO_CONFIG_INT(section, "expire_grace_days", config->memory.expire_grace_days);
+      JSON_TO_CONFIG_INT(section, "prune_expired_days", config->memory.prune_expired_days);
+      /* Clamp expiry windows (mirror config_parser) */
+      if (config->memory.expire_grace_days < 0) {
+         config->memory.expire_grace_days = 0;
+      } else if (config->memory.expire_grace_days > 365) {
+         config->memory.expire_grace_days = 365;
+      }
+      if (config->memory.prune_expired_days < 0) {
+         config->memory.prune_expired_days = 0;
+      } else if (config->memory.prune_expired_days > 365) {
+         config->memory.prune_expired_days = 365;
+      }
       JSON_TO_CONFIG_INT(section, "conversation_idle_timeout_min",
                          config->memory.conversation_idle_timeout_min);
       /* Clamp conversation idle timeout (0 = disabled, else 10-60 min) */

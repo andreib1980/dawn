@@ -156,6 +156,12 @@ int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact) {
    return MEMORY_DB_NOT_FOUND;
 }
 
+/* v58 expiry guard stub: mock facts carry no expiry, so nothing is hidden. */
+bool memory_db_fact_expiry_hidden(int64_t expires_at) {
+   (void)expires_at;
+   return false;
+}
+
 int memory_db_facts_get_sources(int user_id,
                                 const int64_t *fact_ids,
                                 int n,

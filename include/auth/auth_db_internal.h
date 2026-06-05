@@ -49,7 +49,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 57
+#define AUTH_DB_SCHEMA_VERSION 58
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -163,6 +163,7 @@ typedef struct {
    sqlite3_stmt *stmt_memory_fact_find_by_hash;
    sqlite3_stmt *stmt_memory_fact_prune_superseded;
    sqlite3_stmt *stmt_memory_fact_prune_stale;
+   sqlite3_stmt *stmt_memory_fact_prune_expired; /* v58: hard-delete expired facts */
 
    /* v48: FTS5 BM25 keyword search.  See docs/MEM0_ARCHITECTURAL_PARITY.md
     * Phase 1.  External-content rows live in memory_facts_fts; the search

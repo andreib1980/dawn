@@ -150,6 +150,21 @@ int memory_db_fact_count_general(int user_id, int *count_out);
 int memory_db_fact_get(int64_t fact_id, int user_id, memory_fact_t *out_fact);
 
 /**
+ * @brief Whether a fact's expires_at currently hides it from retrieval (v58).
+ *
+ * Mirrors the SQL expiry retrieval guard `(expires_at IS NULL OR expires_at >=
+ * now)` for the one retrieval path that cannot use it: the by-id semantic fetch
+ * (`memory_db_fact_get` in the vector-only branch of hybrid search), which must
+ * return the row so the caller can decide.  Returns true only when
+ * `[memory] expire_enabled` is on, @p expires_at is set (non-zero), and it is in
+ * the past — so a disabled config or a durable (0/NULL) fact is never hidden.
+ *
+ * @param expires_at The fact's expires_at (unix seconds; 0 = durable)
+ * @return true if the fact should be hidden from retrieval right now
+ */
+bool memory_db_fact_expiry_hidden(int64_t expires_at);
+
+/**
  * @brief List facts for a user (non-superseded only)
  *
  * @param user_id User ID
@@ -276,6 +291,20 @@ int memory_db_fact_update_confidence(int64_t fact_id, int user_id, float confide
 int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t entity_id);
 
 /**
+ * @brief Set (or clear) a fact's expiry timestamp (v58, C3)
+ *
+ * Writes memory_facts.expires_at for the given fact.  @p expires_at <= 0 stores
+ * NULL (clears expiry → durable).  Scoped to (id, user_id) — CWE-639.  Used by
+ * extraction when a transient dated fact is detected; not on the hot path.
+ *
+ * @param fact_id Fact ID
+ * @param user_id Owner user ID
+ * @param expires_at Unix seconds after which the fact is hidden/pruned; <=0 clears
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_at);
+
+/**
  * @brief Mark a fact as superseded by another
  *
  * Used when a fact is corrected or updated.  Both fact IDs must belong to
@@ -349,6 +378,21 @@ int memory_db_fact_find_by_hash(int user_id,
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_fact_prune_superseded(int user_id, int retention_days, int *count_out);
+
+/**
+ * @brief Prune expired facts past the recoverable window (v58, C3)
+ *
+ * Hard-deletes facts whose expires_at passed more than @p retention_days ago —
+ * the "hard phase" of fact ephemerality.  The retrieval guard already hides
+ * expired facts (soft phase); this reclaims the row after the buffer.
+ * @p retention_days = 0 hard-expires on the reference date (no buffer).
+ *
+ * @param user_id User ID
+ * @param retention_days Keep expired facts recoverable for this many days
+ * @param count_out Output: number of facts deleted
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_prune_expired(int user_id, int retention_days, int *count_out);
 
 /**
  * @brief Prune stale low-confidence facts

@@ -73,6 +73,7 @@ void memory_run_nightly_decay(void) {
    int total_decayed = 0;
    int total_pruned = 0;
    int total_summaries = 0;
+   int total_expired = 0;
 
    for (int i = 0; i < user_count; i++) {
       int uid = user_ids[i];
@@ -99,6 +100,18 @@ void memory_run_nightly_decay(void) {
       /* Prune old superseded facts */
       memory_db_fact_prune_superseded(uid, g_config.memory.prune_superseded_days, NULL);
 
+      /* Prune expired facts past their recoverable window (v58, C3).  Gated —
+       * off by default until recall-validated.  Ordered after prune_superseded
+       * and before the summary prune so it doesn't shift which rows the
+       * confidence/stale passes above see (those run on superseded_by/confidence,
+       * orthogonal to expires_at).  Idempotent under the 20h guard. */
+      if (g_config.memory.expire_enabled) {
+         int expired = 0;
+         memory_db_fact_prune_expired(uid, g_config.memory.prune_expired_days, &expired);
+         if (expired > 0)
+            total_expired += expired;
+      }
+
       /* Prune old summaries */
       int summaries = 0;
       memory_db_prune_old_summaries(uid, g_config.memory.summary_retention_days, &summaries);
@@ -111,7 +124,7 @@ void memory_run_nightly_decay(void) {
 
    last_run = now;
 
-   OLOG_INFO("memory_decay: completed — %d users, %d facts decayed, %d pruned, %d summaries "
-             "cleaned",
-             user_count, total_decayed, total_pruned, total_summaries);
+   OLOG_INFO("memory_decay: completed — %d users, %d facts decayed, %d pruned, %d expired, "
+             "%d summaries cleaned",
+             user_count, total_decayed, total_pruned, total_expired, total_summaries);
 }

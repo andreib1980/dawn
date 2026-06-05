@@ -584,7 +584,7 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, category FROM memory_facts "
+       "access_count, superseded_by, category, expires_at FROM memory_facts "
        "WHERE id = ? AND user_id = ?",
        -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK) {
@@ -596,8 +596,9 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
        "access_count, superseded_by, category FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL "
-       "ORDER BY confidence DESC LIMIT ? OFFSET ?",
+       "WHERE user_id = ?1 AND superseded_by IS NULL "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
        -1, &s_db.stmt_memory_fact_list, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_list failed: %s", sqlite3_errmsg(s_db.db));
@@ -608,8 +609,9 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
        "access_count, superseded_by, category FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL AND fact_text LIKE ? ESCAPE '\\' "
-       "ORDER BY confidence DESC LIMIT ?",
+       "WHERE user_id = ?1 AND superseded_by IS NULL AND fact_text LIKE ?2 ESCAPE '\\' "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY confidence DESC LIMIT ?3",
        -1, &s_db.stmt_memory_fact_search, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_search failed: %s", sqlite3_errmsg(s_db.db));
@@ -636,10 +638,11 @@ int auth_db_prepare_statements(void) {
        "bm25(memory_facts_fts) AS score "
        "FROM memory_facts_fts "
        "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
-       "WHERE memory_facts_fts MATCH ? "
-       "  AND mf.user_id = ? "
+       "WHERE memory_facts_fts MATCH ?1 "
+       "  AND mf.user_id = ?2 "
        "  AND mf.superseded_by IS NULL "
-       "ORDER BY score ASC LIMIT ?",
+       "  AND (mf.expires_at IS NULL OR mf.expires_at >= ?4) "
+       "ORDER BY score ASC LIMIT ?3",
        -1, &s_db.stmt_memory_fact_search_bm25, NULL);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: prepare memory_fact_search_bm25 failed (FTS5 table missing?): %s — "
@@ -660,11 +663,12 @@ int auth_db_prepare_statements(void) {
        "bm25(memory_facts_fts) AS score "
        "FROM memory_facts_fts "
        "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
-       "WHERE memory_facts_fts MATCH ? "
-       "  AND mf.user_id = ? "
+       "WHERE memory_facts_fts MATCH ?1 "
+       "  AND mf.user_id = ?2 "
        "  AND mf.superseded_by IS NULL "
-       "  AND mf.created_at >= ? "
-       "ORDER BY score ASC LIMIT ?",
+       "  AND mf.created_at >= ?3 "
+       "  AND (mf.expires_at IS NULL OR mf.expires_at >= ?5) "
+       "ORDER BY score ASC LIMIT ?4",
        -1, &s_db.stmt_memory_fact_search_bm25_since, NULL);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: prepare memory_fact_search_bm25_since failed: %s — "
@@ -823,6 +827,17 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* v58: hard-delete expired facts (the hard phase of fact ephemerality).
+    * expires_at < cutoff, where the caller sets cutoff = now - prune_expired_days. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "DELETE FROM memory_facts WHERE user_id = ? "
+                           "AND expires_at IS NOT NULL AND expires_at < ?",
+                           -1, &s_db.stmt_memory_fact_prune_expired, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare memory_fact_prune_expired failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* Memory preference statements.  source_* columns updated on every upsert
     * (latest-source-wins — mirrors the value/confidence overwrite). */
    rc = sqlite3_prepare_v2(
@@ -935,8 +950,9 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
        "access_count, superseded_by, category FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL AND fact_text LIKE ? ESCAPE '\\' "
-       "AND created_at >= ? ORDER BY confidence DESC LIMIT ?",
+       "WHERE user_id = ?1 AND superseded_by IS NULL AND fact_text LIKE ?2 ESCAPE '\\' "
+       "AND created_at >= ?3 AND (expires_at IS NULL OR expires_at >= ?5) "
+       "ORDER BY confidence DESC LIMIT ?4",
        -1, &s_db.stmt_memory_fact_search_since, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_search_since failed: %s", sqlite3_errmsg(s_db.db));
@@ -960,8 +976,9 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
        "access_count, superseded_by, category FROM memory_facts "
-       "WHERE user_id = ? AND superseded_by IS NULL AND created_at >= ? "
-       "ORDER BY created_at DESC LIMIT ?",
+       "WHERE user_id = ?1 AND superseded_by IS NULL AND created_at >= ?2 "
+       "  AND (expires_at IS NULL OR expires_at >= ?4) "
+       "ORDER BY created_at DESC LIMIT ?3",
        -1, &s_db.stmt_memory_fact_list_since, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_list_since failed: %s", sqlite3_errmsg(s_db.db));
@@ -986,9 +1003,10 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, fact_text, confidence, source, created_at, "
                            "last_accessed, access_count, superseded_by, category FROM memory_facts "
-                           "WHERE user_id = ? AND superseded_by IS NULL "
-                           "  AND created_at >= ? AND created_at <= ? "
-                           "ORDER BY created_at ASC LIMIT ?",
+                           "WHERE user_id = ?1 AND superseded_by IS NULL "
+                           "  AND created_at >= ?2 AND created_at <= ?3 "
+                           "  AND (expires_at IS NULL OR expires_at >= ?5) "
+                           "ORDER BY created_at ASC LIMIT ?4",
                            -1, &s_db.stmt_memory_fact_list_window_asc, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_list_window_asc failed: %s",
@@ -999,9 +1017,10 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, fact_text, confidence, source, created_at, "
                            "last_accessed, access_count, superseded_by, category FROM memory_facts "
-                           "WHERE user_id = ? AND superseded_by IS NULL "
-                           "  AND created_at >= ? AND created_at <= ? "
-                           "ORDER BY created_at DESC LIMIT ?",
+                           "WHERE user_id = ?1 AND superseded_by IS NULL "
+                           "  AND created_at >= ?2 AND created_at <= ?3 "
+                           "  AND (expires_at IS NULL OR expires_at >= ?5) "
+                           "ORDER BY created_at DESC LIMIT ?4",
                            -1, &s_db.stmt_memory_fact_list_window_desc, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_list_window_desc failed: %s",
@@ -2293,6 +2312,8 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_memory_fact_prune_superseded);
    if (s_db.stmt_memory_fact_prune_stale)
       sqlite3_finalize(s_db.stmt_memory_fact_prune_stale);
+   if (s_db.stmt_memory_fact_prune_expired)
+      sqlite3_finalize(s_db.stmt_memory_fact_prune_expired);
 
    /* Extraction tracking statements */
    if (s_db.stmt_conv_get_last_extracted)
