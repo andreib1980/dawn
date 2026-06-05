@@ -62,10 +62,15 @@ typedef enum {
  * ============================================================================= */
 
 #define LLM_TOOLS_MAX_TOOLS TOOL_MAX_REGISTERED /* Derived from tool_registry.h */
-#define LLM_TOOLS_MAX_PARAMS 8                  /* Maximum parameters per tool */
-#define LLM_TOOLS_MAX_ENUM_VALUES 16            /* Maximum enum values per parameter */
-#define LLM_TOOLS_MAX_PARALLEL_CALLS 8          /* Maximum parallel tool calls */
-#define LLM_TOOLS_MAX_ITERATIONS 8              /* Maximum tool execution loop iterations */
+#define LLM_TOOLS_MAX_PARAMS                                                             \
+   16                                  /* Maximum parameters per tool. Was 8; the memory \
+                                        * tool has 12, and params past this cap are      \
+                                        * silently dropped from the LLM-callable schema  \
+                                        * (llm_tools.c). Keep headroom above the largest \
+                                        * tool's param_count. */
+#define LLM_TOOLS_MAX_ENUM_VALUES 16   /* Maximum enum values per parameter */
+#define LLM_TOOLS_MAX_PARALLEL_CALLS 8 /* Maximum parallel tool calls */
+#define LLM_TOOLS_MAX_ITERATIONS 8     /* Maximum tool execution loop iterations */
 
 #define LLM_TOOLS_NAME_LEN 64
 #define LLM_TOOLS_DESC_LEN 512

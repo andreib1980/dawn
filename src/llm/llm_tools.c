@@ -569,7 +569,15 @@ static void generate_tool_from_treg(const tool_metadata_t *meta, void *user_data
       t->enabled_remote = meta->default_remote;
    }
 
-   /* Copy parameters */
+   /* Copy parameters.  Params past LLM_TOOLS_MAX_PARAMS are dropped from the LLM-callable
+    * schema — warn loudly rather than silently truncate (this masked replaced_by/with_source/
+    * as_of/include_historical on the 12-param memory tool when the cap was 8). */
+   if (meta->param_count > LLM_TOOLS_MAX_PARAMS) {
+      OLOG_WARNING("Tool '%s' declares %d params but LLM_TOOLS_MAX_PARAMS=%d — %d param(s) dropped "
+                   "from the LLM schema (the LLM cannot call them). Raise LLM_TOOLS_MAX_PARAMS.",
+                   meta->name ? meta->name : "?", meta->param_count, LLM_TOOLS_MAX_PARAMS,
+                   meta->param_count - LLM_TOOLS_MAX_PARAMS);
+   }
    for (int i = 0; i < meta->param_count && i < LLM_TOOLS_MAX_PARAMS; i++) {
       const treg_param_t *src = &meta->params[i];
       tool_param_t *dst = &t->parameters[t->param_count++];
