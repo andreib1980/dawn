@@ -296,6 +296,65 @@ static void test_preprocess_currency_magnitude_million(void) {
    TEST_ASSERT_NOT_NULL(strstr(out, "dollars"));
 }
 
+/* ── Large-number reading (number_to_words integration) ──────────────────── */
+
+static void test_number_small_unchanged(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("I have 52 apples", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "52")); /* small number left for espeak */
+}
+
+static void test_number_year_unchanged(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("in 2024 we", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2024"));
+}
+
+static void test_number_time_unchanged(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("at 3:30 today", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "3:30"));
+}
+
+static void test_number_trillions_to_words(void) {
+   char out[512];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("it is 1234567890123 now", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "trillion"));
+   TEST_ASSERT_NULL(strstr(out, "1234567890123")); /* digits replaced by words */
+}
+
+static void test_number_commas_to_words(void) {
+   char out[512];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("about 1,234,567,890,123 things", out,
+                                                      sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "trillion"));
+}
+
+static void test_number_negative_to_words(void) {
+   char out[512];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("balance -1234567890123 dollars", out,
+                                                      sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "negative one trillion"));
+}
+
+static void test_number_factorial_result(void) {
+   char out[1024];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(
+       0, preprocess_text_for_tts_c(
+              "equals 80658175170943878571660636856403766975289505440883277824000000000000 today",
+              out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "unvigintillion"));
+}
+
 static void test_preprocess_state_abbrev(void) {
    char out[128];
    int written = 0;
@@ -381,6 +440,13 @@ int main(void) {
    RUN_TEST(test_preprocess_currency_dollar_singular);
    RUN_TEST(test_preprocess_currency_dollar_plural);
    RUN_TEST(test_preprocess_currency_magnitude_million);
+   RUN_TEST(test_number_small_unchanged);
+   RUN_TEST(test_number_year_unchanged);
+   RUN_TEST(test_number_time_unchanged);
+   RUN_TEST(test_number_trillions_to_words);
+   RUN_TEST(test_number_commas_to_words);
+   RUN_TEST(test_number_negative_to_words);
+   RUN_TEST(test_number_factorial_result);
    RUN_TEST(test_preprocess_state_abbrev);
    RUN_TEST(test_preprocess_day_abbrev);
    RUN_TEST(test_preprocess_month_abbrev);

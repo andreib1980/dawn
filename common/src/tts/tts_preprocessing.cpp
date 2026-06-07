@@ -42,6 +42,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "tts/number_to_words.h"
+
 // ============================================================================
 // UTF-8 Utilities
 // ============================================================================
@@ -751,6 +753,83 @@ template<PassMode mode> static inline void emit_currency(char *out,
    out_pos += name_len;
 }
 
+/* Integer runs with at least this many digits are spoken as words (e.g. a
+ * factorial result), since espeak reads larger numbers awkwardly.  Below it,
+ * small numbers — years, counts, prices, times — are left to espeak untouched.
+ * 13 digits == trillions, safely clear of any year/time/ordinal. */
+#define NUM2WORDS_TTS_MIN_DIGITS 13
+
+/* Largest numeric token (digits + commas + optional decimal) we will buffer.
+ * number_to_words caps at ~93 integer digits; this clears that with separators. */
+#define NUM2WORDS_TTS_MAX_TOKEN 256
+
+/**
+ * @brief If a long numeric token starts at src[start], emit it as spoken words.
+ *
+ * Scans a number (digits, thousands commas, optional decimal part); when it has
+ * >= NUM2WORDS_TTS_MIN_DIGITS integer digits it is replaced with words via
+ * number_to_words().  Two-pass safe: number_to_words() is deterministic, so both
+ * passes compute the same length.  Returns the number of INPUT bytes consumed,
+ * or 0 when the token is too short / too large / unconvertible — in which case
+ * the caller copies it verbatim (espeak handles it).
+ */
+template<PassMode mode> static size_t emit_large_number(char *out,
+                                                        size_t &out_pos,
+                                                        const char *src,
+                                                        size_t start,
+                                                        size_t len) {
+   size_t p = start;
+   if ((src[p] == '-' || src[p] == '+') && p + 1 < len && src[p + 1] >= '0' && src[p + 1] <= '9') {
+      p++; /* leading sign — number_to_words renders '-' as "negative" */
+   }
+   size_t int_digits = 0;
+   while (p < len) {
+      char c = src[p];
+      if (c >= '0' && c <= '9') {
+         int_digits++;
+         p++;
+      } else if (c == ',' && p + 1 < len && src[p + 1] >= '0' && src[p + 1] <= '9') {
+         p++; /* thousands separator between digits */
+      } else {
+         break;
+      }
+   }
+   if (int_digits < NUM2WORDS_TTS_MIN_DIGITS) {
+      return 0;
+   }
+
+   /* Optional decimal part — only when '.' is followed by a digit (not the
+    * period that ends a sentence). */
+   size_t tok_end = p;
+   if (p < len && src[p] == '.' && p + 1 < len && src[p + 1] >= '0' && src[p + 1] <= '9') {
+      tok_end = p + 1;
+      while (tok_end < len && src[tok_end] >= '0' && src[tok_end] <= '9') {
+         tok_end++;
+      }
+   }
+
+   size_t tok_len = tok_end - start;
+   if (tok_len >= NUM2WORDS_TTS_MAX_TOKEN) {
+      return 0;
+   }
+
+   char token[NUM2WORDS_TTS_MAX_TOKEN];
+   std::memcpy(token, src + start, tok_len);
+   token[tok_len] = '\0';
+
+   char words[NUM2WORDS_MIN_BUFFER];
+   if (number_to_words(token, words, sizeof(words)) != NUM2WORDS_OK) {
+      return 0; /* beyond the scale table or unconvertible — leave as-is */
+   }
+
+   size_t wlen = std::strlen(words);
+   if constexpr (mode == PassMode::GenerateOutput) {
+      std::memcpy(out + out_pos, words, wlen);
+   }
+   out_pos += wlen;
+   return tok_len;
+}
+
 /**
  * @brief Unified text processing implementation for both passes
  *
@@ -940,6 +1019,29 @@ template<PassMode mode> static size_t process_text_impl(const char *src, size_t 
             out_pos += APPROX_LEN;
             i++;  // skip '~', digits will be copied normally
             continue;
+         }
+
+         // Large number -> spoken words (e.g. a 68-digit factorial result).
+         // Fire on a digit, or a sign directly before digits, at a clean token
+         // start (not mid-identifier or after a '.') and only for big numbers;
+         // small numbers stay with espeak.
+         bool starts_number = (byte >= '0' && byte <= '9') ||
+                              ((byte == '-' || byte == '+') && i + 1 < len && src[i + 1] >= '0' &&
+                               src[i + 1] <= '9');
+         if (starts_number) {
+            bool boundary = (i == 0);
+            if (!boundary) {
+               char prev = src[i - 1];
+               boundary = !((prev >= '0' && prev <= '9') || (prev >= 'a' && prev <= 'z') ||
+                            (prev >= 'A' && prev <= 'Z') || prev == '.');
+            }
+            if (boundary) {
+               size_t consumed = emit_large_number<mode>(out, out_pos, src, i, len);
+               if (consumed > 0) {
+                  i += consumed;
+                  continue;
+               }
+            }
          }
 
          // Regular ASCII character - copy

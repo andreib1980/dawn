@@ -66,12 +66,43 @@ double wordToNumber(char *originalWord) {
    strncpy(word, originalWord, sizeof(word) - 1);  // Ensure null-termination.
    word[sizeof(word) - 1] = '\0';
 
-   Magnitude magnitudes[] = {
-      { "thousand", 1000 },
-      { "million", 1000000 },
-      { "billion", 1000000000 },
-      { "trillion", 1000000000000 }  // Extendable for more magnitudes.
-   };
+   /* Short-scale magnitudes, mirroring common/src/tts/number_to_words.c so the
+    * two directions cover the same vocabulary (forward: number -> words).
+    * NOTE: this function returns a double, which holds only ~15-16 significant
+    * digits, so values at quadrillion and beyond are magnitude-correct but not
+    * digit-exact.  That is fine for ASR (spoken commands never reach that size);
+    * the digit-exact reverse lives in number_to_words.c. */
+   static const Magnitude magnitudes[] = { { "thousand", 1e3 },
+                                           { "million", 1e6 },
+                                           { "billion", 1e9 },
+                                           { "trillion", 1e12 },
+                                           { "quadrillion", 1e15 },
+                                           { "quintillion", 1e18 },
+                                           { "sextillion", 1e21 },
+                                           { "septillion", 1e24 },
+                                           { "octillion", 1e27 },
+                                           { "nonillion", 1e30 },
+                                           { "decillion", 1e33 },
+                                           { "undecillion", 1e36 },
+                                           { "duodecillion", 1e39 },
+                                           { "tredecillion", 1e42 },
+                                           { "quattuordecillion", 1e45 },
+                                           { "quindecillion", 1e48 },
+                                           { "sexdecillion", 1e51 },
+                                           { "septendecillion", 1e54 },
+                                           { "octodecillion", 1e57 },
+                                           { "novemdecillion", 1e60 },
+                                           { "vigintillion", 1e63 },
+                                           { "unvigintillion", 1e66 },
+                                           { "duovigintillion", 1e69 },
+                                           { "trevigintillion", 1e72 },
+                                           { "quattuorvigintillion", 1e75 },
+                                           { "quinvigintillion", 1e78 },
+                                           { "sexvigintillion", 1e81 },
+                                           { "septenvigintillion", 1e84 },
+                                           { "octovigintillion", 1e87 },
+                                           { "novemvigintillion", 1e90 },
+                                           { "trigintillion", 1e93 } };
 
    double result = 0.0;     // Accumulator for the result.
    double tempValue = 0.0;  // Temporary accumulator for the current numeric segment.

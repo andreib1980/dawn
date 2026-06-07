@@ -46,15 +46,16 @@ extern "C" {
  * Constants
  * ============================================================================= */
 
-#define TOOL_MAX_REGISTERED 64 /* Max tools in registry */
-#define TOOL_NAME_MAX 64       /* Max length of tool name */
-#define TOOL_DESC_MAX 512      /* Max length of description */
-#define TOOL_TOPIC_MAX 32      /* Max length of MQTT topic */
-#define TOOL_PARAM_MAX 12      /* Max parameters per tool */
-#define TOOL_PARAM_ENUM_MAX 16 /* Max enum values per parameter */
-#define TOOL_ALIAS_MAX 8       /* Max aliases per tool */
-#define TOOL_DEVICE_MAP_MAX 8  /* Max device map entries for meta-tools */
-#define TOOL_SECRET_MAX 4      /* Max secret requirements per tool */
+#define TOOL_MAX_REGISTERED 64        /* Max tools in registry */
+#define TOOL_NAME_MAX 64              /* Max length of tool name */
+#define TOOL_DESC_MAX 512             /* Max length of description */
+#define TOOL_TOPIC_MAX 32             /* Max length of MQTT topic */
+#define TOOL_PARAM_MAX 12             /* Max parameters per tool */
+#define TOOL_PARAM_ENUM_MAX 16        /* Max enum values per parameter */
+#define TOOL_ALIAS_MAX 8              /* Max aliases per tool */
+#define TOOL_DEVICE_MAP_MAX 8         /* Max device map entries for meta-tools */
+#define TOOL_REPEATABLE_ACTIONS_MAX 4 /* Max non-deterministic actions per tool */
+#define TOOL_SECRET_MAX 4             /* Max secret requirements per tool */
 
 /* =============================================================================
  * Parameter Types and Mapping
@@ -278,6 +279,14 @@ typedef struct {
    const treg_param_t *params; /**< Parameter definitions */
    int param_count;            /**< Number of parameters */
 
+   /* Actions exempt from duplicate-call detection because they are
+    * non-deterministic — an identical-args repeat is expected to produce a
+    * different result (e.g. calculator "random": "pick another number"), so the
+    * anti-loop guard must NOT treat it as a duplicate.  Lists action values, not
+    * param names.  Empty for ordinary deterministic tools. */
+   const char *repeatable_actions[TOOL_REPEATABLE_ACTIONS_MAX];
+   int repeatable_action_count;
+
    /* Device Mapping (for meta-tools) */
    const tool_device_map_t *device_map; /**< Maps param values to devices */
    int device_map_count;                /**< Number of device map entries */
@@ -483,6 +492,36 @@ const char *tool_registry_resolve_device(const tool_metadata_t *metadata, const 
  * @return Pointer to effective param, or NULL if not found
  */
 const treg_param_t *tool_registry_get_effective_param(const char *tool_name, int param_index);
+
+/**
+ * @brief Get the JSON args key that carries a tool's action value
+ *
+ * Returns the `.name` of the tool's first TOOL_MAPS_TO_ACTION parameter — i.e.
+ * the key under which the action value appears in the tool-call args JSON.  This
+ * is the param's declared name, which is usually "action" but NOT always
+ * (e.g. switch_llm uses "target", an audio param uses "type").  Callers that
+ * need the action value from args JSON must use this rather than assuming
+ * "action".
+ *
+ * @param tool_name Tool name or alias
+ * @return Action param name (static string owned by metadata), or NULL if the
+ *         tool has no action parameter
+ */
+const char *tool_registry_get_action_param_name(const char *tool_name);
+
+/**
+ * @brief Check whether a tool's action is declared non-deterministic (repeatable)
+ *
+ * The duplicate-tool-call guard uses this to exempt actions whose identical-args
+ * repeat is a feature, not an infinite loop (e.g. calculator "random").  Looks up
+ * the tool (by name or alias) and tests @p action against its
+ * repeatable_actions[] declaration.
+ *
+ * @param tool_name Tool name or alias
+ * @param action    Action value to test (may be NULL)
+ * @return true if the tool declares @p action repeatable, false otherwise
+ */
+bool tool_registry_action_is_repeatable(const char *tool_name, const char *action);
 
 /* =============================================================================
  * Config Integration

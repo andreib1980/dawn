@@ -81,8 +81,19 @@
    };
 
    function formatMarkdown(text) {
-      // Strip command tags before rendering (they should go to debug panel only)
-      const cleanText = text.replace(/<command>[\s\S]*?<\/command>/g, '');
+      const cleanText = text
+         // Strip command tags before rendering (they should go to debug panel only)
+         .replace(/<command>[\s\S]*?<\/command>/g, '')
+         // Compact spelled-out factorial back to the symbol for the printed view
+         // ("52 factorial" → "52!"). The LLM is prompted to write "N factorial"
+         // so TTS reads it correctly; this restores compact notation on screen.
+         // Display-only — the raw text (and thus what TTS speaks) is untouched.
+         // EXCEPT when the phrase is quoted: that's the model discussing the
+         // notation itself (e.g. 'write it as "52 factorial"'), where collapsing
+         // it to "52!" would destroy the contrast it's drawing. Leave those.
+         .replace(/(["'`]?)\b(\d+)\s+factorial\b(["'`]?)/gi, (m, pre, n, post) =>
+            pre || post ? m : `${n}!`
+         );
       // Parse markdown to HTML, then sanitize
       const html = marked.parse(cleanText, { breaks: true, gfm: true, renderer });
       return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });

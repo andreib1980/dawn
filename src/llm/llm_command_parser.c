@@ -117,6 +117,13 @@ static const char *LEGACY_RULES_CORE =
     "9. Do NOT lead responses with comments about location, weather, or time of day.\n"
     "   Vary your greetings. The user's context below is for tool use only.\n";
 
+/* Output-formatting rules that apply in every tool mode (native / command_tags /
+ * disabled).  Kept separate from the tool instructions because they shape prose,
+ * not tool use. */
+static const char *OUTPUT_FORMATTING_RULES =
+    "When writing a mathematical factorial, spell it out as \"N factorial\" (for example "
+    "\"52 factorial\"), not the symbol \"52!\", so it is read correctly when spoken aloud.\n";
+
 // clang-format on
 
 /* Tool-specific rules (LEGACY_RULES_VISION, LEGACY_RULES_WEATHER, etc.) have been removed.
@@ -459,6 +466,9 @@ static int build_system_instructions_to_buffer(const char *mode,
    int len = 0;
    int remaining = (int)buffer_size;
 
+   /* Prose output-format rules first — apply regardless of tool mode. */
+   len += snprintf(buffer + len, remaining - len, "%s", OUTPUT_FORMATTING_RULES);
+
    bool use_native = (strcmp(mode, "native") == 0);
 
    if (use_native) {
@@ -473,9 +483,8 @@ static int build_system_instructions_to_buffer(const char *mode,
    }
 
    if (strcmp(mode, "disabled") == 0) {
-      /* No tool instructions for disabled mode */
-      buffer[0] = '\0';
-      return 0;
+      /* No tool instructions for disabled mode — keep the prose format rules above. */
+      return len;
    }
 
    /* command_tags mode - dynamic generation from tool_registry */

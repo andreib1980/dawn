@@ -100,6 +100,154 @@ static void test_eval_nan(void) {
    TEST_ASSERT_EQUAL_INT(0, r.success);
 }
 
+/* ── Evaluate: factorial (postfix '!') ──────────────────────────────────── */
+
+static void test_eval_factorial_small(void) {
+   calc_result_t r = calculator_evaluate("5!");
+   TEST_ASSERT_EQUAL_INT(1, r.success);
+   TEST_ASSERT_DOUBLE_WITHIN(0.0001, 120.0, r.result);
+}
+
+static void test_eval_factorial_large(void) {
+   /* 52! ≈ 8.0658e67 — must NOT overflow to infinity (the upstream fac() bug). */
+   calc_result_t r = calculator_evaluate("52!");
+   TEST_ASSERT_EQUAL_INT(1, r.success);
+   TEST_ASSERT_DOUBLE_WITHIN(1e63, 8.0658175170943879e67, r.result);
+}
+
+static void test_eval_factorial_of_group(void) {
+   calc_result_t r = calculator_evaluate("(3 + 2)!");
+   TEST_ASSERT_EQUAL_INT(1, r.success);
+   TEST_ASSERT_DOUBLE_WITHIN(0.0001, 120.0, r.result);
+}
+
+static void test_eval_factorial_of_function(void) {
+   calc_result_t r = calculator_evaluate("sqrt(16)!");
+   TEST_ASSERT_EQUAL_INT(1, r.success);
+   TEST_ASSERT_DOUBLE_WITHIN(0.0001, 24.0, r.result);
+}
+
+static void test_eval_factorial_in_expression(void) {
+   calc_result_t r = calculator_evaluate("3! + 4!");
+   TEST_ASSERT_EQUAL_INT(1, r.success);
+   TEST_ASSERT_DOUBLE_WITHIN(0.0001, 30.0, r.result);
+}
+
+static void test_eval_factorial_chained(void) {
+   /* (3!)! = 6! = 720 */
+   calc_result_t r = calculator_evaluate("3!!");
+   TEST_ASSERT_EQUAL_INT(1, r.success);
+   TEST_ASSERT_DOUBLE_WITHIN(0.0001, 720.0, r.result);
+}
+
+static void test_eval_factorial_no_operand(void) {
+   /* '!' with nothing to its left falls back to the original and te_interp errors. */
+   calc_result_t r = calculator_evaluate("!5");
+   TEST_ASSERT_EQUAL_INT(0, r.success);
+}
+
+/* ── Exact mode: digit-perfect arbitrary precision ──────────────────────── */
+
+static void test_exact_small(void) {
+   char *s = calculator_evaluate_exact_str("2 + 3 * 4");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("14", s);
+   free(s);
+}
+
+static void test_exact_factorial_52(void) {
+   /* The whole point: every digit of 52!, no rounding. */
+   char *s = calculator_evaluate_exact_str("52!");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("80658175170943878571660636856403766975289505440883277824000000000000",
+                            s);
+   free(s);
+}
+
+static void test_exact_power(void) {
+   /* 2^100 exactly. */
+   char *s = calculator_evaluate_exact_str("2^100");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("1267650600228229401496703205376", s);
+   free(s);
+}
+
+static void test_exact_negative_result(void) {
+   char *s = calculator_evaluate_exact_str("3 - 10");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("-7", s);
+   free(s);
+}
+
+static void test_exact_even_division(void) {
+   char *s = calculator_evaluate_exact_str("100 / 4");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("25", s);
+   free(s);
+}
+
+static void test_exact_nested_factorial_power(void) {
+   /* (3!)^3 = 6^3 = 216. */
+   char *s = calculator_evaluate_exact_str("3!^3");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("216", s);
+   free(s);
+}
+
+static void test_exact_inexact_division_falls_back(void) {
+   /* 10/3 isn't an integer → falls back to the float evaluator. */
+   char *s = calculator_evaluate_exact_str("10 / 3");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_NOT_NULL(strstr(s, "3.33"));
+   free(s);
+}
+
+static void test_exact_irrational_falls_back(void) {
+   /* sqrt(2) can't be exact → float path. */
+   char *s = calculator_evaluate_exact_str("sqrt(2)");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_NOT_NULL(strstr(s, "1.41"));
+   free(s);
+}
+
+static void test_exact_deep_nesting_no_crash(void) {
+   /* Adversarial: thousands of nested parens must NOT exhaust the stack — the
+    * parser depth guard aborts exact mode and the length cap stops the float
+    * fallback. Assert it returns gracefully rather than crashing. */
+   char expr[6000];
+   size_t n = 2500;
+   for (size_t i = 0; i < n; i++) {
+      expr[i] = '(';
+   }
+   expr[n] = '1';
+   size_t pos = n + 1;
+   for (size_t i = 0; i < n; i++) {
+      expr[pos++] = ')';
+   }
+   expr[pos] = '\0';
+   char *s = calculator_evaluate_exact_str(expr);
+   TEST_ASSERT_NOT_NULL(s);
+   free(s);
+}
+
+static void test_eval_length_cap(void) {
+   /* Over-long expressions are rejected before the recursive parser runs. */
+   char expr[CALC_MAX_EXPR_LEN + 100];
+   memset(expr, '1', CALC_MAX_EXPR_LEN + 50);
+   expr[CALC_MAX_EXPR_LEN + 50] = '\0';
+   calc_result_t r = calculator_evaluate(expr);
+   TEST_ASSERT_EQUAL_INT(0, r.success);
+}
+
+static void test_exact_irrational_but_integer_value(void) {
+   /* sqrt(16) = 4: not handled by the integer parser, but the float fallback
+    * still returns a clean integer. */
+   char *s = calculator_evaluate_exact_str("sqrt(16)");
+   TEST_ASSERT_NOT_NULL(s);
+   TEST_ASSERT_EQUAL_STRING("4", s);
+   free(s);
+}
+
 /* ── Format result ──────────────────────────────────────────────────────── */
 
 static void test_format_integer(void) {
@@ -230,6 +378,28 @@ int main(void) {
    RUN_TEST(test_eval_parse_error);
    RUN_TEST(test_eval_division_by_zero);
    RUN_TEST(test_eval_nan);
+
+   /* factorial */
+   RUN_TEST(test_eval_factorial_small);
+   RUN_TEST(test_eval_factorial_large);
+   RUN_TEST(test_eval_factorial_of_group);
+   RUN_TEST(test_eval_factorial_of_function);
+   RUN_TEST(test_eval_factorial_in_expression);
+   RUN_TEST(test_eval_factorial_chained);
+   RUN_TEST(test_eval_factorial_no_operand);
+
+   /* exact (arbitrary precision) */
+   RUN_TEST(test_exact_small);
+   RUN_TEST(test_exact_factorial_52);
+   RUN_TEST(test_exact_power);
+   RUN_TEST(test_exact_negative_result);
+   RUN_TEST(test_exact_even_division);
+   RUN_TEST(test_exact_nested_factorial_power);
+   RUN_TEST(test_exact_inexact_division_falls_back);
+   RUN_TEST(test_exact_irrational_falls_back);
+   RUN_TEST(test_exact_irrational_but_integer_value);
+   RUN_TEST(test_exact_deep_nesting_no_crash);
+   RUN_TEST(test_eval_length_cap);
 
    /* format */
    RUN_TEST(test_format_integer);

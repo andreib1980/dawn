@@ -163,19 +163,22 @@ static double pi(void) {
 static double e(void) {
    return 2.71828182845904523536;
 }
-static double fac(double a) { /* simplest version of fac */
+static double fac(double a) {
+   /* DAWN modification (marked per tinyexpr Zlib license clause 2): accumulate
+    * in double, not unsigned long.  The upstream version overflowed the integer
+    * accumulator past 20! and returned INFINITY, so fac(52) failed even though
+    * 52! ≈ 8.07e67 is representable as a double.  Now factorials up to 170!
+    * (the largest that fits in DBL_MAX) return the IEEE-754 approximation. */
    if (a < 0.0)
       return NAN;
-   if (a > UINT_MAX)
+   if (a > 170.0) /* 171! exceeds DBL_MAX */
       return INFINITY;
    unsigned int ua = (unsigned int)(a);
-   unsigned long int result = 1, i;
-   for (i = 1; i <= ua; i++) {
-      if (i > ULONG_MAX / result)
-         return INFINITY;
+   double result = 1.0;
+   for (unsigned int i = 2; i <= ua; i++) {
       result *= i;
    }
-   return (double)result;
+   return result;
 }
 static double ncr(double n, double r) {
    if (n < 0.0 || r < 0.0 || n < r)

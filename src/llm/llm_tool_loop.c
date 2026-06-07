@@ -620,14 +620,17 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
                                       params->history_format)) {
          OLOG_WARNING("Tool loop: Duplicate tool call detected, forcing text response");
 
-         /* Add a hint to use existing results */
+         /* Add a hint to use existing results.  Phrased as a plain instruction
+          * (no "[System:]" prefix) so a reasoning model doesn't mistake this
+          * daemon control message for an injected directive and flag it; tool-
+          * agnostic wording since this fires for any repeated tool, not search. */
          json_object *hint_msg = json_object_new_object();
          json_object_object_add(hint_msg, "role", json_object_new_string("user"));
          json_object_object_add(
              hint_msg, "content",
              json_object_new_string(
-                 "[System: You already performed this search. Use the search results you "
-                 "already have to answer the question. Do not search again.]"));
+                 "You already called that tool with identical arguments and have its result. "
+                 "Answer using the information you already have — do not call it again."));
          json_object_array_add(params->conversation_history, hint_msg);
 
          llm_tool_response_free(&result);

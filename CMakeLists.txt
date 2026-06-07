@@ -499,6 +499,7 @@ set(DAWN_SOURCES
     # TTS subsystem
     src/tts/text_to_speech.cpp
     common/src/tts/tts_preprocessing.cpp
+    common/src/tts/number_to_words.c
 
     # Audio subsystem
     src/audio/audio_capture_thread.c
@@ -531,6 +532,7 @@ set(DAWN_SOURCES
     src/tools/tavily_rate_limit.c
     src/tools/weather_service.c
     src/tools/calculator.c
+    src/tools/calculator_bignum.c
     src/tools/tinyexpr.c
     src/tools/search_summarizer.c
     src/tools/tfidf_summarizer.c

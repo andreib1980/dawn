@@ -1248,11 +1248,18 @@ void llm_stream_handle_event(llm_stream_context_t *ctx, const char *event_data) 
 char *llm_stream_get_response(llm_stream_context_t *ctx) {
    if (!ctx || !ctx->accumulated_response || ctx->accumulated_size == 0) {
       /* Fallback: if we have thinking content but no response AND no tool calls,
-       * use thinking as response. This handles models like Qwen3.5 that put all
-       * output in reasoning_content. Don't apply fallback when tool calls are
-       * present — an empty response with tool_use is normal (the LLM chose to
-       * call tools instead of responding with text). */
-      if (ctx && ctx->accumulated_thinking && ctx->thinking_size > 0 && !ctx->has_tool_calls) {
+       * use thinking as response. This handles LOCAL models like Qwen3.5 that put
+       * all output in reasoning_content — there the thinking IS the answer.
+       *
+       * Gated to LLM_LOCAL: cloud reasoning models (Claude/OpenAI/Gemini via
+       * their separate thinking channel) keep reasoning PRIVATE, so substituting
+       * it for an empty response leaks raw chain-of-thought to the user. For
+       * those, an empty response returns NULL (same as the no-thinking case).
+       *
+       * Don't apply when tool calls are present — an empty response with tool_use
+       * is normal (the LLM chose to call tools instead of responding with text). */
+      if (ctx && ctx->llm_type == LLM_LOCAL && ctx->accumulated_thinking &&
+          ctx->thinking_size > 0 && !ctx->has_tool_calls) {
          OLOG_WARNING("LLM: Empty response but has thinking content (%zu bytes), using as response",
                       ctx->thinking_size);
          return strdup(ctx->accumulated_thinking);

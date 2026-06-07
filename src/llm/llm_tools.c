@@ -2369,6 +2369,29 @@ bool llm_tools_is_duplicate_call(struct json_object *history,
    if (!history || !tool_name)
       return false;
 
+   /* Non-deterministic actions are exempt: an identical-args repeat is a feature
+    * (e.g. calculator "random" — "pick another number"), not an infinite loop.
+    * The registry owns both the args key that carries the action (usually
+    * "action", but e.g. switch_llm uses "target") and which action values a tool
+    * declares repeatable. */
+   if (tool_args && tool_args[0] != '\0') {
+      const char *action_key = tool_registry_get_action_param_name(tool_name);
+      if (action_key) {
+         struct json_object *parsed = json_tokener_parse(tool_args);
+         if (parsed) {
+            struct json_object *action_obj;
+            if (json_object_object_get_ex(parsed, action_key, &action_obj)) {
+               const char *action = json_object_get_string(action_obj);
+               if (action && tool_registry_action_is_repeatable(tool_name, action)) {
+                  json_object_put(parsed);
+                  return false;
+               }
+            }
+            json_object_put(parsed);
+         }
+      }
+   }
+
    int len = json_object_array_length(history);
    int min_idx = len - DUPLICATE_CHECK_LOOKBACK;
    if (min_idx < 0) {

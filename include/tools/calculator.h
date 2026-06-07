@@ -46,6 +46,17 @@
  */
 
 /**
+ * @brief Maximum accepted length of an expression to evaluate.
+ *
+ * Bounds untrusted (LLM-supplied) input before it reaches the recursive-descent
+ * parsers (tinyexpr for 'evaluate', the bignum parser for 'exact'), so a deeply
+ * nested expression can't exhaust the (reduced) worker-thread stack.  Generous
+ * for any real expression — large exact RESULTS come from compact inputs
+ * (e.g. "2^10000", "52!"), not from huge literals.
+ */
+#define CALC_MAX_EXPR_LEN 1024
+
+/**
  * @brief Result structure for calculator evaluations.
  */
 typedef struct {
@@ -65,6 +76,22 @@ typedef struct {
  * @return calc_result_t containing result or error information
  */
 calc_result_t calculator_evaluate(const char *expression);
+
+/**
+ * @brief Evaluate an expression in digit-perfect arbitrary-precision integer mode.
+ *
+ * Computes the exact integer value of @p expression (supports +, -, *, exact /,
+ * ^ with non-negative integer exponent, ! factorial, and parentheses) and
+ * returns its full decimal digit string.  When the expression is not an exact
+ * integer (irrational functions, non-terminating division, negative exponent),
+ * it transparently falls back to the floating-point evaluator.  When the exact
+ * result would exceed the digit cap, it returns the float approximation with a
+ * note.
+ *
+ * @param expression The expression string (e.g., "52!", "2^256").
+ * @return Heap-allocated result string (caller must free), or NULL on failure.
+ */
+char *calculator_evaluate_exact_str(const char *expression);
 
 /**
  * @brief Format a calculation result as a string.

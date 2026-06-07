@@ -960,13 +960,16 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
                                          tool_calls->calls[0].arguments, LLM_HISTORY_OPENAI)) {
             OLOG_WARNING("OpenAI streaming: Duplicate tool call detected, forcing text response");
 
+            /* Plain instruction (no "[System:]" prefix) so a reasoning model
+             * doesn't mistake this daemon control message for an injected
+             * directive; tool-agnostic since it fires for any repeated tool. */
             json_object *hint_msg = json_object_new_object();
             json_object_object_add(hint_msg, "role", json_object_new_string("user"));
             json_object_object_add(
                 hint_msg, "content",
                 json_object_new_string(
-                    "[System: You already performed this search. Use the search results you "
-                    "already have to answer the question. Do not search again.]"));
+                    "You already called that tool with identical arguments and have its result. "
+                    "Answer using the information you already have — do not call it again."));
             json_object_array_add(conversation_history, hint_msg);
 
             sse_parser_free(sse_parser);

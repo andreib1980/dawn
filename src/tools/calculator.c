@@ -37,6 +37,7 @@
 #include <time.h>
 
 #include "logging.h"
+#include "tools/calculator_bignum.h"
 #include "tools/tinyexpr.h"
 
 #define RESULT_BUFFER_SIZE 256
@@ -185,6 +186,110 @@ static double convert_temperature(double value, const char *from, const char *to
    }
 }
 
+/* Maximum parenthesis nesting depth handled by the factorial rewriter. */
+#define FACTORIAL_REWRITE_MAX_DEPTH 64
+
+/* Scratch buffer size for the factorial-rewrite output.  If a factorial-bearing
+ * expression doesn't fit, rewrite_factorials returns false and the caller
+ * evaluates the original (which then errors on the bare '!') — a safe, if
+ * opaque, degradation.  Comfortably larger than any real expression. */
+#define FACTORIAL_REWRITE_BUFFER_SIZE 512
+
+/**
+ * @brief Rewrite postfix factorial ('!') into tinyexpr's fac() prefix form.
+ *
+ * tinyexpr has no postfix operators and never uses '!', so claiming it for
+ * factorial is safe.  The operand to the left of each '!' is the immediately-
+ * preceding atom: a number, a parenthesized group, or a function call
+ * (identifier + group).  Examples: "52!" -> "fac(52)", "(3+2)!" -> "fac((3+2))",
+ * "sqrt(4)!" -> "fac(sqrt(4))", "5!!" -> "fac(fac(5))".
+ *
+ * Single left-to-right pass: each char is copied to @p out while tracking where
+ * the last completed atom began; on '!' that atom is wrapped in fac(...).
+ *
+ * @return true if a rewrite was written to @p out; false if the expression is
+ *         malformed (a '!' with no operand) or the result would not fit — in
+ *         which case the caller falls back to the original expression.
+ */
+static bool rewrite_factorials(const char *in, char *out, size_t out_size) {
+   size_t out_len = 0;
+   long last_atom_start = -1; /* index in `out` where the last atom began, or -1 */
+   bool in_number = false;
+   size_t paren_stack[FACTORIAL_REWRITE_MAX_DEPTH];
+   int paren_depth = 0;
+
+#define FR_PUT(ch)                 \
+   do {                            \
+      if (out_len + 1 >= out_size) \
+         return false;             \
+      out[out_len++] = (ch);       \
+   } while (0)
+
+   for (const char *p = in; *p; p++) {
+      char c = *p;
+
+      if (c == '!') {
+         if (last_atom_start < 0) {
+            return false; /* '!' with no operand to its left */
+         }
+         /* Wrap out[last_atom_start, out_len) as fac(<operand>). */
+         size_t operand_len = out_len - (size_t)last_atom_start;
+         if (out_len + 5 >= out_size) { /* "fac(" + ")" */
+            return false;
+         }
+         memmove(out + last_atom_start + 4, out + last_atom_start, operand_len);
+         memcpy(out + last_atom_start, "fac(", 4);
+         out_len += 4;
+         out[out_len++] = ')';
+         in_number = false;
+         /* The new atom is the whole fac(...), so chained '!' wraps it again. */
+         continue;
+      }
+
+      if (isdigit((unsigned char)c) || c == '.') {
+         if (!in_number) {
+            in_number = true;
+            last_atom_start = (long)out_len;
+         }
+         FR_PUT(c);
+      } else if (c == '(') {
+         if (paren_depth >= FACTORIAL_REWRITE_MAX_DEPTH) {
+            return false;
+         }
+         paren_stack[paren_depth++] = out_len;
+         last_atom_start = -1;
+         in_number = false;
+         FR_PUT(c);
+      } else if (c == ')') {
+         if (paren_depth <= 0) {
+            return false; /* unbalanced — let te_interp report it on the original */
+         }
+         size_t open_idx = paren_stack[--paren_depth];
+         /* Absorb a function-name identifier immediately before the '(' so a
+          * call like sqrt(4) is treated as one atom. */
+         size_t atom = open_idx;
+         while (atom > 0 && (isalnum((unsigned char)out[atom - 1]) || out[atom - 1] == '_')) {
+            atom--;
+         }
+         last_atom_start = (long)atom;
+         in_number = false;
+         FR_PUT(c);
+      } else if (isspace((unsigned char)c)) {
+         in_number = false; /* keep last_atom_start so "5 !" still works */
+         FR_PUT(c);
+      } else {
+         /* Operator or identifier char: not a factorial-able atom on its own. */
+         in_number = false;
+         last_atom_start = -1;
+         FR_PUT(c);
+      }
+   }
+
+#undef FR_PUT
+   out[out_len] = '\0';
+   return true;
+}
+
 calc_result_t calculator_evaluate(const char *expression) {
    calc_result_t res = { 0 };
    int error_pos = 0;
@@ -195,7 +300,25 @@ calc_result_t calculator_evaluate(const char *expression) {
       return res;
    }
 
-   res.result = te_interp(expression, &error_pos);
+   /* Bound input before tinyexpr's recursive-descent parser — guards every
+    * caller, including the exact-mode fallback, against stack exhaustion from a
+    * deeply nested expression. */
+   if (strlen(expression) > CALC_MAX_EXPR_LEN) {
+      res.success = 0;
+      snprintf(res.error, sizeof(res.error), "Expression too long");
+      return res;
+   }
+
+   /* Rewrite postfix factorial (e.g. "52!") into tinyexpr's fac() form.  Only
+    * when a '!' is present and the rewrite fits; otherwise evaluate as-is. */
+   char rewritten[FACTORIAL_REWRITE_BUFFER_SIZE];
+   const char *expr = expression;
+   if (strchr(expression, '!') != NULL &&
+       rewrite_factorials(expression, rewritten, sizeof(rewritten))) {
+      expr = rewritten;
+   }
+
+   res.result = te_interp(expr, &error_pos);
 
    if (error_pos != 0) {
       res.success = 0;
@@ -217,6 +340,45 @@ calc_result_t calculator_evaluate(const char *expression) {
    }
 
    return res;
+}
+
+char *calculator_evaluate_exact_str(const char *expression) {
+   if (expression == NULL || expression[0] == '\0') {
+      return strdup("Error: Empty expression");
+   }
+
+   char *exact = NULL;
+   char errbuf[128] = "";
+   calc_exact_status_t status = calculator_evaluate_exact(expression, &exact, errbuf,
+                                                          sizeof(errbuf));
+
+   if (status == CALC_EXACT_OK) {
+      OLOG_INFO("Calculator: exact '%s' = %.40s%s", expression, exact,
+                strlen(exact) > 40 ? "..." : "");
+      return exact; /* full digit string */
+   }
+
+   /* Not exactly representable (or too large): fall back to the float evaluator,
+    * which handles irrationals, non-terminating division, etc. */
+   calc_result_t fr = calculator_evaluate(expression);
+   char *approx = calculator_format_result(&fr);
+   if (approx == NULL) {
+      return strdup("Failed to evaluate expression.");
+   }
+
+   /* Only when the user asked for exact digits but the integer result is too big
+    * do we annotate that the value shown is an approximation. */
+   if (status == CALC_EXACT_TOO_LARGE && fr.success) {
+      size_t need = strlen(approx) + strlen(errbuf) + 32;
+      char *msg = malloc(need);
+      if (msg != NULL) {
+         snprintf(msg, need, "%s (approximate — %s)", approx, errbuf);
+         free(approx);
+         return msg;
+      }
+      OLOG_WARNING("Calculator: annotation alloc failed, returning unannotated approximation");
+   }
+   return approx;
 }
 
 char *calculator_convert(const char *value_str) {
