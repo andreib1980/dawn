@@ -387,12 +387,8 @@ static bool ensure_tts_loaded(voice_ctx_t *ctx) {
    OLOG_INFO("TTS model loaded");
    return true;
 }
-#else
-static bool ensure_tts_loaded(voice_ctx_t *ctx) {
-   (void)ctx;
-   OLOG_ERROR("TTS not available (built without HAVE_TTS_PIPER)");
-   return false;
-}
+/* No TTS-off stub: the sole caller (synthesis path) is itself HAVE_TTS_PIPER-
+ * gated, so an #else stub would be an unused-function warning in headless builds. */
 #endif
 
 /* =============================================================================
@@ -678,7 +674,9 @@ voice_ctx_t *voice_processing_init(const satellite_config_t *config) {
    ctx->audio_buffer = malloc(ctx->audio_buffer_capacity * sizeof(int16_t));
    if (!ctx->audio_buffer) {
       OLOG_ERROR("Failed to allocate audio buffer");
+#ifdef HAVE_VAD_SILERO
       vad_silero_cleanup(ctx->vad);
+#endif
       free(ctx);
       return NULL;
    }

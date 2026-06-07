@@ -49,7 +49,8 @@ fi
 
 BUILD_LOG=$(mktemp -t dawn-prepush-build.XXXXXX.log)
 TEST_LOG=$(mktemp -t dawn-prepush-test.XXXXXX.log)
-trap 'rm -f "$BUILD_LOG" "$TEST_LOG"' EXIT
+SAT_LOG=$(mktemp -t dawn-prepush-satellite.XXXXXX.log)
+trap 'rm -f "$BUILD_LOG" "$TEST_LOG" "$SAT_LOG"' EXIT
 
 echo -e "${BLUE}Pre-push: building tests-ci in $BUILD_DIR…${NC}"
 if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
@@ -84,6 +85,41 @@ if [ -n "$PASS_LINE" ]; then
    echo -e "${GREEN}Pre-push: $PASS_LINE${NC}"
 else
    echo -e "${GREEN}Pre-push: test suite passed.${NC}"
+fi
+
+# Tier 1 satellite build check.  The daemon build above does NOT compile
+# dawn_satellite/, so config-gated satellite breakage (e.g. an include resolved
+# only in the SDL build, or a VAD-off path) slips through unless built here.
+# Builds whichever satellite build dir already exists (prefer the headless
+# build-min — that's what CI runs and where the structural bugs surface — then
+# the developer's full build-ci/build).  Incremental; skip with a hint if the
+# satellite hasn't been bootstrapped.
+SAT_BUILD_DIR=""
+for d in dawn_satellite/build-min dawn_satellite/build-ci dawn_satellite/build; do
+   if [ -f "$d/CMakeCache.txt" ]; then
+      SAT_BUILD_DIR="$d"
+      break
+   fi
+done
+
+if [ -n "$SAT_BUILD_DIR" ]; then
+   echo -e "${BLUE}Pre-push: building dawn_satellite in $SAT_BUILD_DIR…${NC}"
+   if ! make -C "$SAT_BUILD_DIR" -j"$(nproc)" > "$SAT_LOG" 2>&1; then
+      echo -e "${RED}Satellite build FAILED.  Last 30 lines:${NC}"
+      tail -30 "$SAT_LOG"
+      echo
+      echo -e "${YELLOW}Bypass: git push --no-verify${NC}"
+      PRESERVED=$(mktemp -t dawn-prepush-satellite-failed.XXXXXX.log)
+      cp "$SAT_LOG" "$PRESERVED"
+      echo -e "${YELLOW}Full log preserved at: $PRESERVED${NC}"
+      exit 1
+   fi
+   echo -e "${GREEN}Pre-push: dawn_satellite build OK.${NC}"
+else
+   echo -e "${YELLOW}Pre-push: no dawn_satellite build dir; skipping satellite build.${NC}"
+   echo -e "${YELLOW}  Bootstrap the headless check CI runs:${NC}"
+   echo -e "${YELLOW}  cmake -S dawn_satellite -B dawn_satellite/build-min \\${NC}"
+   echo -e "${YELLOW}    -DENABLE_VAD=OFF -DENABLE_VOSK_ASR=OFF -DENABLE_TTS=OFF${NC}"
 fi
 
 # Optional local-only pre-push extension.  Gitignored (*.local.hook).

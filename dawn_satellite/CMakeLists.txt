@@ -182,11 +182,13 @@ if(ENABLE_SDL_UI)
         src/ui/ui_transcript.c
         src/ui/backlight.c
     )
-    # Add src/ to include path for ui/ headers
-    include_directories(src)
 endif()
 
-# Include directories
+# Include directories.  src/ is unconditional: ws_client.h (always compiled)
+# includes "ui/music_types.h" — a no-SDL-deps header — regardless of
+# ENABLE_SDL_UI, so a headless build must still resolve it.  The SDL *.c
+# sources above stay gated; only the header search path is widened.
+include_directories(src)
 include_directories(include)
 
 # CUDA configuration — shared module handles auto-detection

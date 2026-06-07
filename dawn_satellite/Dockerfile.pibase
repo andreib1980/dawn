@@ -1,0 +1,81 @@
+# =============================================================================
+# dawn_satellite BUILD BASE — Debian trixie (13) arm64 + all heavy ML deps baked
+# in, so per-build compiles are fast (no rebuilding ONNX/Vosk/Piper each time).
+#
+# Build NATIVELY on an arm64 host (the Jetson) — no qemu. Build once, push to a
+# registry, and reuse via build-pi.sh.  Rebuild + re-push only when a pinned dep
+# version below changes (keep these IN SYNC with scripts/lib/libs.sh so the
+# container's libs match what the Pi is provisioned with — see docs/OTA_DESIGN.md
+# §10; mismatched lib versions = the same runtime failure as the soname problem).
+#
+# Reproduces scripts/lib/libs.sh: espeak-ng (rhasspy fork), ONNX Runtime
+# (prebuilt aarch64), piper-phonemize, libvosk (prebuilt aarch64). whisper.cpp is
+# NOT baked in — it's a repo submodule built during the satellite compile.
+# =============================================================================
+ARG BASE_IMAGE=debian:trixie-slim
+FROM ${BASE_IMAGE}
+
+# Pinned dep versions — MUST match scripts/lib/libs.sh.
+ARG ONNXRUNTIME_VERSION=1.19.2
+ARG VOSK_VERSION=0.3.45
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- apt deps (mirrors SATELLITE_APT_PACKAGES + SDL set in scripts/lib/satellite.sh) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git pkg-config autoconf automake libtool \
+        libasound2-dev libwebsockets-dev libjson-c-dev libspdlog-dev libopus-dev \
+        libsdl2-dev libsdl2-ttf-dev libsdl2-gfx-dev libdrm-dev \
+        unzip wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- ONNX Runtime (prebuilt aarch64) → /usr/local (VAD + Piper TTS) ---
+RUN set -eux; \
+    cd /tmp; \
+    wget -q -O ort.tgz \
+      "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz"; \
+    tar xzf ort.tgz; \
+    cp -r "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/include/"* /usr/local/include/; \
+    cp -a "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime"*.so* /usr/local/lib/; \
+    ldconfig; \
+    rm -rf /tmp/ort.tgz "/tmp/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}"
+
+# --- espeak-ng (rhasspy fork — required by piper-phonemize) → /usr ---
+RUN set -eux; \
+    multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
+    git clone --depth 1 https://github.com/rhasspy/espeak-ng.git /tmp/espeak-ng; \
+    cd /tmp/espeak-ng; \
+    ./autogen.sh; \
+    ./configure --prefix=/usr --libdir="/usr/lib/${multiarch}"; \
+    make -j"$(nproc)"; \
+    make install; \
+    ldconfig; \
+    rm -rf /tmp/espeak-ng
+
+# --- piper-phonemize (needs ONNX Runtime + espeak-ng above) → /usr/local ---
+RUN set -eux; \
+    git clone --depth 1 https://github.com/rhasspy/piper-phonemize.git /tmp/piper-phonemize; \
+    cd /tmp/piper-phonemize; \
+    mkdir build && cd build; \
+    cmake .. -DONNXRUNTIME_DIR=/usr/local -DESPEAK_NG_DIR=/usr; \
+    make -j"$(nproc)"; \
+    cp -a libpiper_phonemize.so* /usr/local/lib/; \
+    mkdir -p /usr/local/include/piper-phonemize; \
+    cp ../src/*.hpp /usr/local/include/piper-phonemize/; \
+    cp ../src/uni_algo.h /usr/local/include/piper-phonemize/; \
+    ldconfig; \
+    rm -rf /tmp/piper-phonemize
+
+# --- libvosk (prebuilt aarch64) → /usr/local (streaming ASR) ---
+RUN set -eux; \
+    cd /tmp; \
+    wget -q -O vosk.zip \
+      "https://github.com/alphacep/vosk-api/releases/download/v${VOSK_VERSION}/vosk-linux-aarch64-${VOSK_VERSION}.zip"; \
+    unzip -q vosk.zip; \
+    cp "vosk-linux-aarch64-${VOSK_VERSION}/libvosk.so" /usr/local/lib/; \
+    cp "vosk-linux-aarch64-${VOSK_VERSION}/vosk_api.h" /usr/local/include/; \
+    ldconfig; \
+    rm -rf /tmp/vosk.zip "/tmp/vosk-linux-aarch64-${VOSK_VERSION}"
+
+ENV HOME=/tmp
+WORKDIR /repo/dawn_satellite
