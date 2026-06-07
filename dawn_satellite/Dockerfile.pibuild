@@ -1,0 +1,36 @@
+# Pi-target build environment for dawn_satellite — Debian trixie (13) arm64,
+# matching the target Pi's ABI (libwebsockets 4.3.5 / .so.19, glibc). Build it
+# NATIVELY on an arm64 host (e.g. the Jetson) — no qemu emulation — to produce a
+# binary that actually runs on the Pi, solving the cross-distro soname/glibc
+# mismatch (a Jetson/Ubuntu build links libwebsockets.so.16 and won't load on the
+# Pi; stock Debian bookworm links .so.17 — also wrong for a trixie Pi).
+# See docs/OTA_DESIGN.md §10.
+#
+# Scope: this is the HEADLESS (DAP2-only) dev/test image — apt-only deps, no
+# ONNX Runtime / Vosk / Piper. Enough to connect, register, and report firmware
+# version (keyboard/text mode needs no local voice models). The full ML release
+# build is Phase 2 of the OTA work.
+#
+# IMPORTANT: the base image must match the TARGET Pi's distro so the linked
+# libwebsockets/glibc sonames match.  Default is trixie (the current target Pi,
+# .so.19).  Stock debian:bookworm ships libwebsockets.so.17 — wrong here.  When
+# the Pi's distro changes, bump this to match.  Override at build time:
+#   docker build --build-arg BASE_IMAGE=debian:bookworm-slim ...
+# or via build-pi.sh:  BASE_IMAGE=debian:bookworm-slim ./dawn_satellite/build-pi.sh
+ARG BASE_IMAGE=debian:trixie-slim
+FROM ${BASE_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        build-essential \
+        pkg-config \
+        git \
+        libwebsockets-dev \
+        libjson-c-dev \
+        libasound2-dev \
+        libopus-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# HOME for tool state when the container runs as the host uid (-u).
+ENV HOME=/tmp
+WORKDIR /repo/dawn_satellite
