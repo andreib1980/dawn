@@ -56,7 +56,10 @@
 #include "gpio_control.h"
 #endif
 
-#define VERSION "2.0.0"
+/* Single source of truth in satellite_version.h (also reported to the daemon
+ * at registration for OTA fleet visibility). */
+#include "satellite_version.h"
+#define VERSION DAWN_SATELLITE_FIRMWARE_VERSION
 
 /* Global context for signal handler */
 static satellite_ctx_t *g_ctx = NULL;
@@ -284,7 +287,8 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
 
    ws_capabilities_t caps = { .local_asr = true, /* Will have local ASR */
                               .local_tts = true, /* Will have local TTS */
-                              .wake_word = true /* Will have wake word */ };
+                              .wake_word = true, /* Will have wake word */
+                              .ota = true /* Supports server-driven OTA */ };
 
    printf("Registering satellite '%s'...\n", identity.name);
    if (ws_client_register(ws, &identity, &caps) != 0) {

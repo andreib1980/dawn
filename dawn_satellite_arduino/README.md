@@ -38,8 +38,21 @@ are played back through an I2S speaker.
 4. Under **Tools**, set:
    - **PSRAM**: `OPI PSRAM`
    - **Flash Size**: `4MB (32Mb)`
-   - **Partition Scheme**: `Default 4MB with spiffs`
+   - **Partition Scheme**: `Minimal SPIFFS (1.9MB APP with OTA)` — dual-app layout
+     required for over-the-air updates (see **OTA bootstrap** below). The
+     repo's `partitions.csv` documents the exact byte layout.
    - **Upload Speed**: `921600`
+
+### OTA bootstrap (one-time)
+
+Server→satellite OTA needs two app partitions, but the stock `Default 4MB with
+spiffs` scheme has only one. Switching schemes is a **one-time USB re-flash** —
+OTA cannot lay down its own partition table. The dual-OTA layout
+(`partitions.csv`) keeps the `nvs` partition at its stock `0x9000/0x5000`
+offset, so a device that has already paired **keeps its UUID and reconnect
+secret** across this re-flash (no re-registration needed). After this one USB
+flash, all subsequent updates arrive over the air. See
+`docs/OTA_DESIGN.md` §8.
 
 ### Libraries
 

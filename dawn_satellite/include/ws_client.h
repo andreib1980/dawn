@@ -88,6 +88,7 @@ typedef struct {
    bool local_asr; /* Has local speech recognition */
    bool local_tts; /* Has local text-to-speech */
    bool wake_word; /* Has local wake word detection */
+   bool ota;       /* Supports server-driven OTA updates */
 } ws_capabilities_t;
 
 /**

@@ -181,6 +181,17 @@
             '</span>' +
             '</div>' +
             (lastSeenText ? '<div class="satellite-last-seen">' + lastSeenText + '</div>' : '') +
+            // Firmware version + any in-flight OTA state (non-local devices that have reported it)
+            (!isLocal && sat.firmware_version
+               ? '<div class="satellite-last-seen satellite-firmware">Firmware: ' +
+                 escapeHtml(sat.firmware_version) +
+                 (sat.ota_state && sat.ota_state !== 'idle'
+                    ? ' · ' +
+                      escapeHtml(sat.ota_state) +
+                      (sat.ota_target_version ? ' → ' + escapeHtml(sat.ota_target_version) : '')
+                    : '') +
+                 '</div>'
+               : '') +
             // Controls row
             '<div class="satellite-controls">' +
             '<label class="satellite-control-group">' +

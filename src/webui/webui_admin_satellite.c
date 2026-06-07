@@ -30,6 +30,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
@@ -57,6 +58,21 @@ static json_object *satellite_mapping_to_json(const satellite_mapping_t *m, bool
    json_object_object_add(sat, "last_seen", json_object_new_int64((int64_t)m->last_seen));
    json_object_object_add(sat, "created_at", json_object_new_int64((int64_t)m->created_at));
    json_object_object_add(sat, "online", json_object_new_boolean(online));
+
+   /* OTA fleet visibility (Phase 1): reported firmware version + any in-flight
+    * update state.  Looked up here (outside the satellite_db lock — callers
+    * serialize from a collected array or post-update) so the panel can show
+    * which devices are behind.  Absent row → unknown/idle defaults. */
+   ota_device_state_t ota;
+   if (ota_db_get(m->uuid, &ota) == AUTH_DB_SUCCESS) {
+      json_object_object_add(sat, "firmware_version", json_object_new_string(ota.current_version));
+      json_object_object_add(sat, "ota_state", json_object_new_string(ota.state));
+      json_object_object_add(sat, "ota_target_version", json_object_new_string(ota.target_version));
+   } else {
+      json_object_object_add(sat, "firmware_version", json_object_new_string(""));
+      json_object_object_add(sat, "ota_state", json_object_new_string("idle"));
+      json_object_object_add(sat, "ota_target_version", json_object_new_string(""));
+   }
    return sat;
 }
 
