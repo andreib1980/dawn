@@ -1391,6 +1391,50 @@ const treg_param_t *tool_registry_get_effective_param(const char *tool_name, int
    return result;
 }
 
+const char *tool_registry_get_action_param_name(const char *tool_name) {
+   if (!tool_name) {
+      return NULL;
+   }
+
+   const tool_metadata_t *meta = tool_registry_find(tool_name);
+   if (!meta) {
+      return NULL;
+   }
+
+   for (int i = 0; i < meta->param_count; i++) {
+      if (meta->params[i].maps_to == TOOL_MAPS_TO_ACTION) {
+         return meta->params[i].name;
+      }
+   }
+   return NULL;
+}
+
+bool tool_registry_action_is_repeatable(const char *tool_name, const char *action) {
+   if (!tool_name || !action || action[0] == '\0') {
+      return false;
+   }
+
+   /* tool_registry_find handles name-or-alias.  Registration completes at
+    * startup before any concurrent LLM traffic, and metadata content is never
+    * mutated afterward, so reading repeatable_actions[] without the registry
+    * lock is safe (same contract as the other lock-free metadata readers). */
+   const tool_metadata_t *meta = tool_registry_find(tool_name);
+   if (!meta) {
+      return false;
+   }
+
+   int count = meta->repeatable_action_count;
+   if (count > TOOL_REPEATABLE_ACTIONS_MAX) {
+      count = TOOL_REPEATABLE_ACTIONS_MAX; /* defensive: clamp to array size */
+   }
+   for (int i = 0; i < count; i++) {
+      if (meta->repeatable_actions[i] && strcmp(meta->repeatable_actions[i], action) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 /* =============================================================================
  * Direct Command Variation Statistics
  * ============================================================================= */

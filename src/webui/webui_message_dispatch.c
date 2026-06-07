@@ -442,7 +442,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                   has_changes = true;
                   strncpy(config.model, new_model, sizeof(config.model) - 1);
                   config.model[sizeof(config.model) - 1] = '\0';
-                  OLOG_INFO("WebUI: Session model set to '%s'", config.model);
+                  /* "requested", not "set": under the OpenRouter gateway a bare
+                   * (non vendor/model) id is dropped below and the resolver
+                   * substitutes the gateway default — so this value is not
+                   * necessarily what runs.  Logging it as "set" previously
+                   * implied a model switch that the gateway then discarded. */
+                  OLOG_INFO("WebUI: Session model requested '%s'", config.model);
 
                   /* Infer provider from model name if not explicitly set
                    * (handles old conversations and frontend bugs).
@@ -477,6 +482,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
          if (config.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
             config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
             if (config.model[0] != '\0' && strchr(config.model, '/') == NULL) {
+               OLOG_INFO("WebUI: OpenRouter gateway dropped bare model '%s' (not a vendor/model "
+                         "id) — resolver will use the OpenRouter default",
+                         config.model);
                config.model[0] = '\0';
             }
          }

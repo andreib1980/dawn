@@ -133,6 +133,48 @@ static void test_trillion(void) {
    TEST_ASSERT_DOUBLE_WITHIN(0.0, 1234567890123.0, wordToNumber(input));
 }
 
+/* ── Extended short-scale magnitudes (symmetry with number_to_words.c) ─────
+ * Beyond trillion the double return is magnitude-correct but not digit-exact
+ * (only ~15-16 significant digits), so these assert within a relative band. */
+
+static void test_quadrillion(void) {
+   char input[] = "five quadrillion";
+   TEST_ASSERT_DOUBLE_WITHIN(1.0, 5e15, wordToNumber(input));
+}
+
+static void test_sextillion(void) {
+   char input[] = "seven sextillion";
+   TEST_ASSERT_DOUBLE_WITHIN(7e21 * 1e-9, 7e21, wordToNumber(input));
+}
+
+static void test_decillion(void) {
+   char input[] = "three decillion";
+   TEST_ASSERT_DOUBLE_WITHIN(3e33 * 1e-9, 3e33, wordToNumber(input));
+}
+
+static void test_vigintillion(void) {
+   char input[] = "two vigintillion";
+   TEST_ASSERT_DOUBLE_WITHIN(2e63 * 1e-9, 2e63, wordToNumber(input));
+}
+
+static void test_unvigintillion_symmetry(void) {
+   /* The headline pairing: number_to_words renders 52!'s lead group as
+    * "eighty unvigintillion"; this parses it back to the same magnitude. */
+   char input[] = "eighty unvigintillion";
+   TEST_ASSERT_DOUBLE_WITHIN(8e67 * 1e-9, 8e67, wordToNumber(input));
+}
+
+static void test_trigintillion(void) {
+   char input[] = "one trigintillion";
+   TEST_ASSERT_DOUBLE_WITHIN(1e93 * 1e-9, 1e93, wordToNumber(input));
+}
+
+static void test_extended_scale_chain(void) {
+   /* Mixed scales compose: two quadrillion + three trillion. */
+   char input[] = "two quadrillion three trillion";
+   TEST_ASSERT_DOUBLE_WITHIN(2.003e15 * 1e-9, 2.003e15, wordToNumber(input));
+}
+
 static void test_four_million_flat(void) {
    char input[] = "four million";
    TEST_ASSERT_DOUBLE_WITHIN(0.0, 4000000.0, wordToNumber(input));
@@ -196,6 +238,13 @@ int main(void) {
    RUN_TEST(test_max_below_billion);
    RUN_TEST(test_billion);
    RUN_TEST(test_trillion);
+   RUN_TEST(test_quadrillion);
+   RUN_TEST(test_sextillion);
+   RUN_TEST(test_decillion);
+   RUN_TEST(test_vigintillion);
+   RUN_TEST(test_unvigintillion_symmetry);
+   RUN_TEST(test_trigintillion);
+   RUN_TEST(test_extended_scale_chain);
    RUN_TEST(test_four_million_flat);
 
    RUN_TEST(test_decimal_pi);

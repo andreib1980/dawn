@@ -615,6 +615,7 @@ dawn_add_unit_test(test_config_validate
 dawn_add_unit_test(test_calculator
    SOURCES test_calculator.c
            ${SRC_ROOT}/src/tools/calculator.c
+           ${SRC_ROOT}/src/tools/calculator_bignum.c
            ${SRC_ROOT}/src/tools/tinyexpr.c
    LIBS    dawn_common unity m pthread
    LABEL   ci)
@@ -661,6 +662,13 @@ dawn_add_unit_test(test_html_parser
 dawn_add_unit_test(test_tts_preprocessing
    SOURCES test_tts_preprocessing.c
            ${SRC_ROOT}/common/src/tts/tts_preprocessing.cpp
+           ${SRC_ROOT}/common/src/tts/number_to_words.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_number_to_words
+   SOURCES test_number_to_words.c
+           ${SRC_ROOT}/common/src/tts/number_to_words.c
    LIBS    unity
    LABEL   ci)
 

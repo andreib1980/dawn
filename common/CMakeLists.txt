@@ -288,6 +288,7 @@ if(DAWN_COMMON_WITH_TTS)
         add_library(dawn_common_tts STATIC
             src/tts/tts_piper.cpp
             src/tts/tts_preprocessing.cpp
+            src/tts/number_to_words.c
         )
         target_include_directories(dawn_common_tts PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
