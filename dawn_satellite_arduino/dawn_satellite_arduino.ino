@@ -71,6 +71,10 @@ const char *SATELLITE_LOCATION = SECRET_SATELLITE_LOCATION;
 /* ── TFT Display ───────────────────────────────────────────────────────────── */
 #define TFT_BACKLIGHT 45
 
+/* Firmware version reported to the daemon at registration for OTA fleet
+ * visibility (docs/OTA_DESIGN.md §1).  Bump on every released sketch. */
+#define FIRMWARE_VERSION "2.0.0"
+
 /* ── Audio configuration ───────────────────────────────────────────────────── */
 #define SAMPLE_RATE 16000
 #define BITS_PER_SAMPLE 16
@@ -562,12 +566,17 @@ void sendRegistration() {
    payload["location"] = SATELLITE_LOCATION;
    payload["tier"] = 2;
    payload["protocol_version"] = "2.0";
+   payload["firmware_version"] = FIRMWARE_VERSION;
 
    JsonObject caps = payload["capabilities"].to<JsonObject>();
    caps["local_asr"] = false;
    caps["local_tts"] = false;
    caps["wake_word"] = false;
    caps["push_to_talk"] = true;
+   /* OTA apply lands in Phase 4 (needs the dual-partition table); until then the
+    * device reports its version but does not advertise OTA capability, so the
+    * server will not send it update offers. */
+   caps["ota"] = false;
 
    JsonObject hw = payload["hardware"].to<JsonObject>();
    hw["platform"] = "esp32s3";

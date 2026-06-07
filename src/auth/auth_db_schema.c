@@ -264,6 +264,26 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_satellite_user ON satellite_mappings(user_id);"
 
+    /* OTA per-device update state (v59).  One row per satellite uuid, created
+     * lazily on first registration that reports a firmware_version.  Tracks the
+     * device's reported running version plus any in-flight update (single source
+     * of truth for the OTA state machine — see docs/OTA_DESIGN.md §5).  The
+     * token/token_expires columns gate the one-time HTTPS image download (Phase
+     * 2); unused in Phase 1.  No FK to satellite_mappings: a device reports its
+     * version at register time, which is also when the mapping is upserted, but
+     * the two writes are independent rows keyed by the same uuid. */
+    "CREATE TABLE IF NOT EXISTS ota_device_state ("
+    "   uuid TEXT PRIMARY KEY,"
+    "   current_version TEXT NOT NULL DEFAULT '',"
+    "   target_version TEXT,"
+    "   state TEXT NOT NULL DEFAULT 'idle',"
+    "   last_error TEXT,"
+    "   token TEXT,"
+    "   token_expires INTEGER,"
+    "   created_at INTEGER NOT NULL,"
+    "   updated_at INTEGER NOT NULL"
+    ");"
+
     /* Memory system tables (v14, columns extended in v15/v19) */
     "CREATE TABLE IF NOT EXISTS memory_facts ("
     "   id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -3069,6 +3089,35 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v59 — ota_device_state (server→satellite OTA per-device state).
+    * Single new table, created on existing DBs via CREATE TABLE IF NOT EXISTS.
+    * No backfill (empty on first boot; rows created lazily when a device first
+    * reports a firmware_version).  See docs/OTA_DESIGN.md §5. */
+   bool v59_ok = (current_version >= 59) || (current_version == 0);
+   if (current_version > 0 && current_version < 59) {
+      const char *v59_sql = "CREATE TABLE IF NOT EXISTS ota_device_state ("
+                            "   uuid TEXT PRIMARY KEY,"
+                            "   current_version TEXT NOT NULL DEFAULT '',"
+                            "   target_version TEXT,"
+                            "   state TEXT NOT NULL DEFAULT 'idle',"
+                            "   last_error TEXT,"
+                            "   token TEXT,"
+                            "   token_expires INTEGER,"
+                            "   created_at INTEGER NOT NULL,"
+                            "   updated_at INTEGER NOT NULL"
+                            ");";
+      rc = sqlite3_exec(s_db.db, v59_sql, NULL, NULL, &errmsg);
+      if (rc != SQLITE_OK) {
+         OLOG_ERROR("auth_db: v59 ota_device_state migration failed: %s",
+                    errmsg ? errmsg : "unknown");
+         sqlite3_free(errmsg);
+         errmsg = NULL;
+      } else {
+         OLOG_INFO("auth_db: v59 created ota_device_state table");
+         v59_ok = true;
+      }
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3222,7 +3271,7 @@ int auth_db_create_schema(const char *db_path) {
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
-                              v55_ok && v56_ok && v57_ok && v58_ok;
+                              v55_ok && v56_ok && v57_ok && v58_ok && v59_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

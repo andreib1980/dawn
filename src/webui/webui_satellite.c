@@ -33,6 +33,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
 #include "logging.h"
@@ -474,6 +475,21 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       if (json_object_object_get_ex(caps_obj, "wake_word", &ww_obj)) {
          caps.wake_word = json_object_get_boolean(ww_obj);
       }
+      struct json_object *ota_obj;
+      if (json_object_object_get_ex(caps_obj, "ota", &ota_obj)) {
+         caps.ota = json_object_get_boolean(ota_obj);
+      }
+   }
+
+   /* Firmware version (optional — legacy firmware omits it).  Recorded in
+    * ota_device_state for fleet visibility and the OTA register-time finalize
+    * check (Phase 2).  See docs/OTA_DESIGN.md §1. */
+   const char *firmware_version = "";
+   struct json_object *fw_obj;
+   if (json_object_object_get_ex(payload, "firmware_version", &fw_obj)) {
+      const char *fw = json_object_get_string(fw_obj);
+      if (fw)
+         firmware_version = fw;
    }
 
    /* Validate tier matches declared capabilities to prevent resource abuse.
@@ -618,6 +634,12 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
 
          OLOG_INFO("Satellite: Auto-registered new satellite %s (%s)", identity.name, uuid);
       }
+
+      /* Record the reported firmware version (lazily creates the OTA state row).
+       * Separate write from the mapping upsert above — ota_device_state has no FK
+       * to satellite_mappings and the version is advisory, so a torn write across
+       * a crash is self-healing on the next registration. */
+      ota_db_report_version(uuid, firmware_version);
    }
 
    /* Get reconnect secret for client to save */

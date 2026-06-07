@@ -27,6 +27,8 @@
 #include <sys/random.h>
 #include <time.h>
 
+#include "satellite_version.h"
+
 /* Shared logging (same format as daemon) */
 #include "logging.h"
 
@@ -1080,6 +1082,8 @@ int ws_client_register(ws_client_t *client,
    json_object_object_add(payload, "name", json_object_new_string(identity->name));
    json_object_object_add(payload, "location", json_object_new_string(identity->location));
    json_object_object_add(payload, "tier", json_object_new_int(1)); /* Tier 1 */
+   json_object_object_add(payload, "firmware_version",
+                          json_object_new_string(DAWN_SATELLITE_FIRMWARE_VERSION));
 
    /* Include registration key if configured (for satellite authentication) */
    if (client->registration_key[0]) {
@@ -1099,6 +1103,7 @@ int ws_client_register(ws_client_t *client,
    json_object_object_add(caps_obj, "local_asr", json_object_new_boolean(caps->local_asr));
    json_object_object_add(caps_obj, "local_tts", json_object_new_boolean(caps->local_tts));
    json_object_object_add(caps_obj, "wake_word", json_object_new_boolean(caps->wake_word));
+   json_object_object_add(caps_obj, "ota", json_object_new_boolean(caps->ota));
    json_object_object_add(payload, "capabilities", caps_obj);
 
    json_object_object_add(msg, "payload", payload);

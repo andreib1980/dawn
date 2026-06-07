@@ -148,6 +148,7 @@ typedef struct {
    bool local_asr;  // Satellite can transcribe locally
    bool local_tts;  // Satellite can synthesize locally
    bool wake_word;  // Satellite has wake word detection
+   bool ota;        // Satellite supports server-driven OTA updates (offer gating)
 } dap2_capabilities_t;
 
 /**
