@@ -132,6 +132,76 @@ static const tool_metadata_t mock_schedulable_with_value = {
 };
 
 
+/* Tool with an ARRAY param (declared last, per the ARRAY terminal-slot
+ * contract) — exercises array schema emission. */
+static const treg_param_t mock_array_params[] = {
+   {
+       .name = "action",
+       .description = "Action to perform",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = true,
+       .maps_to = TOOL_MAPS_TO_ACTION,
+       .enum_values = { "enqueue", "search" },
+       .enum_count = 2,
+   },
+   {
+       .name = "items",
+       .description = "List of items",
+       .type = TOOL_PARAM_TYPE_ARRAY,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "items",
+   },
+};
+
+static const tool_metadata_t mock_tool_array = {
+   .name = "array_tool",
+   .device_string = "array device",
+   .description = "A tool with a string-array param",
+   .callback = mock_callback,
+   .device_type = TOOL_DEVICE_TYPE_TRIGGER,
+   .capabilities = TOOL_CAP_NONE,
+   .params = mock_array_params,
+   .param_count = 2,
+   .default_local = true,
+   .default_remote = true,
+};
+
+/* ARRAY param NOT in the last slot — must be rejected at registration time
+ * (terminal-slot contract). */
+static const treg_param_t mock_array_params_bad[] = {
+   {
+       .name = "items",
+       .description = "List of items (illegally not last)",
+       .type = TOOL_PARAM_TYPE_ARRAY,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "items",
+   },
+   {
+       .name = "action",
+       .description = "Action",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = true,
+       .maps_to = TOOL_MAPS_TO_ACTION,
+       .enum_values = { "go" },
+       .enum_count = 1,
+   },
+};
+
+static const tool_metadata_t mock_tool_array_bad = {
+   .name = "array_bad_tool",
+   .device_string = "array bad device",
+   .description = "ARRAY param not last — should fail registration",
+   .callback = mock_callback,
+   .device_type = TOOL_DEVICE_TYPE_TRIGGER,
+   .capabilities = TOOL_CAP_NONE,
+   .params = mock_array_params_bad,
+   .param_count = 2,
+   .default_local = true,
+   .default_remote = true,
+};
+
 /* ============================================================================
  * setUp / tearDown — fresh registry for each test
  * ============================================================================ */
@@ -430,6 +500,76 @@ static void test_validate_null_err_buf_safe(void) {
 }
 
 /* ============================================================================
+ * ARRAY param: schema emission + custom-field encode/decode contract
+ * ============================================================================ */
+
+static void test_schema_array_emits_items(void) {
+   tool_registry_register(&mock_tool_array);
+
+   char buf[4096] = { 0 };
+   int written = 0;
+   int rc = tool_registry_generate_llm_schema(buf, sizeof(buf), false, false, &written);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schema generation succeeds");
+
+   /* The array param advertises type:array with string items. */
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"items\":{\"type\":\"string\"}"),
+                                "array param emits items:{type:string}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"type\":\"array\""), "array param emits type:array");
+}
+
+static void test_array_param_must_be_last(void) {
+   /* ARRAY param declared last → registers fine. */
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, tool_registry_register(&mock_tool_array),
+                                 "ARRAY-last tool registers");
+   /* ARRAY param NOT last → rejected. */
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, tool_registry_register(&mock_tool_array_bad),
+                                 "ARRAY-not-last tool is rejected");
+}
+
+static void test_schema_scalar_has_no_items(void) {
+   /* A tool with only scalar params must NOT emit an items key (back-compat). */
+   tool_registry_register(&mock_tool);
+
+   char buf[4096] = { 0 };
+   int written = 0;
+   int rc = tool_registry_generate_llm_schema(buf, sizeof(buf), false, false, &written);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schema generation succeeds");
+   TEST_ASSERT_NULL_MESSAGE(strstr(buf, "\"items\""), "scalar-only tool emits no items key");
+}
+
+static void test_extract_custom_tail_reads_to_end(void) {
+   /* A serialized array containing a literal "::" must survive the tail
+    * extractor intact (terminal slot), whereas the plain extractor truncates. */
+   const char *encoded = "::items::[\"Song :: Reprise\",\"Plain\"]";
+   char out[256] = { 0 };
+
+   TEST_ASSERT_TRUE(tool_param_extract_custom_tail(encoded, "items", out, sizeof(out)));
+   TEST_ASSERT_EQUAL_STRING("[\"Song :: Reprise\",\"Plain\"]", out);
+
+   /* Plain extractor stops at the internal "::" — demonstrates why tail is needed. */
+   char trunc[256] = { 0 };
+   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "items", trunc, sizeof(trunc)));
+   TEST_ASSERT_EQUAL_STRING("[\"Song ", trunc);
+}
+
+static void test_extract_base_and_custom_coexist(void) {
+   /* base value + a scalar custom before the terminal array. */
+   const char *encoded = "queenquery::limit::5::items::[\"a\",\"b\"]";
+   char base[64] = { 0 };
+   char limit[16] = { 0 };
+   char items[64] = { 0 };
+
+   tool_param_extract_base(encoded, base, sizeof(base));
+   TEST_ASSERT_EQUAL_STRING("queenquery", base);
+
+   TEST_ASSERT_TRUE(tool_param_extract_custom(encoded, "limit", limit, sizeof(limit)));
+   TEST_ASSERT_EQUAL_STRING("5", limit);
+
+   TEST_ASSERT_TRUE(tool_param_extract_custom_tail(encoded, "items", items, sizeof(items)));
+   TEST_ASSERT_EQUAL_STRING("[\"a\",\"b\"]", items);
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -466,6 +606,13 @@ int main(void) {
    RUN_TEST(test_validate_requires_value_empty_fails);
    RUN_TEST(test_validate_requires_value_populated_passes);
    RUN_TEST(test_validate_null_err_buf_safe);
+
+   /* ARRAY param: schema emission + encode/decode contract */
+   RUN_TEST(test_schema_array_emits_items);
+   RUN_TEST(test_array_param_must_be_last);
+   RUN_TEST(test_schema_scalar_has_no_items);
+   RUN_TEST(test_extract_custom_tail_reads_to_end);
+   RUN_TEST(test_extract_base_and_custom_coexist);
 
    return UNITY_END();
 }

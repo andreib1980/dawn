@@ -343,6 +343,75 @@ bool plan_eval_condition(const plan_context_t *ctx, const char *expr) {
  * Interpolation
  * ============================================================================= */
 
+/* A variable-name / field-name character: [a-z0-9_]. */
+static inline bool plan_is_var_char(char c) {
+   return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/**
+ * @brief Resolve a variable (with optional .field JSON access) and append to out
+ *
+ * Shared by both interpolation syntaxes ($var/${var} and {{var}}) so they
+ * resolve identically — including dot-access (`$var.field` == `{{var.field}}`).
+ * Missing variables append nothing (matches prior behavior). Truncates to fit.
+ */
+static void plan_append_resolved_var(const plan_context_t *ctx,
+                                     const char *name_start,
+                                     size_t name_len,
+                                     const char *field_name,
+                                     size_t field_len,
+                                     char *out,
+                                     size_t *pos,
+                                     size_t out_size) {
+   char var_name[PLAN_VAR_NAME_MAX + 1];
+   size_t copy_len = name_len < PLAN_VAR_NAME_MAX ? name_len : PLAN_VAR_NAME_MAX;
+   memcpy(var_name, name_start, copy_len);
+   var_name[copy_len] = '\0';
+
+   const char *val = plan_vars_get(ctx, var_name);
+   if (!val)
+      return;
+
+   const char *resolved = val;
+   char field_buf[512];
+
+   /* Dot-access: parse JSON and extract named field */
+   if (field_name && field_len > 0) {
+      char field_key[PLAN_VAR_NAME_MAX + 1];
+      size_t fk_len = field_len < PLAN_VAR_NAME_MAX ? field_len : PLAN_VAR_NAME_MAX;
+      memcpy(field_key, field_name, fk_len);
+      field_key[fk_len] = '\0';
+
+      struct json_object *jobj = json_tokener_parse(val);
+      if (jobj && json_object_is_type(jobj, json_type_object)) {
+         struct json_object *field_val;
+         if (json_object_object_get_ex(jobj, field_key, &field_val)) {
+            const char *fv_str = json_object_get_string(field_val);
+            if (fv_str) {
+               strncpy(field_buf, fv_str, sizeof(field_buf) - 1);
+               field_buf[sizeof(field_buf) - 1] = '\0';
+               resolved = field_buf;
+            } else {
+               resolved = ""; /* field exists but not stringifiable */
+            }
+         } else {
+            resolved = ""; /* field not found in JSON object */
+         }
+         json_object_put(jobj);
+      } else if (jobj) {
+         json_object_put(jobj);
+         /* val is not a JSON object — fall back to raw value */
+      }
+      /* If val doesn't parse as JSON at all, fall back to raw value */
+   }
+
+   size_t val_len = strlen(resolved);
+   size_t avail = out_size - 1 - *pos;
+   size_t copy = val_len < avail ? val_len : avail;
+   memcpy(out + *pos, resolved, copy);
+   *pos += copy;
+}
+
 int plan_interpolate(const plan_context_t *ctx,
                      const char *template_str,
                      char *out,
@@ -359,6 +428,42 @@ int plan_interpolate(const plan_context_t *ctx,
    const char *p = template_str;
 
    while (*p && pos < out_size - 1) {
+      /* {{var}} or {{var.field}} — the syntax the tool description documents. */
+      if (p[0] == '{' && p[1] == '{') {
+         const char *q = p + 2;
+         const char *name_start = q;
+         while (plan_is_var_char(*q))
+            q++;
+         size_t name_len = q - name_start;
+
+         /* Optional .field dot-access */
+         const char *field_name = NULL;
+         size_t field_len = 0;
+         if (name_len > 0 && *q == '.') {
+            const char *field_start = q + 1;
+            const char *fp = field_start;
+            while (plan_is_var_char(*fp))
+               fp++;
+            field_len = fp - field_start;
+            if (field_len > 0) {
+               field_name = field_start;
+               q = fp;
+            }
+         }
+
+         /* Require a valid name and closing "}}" — otherwise emit literally. */
+         if (name_len > 0 && q[0] == '}' && q[1] == '}') {
+            plan_append_resolved_var(ctx, name_start, name_len, field_name, field_len, out, &pos,
+                                     out_size);
+            p = q + 2; /* skip closing }} */
+            continue;
+         }
+
+         /* Not a valid {{...}} reference — emit the '{' literally and advance. */
+         out[pos++] = *p++;
+         continue;
+      }
+
       if (*p != '$') {
          out[pos++] = *p++;
          continue;
@@ -374,7 +479,7 @@ int plan_interpolate(const plan_context_t *ctx,
 
       /* Collect variable name chars */
       const char *name_start = p;
-      while (*p && ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_'))
+      while (plan_is_var_char(*p))
          p++;
 
       size_t name_len = p - name_start;
@@ -398,7 +503,7 @@ int plan_interpolate(const plan_context_t *ctx,
       if (!braced && *p == '.') {
          const char *field_start = p + 1;
          const char *fp = field_start;
-         while (*fp && ((*fp >= 'a' && *fp <= 'z') || (*fp >= '0' && *fp <= '9') || *fp == '_'))
+         while (plan_is_var_char(*fp))
             fp++;
          field_len = fp - field_start;
          if (field_len > 0) {
@@ -407,53 +512,8 @@ int plan_interpolate(const plan_context_t *ctx,
          }
       }
 
-      /* Look up variable */
-      char var_name[PLAN_VAR_NAME_MAX + 1];
-      size_t copy_len = name_len < PLAN_VAR_NAME_MAX ? name_len : PLAN_VAR_NAME_MAX;
-      memcpy(var_name, name_start, copy_len);
-      var_name[copy_len] = '\0';
-
-      const char *val = plan_vars_get(ctx, var_name);
-      if (val) {
-         const char *resolved = val;
-         char field_buf[512];
-
-         /* Dot-access: parse JSON and extract named field */
-         if (field_name && field_len > 0) {
-            char field_key[PLAN_VAR_NAME_MAX + 1];
-            size_t fk_len = field_len < PLAN_VAR_NAME_MAX ? field_len : PLAN_VAR_NAME_MAX;
-            memcpy(field_key, field_name, fk_len);
-            field_key[fk_len] = '\0';
-
-            struct json_object *jobj = json_tokener_parse(val);
-            if (jobj && json_object_is_type(jobj, json_type_object)) {
-               struct json_object *field_val;
-               if (json_object_object_get_ex(jobj, field_key, &field_val)) {
-                  const char *fv_str = json_object_get_string(field_val);
-                  if (fv_str) {
-                     strncpy(field_buf, fv_str, sizeof(field_buf) - 1);
-                     field_buf[sizeof(field_buf) - 1] = '\0';
-                     resolved = field_buf;
-                  } else {
-                     resolved = ""; /* field exists but not stringifiable */
-                  }
-               } else {
-                  resolved = ""; /* field not found in JSON object */
-               }
-               json_object_put(jobj);
-            } else if (jobj) {
-               json_object_put(jobj);
-               /* val is not a JSON object — fall back to raw value */
-            }
-            /* If val doesn't parse as JSON at all, fall back to raw value */
-         }
-
-         size_t val_len = strlen(resolved);
-         size_t avail = out_size - 1 - pos;
-         size_t copy = val_len < avail ? val_len : avail;
-         memcpy(out + pos, resolved, copy);
-         pos += copy;
-      }
+      plan_append_resolved_var(ctx, name_start, name_len, field_name, field_len, out, &pos,
+                               out_size);
    }
 
    out[pos] = '\0';

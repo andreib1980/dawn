@@ -235,6 +235,49 @@ static void test_interpolation(void) {
    plan_context_cleanup(&ctx);
 }
 
+static void test_interpolation_double_brace(void) {
+   plan_context_t ctx = { 0 };
+   plan_vars_set(&ctx, "artist", "Prince");
+   plan_vars_set(&ctx, "result", "{\"path\":\"/music/kiss.flac\",\"title\":\"Kiss\"}");
+
+   char out[256];
+   int rc;
+
+   /* {{var}} — the syntax the tool description documents */
+   rc = plan_interpolate(&ctx, "ARTIST: {{artist}}", out, sizeof(out));
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("ARTIST: Prince", out);
+
+   /* {{var}} and $var resolve identically */
+   rc = plan_interpolate(&ctx, "{{artist}} == $artist", out, sizeof(out));
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("Prince == Prince", out);
+
+   /* Dot-access parity: {{var.field}} == $var.field */
+   char braced[256], dollar[256];
+   plan_interpolate(&ctx, "{{result.title}}", braced, sizeof(braced));
+   plan_interpolate(&ctx, "$result.title", dollar, sizeof(dollar));
+   TEST_ASSERT_EQUAL_STRING("Kiss", braced);
+   TEST_ASSERT_EQUAL_STRING("Kiss", dollar);
+
+   /* Undefined {{var}} expands to empty (matches $var behavior) */
+   rc = plan_interpolate(&ctx, "x{{nope}}y", out, sizeof(out));
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("xy", out);
+
+   /* Malformed {{ — emitted literally, not swallowed */
+   rc = plan_interpolate(&ctx, "a {{ b", out, sizeof(out));
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("a {{ b", out);
+
+   /* Empty {{}} — emitted literally */
+   rc = plan_interpolate(&ctx, "x{{}}y", out, sizeof(out));
+   TEST_ASSERT_EQUAL_INT(0, rc);
+   TEST_ASSERT_EQUAL_STRING("x{{}}y", out);
+
+   plan_context_cleanup(&ctx);
+}
+
 static void test_interpolation_size_limit(void) {
    plan_context_t ctx = { 0 };
 
@@ -878,6 +921,7 @@ int main(void) {
    RUN_TEST(test_variable_store_max_capacity);
    RUN_TEST(test_condition_evaluation);
    RUN_TEST(test_interpolation);
+   RUN_TEST(test_interpolation_double_brace);
    RUN_TEST(test_interpolation_size_limit);
    RUN_TEST(test_parse_valid_plan);
    RUN_TEST(test_parse_multi_step_plan);

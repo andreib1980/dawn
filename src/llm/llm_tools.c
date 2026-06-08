@@ -700,8 +700,26 @@ static const char *param_type_to_json_type(tool_param_type_t type) {
          return "number";
       case TOOL_PARAM_TYPE_BOOL:
          return "boolean";
+      case TOOL_PARAM_TYPE_ARRAY:
+         return "array";
       default:
          return "string";
+   }
+}
+
+/**
+ * @brief Add the JSON-schema "type" (and, for arrays, "items") to a property
+ *
+ * Scalar types add a single "type" string. TOOL_PARAM_TYPE_ARRAY additionally
+ * adds "items":{"type":"string"} so the provider advertises a string array.
+ * Shared by both schema builders so the array shape stays consistent.
+ */
+static void add_param_type_to_prop(struct json_object *prop, tool_param_type_t type) {
+   json_object_object_add(prop, "type", json_object_new_string(param_type_to_json_type(type)));
+   if (type == TOOL_PARAM_TYPE_ARRAY) {
+      struct json_object *items = json_object_new_object();
+      json_object_object_add(items, "type", json_object_new_string("string"));
+      json_object_object_add(prop, "items", items);
    }
 }
 
@@ -727,9 +745,7 @@ static struct json_object *build_parameters_schema_from_treg(const char *tool_na
       }
 
       struct json_object *prop = json_object_new_object();
-      json_object_object_add(prop, "type",
-                             json_object_new_string(
-                                 param_type_to_json_type((tool_param_type_t)p->type)));
+      add_param_type_to_prop(prop, (tool_param_type_t)p->type);
       json_object_object_add(prop, "description",
                              json_object_new_string(p->description ? p->description : ""));
 
@@ -773,8 +789,7 @@ static struct json_object *build_parameters_schema_from_cached(const tool_defini
       const tool_param_t *p = &tool->parameters[i];
 
       struct json_object *prop = json_object_new_object();
-      json_object_object_add(prop, "type",
-                             json_object_new_string(param_type_to_json_type(p->type)));
+      add_param_type_to_prop(prop, p->type);
       json_object_object_add(prop, "description", json_object_new_string(p->description));
 
       /* Add enum values if present */
@@ -1239,12 +1254,30 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
             }
             break;
          case TOOL_MAPS_TO_CUSTOM:
-            /* Custom fields appended to value with ::field_name::value format */
+            /* Custom fields appended to value with ::field_name::value format.
+             * For TOOL_PARAM_TYPE_ARRAY, val_str is the array's serialized JSON
+             * (json_object_get_string returns the JSON repr for non-strings) and
+             * MUST be the terminal slot — see the ARRAY contract in tool_registry.h. */
             if (val_str) {
                if (param->field_name && param->field_name[0]) {
-                  /* Append with field name for parsing in callback */
+                  /* Append with field name for parsing in callback. Guard against
+                   * silent truncation: a truncated array slot would parse as invalid
+                   * JSON downstream with no diagnostic, so reject explicitly. */
                   size_t cur_len = strlen(value_buf);
                   size_t remaining = sizeof(value_buf) - cur_len;
+                  /* 4 = the four delimiter bytes ("::" x2); the NUL is covered by
+                   * the strict `need >= remaining` test (leaves >=1 byte). */
+                  size_t need = strlen(param->field_name) + strlen(val_str) + 4;
+                  if (need >= remaining) {
+                     OLOG_ERROR("Tool '%s' param '%s' too large to encode (%zu >= %zu)", meta->name,
+                                param->field_name, need, remaining);
+                     snprintf(result->result, LLM_TOOLS_RESULT_LEN,
+                              "Error: too many items for '%s' — try fewer at a time",
+                              param->field_name);
+                     result->success = false;
+                     json_object_put(args);
+                     return 1;
+                  }
                   snprintf(value_buf + cur_len, remaining, "::%s::%s", param->field_name, val_str);
                } else if (value_buf[0] == '\0') {
                   /* Fallback: store directly if value is empty */
