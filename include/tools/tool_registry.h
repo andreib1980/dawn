@@ -70,7 +70,23 @@ typedef enum {
    TOOL_PARAM_TYPE_NUMBER, /**< Floating-point parameter */
    TOOL_PARAM_TYPE_BOOL,   /**< Boolean parameter */
    TOOL_PARAM_TYPE_ENUM,   /**< Enumeration (string with allowed values) */
+   TOOL_PARAM_TYPE_ARRAY,  /**< Array of strings (LLM emits a native JSON array). See note below. */
 } tool_param_type_t;
+
+/*
+ * ARRAY param delivery contract:
+ *   The LLM emits a native JSON array; the schema advertises
+ *   {"type":"array","items":{"type":"string"}}. At encode time
+ *   (llm_tools.c) json-c serializes the array to its compact JSON string,
+ *   which rides the existing TOOL_MAPS_TO_CUSTOM "::field::value" packing.
+ *   Because that packing is "::"-delimited and a serialized array (or an
+ *   element) can itself contain "::", an ARRAY custom param MUST be the
+ *   LAST-declared param in the tool's params[] so its value occupies the
+ *   terminal slot, and the callback MUST decode it with
+ *   tool_param_extract_custom_tail() (reads to end-of-string), not the
+ *   plain tool_param_extract_custom(). A tool may declare at most one
+ *   ARRAY param for this reason.
+ */
 
 /**
  * @brief How a parameter maps to the device/action/value model
@@ -785,6 +801,47 @@ static inline bool tool_param_extract_custom(const char *value,
    const char *val_start = pos + strlen(pattern);
    const char *val_end = strstr(val_start, "::");
    size_t val_len = val_end ? (size_t)(val_end - val_start) : strlen(val_start);
+
+   if (val_len >= out_len)
+      val_len = out_len - 1;
+
+   memcpy(out_value, val_start, val_len);
+   out_value[val_len] = '\0';
+   return true;
+}
+
+/**
+ * @brief Extract a terminal custom parameter, reading to end-of-string
+ *
+ * Like tool_param_extract_custom() but, once it finds "::field_name::", it
+ * copies everything to the end of the string rather than stopping at the next
+ * "::". This is required for TOOL_PARAM_TYPE_ARRAY values: the serialized JSON
+ * array (or an element) may contain a literal "::", which the plain extractor
+ * would truncate. Valid ONLY for the LAST-declared param (the terminal slot) —
+ * see the ARRAY contract note near tool_param_type_t.
+ *
+ * @param value Full value string (may contain custom params)
+ * @param field_name Name of the terminal field to extract
+ * @param out_value Buffer for extracted value
+ * @param out_len Size of out_value buffer
+ * @return true if found, false otherwise
+ */
+static inline bool tool_param_extract_custom_tail(const char *value,
+                                                  const char *field_name,
+                                                  char *out_value,
+                                                  size_t out_len) {
+   if (!value || !field_name || !out_value)
+      return false;
+
+   char pattern[64];
+   snprintf(pattern, sizeof(pattern), "::%s::", field_name);
+
+   const char *pos = strstr(value, pattern);
+   if (!pos)
+      return false;
+
+   const char *val_start = pos + strlen(pattern);
+   size_t val_len = strlen(val_start);
 
    if (val_len >= out_len)
       val_len = out_len - 1;

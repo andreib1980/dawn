@@ -28,6 +28,7 @@
 #include "tools/music_tool.h"
 
 #include <errno.h>
+#include <json-c/json.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -40,6 +41,7 @@
 #include "audio/music_db.h"
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
 #include "dawn.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -94,27 +96,32 @@ static void music_tool_cleanup(void);
 static const treg_param_t music_params[] = {
    {
        .name = "action",
-       .description = "The playback action: 'play' (start/search and play), 'stop' (halt), "
-                      "'pause' (halt, keeps position), 'resume' (restart current track), "
-                      "'next' (skip forward), 'previous' (skip backward), "
-                      "'list' (show current playback queue - empty if nothing playing), "
-                      "'select' (jump to track N in queue), "
-                      "'search' (find music without playing), "
-                      "'library' (browse music collection - list artists/albums/stats), "
-                      "'shuffle' (toggle shuffle mode on/off), "
-                      "'repeat' (cycle repeat: none -> all -> one -> none)",
+       .description =
+           "The action: 'play' (REPLACE the queue with search results or items, then play), "
+           "'enqueue' (APPEND to the queue without interrupting — use this to add to an existing "
+           "playlist), 'stop', 'pause', 'resume', 'next', 'previous', "
+           "'list' (show queue + shuffle/repeat state), "
+           "'select' (jump to track N, 1-based), "
+           "'remove' (drop track N (1-based) or a title match from the queue), "
+           "'clear' (empty the queue), "
+           "'search' (find music without playing — returns paths), "
+           "'library' (browse artists/albums/stats), "
+           "'shuffle' ('on'/'off'; no arg reports current state), "
+           "'repeat' ('none'/'all'/'one'; no arg reports current state)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "play", "stop", "pause", "resume", "next", "previous", "list", "select",
-                        "search", "library", "shuffle", "repeat" },
-       .enum_count = 12,
+       .enum_values = { "play", "enqueue", "stop", "pause", "resume", "next", "previous", "list",
+                        "select", "remove", "clear", "search", "library", "shuffle", "repeat" },
+       .enum_count = 15,
    },
    {
        .name = "query",
-       .description = "For 'play'/'search': search terms matching artist, album, or track. "
-                      "For 'select': track number (1-based). "
-                      "For 'library': 'artists', 'albums', or omit for stats.",
+       .description =
+           "For 'play'/'search'/'enqueue': search terms — ONE artist OR title OR album per query "
+           "(see the tool description for search rules). For 'select'/'remove': track number "
+           "(1-based); 'remove' also accepts a title to match. For 'shuffle': 'on' or 'off'. "
+           "For 'repeat': 'none', 'all', or 'one'. For 'library': 'artists', 'albums', or omit.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -136,6 +143,20 @@ static const treg_param_t music_params[] = {
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "page",
    },
+   /* ARRAY param MUST be declared last (terminal-slot contract — see
+    * tool_registry.h). Only one ARRAY param per tool. */
+   {
+       .name = "items",
+       .description =
+           "For 'play'/'enqueue': a list of track names or file paths to queue (names resolve to "
+           "the best match; paths from a 'search' result are exact). For 'search': a list of "
+           "queries to run in one batch. Build playlists by collecting names/paths and passing "
+           "them here.",
+       .type = TOOL_PARAM_TYPE_ARRAY,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "items",
+   },
 };
 
 /* ========== Tool Metadata ========== */
@@ -147,13 +168,21 @@ static const tool_metadata_t music_metadata = {
    .aliases = { "audio", "player" },
    .alias_count = 2,
 
-   .description = "Control music playback. Actions: 'play' (search and play), 'stop' (halt), "
-                  "'pause' (halt keeping position), 'resume' (restart current), "
-                  "'next'/'previous' (skip tracks), 'list' (show playlist), "
-                  "'select' (jump to track N), 'search' (find without playing), "
-                  "'shuffle' (toggle shuffle), 'repeat' (cycle repeat mode).",
+   .description =
+       "Control music playback and build playlists from the local library. 'play' REPLACES the "
+       "queue; 'enqueue' APPENDS (use it to add to an existing playlist). search/play match a "
+       "query as a case-insensitive substring against ONE field (artist, title, album, or genre); "
+       "spaces are wildcards WITHIN one field, so search by artist alone or title alone — never "
+       "combine 'Artist Title' in one query. The library has NO decade/genre-mood/vibe index: "
+       "'search 80s' only matches text literally containing '80s'. To build a themed/decade/mood "
+       "playlist: (1) think of concrete artist & song names (use the web 'search' tool — distinct "
+       "from this tool's 'search' action — if unsure who fits); (2) browse 'library' "
+       "artists/albums to see what exists; (3) batch-search (search "
+       "items:[\"Prince\",\"Madonna\"]) "
+       "with ONE artist/title per query to get paths; (4) enqueue items:[paths] to add them. "
+       "All track numbers are 1-based.",
    .params = music_params,
-   .param_count = 4,
+   .param_count = 5,
 
    .device_type = TOOL_DEVICE_TYPE_MUSIC,
    .capabilities = TOOL_CAP_FILESYSTEM | TOOL_CAP_SCHEDULABLE,
@@ -313,6 +342,89 @@ static int search_music_database(const char *query, Playlist *playlist) {
    return playlist->count;
 }
 
+/**
+ * @brief Resolve one free-text item (or path) to its best-match library track
+ *
+ * Mirrors the WebUI resolver: best-match search, retry on the title portion of
+ * "Artist - Title" (spaces are intra-field wildcards so the combined form
+ * usually misses). Returns 1 on a match (fills @p out), 0 otherwise.
+ */
+static int local_resolve_item(const char *item, music_search_result_t *out) {
+   if (!item || !item[0]) {
+      return 0;
+   }
+   music_search_result_t r[5];
+   int count = 0;
+
+   /* "Artist - Title" → search the title, prefer the artist-matching candidate
+    * (disambiguates generic titles like "Africa"). */
+   const char *dash = strstr(item, " - ");
+   if (dash) {
+      char artist[sizeof(out->artist)];
+      size_t alen = (size_t)(dash - item);
+      if (alen >= sizeof(artist)) {
+         alen = sizeof(artist) - 1;
+      }
+      memcpy(artist, item, alen);
+      artist[alen] = '\0';
+
+      if (music_db_search(dash + 3, r, 5, &count) == SUCCESS && count > 0) {
+         int pick = 0;
+         for (int i = 0; i < count; i++) {
+            if (strcasestr(r[i].artist, artist)) {
+               pick = i;
+               break;
+            }
+         }
+         *out = r[pick];
+         return 1;
+      }
+   }
+
+   /* Plain name (or dash-form whose title found nothing) → best-match top-1. */
+   if (music_db_search(item, r, 5, &count) == SUCCESS && count > 0) {
+      *out = r[0];
+      return 1;
+   }
+   return 0;
+}
+
+/**
+ * @brief Fill s_playlist from a JSON array of item names/paths (local playback)
+ *
+ * Caller holds s_music_mutex. When @p replace is true the playlist is cleared
+ * first. Returns the number of tracks added.
+ */
+static int local_fill_playlist_from_items(const char *items_json, bool replace) {
+   struct json_object *arr = json_tokener_parse(items_json);
+   if (!arr || !json_object_is_type(arr, json_type_array)) {
+      if (arr) {
+         json_object_put(arr);
+      }
+      return 0;
+   }
+   if (replace) {
+      s_playlist.count = 0;
+      s_current_track = 0;
+   }
+   int n = (int)json_object_array_length(arr);
+   int added = 0;
+   for (int i = 0; i < n && s_playlist.count < MAX_PLAYLIST_LENGTH; i++) {
+      struct json_object *e = json_object_array_get_idx(arr, i);
+      const char *item = e ? json_object_get_string(e) : NULL;
+      music_search_result_t r;
+      if (local_resolve_item(item, &r)) {
+         snprintf(s_playlist.filenames[s_playlist.count], MAX_FILENAME_LENGTH, "%s", r.path);
+         snprintf(s_playlist.display_names[s_playlist.count], MAX_FILENAME_LENGTH, "%s",
+                  r.display_name);
+         s_playlist.count++;
+         added++;
+      }
+   }
+   json_object_put(arr);
+   return added;
+}
+
 /* ========== Callback Implementation ========== */
 
 static char *music_tool_callback_inner(const char *action, char *value, int *should_respond);
@@ -368,26 +480,51 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
 #endif
 
    if (strcmp(action, "play") == 0) {
-      /* Early validation - check before doing any work */
-      if (!value || value[0] == '\0') {
-         if (direct_mode) {
-            *should_respond = 0;
-            return NULL;
+      /* items[] → explicit track list (resolve each, REPLACE, play). */
+      if (value && value[0]) {
+         size_t cap = strlen(value) + 1;
+         char *items_json = malloc(cap);
+         if (items_json && tool_param_extract_custom_tail(value, "items", items_json, cap)) {
+            stop_current_playback();
+            s_paused_position = 0;
+            s_paused_sample_rate = 0;
+            int added = local_fill_playlist_from_items(items_json, true);
+            free(items_json);
+            if (s_playlist.count > 0) {
+               s_current_track = 0;
+               if (direct_mode) {
+                  *should_respond = 0;
+                  start_playback(false);
+                  return NULL;
+               }
+               start_playback(false);
+               result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
+               if (result) {
+                  snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE,
+                           "Now playing %d track%s from your list", added, added == 1 ? "" : "s");
+               }
+               return result;
+            }
+            if (direct_mode) {
+               *should_respond = 0;
+               return NULL;
+            }
+            return strdup("None of those tracks were found in the library");
          }
-         return strdup("Please specify what to search for.");
+         free(items_json);
       }
 
-      if ((strlen(value) + 8) > MAX_FILENAME_LENGTH) {
-         OLOG_ERROR("\"%s\" is too long to search for.", value);
+      /* Single-query play: search the base query (strip any custom-field suffix). */
+      char base[MAX_FILENAME_LENGTH];
+      tool_param_extract_base(value ? value : "", base, sizeof(base));
+
+      /* Early validation - check before doing any work */
+      if (base[0] == '\0') {
          if (direct_mode) {
             *should_respond = 0;
             return NULL;
          }
-         result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
-         if (result) {
-            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "Search term '%s' is too long", value);
-         }
-         return result;
+         return strdup("Please specify what to play, or pass items:[...] for a track list.");
       }
 
       /* Stop any current playback */
@@ -400,13 +537,8 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       s_paused_sample_rate = 0;
 
       /* Search by artist, title, album via database */
-      search_music_database(value, &s_playlist);
-      OLOG_INFO("Search found %d results for: %s", s_playlist.count, value);
-
-      OLOG_INFO("New playlist (%d tracks):", s_playlist.count);
-      for (int i = 0; i < s_playlist.count; i++) {
-         OLOG_INFO("\t%s", s_playlist.filenames[i]);
-      }
+      search_music_database(base, &s_playlist);
+      OLOG_INFO("Search found %d results for: %s", s_playlist.count, base);
 
       if (s_playlist.count > 0) {
          if (direct_mode) {
@@ -417,11 +549,11 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
 
          start_playback(false);
          const char *filename = extract_filename(s_playlist.filenames[s_current_track]);
-         result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
+         size_t rsz = 2 * MAX_FILENAME_LENGTH + 64;
+         result = malloc(rsz);
          if (result) {
-            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE,
-                     "Now playing: %s (track 1 of %d matching '%s')", filename, s_playlist.count,
-                     value);
+            snprintf(result, rsz, "Now playing: %s (track 1 of %d matching '%s')", filename,
+                     s_playlist.count, base);
          }
          return result;
       } else {
@@ -430,12 +562,25 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
             *should_respond = 0;
             return NULL;
          }
-         result = malloc(MUSIC_CALLBACK_BUFFER_SIZE);
+         size_t rsz = MAX_FILENAME_LENGTH + 64;
+         result = malloc(rsz);
          if (result) {
-            snprintf(result, MUSIC_CALLBACK_BUFFER_SIZE, "No music found matching '%s'", value);
+            snprintf(result, rsz, "No music found matching '%s'", base);
          }
          return result;
       }
+
+   } else if (strcmp(action, "enqueue") == 0 || strcmp(action, "clear") == 0 ||
+              strcmp(action, "remove") == 0 || strcmp(action, "shuffle") == 0 ||
+              strcmp(action, "repeat") == 0) {
+      /* Queue editing + shuffle/repeat require the per-user shared queue that
+       * only the WebUI streaming path maintains. The local speaker has no queue
+       * model — be honest rather than silently no-op. */
+      if (direct_mode) {
+         *should_respond = 0;
+         return NULL;
+      }
+      return strdup("Queue editing and shuffle/repeat are available on the web interface.");
 
    } else if (strcmp(action, "stop") == 0) {
       OLOG_INFO("Stopping music playback.");
@@ -669,6 +814,58 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
    } else if (strcmp(action, "search") == 0) {
       /* Search without playing - return matching tracks */
       Playlist *search_results = NULL;
+
+      /* Batch search: items[] of queries → grouped results with paths. */
+      if (value && value[0]) {
+         size_t cap = strlen(value) + 1;
+         char *items_json = malloc(cap);
+         if (items_json && tool_param_extract_custom_tail(value, "items", items_json, cap)) {
+            struct json_object *arr = json_tokener_parse(items_json);
+            free(items_json);
+            if (arr && json_object_is_type(arr, json_type_array)) {
+               strbuf_t sb;
+               strbuf_init(&sb, 1024);
+               int n = (int)json_object_array_length(arr);
+               if (n > MAX_PLAYLIST_LENGTH) {
+                  n = MAX_PLAYLIST_LENGTH; /* bound per-call DB work */
+               }
+               for (int i = 0; i < n; i++) {
+                  struct json_object *e = json_object_array_get_idx(arr, i);
+                  const char *q = e ? json_object_get_string(e) : NULL;
+                  if (!q || !q[0]) {
+                     continue;
+                  }
+                  strbuf_appendf(&sb, "%s:\n", q);
+                  music_search_result_t r[5];
+                  int count = 0;
+                  if (music_db_search(q, r, 5, &count) == SUCCESS && count > 0) {
+                     for (int j = 0; j < count; j++) {
+                        strbuf_appendf(&sb, "  %s  [%s]\n", r[j].display_name, r[j].path);
+                     }
+                  } else {
+                     strbuf_appendf(&sb, "  No match: %s\n", q);
+                  }
+               }
+               json_object_put(arr);
+               if (direct_mode) {
+                  *should_respond = 0;
+                  strbuf_free(&sb);
+                  return NULL;
+               }
+               char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
+               if (!out) {
+                  strbuf_free(&sb);
+                  return strdup("Failed to build search results");
+               }
+               return out;
+            }
+            if (arr) {
+               json_object_put(arr);
+            }
+         } else {
+            free(items_json);
+         }
+      }
 
       if (!value || !*value) {
          if (direct_mode) {

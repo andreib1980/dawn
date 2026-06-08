@@ -251,6 +251,66 @@ char *webui_volume_execute_tool(ws_connection_t *conn,
                                 const char *value,
                                 int *should_respond);
 
+/* =============================================================================
+ * Shared queue-mutation helpers (transport-free)
+ *
+ * Mutate + persist + bump generation; the CALLER is responsible for transport
+ * (send_json_response on the LWS thread, or webui_music_send_state +
+ * webui_music_broadcast_queue_state on the LLM worker thread). This lets the
+ * browser WebSocket handlers and the LLM tool path share one mutation body.
+ * All honor the queue_mutex -> state_mutex lock order.
+ * ============================================================================= */
+
+/** Per-item outcome from webui_music_queue_apply_paths(). */
+typedef enum {
+   QUEUE_APPLY_ADDED = 0, /**< Resolved and appended */
+   QUEUE_APPLY_DUPLICATE, /**< Already present in queue (append mode) */
+   QUEUE_APPLY_NOT_FOUND, /**< Invalid path or not in the music DB */
+   QUEUE_APPLY_FULL,      /**< Queue at WEBUI_MUSIC_MAX_QUEUE */
+} queue_apply_outcome_t;
+
+/**
+ * @brief Append (or replace) queue tracks by path
+ *
+ * Resolves each path via music_db_get_by_path(), dedups against existing queue
+ * contents (append mode), then mutates the shared queue + persists + bumps
+ * generation under queue_mutex. DB lookups happen BEFORE the lock. Does NOT
+ * start playback or send transport — the caller does.
+ *
+ * @param state    Session music state (uses state->shared_queue)
+ * @param paths    Array of file paths
+ * @param n        Number of paths
+ * @param replace  true: clear the queue first (play); false: append (enqueue)
+ * @param outcomes Optional caller-allocated array of n entries for per-item result
+ * @return SUCCESS, or FAILURE on invalid args / allocation failure
+ */
+int webui_music_queue_apply_paths(session_music_state_t *state,
+                                  const char *const *paths,
+                                  int n,
+                                  bool replace,
+                                  queue_apply_outcome_t *outcomes);
+
+/**
+ * @brief Remove the queue entry at a 0-based index
+ *
+ * Shifts remaining entries, adjusts this session's and sibling sessions'
+ * queue_index, persists. Transport-free.
+ *
+ * @return SUCCESS, or FAILURE if index is out of range
+ */
+int webui_music_queue_remove_index(session_music_state_t *state, int index0);
+
+/**
+ * @brief Clear the queue and reset playback for this session
+ *
+ * Stops streaming, zeroes the queue, resets queue_index/playing, persists.
+ * Transport-free.
+ *
+ * @param removed_out Optional out: queue length before clearing
+ * @return SUCCESS
+ */
+int webui_music_queue_clear(session_music_state_t *state, int *removed_out);
+
 #ifdef __cplusplus
 }
 #endif
