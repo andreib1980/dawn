@@ -21,6 +21,7 @@
 
 /* Std C */
 #include <json-c/json.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -459,26 +460,51 @@ static void build_combined_entry(const tool_metadata_t *tool, void *user_data) {
  * @param buffer_size Size of the output buffer
  * @return Number of bytes written (excluding null terminator)
  */
+/**
+ * @brief Truncation-safe formatted append into a fixed buffer
+ *
+ * snprintf returns the length it WOULD have written, so `len += snprintf(...)`
+ * can advance past the buffer when the content is truncated — after which
+ * `buffer + len` / `size - len` go out of bounds. This clamps: it writes at
+ * buffer[*len], never exceeds cap-1 bytes, and advances *len only by the bytes
+ * actually written.
+ */
+static void instr_appendf(char *buffer, int cap, int *len, const char *fmt, ...) {
+   if (!buffer || *len < 0 || *len >= cap - 1) {
+      return;
+   }
+   va_list ap;
+   va_start(ap, fmt);
+   int n = vsnprintf(buffer + *len, (size_t)(cap - *len), fmt, ap);
+   va_end(ap);
+   if (n < 0) {
+      return;
+   }
+   *len += (n < cap - *len) ? n : (cap - *len - 1);
+}
+
 static int build_system_instructions_to_buffer(const char *mode,
                                                bool is_remote,
                                                char *buffer,
                                                size_t buffer_size) {
    int len = 0;
-   int remaining = (int)buffer_size;
+   int cap = (int)buffer_size;
 
    /* Prose output-format rules first — apply regardless of tool mode. */
-   len += snprintf(buffer + len, remaining - len, "%s", OUTPUT_FORMATTING_RULES);
+   instr_appendf(buffer, cap, &len, "%s", OUTPUT_FORMATTING_RULES);
 
    bool use_native = (strcmp(mode, "native") == 0);
 
    if (use_native) {
-      len += snprintf(buffer + len, remaining - len, "%s\n", NATIVE_TOOLS_RULES);
+      instr_appendf(buffer, cap, &len, "%s\n", NATIVE_TOOLS_RULES);
       /* Add plan executor DSL when tool is registered and 3+ tools enabled */
       if (tool_registry_is_enabled("execute_plan") && llm_tools_get_enabled_count() >= 3) {
-         len += snprintf(buffer + len, remaining - len, "%s", PLAN_EXECUTOR_PROMPT);
+         instr_appendf(buffer, cap, &len, "%s", PLAN_EXECUTOR_PROMPT);
       }
       /* Append per-session hint about unavailable/disabled tools */
-      len += llm_tools_build_disabled_hint(is_remote, buffer + len, remaining - len);
+      if (len < cap - 1) {
+         len += llm_tools_build_disabled_hint(is_remote, buffer + len, cap - len);
+      }
       return len;
    }
 
@@ -490,7 +516,7 @@ static int build_system_instructions_to_buffer(const char *mode,
    /* command_tags mode - dynamic generation from tool_registry */
 
    /* Core behavior rules (static, minimal) */
-   len += snprintf(buffer + len, remaining - len, "%s\n", LEGACY_RULES_CORE);
+   instr_appendf(buffer, cap, &len, "%s\n", LEGACY_RULES_CORE);
 
    /* Single-pass generation of both capabilities and command tags */
    char cap_buffer[2048];
@@ -509,10 +535,11 @@ static int build_system_instructions_to_buffer(const char *mode,
    tool_registry_foreach_enabled(build_combined_entry, &ctx);
 
    /* Assemble capabilities list with header and footer */
-   len += snprintf(buffer + len, remaining - len, "CAPABILITIES: You CAN %s.\n\n", cap_buffer);
+   instr_appendf(buffer, cap, &len, "CAPABILITIES: You CAN %s.\n\n", cap_buffer);
 
-   /* Append command tag instructions */
-   int cmd_copy = (ctx.cmd_offset < remaining - len) ? ctx.cmd_offset : remaining - len - 1;
+   /* Append command tag instructions (bounded copy; len is clamped to <= cap-1). */
+   int avail = cap - len - 1;
+   int cmd_copy = (ctx.cmd_offset < avail) ? ctx.cmd_offset : avail;
    if (cmd_copy > 0) {
       memcpy(buffer + len, cmd_buffer, cmd_copy);
       len += cmd_copy;

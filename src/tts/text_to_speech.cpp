@@ -826,7 +826,7 @@ void text_to_speech(const char *text) {
 
    assert(text != nullptr && "Received a null pointer");
    std::string inputText = preprocess_text_for_tts(std::string(text));
-   OLOG_INFO("TTS preprocessed: \"%.200s\"", inputText.c_str());
+   OLOG_DEBUG("TTS preprocessed: \"%.200s\"", inputText.c_str());
 
    // Add text to the processing queue
    pthread_mutex_lock(&tts_queue_mutex);
@@ -867,7 +867,7 @@ int text_to_speech_to_pcm(const char *text,
 
       // Preprocess text for better TTS output
       std::string processedText = preprocess_text_for_tts(std::string(text));
-      OLOG_INFO("TTS preprocessed: \"%.200s\"", processedText.c_str());
+      OLOG_DEBUG("TTS preprocessed: \"%.200s\"", processedText.c_str());
 
       // Use textToAudio to get raw PCM samples (no WAV header)
       std::vector<int16_t> audioBuffer;
