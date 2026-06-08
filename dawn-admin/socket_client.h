@@ -819,4 +819,40 @@ admin_resp_code_t admin_client_messaging_reenable_channel(int fd,
                                                           char *response,
                                                           size_t resp_len);
 
+/* =============================================================================
+ * OTA updates (dawn-admin ota *)
+ * ============================================================================= */
+
+/**
+ * @brief List the daemon's available OTA releases (aligned text table).
+ *
+ * @param fd        Connected socket FD.
+ * @param response  Output buffer for the table text.
+ * @param resp_len  Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len);
+
+/**
+ * @brief Push an update offer to one satellite by uuid.
+ *
+ * The daemon resolves the device's tier→platform, mints a one-time download
+ * token, and delivers the ota_offer over the device's live WS session (the
+ * device must be online).
+ *
+ * @param fd              Connected socket FD.
+ * @param uuid            Target satellite uuid (1..ADMIN_OTA_UUID_MAX bytes).
+ * @param version         Release version to offer (1..ADMIN_OTA_VERSION_MAX).
+ * @param allow_downgrade Permit offering an older version than the device runs.
+ * @param response        Output buffer for daemon response text.
+ * @param resp_len        Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_ota_push(int fd,
+                                        const char *uuid,
+                                        const char *version,
+                                        bool allow_downgrade,
+                                        char *response,
+                                        size_t resp_len);
+
 #endif /* DAWN_ADMIN_SOCKET_CLIENT_H */

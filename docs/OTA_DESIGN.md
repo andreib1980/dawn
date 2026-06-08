@@ -29,12 +29,17 @@ tooling, `9577b14` manifest core + keytool, `68395af` Phase 2 server engine):
 - **Phase 2 #11 transports** — HTTPS image route (`webui_http.c`, `/api/ota/..`, TLS+token+
   path-hardened), WS device handlers + server→device push (`src/webui/webui_ota.c`), admin-gated
   `ota_push`/`ota_list`, registration finalize hook. WS protocol documented (WEBSOCKET_PROTOCOL.md).
+- **#11 operator surfaces** — (a) **dawn-admin CLI**: admin opcode band `0xC0–0xCF` reserved in
+  `admin_socket.h`, `src/auth/admin_socket_ota.c` (`handle_ota_list_cmd`/`handle_ota_push_cmd`,
+  push delegates to `webui_ota_push` so it shares the WebUI spine), `dawn-admin ota list` +
+  `dawn-admin ota push --uuid <u> --version <v> [--allow-downgrade]` (client in
+  `dawn-admin/socket_client.{c,h}`). (b) **WebUI admin panel**: per-online-device version picker +
+  allow-downgrade + Push button in `www/js/admin/satellites.js` (fetches `ota_list`, sends
+  `ota_push`, renders in-flight `ota_state`), dispatch in `dawn.js`, styles in
+  `www/css/components/satellites.css`. Both build clean, CI 69/69. *Live round-trip pending a daemon
+  restart* (the running daemon predates the 0xC0 dispatch).
 
 **REMAINING:**
-- **#11 deferred follow-ups** (functional path works without them): (a) **dawn-admin CLI** transport
-  — reserve admin opcode band `0xC0–0xCF` in `admin_socket.h`, add `admin_socket_ota.c` +
-  `dawn-admin ota push/list` calling `webui_ota_push`/`ota_release_*`; (b) **WebUI admin-panel JS**
-  buttons (server messages `ota_list`/`ota_push` exist — `www/js/admin/` needs the UI).
 - **Phase 3 (RPi apply)** — install-path migration R1 (§7), device-side `abi_tag` check, libcurl
   download + libsodium verify-before-commit (0700, no TOCTOU), binary swap + self-restart,
   boot-count rollback (< systemd StartLimitBurst).

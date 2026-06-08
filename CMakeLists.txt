@@ -730,6 +730,7 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_memory.c
         src/auth/admin_socket_memory_entity.c
         src/auth/admin_socket_messaging.c
+        src/auth/admin_socket_ota.c
         src/auth/auth_db_user.c
         src/auth/auth_db_settings.c
         src/auth/auth_db_session.c

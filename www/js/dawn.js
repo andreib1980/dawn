@@ -472,6 +472,14 @@
                if (typeof DawnSatellites !== 'undefined')
                   DawnSatellites.handleRegistrationKeyResponse(msg.payload);
                break;
+            case 'ota_list_response':
+               if (typeof DawnSatellites !== 'undefined')
+                  DawnSatellites.handleOtaListResponse(msg.payload);
+               break;
+            case 'ota_push_response':
+               if (typeof DawnSatellites !== 'undefined')
+                  DawnSatellites.handleOtaPushResponse(msg.payload);
+               break;
             // Messaging channel management responses (user-scoped)
             case 'list_channels_response':
                if (typeof DawnMessaging !== 'undefined')

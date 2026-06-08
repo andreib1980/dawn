@@ -212,6 +212,15 @@ typedef enum {
    ADMIN_MSG_MESSAGING_REENABLE_CHANNEL = 0xA4, /**< re-enable a soft-deleted channel by name */
 
    /* Next free messaging opcode: 0xA5.  (Range ends 0xAF.) */
+
+   /* OTA updates (operator surface for the server→satellite OTA system; the
+    * #11 operator-surface follow-ups, see docs/OTA_DESIGN.md).  Opcode range
+    * 0xC0..0xCF is reserved for OTA (0xB0 band belongs to the coding harness).
+    * Both commands trust SO_PEERCRED (root/daemon UID) like the messaging
+    * operator commands — no admin-auth prefix.  See docs/OTA_DESIGN.md. */
+   ADMIN_MSG_OTA_LIST = 0xC0, /**< list available releases (text table) */
+   ADMIN_MSG_OTA_PUSH = 0xC1, /**< push an update offer to one device by uuid */
+   /* Next free OTA opcode: 0xC2.  (Range ends 0xCF.) */
 } admin_msg_type_t;
 
 /**
@@ -469,6 +478,28 @@ typedef struct __attribute__((packed)) {
  *   Byte 1..1+P:   provider     (no NUL; may be empty)
  *   Byte 1+P..1+P+2 (optional): limit, uint16 little-endian (0/absent = default 50)
  */
+
+/*
+ * =============================================================================
+ * OTA payloads (Phase 8)
+ * =============================================================================
+ *
+ * ADMIN_MSG_OTA_LIST — no payload.  Response body is the available releases
+ *   as an aligned text table (PLATFORM/TIER/VERSION) plus an enabled/disabled
+ *   header line.
+ *
+ * ADMIN_MSG_OTA_PUSH — wire format (little-endian):
+ *   Byte 0:        flags  (bit 0 = allow_downgrade)
+ *   Byte 1:        uuid_len  (1..ADMIN_OTA_UUID_MAX)
+ *   Bytes 2..1+U:  uuid     (no NUL)
+ *   Bytes 2+U..:   version  (no NUL; length = payload_len - 2 - uuid_len)
+ *
+ * Total max: 1 + 1 + 36 + 31 = 69 bytes (within ADMIN_MSG_MAX_PAYLOAD = 256).
+ * The WebUI panel uses the WS ota_push message directly, not this socket path.
+ */
+#define ADMIN_OTA_FLAG_ALLOW_DOWNGRADE 0x01
+#define ADMIN_OTA_UUID_MAX 36    /* SATELLITE_UUID_MAX - 1 (no NUL on the wire) */
+#define ADMIN_OTA_VERSION_MAX 31 /* OTA_VERSION_MAX - 1 (no NUL on the wire) */
 
 /*
  * =============================================================================
