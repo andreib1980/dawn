@@ -59,6 +59,7 @@
 #include "webui/webui_email.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_oauth.h"
+#include "webui/webui_ota.h"
 #include "webui/webui_server.h"
 
 /* handle_cancel_message is defined at the bottom of this TU. */
@@ -839,6 +840,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       }
    } else if (strcmp(type, "get_satellite_registration_key") == 0) {
       handle_get_satellite_registration_key(conn);
+   } else if (strcmp(type, "ota_list") == 0) {
+      handle_ota_list(conn);
+   } else if (strcmp(type, "ota_push") == 0) {
+      handle_ota_push(conn, payload);
    }
    /* Messaging channel management (user-scoped) */
    else if (strcmp(type, "list_channels") == 0) {
@@ -1324,6 +1329,18 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else if (strcmp(type, "volume_state") == 0) {
       if (conn->is_satellite && payload) {
          handle_satellite_volume_state(conn, payload);
+      }
+   } else if (strcmp(type, "ota_status") == 0) {
+      if (conn->is_satellite && payload) {
+         handle_ota_status(conn, payload);
+      }
+   } else if (strcmp(type, "ota_ack") == 0) {
+      if (conn->is_satellite) {
+         handle_ota_ack(conn, payload);
+      }
+   } else if (strcmp(type, "ota_reject") == 0) {
+      if (conn->is_satellite) {
+         handle_ota_reject(conn, payload);
       }
    } else if (strncmp(type, "ha_", sizeof("ha_") - 1) == 0) {
       OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", type);

@@ -33,6 +33,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/ota.h"
 #include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
@@ -640,6 +641,11 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
        * to satellite_mappings and the version is advisory, so a torn write across
        * a crash is self-healing on the next registration. */
       ota_db_report_version(uuid, firmware_version);
+
+      /* Server-owned OTA commit: if this device just came back reporting the
+       * version we pushed, mark the update successful (a device must prove the
+       * new image runs by reconnecting on it — it never self-declares success). */
+      ota_finalize_on_register(uuid, firmware_version);
    }
 
    /* Get reconnect secret for client to save */

@@ -2298,6 +2298,13 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[messaging.sms]\n");
    fprintf(fp, "active_window_sec = %d\n", config->messaging.sms_active_window_sec);
 
+   /* [ota] — round-trips so a WebUI settings save can't drop it. */
+   fprintf(fp, "\n[ota]\n");
+   fprintf(fp, "enabled = %s\n", config->ota.enabled ? "true" : "false");
+   fprintf(fp, "release_dir = \"%s\"\n", config->ota.release_dir);
+   fprintf(fp, "download_token_ttl_sec = %d\n", config->ota.download_token_ttl_sec);
+   fprintf(fp, "require_tls = %s\n", config->ota.require_tls ? "true" : "false");
+
    /* Write tool-owned config sections (e.g. [home_assistant], [shutdown]) */
    tool_registry_write_configs(fp);
 

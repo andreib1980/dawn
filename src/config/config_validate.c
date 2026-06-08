@@ -439,6 +439,14 @@ int config_validate(const dawn_config_t *config,
                 config->llm.silent_observe.provider);
    }
 
+   /* ===== OTA ===== */
+   if (config->ota.enabled) {
+      VALIDATE_RANGE_INT("ota.download_token_ttl_sec", config->ota.download_token_ttl_sec, 5, 3600);
+      if (config->ota.release_dir[0] == '\0') {
+         ADD_ERROR("ota.release_dir", "must be set when ota.enabled = true");
+      }
+   }
+
    return error_count;
 }
 

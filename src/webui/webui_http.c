@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/ota.h"
 #include "core/rate_limiter.h"
 #include "logging.h"
 #include "ui/metrics.h"
@@ -1276,6 +1277,52 @@ int callback_http(struct lws *wsi,
          }
 
          /* Image API endpoints (require auth) */
+         /* GET /api/ota/<platform>/<version>/image?uuid=..&token=.. — OTA image
+          * download.  The one-time, uuid+version-bound token (consumed inside
+          * ota_authorize_image_download) is the auth gate; TLS is required and
+          * the per-IP limiter is only a coarse DoS guard. */
+         if (strncmp(path, "/api/ota/", 9) == 0 && pss && !pss->is_post) {
+            if (g_config.ota.require_tls && !lws_is_ssl(wsi)) {
+               lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
+               return LWS_CLOSE_CONNECTION;
+            }
+            char peer_ip[64] = "unknown";
+            lws_get_peer_simple(wsi, peer_ip, sizeof(peer_ip));
+            char norm_ip[RATE_LIMIT_IP_SIZE];
+            rate_limiter_normalize_ip(peer_ip, norm_ip, sizeof(norm_ip));
+            if (rate_limiter_check(&s_service_rate, norm_ip)) {
+               lws_return_http_status(wsi, HTTP_STATUS_TOO_MANY_REQUESTS, NULL);
+               return LWS_CLOSE_CONNECTION;
+            }
+
+            char platform[16] = "";
+            char version[OTA_VERSION_MAX] = "";
+            /* widths: platform 15, version OTA_VERSION_MAX-1 (=31) */
+            if (sscanf(path + 9, "%15[^/]/%31[^/]/image", platform, version) == 2) {
+               char ubuf[80] = "";
+               char tbuf[OTA_TOKEN_HEX + 8] = "";
+               const char *uuid = lws_get_urlarg_by_name(wsi, "uuid=", ubuf, sizeof(ubuf));
+               const char *token = lws_get_urlarg_by_name(wsi, "token=", tbuf, sizeof(tbuf));
+               char img[1024];
+               if (uuid && token &&
+                   ota_authorize_image_download(uuid, platform, version, token, img, sizeof(img)) ==
+                       SUCCESS) {
+                  char hdrs[64];
+                  int hl = snprintf(hdrs, sizeof(hdrs), "Cache-Control: no-store\r\n");
+                  int n = lws_serve_http_file(wsi, img, "application/octet-stream", hdrs, hl);
+                  if (n < 0) {
+                     lws_return_http_status(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL);
+                     return LWS_CLOSE_CONNECTION;
+                  }
+                  return 0; /* served (sync or async via file-completion callback) */
+               }
+               lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
+               return LWS_CLOSE_CONNECTION;
+            }
+            lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);
+            return LWS_CLOSE_CONNECTION;
+         }
+
          /* GET /api/images/:id - download image */
          if (strncmp(path, "/api/images/", 12) == 0 && pss && !pss->is_post) {
             const char *image_id = path + 12;

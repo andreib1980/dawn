@@ -1650,6 +1650,20 @@ static void parse_messaging(toml_table_t *table, messaging_config_t *config) {
       config->sms_active_window_sec = 86400;
 }
 
+static void parse_ota(toml_table_t *table, ota_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled", "release_dir", "download_token_ttl_sec",
+                                             "require_tls", NULL };
+   warn_unknown_keys(table, "ota", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_STRING(table, "release_dir", config->release_dir);
+   PARSE_INT(table, "download_token_ttl_sec", config->download_token_ttl_sec);
+   PARSE_BOOL(table, "require_tls", config->require_tls);
+}
+
 /* =============================================================================
  * Public API
  * ============================================================================= */
@@ -1720,6 +1734,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_scheduler(toml_table_in(root, "scheduler"), &config->scheduler);
    parse_calendar(toml_table_in(root, "calendar"), &config->calendar);
    parse_messaging(toml_table_in(root, "messaging"), &config->messaging);
+   parse_ota(toml_table_in(root, "ota"), &config->ota);
 
    toml_free(root);
 
