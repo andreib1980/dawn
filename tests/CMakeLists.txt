@@ -140,6 +140,12 @@ dawn_add_unit_test(test_session_commands
    LIBS    unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_ota_manifest
+   SOURCES test_ota_manifest.c
+           ${SRC_ROOT}/src/core/ota_manifest.c
+   LIBS    unity ${SODIUM_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_scheduler
    SOURCES test_scheduler.c test_scheduler_stub.c
            ${SRC_ROOT}/src/core/scheduler_db.c
