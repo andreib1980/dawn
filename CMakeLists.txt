@@ -649,6 +649,7 @@ list(APPEND DAWN_SOURCES
     src/core/scheduler.c
     src/core/missed_notifications_db.c
     src/core/ota_db.c
+    src/core/ota_manifest.c
 )
 
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)
@@ -912,6 +913,17 @@ target_include_directories(piper PUBLIC
                            /usr/local/include/piper-phonemize
                            ${SPDLOG_INCLUDE_DIRS}
                            /usr/local/include/onnxruntime/)
+
+# =============================================================================
+# ota-keytool — offline OTA signing CLI (build on demand: `make ota-keytool`)
+# =============================================================================
+# Links the pure manifest core; never talks to the daemon (the signing key stays
+# off the server).  EXCLUDE_FROM_ALL so it doesn't bloat the daemon build.
+# See docs/OTA_DESIGN.md §Trust model.
+add_executable(ota-keytool EXCLUDE_FROM_ALL
+    tools/ota_keytool.c
+    src/core/ota_manifest.c)
+target_link_libraries(ota-keytool ${SODIUM_LIBRARIES})
 
 # =============================================================================
 # Install rules (used by: cmake --install build --prefix /usr/local)
