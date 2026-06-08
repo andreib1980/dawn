@@ -133,6 +133,11 @@ static void print_usage(const char *prog) {
            "                                       Re-enable a previously unlinked channel.\n"
            "  messaging link-attempts [--provider p] [--limit n]\n"
            "                                       Recent /link attempts (abuse review).\n");
+   fprintf(stderr, "\nOTA Updates:\n");
+   fprintf(stderr,
+           "  ota list                               List available OTA releases.\n"
+           "  ota push --uuid <uuid> --version <v> [--allow-downgrade]\n"
+           "                                       Offer an update to one online satellite.\n");
    fprintf(stderr, "\n");
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  --yes, -y    Skip confirmation prompts\n");
@@ -2163,6 +2168,76 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "Error: Unknown messaging subcommand: %s\n", subcmd);
       fprintf(stderr,
               "Available: generate-link-code, list-channels, unlink, reenable, link-attempts\n");
+      return 1;
+   }
+
+   /* OTA updates */
+   if (strcmp(cmd, "ota") == 0) {
+      if (argc < 3) {
+         fprintf(stderr, "Error: Missing ota subcommand\n");
+         fprintf(stderr, "Usage: %s ota list\n", argv[0]);
+         fprintf(stderr, "       %s ota push --uuid <uuid> --version <v> [--allow-downgrade]\n",
+                 argv[0]);
+         return 1;
+      }
+      const char *subcmd = argv[2];
+
+      if (strcmp(subcmd, "list") == 0) {
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[ADMIN_MSG_CONTENT_MAX + 1];
+         admin_resp_code_t resp = admin_client_ota_list(fd, response, sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "push") == 0) {
+         const char *uuid = NULL;
+         const char *version = NULL;
+         bool allow_downgrade = false;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--uuid") == 0 && i + 1 < argc) {
+               uuid = argv[++i];
+            } else if (strcmp(argv[i], "--version") == 0 && i + 1 < argc) {
+               version = argv[++i];
+            } else if (strcmp(argv[i], "--allow-downgrade") == 0) {
+               allow_downgrade = true;
+            } else {
+               fprintf(stderr, "Error: Unknown option for ota push: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         if (!uuid || !uuid[0] || !version || !version[0]) {
+            fprintf(stderr, "Error: --uuid <uuid> and --version <v> are required\n");
+            fprintf(stderr, "Usage: %s ota push --uuid <uuid> --version <v> [--allow-downgrade]\n",
+                    argv[0]);
+            return 1;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = admin_client_ota_push(fd, uuid, version, allow_downgrade,
+                                                        response, sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      fprintf(stderr, "Error: Unknown ota subcommand: %s\n", subcmd);
+      fprintf(stderr, "Available: list, push\n");
       return 1;
    }
 

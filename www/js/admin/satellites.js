@@ -8,6 +8,8 @@
    let satellites = [];
    let users = [];
    let haAreas = [];
+   let otaReleases = []; // [{ platform, tier, version }]
+   let otaEnabled = false;
    let refreshInterval = null;
    let callbacks = {
       showConfirmModal: null,
@@ -47,6 +49,33 @@
             payload: { uuid },
          });
       }
+   }
+
+   function requestOtaList() {
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({ type: 'ota_list' });
+      }
+   }
+
+   function requestOtaPush(uuid, version, allowDowngrade) {
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({
+            type: 'ota_push',
+            payload: { uuid, version, allow_downgrade: !!allowDowngrade },
+         });
+      }
+   }
+
+   // Tier → release platform string (tier 1 = RPi, tier 2 = ESP32).
+   function platformForTier(tier) {
+      return tier === 2 ? 'esp32' : 'rpi';
+   }
+
+   // Available release versions for a device's platform (newest first by the
+   // server's store order, which is already version-sorted).
+   function releaseVersionsForTier(tier) {
+      const platform = platformForTier(tier);
+      return otaReleases.filter((r) => r.platform === platform).map((r) => r.version);
    }
 
    /* =============================================================================
@@ -100,6 +129,54 @@
          '" value="' +
          escapeHtml(sat.ha_area || '') +
          '" placeholder="e.g., Living Room">'
+      );
+   }
+
+   // OTA push control for an eligible device: a version picker + allow-downgrade
+   // toggle + Update button.  Returns '' when OTA is disabled, the device is
+   // offline/local, or no release matches the device's platform.
+   function buildOtaControl(sat, isLocal, online) {
+      if (isLocal || !online || !otaEnabled) return '';
+      const versions = releaseVersionsForTier(sat.tier);
+      if (versions.length === 0) return '';
+      const busy =
+         sat.ota_state &&
+         sat.ota_state !== 'idle' &&
+         sat.ota_state !== 'success' &&
+         sat.ota_state !== 'failed';
+      // escapeAttr (not escapeHtml) for attribute context — escapeHtml does not
+      // escape quotes, and sat.name is attacker-controlled (set at registration
+      // with no charset restriction).  See SEC review 2026-06-08.
+      let options = '';
+      for (const v of versions) {
+         options += '<option value="' + escapeAttr(v) + '">' + escapeHtml(v) + '</option>';
+      }
+      return (
+         '<div class="satellite-controls satellite-ota-controls">' +
+         '<label class="satellite-control-group">' +
+         '<span class="control-label">Update to:</span>' +
+         '<select class="satellite-ota-version" data-uuid="' +
+         escapeAttr(sat.uuid) +
+         '"' +
+         (busy ? ' disabled' : '') +
+         '>' +
+         options +
+         '</select>' +
+         '</label>' +
+         '<label class="satellite-control-group satellite-ota-downgrade">' +
+         '<input type="checkbox" class="satellite-ota-allow-downgrade" data-uuid="' +
+         escapeAttr(sat.uuid) +
+         '">' +
+         '<span class="control-label">Allow downgrade</span>' +
+         '</label>' +
+         '<button class="btn satellite-ota-push-btn" data-uuid="' +
+         escapeAttr(sat.uuid) +
+         '" data-name="' +
+         escapeAttr(sat.name) +
+         '"' +
+         (busy ? ' disabled title="Update already in progress"' : '') +
+         '>Push Update</button>' +
+         '</div>'
       );
    }
 
@@ -207,6 +284,8 @@
             buildHaAreaControl(sat) +
             '</label>' +
             '</div>' +
+            // OTA push control (eligible online devices only)
+            buildOtaControl(sat, isLocal, effectiveOnline) +
             // Footer: delete button (hidden for the daemon's local pseudo-satellite)
             (isLocal
                ? '<div class="satellite-footer satellite-footer-local">' +
@@ -216,12 +295,13 @@
                  '</span>' +
                  '</div>'
                : '<div class="satellite-footer">' +
+                 // escapeAttr for attribute context (sat.name is attacker-controlled).
                  '<button class="btn satellite-delete-btn" data-uuid="' +
-                 sat.uuid +
+                 escapeAttr(sat.uuid) +
                  '" data-name="' +
-                 escapeHtml(sat.name) +
+                 escapeAttr(sat.name) +
                  '" data-user="' +
-                 escapeHtml(getUserName(sat.user_id)) +
+                 escapeAttr(getUserName(sat.user_id)) +
                  '">Delete Satellite</button>' +
                  '</div>') +
             '</div>';
@@ -239,6 +319,11 @@
 
    function escapeHtml(str) {
       return DawnFormat.escapeHtml(str);
+   }
+
+   // For interpolation inside attribute="..." values (escapes quotes too).
+   function escapeAttr(str) {
+      return DawnFormat.escapeAttr(str);
    }
 
    /* =============================================================================
@@ -303,6 +388,42 @@
             }
          });
       });
+
+      // OTA push buttons
+      document.querySelectorAll('.satellite-ota-push-btn').forEach((btn) => {
+         btn.addEventListener('click', function () {
+            const uuid = this.dataset.uuid;
+            const name = this.dataset.name;
+            const card = this.closest('.satellite-card');
+            const versionSel = card && card.querySelector('.satellite-ota-version');
+            const downgradeCb = card && card.querySelector('.satellite-ota-allow-downgrade');
+            const version = versionSel ? versionSel.value : '';
+            const allowDowngrade = downgradeCb ? downgradeCb.checked : false;
+            if (!version) {
+               if (typeof DawnToast !== 'undefined') {
+                  DawnToast.show('No release version selected', 'error');
+               }
+               return;
+            }
+            let msg = 'Push update ' + version + " to '" + name + "'?";
+            if (allowDowngrade) {
+               msg += '\nDowngrade is allowed for this push.';
+            }
+            msg += '\nThe device will download, verify, and apply it.';
+            const doPush = () => {
+               this.disabled = true;
+               requestOtaPush(uuid, version, allowDowngrade);
+            };
+            if (callbacks.showConfirmModal) {
+               callbacks.showConfirmModal(msg, doPush, {
+                  title: 'Push OTA Update',
+                  okText: 'Push',
+               });
+            } else if (confirm(msg)) {
+               doPush();
+            }
+         });
+      });
    }
 
    /* =============================================================================
@@ -363,6 +484,28 @@
       } else {
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show('Failed to delete satellite', 'error');
+         }
+      }
+   }
+
+   function handleOtaListResponse(payload) {
+      if (!payload) return;
+      otaEnabled = !!payload.enabled;
+      otaReleases = Array.isArray(payload.releases) ? payload.releases : [];
+      renderSatelliteList();
+   }
+
+   function handleOtaPushResponse(payload) {
+      if (payload && payload.success) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show('Update ' + (payload.version || '') + ' pushed to satellite', 'success');
+         }
+         // Refresh so the in-flight ota_state shows on the card.
+         requestListSatellites();
+      } else {
+         renderSatelliteList(); // re-enable the push button
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show('Failed to push update', 'error');
          }
       }
    }
@@ -715,6 +858,7 @@
                   if (satellites.length === 0) {
                      requestListSatellites();
                   }
+                  requestOtaList();
                   startAutoRefresh();
                } else {
                   stopAutoRefresh();
@@ -726,7 +870,10 @@
       // Refresh button
       const refreshBtn = document.getElementById('refresh-satellites-btn');
       if (refreshBtn) {
-         refreshBtn.addEventListener('click', requestListSatellites);
+         refreshBtn.addEventListener('click', function () {
+            requestListSatellites();
+            requestOtaList();
+         });
       }
 
       // Pair modal
@@ -748,6 +895,8 @@
       handleListResponse: handleListResponse,
       handleUpdateResponse: handleUpdateResponse,
       handleDeleteResponse: handleDeleteResponse,
+      handleOtaListResponse: handleOtaListResponse,
+      handleOtaPushResponse: handleOtaPushResponse,
       handleRegistrationKeyResponse: handleRegistrationKeyResponse,
       handleReconnect: function () {
          /* Re-render to un-disable any stuck controls, then refresh if section is open */

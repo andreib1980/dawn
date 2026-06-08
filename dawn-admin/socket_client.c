@@ -1780,3 +1780,43 @@ admin_resp_code_t admin_client_messaging_link_attempts(int fd,
    }
    return recv_text_response(fd, response, resp_len);
 }
+
+/* =============================================================================
+ * OTA updates (dawn-admin ota *)
+ * ============================================================================= */
+
+admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_OTA_LIST, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_ota_push(int fd,
+                                        const char *uuid,
+                                        const char *version,
+                                        bool allow_downgrade,
+                                        char *response,
+                                        size_t resp_len) {
+   if (!uuid || !uuid[0] || !version || !version[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t ulen = strlen(uuid);
+   size_t vlen = strlen(version);
+   if (ulen == 0 || ulen > ADMIN_OTA_UUID_MAX || vlen == 0 || vlen > ADMIN_OTA_VERSION_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+
+   /* Wire: byte 0 = flags, byte 1 = uuid_len, [uuid], [version]. */
+   uint8_t buf[2 + ADMIN_OTA_UUID_MAX + ADMIN_OTA_VERSION_MAX];
+   buf[0] = (uint8_t)(allow_downgrade ? ADMIN_OTA_FLAG_ALLOW_DOWNGRADE : 0);
+   buf[1] = (uint8_t)ulen;
+   memcpy(buf + 2, uuid, ulen);
+   memcpy(buf + 2 + ulen, version, vlen);
+   uint16_t total = (uint16_t)(2 + ulen + vlen);
+
+   if (send_message(fd, ADMIN_MSG_OTA_PUSH, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}

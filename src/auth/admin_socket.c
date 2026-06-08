@@ -2415,6 +2415,12 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_MESSAGING_REENABLE_CHANNEL:
          return handle_messaging_reenable_channel(client_fd, payload, header.payload_len);
 
+      /* Phase 8: OTA operator commands */
+      case ADMIN_MSG_OTA_LIST:
+         return handle_ota_list_cmd(client_fd);
+      case ADMIN_MSG_OTA_PUSH:
+         return handle_ota_push_cmd(client_fd, payload, header.payload_len);
+
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);
          send_response(client_fd, ADMIN_RESP_FAILURE);

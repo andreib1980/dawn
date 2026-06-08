@@ -208,18 +208,73 @@
    background: rgba(239, 68, 68, 0.15);
 }
 
+/* OTA push controls: a second controls row, visually separated from the
+ * user/HA-area row above it. */
+.satellite-ota-controls {
+   margin-top: 0.5rem;
+   padding-top: 0.5rem;
+   border-top: 1px solid var(--border-color);
+}
+
+.satellite-ota-version {
+   padding: 4px 8px;
+   font-size: 0.85rem;
+   background: var(--bg-primary);
+   color: var(--text-primary);
+   border: 1px solid var(--border-color);
+   border-radius: 4px;
+   min-height: 32px;
+   min-width: 100px;
+}
+
+.satellite-ota-version:disabled {
+   opacity: 0.5;
+   cursor: wait; /* disabled = update in progress (transient), matches panel busy semantics */
+}
+
+.satellite-ota-downgrade {
+   cursor: pointer;
+}
+
+.satellite-ota-push-btn {
+   flex-shrink: 0;
+   background: transparent;
+   border: 1px solid var(--accent);
+   color: var(--accent);
+   padding: 0.25rem 0.75rem;
+   font-size: 0.8rem;
+   border-radius: 4px;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.satellite-ota-push-btn:hover:not(:disabled) {
+   background: var(--accent-hover);
+}
+
+.satellite-ota-push-btn:disabled {
+   opacity: 0.5;
+   cursor: wait; /* disabled = update in progress (transient), matches panel busy semantics */
+}
+
 /* =============================================================================
  * Focus & Accessibility
  * ============================================================================= */
 
 .satellite-user-select:focus-visible,
-.satellite-ha-area:focus-visible {
+.satellite-ha-area:focus-visible,
+.satellite-ota-version:focus-visible {
    outline: 2px solid var(--accent);
    outline-offset: 2px;
 }
 
 .satellite-delete-btn:focus-visible {
    outline: 2px solid var(--error);
+   outline-offset: 2px;
+}
+
+.satellite-ota-push-btn:focus-visible {
+   outline: 2px solid var(--accent);
    outline-offset: 2px;
 }
 
@@ -244,12 +299,14 @@
    }
 
    .satellite-user-select,
-   .satellite-ha-area {
+   .satellite-ha-area,
+   .satellite-ota-version {
       width: 100%;
       min-height: 44px;
    }
 
-   .satellite-delete-btn {
+   .satellite-delete-btn,
+   .satellite-ota-push-btn {
       min-height: 44px;
       padding: 0.5rem 1rem;
    }
