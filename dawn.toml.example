@@ -830,6 +830,20 @@
                                     # (default: 600 = 10 minutes).
 
 # =============================================================================
+# OTA (over-the-air satellite updates)
+# =============================================================================
+# Server→satellite firmware updates. Release artifacts are signed OFFLINE with
+# ota-keytool (the daemon never holds the signing key); the daemon only serves
+# them and devices verify against a baked-in public keyring. See docs/OTA_DESIGN.md.
+
+[ota]
+# enabled = false                    # Master switch for serving OTA updates.
+# release_dir = "/var/lib/dawn/ota"  # Root of signed releases:
+                                    #   <release_dir>/<platform>/<version>/{image,manifest,manifest.sig}
+# download_token_ttl_sec = 120       # One-time image-download token lifetime (5-3600).
+# require_tls = true                 # Refuse OTA control/download over plaintext.
+
+# =============================================================================
 # Shutdown Control
 # =============================================================================
 

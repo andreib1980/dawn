@@ -146,6 +146,15 @@ dawn_add_unit_test(test_ota_manifest
    LIBS    unity ${SODIUM_LIBRARIES}
    LABEL   ci)
 
+dawn_add_unit_test(test_ota
+   SOURCES test_ota.c
+           ${SRC_ROOT}/src/core/ota.c
+           ${SRC_ROOT}/src/core/ota_db.c
+           ${SRC_ROOT}/src/core/ota_manifest.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${SODIUM_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_scheduler
    SOURCES test_scheduler.c test_scheduler_stub.c
            ${SRC_ROOT}/src/core/scheduler_db.c

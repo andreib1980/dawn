@@ -63,6 +63,7 @@
 #include "core/component_status.h"
 #include "core/embedding_engine.h"
 #include "core/ocp_helpers.h"
+#include "core/ota.h"
 #include "core/path_utils.h"
 #include "core/session_manager.h"
 #include "core/wake_word.h"
@@ -2359,6 +2360,12 @@ mqtt_disabled:
    if (auth_db_init(auth_db_path) != AUTH_DB_SUCCESS) {
       OLOG_ERROR("Failed to initialize database - memory system disabled");
       OLOG_ERROR("  Hint: Check file permissions on %s", expanded_data_dir);
+   }
+
+   /* OTA subsystem (after the DB is ready — it reconciles device state).
+    * Non-fatal: a failure just leaves OTA serving disabled. */
+   if (ota_init() != SUCCESS) {
+      OLOG_WARNING("OTA init failed - over-the-air updates disabled");
    }
 
    /* Initialize memory embeddings (non-fatal — falls back to keyword search) */

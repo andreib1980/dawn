@@ -78,6 +78,67 @@ int ota_db_report_version(const char *uuid, const char *version);
  */
 int ota_db_get(const char *uuid, ota_device_state_t *out);
 
+/* OTA state-machine tokens (DB is the single source of truth — §5).  In-flight
+ * states are the ones a fresh push must not interrupt. */
+#define OTA_STATE_IDLE "idle"
+#define OTA_STATE_OFFERED "offered"
+#define OTA_STATE_DOWNLOADING "downloading"
+#define OTA_STATE_VERIFYING "verifying"
+#define OTA_STATE_APPLYING "applying"
+#define OTA_STATE_REBOOTING "rebooting"
+#define OTA_STATE_SUCCESS "success"
+#define OTA_STATE_FAILED "failed"
+#define OTA_STATE_UNKNOWN "unknown"
+
+/**
+ * @brief Transition a device's OTA state (e.g. from an ota_status report).
+ * @param uuid       Satellite UUID (row must exist)
+ * @param state      New state token (OTA_STATE_*)
+ * @param last_error Optional error detail (NULL/"" clears it)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int ota_db_set_state(const char *uuid, const char *state, const char *last_error);
+
+/**
+ * @brief Begin an update offer for a device — SINGLE-FLIGHT.
+ *
+ * Records target_version + a one-time download token (with expiry) and moves the
+ * device to 'offered', but ONLY if it is not already mid-update.  Rejects with
+ * AUTH_DB_LOCKED when an offer/download/apply is already in flight.
+ *
+ * @return AUTH_DB_SUCCESS if claimed, AUTH_DB_LOCKED if already in-flight,
+ *         AUTH_DB_FAILURE on error
+ */
+int ota_db_begin_offer(const char *uuid,
+                       const char *target_version,
+                       const char *token,
+                       time_t token_expires);
+
+/**
+ * @brief Validate + consume the one-time download token (gates the HTTPS pull).
+ *
+ * Succeeds only if the token matches, has not expired, and matches the device's
+ * current target_version; the token is cleared on success (single use).
+ *
+ * @return AUTH_DB_SUCCESS if valid (and consumed), AUTH_DB_FAILURE otherwise
+ */
+int ota_db_consume_token(const char *uuid, const char *version, const char *token, time_t now);
+
+/**
+ * @brief Clear target/token and return to idle (on success-finalize or abort).
+ */
+int ota_db_clear_target(const char *uuid, const char *final_state);
+
+/**
+ * @brief Reconcile transient states orphaned by a daemon restart.
+ *
+ * Rows stuck in an in-flight state with updated_at older than @p stale_before
+ * are moved to 'unknown' (reconciled when the device reconnects + reports).
+ * @param reconciled_out Optional count of rows touched
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int ota_db_reconcile_stale(time_t stale_before, int *reconciled_out);
+
 #ifdef __cplusplus
 }
 #endif

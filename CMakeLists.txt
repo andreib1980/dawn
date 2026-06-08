@@ -587,6 +587,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_doc_library.c
         src/webui/webui_satellite.c
         src/webui/webui_admin_satellite.c
+        src/webui/webui_ota.c
         src/webui/webui_contacts.c
         src/webui/webui_scheduler.c
     )
@@ -650,6 +651,7 @@ list(APPEND DAWN_SOURCES
     src/core/missed_notifications_db.c
     src/core/ota_db.c
     src/core/ota_manifest.c
+    src/core/ota.c
 )
 
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)

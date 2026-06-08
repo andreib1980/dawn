@@ -544,6 +544,12 @@ void config_set_defaults(dawn_config_t *config) {
    /* Messaging channels */
    config->messaging.sms_active_window_sec = 600; /* 10 minutes */
 
+   /* OTA (over-the-air satellite updates) — opt-in; serve disabled by default */
+   config->ota.enabled = false;
+   SAFE_COPY(config->ota.release_dir, "/var/lib/dawn/ota");
+   config->ota.download_token_ttl_sec = 120; /* 2 min: enough to start the pull */
+   config->ota.require_tls = true;           /* never serve OTA over plaintext */
+
    /* Music - streaming settings */
    config->music.streaming_enabled = true;
    strncpy(config->music.streaming_quality, "standard",

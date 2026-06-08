@@ -933,6 +933,16 @@ typedef struct {
 } secrets_config_t;
 
 /* =============================================================================
+ * OTA (over-the-air satellite updates) Configuration
+ * ============================================================================= */
+typedef struct {
+   bool enabled;                      /* Master switch for serving OTA updates */
+   char release_dir[CONFIG_PATH_MAX]; /* Root of signed release artifacts */
+   int download_token_ttl_sec;        /* One-time image-download token lifetime (s) */
+   bool require_tls;                  /* Reject OTA control/download over plaintext */
+} ota_config_t;
+
+/* =============================================================================
  * Main Configuration Struct
  * ============================================================================= */
 typedef struct {
@@ -962,6 +972,7 @@ typedef struct {
    scheduler_config_t scheduler;
    calendar_config_t calendar;
    messaging_config_t messaging;
+   ota_config_t ota;
 } dawn_config_t;
 
 /* =============================================================================
