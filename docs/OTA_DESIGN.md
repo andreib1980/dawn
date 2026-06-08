@@ -1,10 +1,49 @@
 # Server→Satellite OTA Update System — Design
 
-**Status:** In flight (Phase 1). Untracked working doc until the feature ships (per the design-doc
-commit policy).
-**Date:** 2026-06-06. Reviewed by architecture / embedded-efficiency / security agents (v2 folds in
-their criticals: sign-raw-bytes, verify-before-parse, offline signing, ESP32 reboot-to-clean OTA,
-TOCTOU, server-push spine).
+**Status:** Phases 1–2 SHIPPED (server side). Branch `satellite_ota`.
+**Date:** 2026-06-06 (design); implementation status updated 2026-06-08. Reviewed by architecture /
+embedded-efficiency / security agents (v2 folds in their criticals: sign-raw-bytes,
+verify-before-parse, offline signing, ESP32 reboot-to-clean OTA, TOCTOU, server-push spine).
+
+---
+
+## Implementation status (2026-06-08)
+
+Committed on branch `satellite_ota` (4 commits: `7847a3b` Phase 1, `b0cfc8d` satellite build
+tooling, `9577b14` manifest core + keytool, `68395af` Phase 2 server engine):
+
+**DONE — server side, fully tested (CI 69/69):**
+- **Phase 1** — `firmware_version` + `ota` capability reported at registration; `ota_device_state`
+  table (auth_db v59) + `src/core/ota_db.c`; WebUI admin shows per-device firmware. Validated on
+  real hardware (dawn-kitchen Tier 1, Office Speaker Tier 2 both report 2.0.0).
+- **Satellite build tooling** — CI `satellite-build` job + pre-push hook; `dawn_satellite/`
+  Pi-target build container (`Dockerfile.pibase`/`.pibuild` + `build-pi.sh`, GHCR base
+  `ghcr.io/the-oasis-project/dawn-satellite-build:trixie-arm64`); fixed two headless-build bugs.
+- **Phase 2 #8 manifest core** — `src/core/ota_manifest.{c,h}` (fixed LE binary wire, Ed25519
+  verify-before-parse + keyring, SHA-256, numeric semver, anti-rollback). 17 unit tests.
+- **Phase 2 #9 offline keytool** — `tools/ota_keytool.c` (`make ota-keytool`): keygen / sign /
+  verify / pubkey-header. Validated end-to-end.
+- **Phase 2 #10 daemon glue** — `src/core/ota.{c,h}` (release store, resolve, begin_push, token
+  download authz + realpath guard, finalize) + `ota_db` state machine (single-flight, one-time
+  token, reconcile). `[ota]` config. 9 integration tests (`tests/test_ota.c`).
+- **Phase 2 #11 transports** — HTTPS image route (`webui_http.c`, `/api/ota/..`, TLS+token+
+  path-hardened), WS device handlers + server→device push (`src/webui/webui_ota.c`), admin-gated
+  `ota_push`/`ota_list`, registration finalize hook. WS protocol documented (WEBSOCKET_PROTOCOL.md).
+
+**REMAINING:**
+- **#11 deferred follow-ups** (functional path works without them): (a) **dawn-admin CLI** transport
+  — reserve admin opcode band `0xC0–0xCF` in `admin_socket.h`, add `admin_socket_ota.c` +
+  `dawn-admin ota push/list` calling `webui_ota_push`/`ota_release_*`; (b) **WebUI admin-panel JS**
+  buttons (server messages `ota_list`/`ota_push` exist — `www/js/admin/` needs the UI).
+- **Phase 3 (RPi apply)** — install-path migration R1 (§7), device-side `abi_tag` check, libcurl
+  download + libsodium verify-before-commit (0700, no TOCTOU), binary swap + self-restart,
+  boot-count rollback (< systemd StartLimitBurst).
+- **Phase 4 (ESP32 apply)** — reboot-to-clean OTA, `partitions.csv` dual-OTA bootstrap (already
+  added), `Update` flow + WDT + sector-aligned writes, Ed25519 verify, native partition rollback.
+- **Phase 5 (hardening)** — canary-then-rollout for `push all`, audit log.
+
+NOTE: the server can now offer/serve/track updates, but **satellites do not yet apply `ota_offer`**
+(that's Phase 3/4). Pushing to a current satellite is harmless (unknown WS type ignored by design).
 
 ---
 
