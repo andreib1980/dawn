@@ -185,6 +185,26 @@ int music_db_search(const char *pattern,
                     int *count_out);
 
 /**
+ * @brief Pick the most relevant result from a candidate set (pure, no DB/locks)
+ *
+ * music_db_search() orders alphabetically, so its first row is rarely the best
+ * match for a track query (e.g. searching "Africa" returns Bo Burnham before
+ * Toto). This ranks candidates by title closeness — exact title > title prefix >
+ * substring — adds a strong bonus when @p artist is non-NULL and matches the
+ * candidate's artist, and breaks ties toward the shorter (closer) title.
+ *
+ * @param results     Candidate array (from music_db_search)
+ * @param count       Number of candidates
+ * @param title_query The track title (or whole query) to match against
+ * @param artist      Optional artist to prefer (NULL when the query has no artist)
+ * @return index of the best candidate in [0, count), or 0 if count <= 0
+ */
+int music_db_pick_best_match(const music_search_result_t *results,
+                             int count,
+                             const char *title_query,
+                             const char *artist);
+
+/**
  * @brief Get metadata for a specific file from the database
  *
  * @param path Full path to audio file

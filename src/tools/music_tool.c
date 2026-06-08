@@ -59,6 +59,9 @@
 #define MAX_PLAYLIST_LENGTH 100
 #define MUSIC_CALLBACK_BUFFER_SIZE 512
 
+/* Candidate window pulled from the DB for relevance ranking in the resolver. */
+#define MUSIC_RESOLVE_CANDIDATES 8
+
 /* ========== Types ========== */
 
 /**
@@ -353,37 +356,28 @@ static int local_resolve_item(const char *item, music_search_result_t *out) {
    if (!item || !item[0]) {
       return 0;
    }
-   music_search_result_t r[5];
+   music_search_result_t r[MUSIC_RESOLVE_CANDIDATES];
    int count = 0;
 
-   /* "Artist - Title" → search the title, prefer the artist-matching candidate
-    * (disambiguates generic titles like "Africa"). */
+   /* Split an optional "Artist - Title"; search the title (or whole item) and
+    * rank candidates by relevance so a bare/generic title ("Africa") doesn't
+    * pick the DB's alphabetical top row. */
    const char *dash = strstr(item, " - ");
+   char artist[sizeof(out->artist)] = { 0 };
+   const char *title_query = item;
    if (dash) {
-      char artist[sizeof(out->artist)];
       size_t alen = (size_t)(dash - item);
       if (alen >= sizeof(artist)) {
          alen = sizeof(artist) - 1;
       }
       memcpy(artist, item, alen);
       artist[alen] = '\0';
-
-      if (music_db_search(dash + 3, r, 5, &count) == SUCCESS && count > 0) {
-         int pick = 0;
-         for (int i = 0; i < count; i++) {
-            if (strcasestr(r[i].artist, artist)) {
-               pick = i;
-               break;
-            }
-         }
-         *out = r[pick];
-         return 1;
-      }
+      title_query = dash + 3;
    }
 
-   /* Plain name (or dash-form whose title found nothing) → best-match top-1. */
-   if (music_db_search(item, r, 5, &count) == SUCCESS && count > 0) {
-      *out = r[0];
+   if (music_db_search(title_query, r, MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS && count > 0) {
+      int pick = music_db_pick_best_match(r, count, title_query, dash ? artist : NULL);
+      *out = r[pick];
       return 1;
    }
    return 0;

@@ -51,6 +51,9 @@
 /* "Artist - Title" display string size for resolved items. */
 #define WEBUI_MUSIC_DISPLAY_MAX (WEBUI_MUSIC_STRING_MAX * 2)
 
+/* Candidate window pulled from the DB for relevance ranking in the resolver. */
+#define WEBUI_MUSIC_RESOLVE_CANDIDATES 8
+
 /* =============================================================================
  * LLM-facing helpers: state footer, item resolution, batch apply + report
  * ============================================================================= */
@@ -121,7 +124,7 @@ static int resolve_item_to_path(const char *item,
       return FAILURE;
    }
 
-   music_search_result_t r[5];
+   music_search_result_t r[WEBUI_MUSIC_RESOLVE_CANDIDATES];
    int count = 0;
 
    /* Absolute path → exact lookup. Gate on the same library-prefix check the
@@ -140,38 +143,28 @@ static int resolve_item_to_path(const char *item,
       return FAILURE;
    }
 
-   /* "Artist - Title" → search the title, prefer the artist-matching candidate. */
+   /* Split an optional "Artist - Title"; search the title (or whole item) and
+    * rank the candidates by relevance (music_db_search orders alphabetically, so
+    * its first row is rarely the right track — e.g. "Africa" → Bo Burnham). */
    const char *dash = strstr(item, " - ");
+   char artist[sizeof(r[0].artist)] = { 0 };
+   const char *title_query = item;
    if (dash) {
-      char artist[sizeof(r[0].artist)];
       size_t alen = (size_t)(dash - item);
       if (alen >= sizeof(artist)) {
          alen = sizeof(artist) - 1;
       }
       memcpy(artist, item, alen);
       artist[alen] = '\0';
-
-      if (music_db_search(dash + 3, r, 5, &count) == SUCCESS && count > 0) {
-         int pick = 0;
-         for (int i = 0; i < count; i++) {
-            if (strcasestr(r[i].artist, artist)) {
-               pick = i;
-               break;
-            }
-         }
-         safe_strncpy(path_out, r[pick].path, path_len);
-         if (display_out) {
-            snprintf(display_out, display_len, "%s - %s", r[pick].artist, r[pick].title);
-         }
-         return SUCCESS;
-      }
+      title_query = dash + 3;
    }
 
-   /* Plain name (or dash-form whose title found nothing) → best-match top-1. */
-   if (music_db_search(item, r, 5, &count) == SUCCESS && count > 0) {
-      safe_strncpy(path_out, r[0].path, path_len);
+   if (music_db_search(title_query, r, WEBUI_MUSIC_RESOLVE_CANDIDATES, &count) == SUCCESS &&
+       count > 0) {
+      int pick = music_db_pick_best_match(r, count, title_query, dash ? artist : NULL);
+      safe_strncpy(path_out, r[pick].path, path_len);
       if (display_out) {
-         snprintf(display_out, display_len, "%s - %s", r[0].artist, r[0].title);
+         snprintf(display_out, display_len, "%s - %s", r[pick].artist, r[pick].title);
       }
       return SUCCESS;
    }
@@ -497,9 +490,6 @@ int webui_music_execute_tool(ws_connection_t *conn,
          return 1;
       }
 
-      /* Was anything playing before we append? (decide auto-start) */
-      bool was_idle = !state->playing;
-
       char *report = NULL;
       if (items) {
          report = apply_items_and_report(state, items, false, NULL);
@@ -526,38 +516,13 @@ int webui_music_execute_tool(ws_connection_t *conn,
          }
       }
 
-      /* Auto-start if nothing was playing and the queue now has tracks. */
-      user_music_queue_t *uq = state->shared_queue;
-      char start_path[WEBUI_MUSIC_PATH_MAX] = { 0 };
-      if (was_idle) {
-         pthread_mutex_lock(&uq->queue_mutex);
-         int idx = state->queue_index;
-         if (idx >= 0 && idx < uq->queue_length) {
-            snprintf(start_path, sizeof(start_path), "%s", uq->queue[idx].path);
-         }
-         pthread_mutex_unlock(&uq->queue_mutex);
-      }
-      bool started = false;
-      if (start_path[0]) {
-         started = (webui_music_start_playback(state, start_path) == 0);
-      }
+      /* enqueue only adds — it never starts playback (the WebUI has its own
+       * play control). The user presses play, or calls play/next explicitly. */
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(state->shared_queue, conn);
 
       if (result_out) {
-         strbuf_t sb;
-         strbuf_init(&sb, 384);
-         strbuf_appendf(&sb, "%s", report ? report : "Nothing added.");
-         if (started) {
-            strbuf_appendf(&sb, " Queue was idle — started playback.");
-         }
-         append_state_footer(&sb, state);
-         if (strbuf_oom(&sb)) {
-            strbuf_free(&sb);
-            *result_out = report ? strdup(report) : strdup("Nothing added.");
-         } else {
-            *result_out = strbuf_steal(&sb);
-         }
+         *result_out = result_with_footer(state, report ? report : "Nothing added.");
       }
       free(report);
       return 0;
