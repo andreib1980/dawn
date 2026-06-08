@@ -31,6 +31,7 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -836,6 +837,70 @@ int music_db_search(const char *pattern,
 
    *count_out = count;
    return SUCCESS;
+}
+
+/* Case-insensitive substring test (avoids depending on GNU strcasestr here). */
+static bool music_ci_contains(const char *haystack, const char *needle) {
+   size_t nlen = strlen(needle);
+   if (nlen == 0) {
+      return true;
+   }
+   for (const char *p = haystack; *p; p++) {
+      if (strncasecmp(p, needle, nlen) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+int music_db_pick_best_match(const music_search_result_t *results,
+                             int count,
+                             const char *title_query,
+                             const char *artist) {
+   if (!results || count <= 0) {
+      return 0;
+   }
+   if (!title_query) {
+      title_query = "";
+   }
+
+   size_t qlen = strlen(title_query);
+   int best = 0;
+   long best_score = -1; /* so candidate 0 always initializes the winner */
+   size_t best_len = 0;
+
+   for (int i = 0; i < count; i++) {
+      const char *t = results[i].title;
+      long score = 0;
+
+      /* Title closeness: exact > prefix > substring. */
+      if (qlen > 0) {
+         if (strcasecmp(t, title_query) == 0) {
+            score += 300;
+         } else if (strncasecmp(t, title_query, qlen) == 0) {
+            score += 200;
+         } else if (music_ci_contains(t, title_query)) {
+            score += 100;
+         }
+      }
+
+      /* A matching artist dominates (disambiguates "Artist - Title"). */
+      if (artist && artist[0] && music_ci_contains(results[i].artist, artist)) {
+         score += 1000;
+      }
+
+      size_t len = strlen(t);
+      /* Higher score wins; among equally-scored REAL matches prefer the shorter
+       * (closer) title. When nothing matches (score 0 for all), this keeps
+       * candidate 0 — i.e. the DB's first row — rather than an arbitrary shortest. */
+      bool better = (score > best_score) || (score == best_score && score > 0 && len < best_len);
+      if (better) {
+         best_score = score;
+         best_len = len;
+         best = i;
+      }
+   }
+   return best;
 }
 
 int music_db_get_by_path(const char *path, music_search_result_t *result, bool *found_out) {

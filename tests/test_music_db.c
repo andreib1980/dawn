@@ -593,6 +593,66 @@ void tearDown(void) {
    teardown_db();
 }
 
+/* ============================================================================
+ * music_db_pick_best_match — pure relevance ranking (no DB)
+ * ============================================================================ */
+
+static music_search_result_t mk_result(const char *artist, const char *title) {
+   music_search_result_t r;
+   memset(&r, 0, sizeof(r));
+   snprintf(r.artist, sizeof(r.artist), "%s", artist);
+   snprintf(r.title, sizeof(r.title), "%s", title);
+   return r;
+}
+
+/* The conv-813 regression: bare "Africa" must pick Toto, not Bo Burnham, even
+ * though the DB returns Bo Burnham first (alphabetical). */
+static void test_pick_best_bare_title_prefers_close_match(void) {
+   music_search_result_t r[3] = {
+      mk_result("Bo Burnham", "A Prayer / How Do We Fix Africa?"),
+      mk_result("Bo Burnham", "A Prayer/How Do We Fix Africa? [Explicit]"),
+      mk_result("Toto", "Africa (Single Version)"),
+   };
+   int pick = music_db_pick_best_match(r, 3, "Africa", NULL);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(2, pick,
+                                 "bare 'Africa' picks Toto (title prefix beats substring)");
+}
+
+/* Artist qualifier dominates even when another title is a closer string match. */
+static void test_pick_best_artist_dominates(void) {
+   music_search_result_t r[2] = {
+      mk_result("Bo Burnham", "Africa"),            /* exact title, wrong artist */
+      mk_result("Toto", "Africa (Single Version)"), /* prefix title, right artist */
+   };
+   int pick = music_db_pick_best_match(r, 2, "Africa", "Toto");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(1, pick, "artist match outweighs a closer title");
+}
+
+/* Exact title beats a prefix/substring when no artist is given. */
+static void test_pick_best_exact_title(void) {
+   music_search_result_t r[2] = {
+      mk_result("Spandau Ballet", "Gold (Remastered)"),
+      mk_result("Spandau Ballet", "Gold"),
+   };
+   int pick = music_db_pick_best_match(r, 2, "Gold", NULL);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(1, pick, "exact title outranks prefix");
+}
+
+/* No title match anywhere → falls back to index 0 (does not crash). */
+static void test_pick_best_no_match_falls_back(void) {
+   music_search_result_t r[2] = {
+      mk_result("Artist A", "Totally Unrelated"),
+      mk_result("Artist B", "Also Unrelated"),
+   };
+   int pick = music_db_pick_best_match(r, 2, "Nonexistent", NULL);
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, pick, "no match falls back to first candidate");
+}
+
+/* Defensive: empty candidate set returns 0. */
+static void test_pick_best_empty(void) {
+   TEST_ASSERT_EQUAL_INT(0, music_db_pick_best_match(NULL, 0, "x", NULL));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_source_names);
@@ -617,5 +677,10 @@ int main(void) {
    RUN_TEST(test_get_by_path_plex);
    RUN_TEST(test_get_by_path_missing);
    RUN_TEST(test_stale_deletion_scoped);
+   RUN_TEST(test_pick_best_bare_title_prefers_close_match);
+   RUN_TEST(test_pick_best_artist_dominates);
+   RUN_TEST(test_pick_best_exact_title);
+   RUN_TEST(test_pick_best_no_match_falls_back);
+   RUN_TEST(test_pick_best_empty);
    return UNITY_END();
 }
