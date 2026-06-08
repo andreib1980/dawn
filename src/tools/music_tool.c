@@ -356,6 +356,19 @@ static int local_resolve_item(const char *item, music_search_result_t *out) {
    if (!item || !item[0]) {
       return 0;
    }
+
+   /* Absolute path → exact lookup (paths from 'search' are exact handles). The
+    * local speaker plays files directly, so only local paths are resolvable
+    * here; a plex: path falls through to search and won't match, which is
+    * correct (local playback can't stream Plex). */
+   if (item[0] == '/') {
+      bool found = false;
+      if (music_db_get_by_path(item, out, &found) == SUCCESS && found) {
+         return 1;
+      }
+      return 0;
+   }
+
    music_search_result_t r[MUSIC_RESOLVE_CANDIDATES];
    int count = 0;
 
@@ -448,7 +461,7 @@ static char *music_tool_callback_inner(const char *action, char *value, int *sho
       char *webui_result = NULL;
       int ret = webui_music_execute_tool(conn, action, value, &webui_result);
 
-      if (ret == 0) {
+      if (ret == SUCCESS) {
          /* WebUI handled successfully */
          OLOG_INFO("Music: Routed '%s' to WebUI session", action);
          if (direct_mode) {

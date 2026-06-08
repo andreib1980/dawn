@@ -788,7 +788,7 @@ static inline bool tool_param_extract_custom(const char *value,
                                              const char *field_name,
                                              char *out_value,
                                              size_t out_len) {
-   if (!value || !field_name || !out_value)
+   if (!value || !field_name || !out_value || out_len == 0)
       return false;
 
    char pattern[64];
@@ -830,7 +830,7 @@ static inline bool tool_param_extract_custom_tail(const char *value,
                                                   const char *field_name,
                                                   char *out_value,
                                                   size_t out_len) {
-   if (!value || !field_name || !out_value)
+   if (!value || !field_name || !out_value || out_len == 0)
       return false;
 
    char pattern[64];
