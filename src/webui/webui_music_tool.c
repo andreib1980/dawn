@@ -74,7 +74,11 @@ static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
    int len = uq->queue_length;
    bool shuffle = uq->shuffle;
    music_repeat_mode_t rep = uq->repeat_mode;
+   /* queue_index is a per-session field guarded by state_mutex; snapshot it under
+    * that lock (nested inside queue_mutex — correct order) to avoid a torn read. */
+   pthread_mutex_lock(&state->state_mutex);
    int idx = state->queue_index;
+   pthread_mutex_unlock(&state->state_mutex);
    if (len > 0 && idx >= 0 && idx < len) {
       safe_strncpy(now_title, uq->queue[idx].title, sizeof(now_title));
       safe_strncpy(now_artist, uq->queue[idx].artist, sizeof(now_artist));
@@ -127,13 +131,13 @@ static int resolve_item_to_path(const char *item,
    music_search_result_t r[WEBUI_MUSIC_RESOLVE_CANDIDATES];
    int count = 0;
 
-   /* Absolute path → exact lookup. Gate on the same library-prefix check the
-    * browser add path uses, so an attacker-influenced item can't reach a file
-    * outside the library even if the DB ever indexed one (defense in depth). */
-   if (item[0] == '/') {
+   /* Exact library path → exact lookup. webui_music_is_path_valid() accepts both
+    * local absolute paths and validated plex: paths (the forms 'search' returns),
+    * and rejects free-text names — so names fall through to the ranked search
+    * below. Doubles as defense in depth (no out-of-library file). */
+   if (webui_music_is_path_valid(item)) {
       bool found = false;
-      if (webui_music_is_path_valid(item) && music_db_get_by_path(item, &r[0], &found) == SUCCESS &&
-          found) {
+      if (music_db_get_by_path(item, &r[0], &found) == SUCCESS && found) {
          safe_strncpy(path_out, r[0].path, path_len);
          if (display_out) {
             snprintf(display_out, display_len, "%s - %s", r[0].artist, r[0].title);
@@ -314,17 +318,17 @@ int webui_music_execute_tool(ws_connection_t *conn,
                              const char *query,
                              char **result_out) {
    if (!conn || !action) {
-      return 1;
+      return FAILURE;
    }
 
    /* Ensure music session is initialized */
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
    if (!state) {
-      if (webui_music_session_init(conn) != 0) {
+      if (webui_music_session_init(conn) != SUCCESS) {
          if (result_out) {
             *result_out = strdup("Failed to initialize music session");
          }
-         return 1;
+         return FAILURE;
       }
       state = (session_music_state_t *)conn->music_state;
    }
@@ -379,7 +383,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
             }
          }
          free(report);
-         return 0;
+         return SUCCESS;
       }
 
       if (base_query[0] == '\0') {
@@ -392,13 +396,13 @@ int webui_music_execute_tool(ws_connection_t *conn,
             if (result_out) {
                *result_out = result_with_footer(state, "Resumed playback");
             }
-            return 0;
+            return SUCCESS;
          }
          if (result_out) {
             *result_out = strdup(
                 "Please specify what to play, or pass items:[...] for a track list");
          }
-         return 1;
+         return FAILURE;
       }
 
       /* Search unified database and play (REPLACE) */
@@ -414,14 +418,14 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (!music_db_is_initialized()) {
          if (result_out)
             *result_out = strdup("Music database not available");
-         return 1;
+         return FAILURE;
       }
       music_search_result_t *results = malloc(WEBUI_MUSIC_MAX_QUEUE *
                                               sizeof(music_search_result_t));
       if (!results) {
          if (result_out)
             *result_out = strdup("Memory allocation failed");
-         return 1;
+         return FAILURE;
       }
       int count = 0;
       if (music_db_search(base_query, results, WEBUI_MUSIC_MAX_QUEUE, &count) != SUCCESS ||
@@ -432,7 +436,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
             snprintf(buf, sizeof(buf), "No music found matching '%s'", base_query);
             *result_out = strdup(buf);
          }
-         return 1;
+         return FAILURE;
       }
 
       user_music_queue_t *uq = state->shared_queue;
@@ -464,7 +468,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
          if (result_out) {
             *result_out = strdup("Failed to start playback");
          }
-         return 1;
+         return FAILURE;
       }
 
       webui_music_send_state(conn, state);
@@ -479,7 +483,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
                   first_title[0] ? first_title : "Unknown");
          *result_out = result_with_footer(state, buf);
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "enqueue") == 0) {
       /* APPEND to the queue — items[] (preferred) or a single query (top match). */
@@ -487,7 +491,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (!items && base_query[0] == '\0') {
          if (result_out)
             *result_out = strdup("enqueue needs items:[...] or a query");
-         return 1;
+         return FAILURE;
       }
 
       char *report = NULL;
@@ -525,7 +529,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
          *result_out = result_with_footer(state, report ? report : "Nothing added.");
       }
       free(report);
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "clear") == 0) {
       int removed = 0;
@@ -538,14 +542,14 @@ int webui_music_execute_tool(ws_connection_t *conn,
                   removed == 1 ? "" : "s");
          *result_out = result_with_footer(state, buf);
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "remove") == 0) {
       /* 1-based index, or a substring match against queue titles. */
       if (base_query[0] == '\0') {
          if (result_out)
             *result_out = strdup("remove needs a track number (1-based) or a title to match");
-         return 1;
+         return FAILURE;
       }
 
       user_music_queue_t *uq = state->shared_queue;
@@ -571,7 +575,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
                snprintf(buf, sizeof(buf), "No queued track matching '%s'", base_query);
                *result_out = strdup(buf);
             }
-            return 1;
+            return FAILURE;
          }
       }
 
@@ -585,7 +589,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
             snprintf(buf, sizeof(buf), "Invalid track number. Choose 1-%d", len);
             *result_out = strdup(buf);
          }
-         return 1;
+         return FAILURE;
       }
       webui_music_send_state(conn, state);
       webui_music_broadcast_queue_state(uq, conn);
@@ -594,7 +598,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
          snprintf(buf, sizeof(buf), "Removed track %d.", index0 + 1);
          *result_out = result_with_footer(state, buf);
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "stop") == 0) {
       webui_music_stop_streaming(state);
@@ -612,7 +616,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (result_out) {
          *result_out = result_with_footer(state, "Music playback stopped");
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "pause") == 0) {
       pthread_mutex_lock(&state->state_mutex);
@@ -623,7 +627,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (result_out) {
          *result_out = result_with_footer(state, "Music paused");
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "resume") == 0) {
       pthread_mutex_lock(&state->state_mutex);
@@ -634,7 +638,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (result_out) {
          *result_out = result_with_footer(state, "Music resumed");
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "next") == 0) {
       user_music_queue_t *uq = state->shared_queue;
@@ -683,7 +687,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
             *result_out = strdup("Already at end of queue");
          }
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "previous") == 0) {
       user_music_queue_t *uq = state->shared_queue;
@@ -733,7 +737,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
             *result_out = strdup("Already at start of queue");
          }
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "shuffle") == 0) {
       user_music_queue_t *uq = state->shared_queue;
@@ -759,7 +763,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
                      cur ? "on" : "off");
             *result_out = strdup(buf);
          }
-         return 0;
+         return SUCCESS;
       }
 
       pthread_mutex_lock(&uq->queue_mutex);
@@ -774,7 +778,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (result_out) {
          *result_out = result_with_footer(state, set_on ? "Shuffle enabled" : "Shuffle disabled");
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "repeat") == 0) {
       user_music_queue_t *uq = state->shared_queue;
@@ -804,7 +808,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
             snprintf(buf, sizeof(buf), "Repeat is %s. Use 'repeat none|all|one' to set it.", cs);
             *result_out = strdup(buf);
          }
-         return 0;
+         return SUCCESS;
       }
 
       pthread_mutex_lock(&uq->queue_mutex);
@@ -822,7 +826,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       if (result_out) {
          *result_out = result_with_footer(state, ms);
       }
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "list") == 0) {
       user_music_queue_t *uq = state->shared_queue;
@@ -832,22 +836,27 @@ int webui_music_execute_tool(ws_connection_t *conn,
          if (result_out) {
             *result_out = strdup("No music in queue");
          }
-         return 0;
+         return SUCCESS;
       }
+
+      /* Snapshot the per-session current index under state_mutex (nested in
+       * queue_mutex — correct order) rather than reading it racily. */
+      pthread_mutex_lock(&state->state_mutex);
+      int cur_idx = state->queue_index;
+      pthread_mutex_unlock(&state->state_mutex);
 
       /* Build queue list — strbuf so a long queue cannot silently truncate
        * mid-row the way the prior fixed sizing did when artist/title strings
        * exceeded the per-row estimate. */
       strbuf_t sb;
       strbuf_init(&sb, 1024 + (size_t)uq->queue_length * 64);
-      strbuf_appendf(&sb, "Queue (%d tracks, currently #%d):\n", uq->queue_length,
-                     state->queue_index + 1);
+      strbuf_appendf(&sb, "Queue (%d tracks, currently #%d):\n", uq->queue_length, cur_idx + 1);
       const char *rep_s = uq->repeat_mode == MUSIC_REPEAT_ALL
                               ? "all"
                               : (uq->repeat_mode == MUSIC_REPEAT_ONE ? "one" : "none");
       strbuf_appendf(&sb, "Shuffle: %s | Repeat: %s\n", uq->shuffle ? "on" : "off", rep_s);
       for (int i = 0; i < uq->queue_length; i++) {
-         const char *marker = (i == state->queue_index) ? "\xE2\x96\xB6 " : "  ";
+         const char *marker = (i == cur_idx) ? "\xE2\x96\xB6 " : "  ";
          if (strbuf_appendf(&sb, "%s%d. %s - %s\n", marker, i + 1,
                             uq->queue[i].artist[0] ? uq->queue[i].artist : "Unknown",
                             uq->queue[i].title[0] ? uq->queue[i].title : "Unknown") < 0)
@@ -862,7 +871,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
          strbuf_free(&sb);
       }
       pthread_mutex_unlock(&uq->queue_mutex);
-      return 0;
+      return SUCCESS;
 
    } else if (strcmp(action, "search") == 0 || strcmp(action, "library") == 0) {
       /* Batch search: items[] of queries → grouped results WITH paths so the LLM
@@ -903,7 +912,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
          } else {
             strbuf_free(&sb);
          }
-         return 0;
+         return SUCCESS;
       }
 
       /* Single-query search/library — let music_tool's local handler answer. */
@@ -918,7 +927,7 @@ int webui_music_execute_tool(ws_connection_t *conn,
       snprintf(buf, sizeof(buf), "Unknown action: %s", action);
       *result_out = strdup(buf);
    }
-   return 1;
+   return FAILURE;
 }
 
 /* =============================================================================

@@ -552,6 +552,16 @@ static void test_extract_custom_tail_reads_to_end(void) {
    TEST_ASSERT_EQUAL_STRING("[\"Song ", trunc);
 }
 
+static void test_extract_zero_out_len_safe(void) {
+   /* out_len == 0 must be rejected before any length math (a SIZE_MAX underflow
+    * would otherwise drive a huge memcpy). */
+   const char *encoded = "base::items::[\"a\"]";
+   char dummy[1] = { 'x' };
+   TEST_ASSERT_FALSE(tool_param_extract_custom_tail(encoded, "items", dummy, 0));
+   TEST_ASSERT_FALSE(tool_param_extract_custom(encoded, "items", dummy, 0));
+   TEST_ASSERT_EQUAL_CHAR('x', dummy[0]); /* untouched */
+}
+
 static void test_extract_base_and_custom_coexist(void) {
    /* base value + a scalar custom before the terminal array. */
    const char *encoded = "queenquery::limit::5::items::[\"a\",\"b\"]";
@@ -612,6 +622,7 @@ int main(void) {
    RUN_TEST(test_array_param_must_be_last);
    RUN_TEST(test_schema_scalar_has_no_items);
    RUN_TEST(test_extract_custom_tail_reads_to_end);
+   RUN_TEST(test_extract_zero_out_len_safe);
    RUN_TEST(test_extract_base_and_custom_coexist);
 
    return UNITY_END();
