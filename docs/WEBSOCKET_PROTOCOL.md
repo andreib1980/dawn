@@ -810,6 +810,50 @@ Application-level keepalive (every 10 seconds).
 ```
 Response: `satellite_pong`
 
+#### OTA (over-the-air updates)
+Server→satellite firmware updates. Control plane is on this WebSocket; the image
+itself is pulled over HTTPS. The signing key never touches the daemon — devices
+verify a signed manifest against a baked-in public keyring. See `docs/OTA_DESIGN.md`.
+
+The `satellite_register` payload advertises OTA support + the running version:
+```json
+{ "firmware_version": "2.0.0", "capabilities": { "ota": true } }
+```
+The daemon never sends `ota_offer` to a device that didn't advertise `ota: true`.
+
+**`ota_offer`** (server → device) — sent when an operator pushes an update. The
+manifest + signature are inlined (tiny); only the image is fetched over HTTPS.
+```json
+{
+   "type": "ota_offer",
+   "payload": {
+      "platform": "rpi", "version": "2.1.0",
+      "url_path": "/api/ota/rpi/2.1.0/image",
+      "token": "<one-time hex>", "image_size": 756696,
+      "sha256": "<hex>", "manifest": "<hex>", "sig": "<hex>",
+      "allow_downgrade": false
+   }
+}
+```
+Device flow: verify `sig` over `manifest` (Ed25519, baked keyring) → check
+`abi_tag` in the manifest matches its OS/ABI → `GET <url_path>?uuid=<uuid>&token=<token>`
+(TLS required; token is one-time, uuid+version-bound) → verify image SHA-256 →
+apply → reboot → reconnect reporting the new `firmware_version` (the daemon then
+commits success — a device never self-declares success).
+
+**`ota_ack`** / **`ota_reject`** (device → server):
+```json
+{"type": "ota_ack", "payload": {"version": "2.1.0"}}
+{"type": "ota_reject", "payload": {"reason": "abi_mismatch"}}
+```
+
+**`ota_status`** (device → server) — progress; `state` ∈ downloading | verifying |
+applying | rebooting | failed:
+```json
+{"type": "ota_status", "payload": {"state": "downloading", "error": null}}
+```
+A `failed` status releases the server-side single-flight lock so a re-push is allowed.
+
 ---
 
 ## Server → Client Messages
