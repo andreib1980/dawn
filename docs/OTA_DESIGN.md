@@ -7,12 +7,13 @@ verify-before-parse, offline signing, ESP32 reboot-to-clean OTA, TOCTOU, server-
 
 ---
 
-## Implementation status (2026-06-08)
+## Implementation status (2026-06-09)
 
-Committed on branch `satellite_ota` (4 commits: `7847a3b` Phase 1, `b0cfc8d` satellite build
-tooling, `9577b14` manifest core + keytool, `68395af` Phase 2 server engine):
+Committed on branch `satellite_ota` (`a38c901` Phase 1, `9593abc` satellite build tooling,
+`c266b75` manifest core + keytool, `1b3e45e` Phase 2 server engine, `5ab603c` status/WS docs,
+`198dc08` #11 operator surfaces):
 
-**DONE — server side, fully tested (CI 69/69):**
+**DONE — server side, fully tested (CI 69/69) + live-verified on real hardware:**
 - **Phase 1** — `firmware_version` + `ota` capability reported at registration; `ota_device_state`
   table (auth_db v59) + `src/core/ota_db.c`; WebUI admin shows per-device firmware. Validated on
   real hardware (dawn-kitchen Tier 1, Office Speaker Tier 2 both report 2.0.0).
@@ -36,8 +37,11 @@ tooling, `9577b14` manifest core + keytool, `68395af` Phase 2 server engine):
   `dawn-admin/socket_client.{c,h}`). (b) **WebUI admin panel**: per-online-device version picker +
   allow-downgrade + Push button in `www/js/admin/satellites.js` (fetches `ota_list`, sends
   `ota_push`, renders in-flight `ota_state`), dispatch in `dawn.js`, styles in
-  `www/css/components/satellites.css`. Both build clean, CI 69/69. *Live round-trip pending a daemon
-  restart* (the running daemon predates the 0xC0 dispatch).
+  `www/css/components/satellites.css`. Four-agent review applied (escapeAttr XSS fix incl. the
+  pre-existing delete-button site; clamped snprintf accumulation; mobile touch targets; keep-in-sync
+  note on the cross-layer forward decl). **Live-verified 2026-06-09** end-to-end on real hardware:
+  CLI `ota list`/`push` + all error paths, token mint (ttl=120s), offer delivery over dawn-kitchen's
+  WS, single-flight lock, and the WebUI panel (gating, confirm, push, busy-state).
 
 **REMAINING:**
 - **Phase 3 (RPi apply)** — install-path migration R1 (§7), device-side `abi_tag` check, libcurl
