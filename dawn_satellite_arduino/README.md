@@ -36,7 +36,10 @@ are played back through an I2S speaker.
 2. **Tools** > **Board** > **Boards Manager** — search **esp32** by Espressif, install
 3. Select board: **Adafruit Feather ESP32-S3 TFT**
 4. Under **Tools**, set:
-   - **PSRAM**: `OPI PSRAM`
+   - **PSRAM**: `QSPI PSRAM` — this board is an ESP32-S3R2 (2 MB **QSPI** PSRAM),
+     the board's default. Do **not** pick `OPI PSRAM`: OPI mode maps zero PSRAM on
+     this chip (`psramFound()` stays true but `getPsramSize()` is 0, so the audio
+     buffers fail to allocate at boot).
    - **Flash Size**: `4MB (32Mb)`
    - **Partition Scheme**: `Minimal SPIFFS (1.9MB APP with OTA)` — dual-app layout
      required for over-the-air updates (see **OTA bootstrap** below). The
@@ -88,6 +91,43 @@ Then edit `arduino_secrets.h`:
 ```
 
 **Note:** `arduino_secrets.h` is gitignored to keep credentials out of version control.
+
+## Over-the-air updates (OTA)
+
+After the one-time USB bootstrap (above), new firmware arrives over the air. The device verifies an
+Ed25519-signed manifest, reboots into a minimal WiFi-only path that streams the image into the inactive
+app slot, SHA-256-checks it, switches the boot partition, and reboots; if the new image can't re-register
+within a few boots, an NVS guard reverts to the old slot. See `docs/OTA_DESIGN.md` §8.
+
+**Two one-time build prerequisites** (both are required to compile — like `arduino_secrets.h`):
+
+1. **Vendor the Ed25519 verify library.** Download the canonical, public-domain **TweetNaCl** two-file
+   build — `tweetnacl.c` + `tweetnacl.h` — from the authoritative source **<https://tweetnacl.cr.yp.to/>**
+   and drop them in this directory **unmodified**, then commit them (a normal vendored dependency, not a
+   secret). The sketch declares the real exported symbol `crypto_sign_ed25519_tweet_open` itself (the name
+   `crypto_sign_open` is a header macro, not a link symbol) and supplies the `randombytes()` stub, so do
+   **not** edit the files or `#include "tweetnacl.h"` from the sketch.
+2. **Provision your verify key.** `cp ota_pubkey.h.example ota_pubkey.h` and paste your operator Ed25519
+   **public** key hex (the prebuilt sketch ships unsigned — you bake your own key, so you sign releases for
+   your own fleet). `ota_pubkey.h` is gitignored.
+
+**Publishing an update** (on the daemon host):
+
+1. Bump `#define FIRMWARE_VERSION` in `satellite_version.h`. **This is mandatory** — unlike the Tier-1 RPi build there
+   is no marker-check gate, so an unbumped version will flash and run but the server will never finalize
+   the push as `success` (it commits only when the device re-registers reporting the pushed version).
+2. Build the `.bin`, either way:
+   - **Arduino IDE:** **Sketch** > **Export Compiled Binary** → `…/build/…/dawn_satellite_arduino.ino.bin`.
+   - **Command line:** `./build-esp32.sh` (uses `arduino-cli` with the right FQBN/PSRAM/partition options
+     and writes the same `build/<fqbn>/dawn_satellite_arduino.ino.bin`). The repo also compiles this sketch
+     in CI as a gate via `build-esp32.sh --stub` (placeholder headers, compile-only) — see `ci.yml`.
+3. Sign + stage + push:
+   ```bash
+   sudo ./dawn_satellite/ota-release.sh --version X.Y.Z --platform esp32 --tier 2 \
+        --abi-tag esp32s3 --image <path-to>.ino.bin --push <device-uuid>
+   ```
+   (`esp32s3` must match the `abi_tag` the device checks; `ota-release.sh` already accepts `--platform
+   esp32`.) Restart the daemon if it hasn't scanned the new release dir.
 
 ## Upload & Run
 

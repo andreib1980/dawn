@@ -24,6 +24,9 @@ dawn_satellite_arduino/ca_cert.h
 # Arduino secrets (WiFi credentials, server IP)
 dawn_satellite_arduino/arduino_secrets.h
 
+# OTA verify key (operator's Ed25519 public key, baked per-deployment)
+dawn_satellite_arduino/ota_pubkey.h
+
 # Downloaded models (not shipped in repo)
 models/embeddings/
 models/whisper.cpp

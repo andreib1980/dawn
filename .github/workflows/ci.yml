@@ -134,3 +134,43 @@ jobs:
 
       - name: Build
         run: make -C dawn_satellite/build-ci -j"$(nproc)"
+
+  # -------------------------------------------------------------------------
+  # Job 5: ESP32 satellite compile gate (~2-3 min cold)
+  # Tier-2 Arduino firmware — catches build breakage on every push, mirroring
+  # the satellite-build gate for Tier 1.  NOT a release-artifact producer: the
+  # sketch bakes WiFi creds + server IP + CA cert + verify key at compile time,
+  # so a generic .bin isn't flashable.  build-esp32.sh --stub drops in
+  # placeholder headers purely so a fresh checkout compiles; the FQBN + library
+  # list live in that one script (shared with local builds).  Real release .bin
+  # is operator-built with real headers (see dawn_satellite_arduino/README.md).
+  # -------------------------------------------------------------------------
+  esp32-build:
+    needs: format-check
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install arduino-cli (pinned version + sha256)
+        run: |
+          ver=1.5.1
+          sha=28a8e119c498a25607821c36cb2dc49e8463941b261a0d99091baa7bc692dd2b
+          curl -fsSL -o /tmp/arduino-cli.tar.gz \
+            "https://github.com/arduino/arduino-cli/releases/download/v${ver}/arduino-cli_${ver}_Linux_64bit.tar.gz"
+          echo "${sha}  /tmp/arduino-cli.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/arduino-cli.tar.gz -C /usr/local/bin arduino-cli
+
+      # Cache the esp32 core + xtensa toolchain + libraries (~200 MB download).
+      # Keyed on build-esp32.sh, which holds the core/lib/FQBN list — bump that
+      # script and the cache re-populates.  Cold ~2-3 min, warm ~20-40 s.
+      - name: Cache ~/.arduino15
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.arduino15
+          key: esp32-arduino15-${{ runner.os }}-${{ hashFiles('dawn_satellite_arduino/build-esp32.sh') }}
+          restore-keys: |
+            esp32-arduino15-${{ runner.os }}-
+
+      - name: Compile (stub headers — gate only)
+        run: bash dawn_satellite_arduino/build-esp32.sh --stub

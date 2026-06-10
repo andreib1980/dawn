@@ -287,13 +287,28 @@ static int find_free_slot(void) {
 }
 
 static session_t *find_session_by_uuid_unlocked(const char *uuid) {
+   /* Prefer a LIVE (connected) session.  During reconnect churn (e.g. an OTA that
+    * reboots the device several times) a stale, disconnected session for the same
+    * UUID can linger at a lower slot index than the freshly-reconnected live one.
+    * Returning the stale one makes session_find_by_uuid() report the device as
+    * offline (its disconnected check trips) even though it is connected — which
+    * surfaced as a spurious "Device is offline" on `ota push`.  Fall back to the
+    * first disconnected match only if no live session exists, since the reconnect
+    * path (create_dap2_session) relies on finding the disconnected session to
+    * reclaim it. */
+   session_t *fallback = NULL;
    for (int i = 0; i < MAX_SESSIONS; i++) {
       if (sessions[i] != NULL && sessions[i]->type == SESSION_TYPE_DAP2 &&
           strcmp(sessions[i]->identity.uuid, uuid) == 0) {
-         return sessions[i];
+         if (!sessions[i]->disconnected) {
+            return sessions[i];
+         }
+         if (!fallback) {
+            fallback = sessions[i];
+         }
       }
    }
-   return NULL;
+   return fallback;
 }
 
 static session_t *find_session_by_ip_unlocked(const char *ip) {
