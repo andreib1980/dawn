@@ -73,6 +73,14 @@ if(ENABLE_DAP2)
     pkg_check_modules(JSONC REQUIRED json-c)
     include_directories(${JSONC_INCLUDE_DIRS})
 
+    # OTA device-apply deps: libcurl (signed-image HTTPS pull) + libsodium
+    # (Ed25519 verify, via the shared core/ota_manifest.c).  Match the Pi's
+    # libcurl TLS backend in the build container.
+    pkg_check_modules(CURL REQUIRED libcurl)
+    include_directories(${CURL_INCLUDE_DIRS})
+    pkg_check_modules(SODIUM REQUIRED libsodium)
+    include_directories(${SODIUM_INCLUDE_DIRS})
+
     add_definitions(-DENABLE_DAP2)
     message(STATUS "Protocol: DAP2 (WebSocket, Tier 1)")
 
@@ -146,6 +154,13 @@ if(ENABLE_DAP2)
     # Voice processing requires DAP2 (text-based protocol)
     list(APPEND SATELLITE_SOURCES src/voice_processing.c)
     list(APPEND SATELLITE_SOURCES src/tts_playback_queue.c)
+    # OTA device-apply: shared manifest core + marker codec + apply module
+    # (ota_apply_decide.c = the pure, host-tested offer-decision half).
+    list(APPEND SATELLITE_SOURCES
+        src/ota_apply.c
+        src/ota_apply_decide.c
+        src/ota_marker.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/ota_manifest.c)
 else()
     list(APPEND SATELLITE_SOURCES src/dap_client.c)
 endif()
@@ -313,10 +328,19 @@ if(GPIOD_FOUND)
 endif()
 
 if(ENABLE_DAP2)
-    target_link_libraries(dawn_satellite ${LWS_LIBRARIES} ${JSONC_LIBRARIES})
+    target_link_libraries(dawn_satellite ${LWS_LIBRARIES} ${JSONC_LIBRARIES}
+                          ${CURL_LIBRARIES} ${SODIUM_LIBRARIES})
     if(OPUS_FOUND)
         target_link_libraries(dawn_satellite ${OPUS_LIBRARIES})
     endif()
+
+    # Frozen OTA rollback agent (ExecStart): a tiny, libc-only helper that runs
+    # before — and independent of — the satellite binary, so it can roll back
+    # even a dead-on-arrival image.  No curl/sodium/SDL: shares only the marker
+    # codec.  NEVER OTA-updated.  See docs/OTA_DESIGN.md §7.
+    add_executable(dawn-satellite-launch src/ota_launch.c src/ota_launch_core.c src/ota_marker.c)
+    target_include_directories(dawn-satellite-launch PRIVATE include ../include)
+    install(TARGETS dawn-satellite-launch DESTINATION bin)
 endif()
 
 if(ENABLE_SDL_UI)

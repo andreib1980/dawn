@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjson-c-dev \
         libasound2-dev \
         libopus-dev \
+        libcurl4-openssl-dev \
+        libsodium-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # HOME for tool state when the container runs as the host uid (-u).

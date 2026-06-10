@@ -17,6 +17,11 @@
  * the project author(s).
  *
  * OTA signed-manifest core — pure, libsodium-only.  See ota_manifest.h.
+ *
+ * SATELLITE-SAFE CONTRACT: this file is compiled into BOTH the daemon and the
+ * dawn_satellite Tier-1 binary (via dawn_satellite/CMakeLists.txt).  It MUST
+ * stay free of daemon globals (g_config/g_secrets), auth_db, file I/O, and any
+ * non-libsodium/libc dependency, or the satellite build breaks.  Keep it pure.
  */
 
 #include "core/ota_manifest.h"

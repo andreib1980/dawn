@@ -4,6 +4,12 @@ Documentation=https://github.com/The-OASIS-Project/dawn
 After=network-online.target sound.target
 Wants=network-online.target
 
+# Start-rate limit MUST live in [Unit] (systemd ignores it in [Service]).
+# The OTA launcher's rollback boot-count threshold (3) sits below this burst (5)
+# so a crash-looping update rolls back before systemd gives up restarting.
+StartLimitIntervalSec=5min
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=dawn
@@ -13,10 +19,13 @@ Group=dawn
 WorkingDirectory=/var/lib/dawn-satellite
 
 # Environment
-EnvironmentFile=/usr/local/etc/dawn-satellite/dawn-satellite.conf
+EnvironmentFile=/etc/dawn-satellite/dawn-satellite.conf
 
-# Startup
-ExecStart=/usr/local/bin/dawn_satellite --config /usr/local/etc/dawn-satellite/satellite.toml
+# Startup — run the OTA launcher (rollback agent), NOT the binary directly.
+# The launcher is package-owned + root-owned at /usr/bin (read-only, never
+# OTA-updated); it decides commit/count/rollback, then execs the OTA-updatable
+# binary from the dawn-owned writable dir /var/lib/dawn-satellite/bin.
+ExecStart=/usr/bin/dawn-satellite-launch --config /etc/dawn-satellite/satellite.toml
 
 # Logging
 StandardOutput=append:/var/log/dawn-satellite/satellite.log
@@ -25,15 +34,15 @@ StandardError=append:/var/log/dawn-satellite/satellite.log
 # Restart policy - satellite should always reconnect
 Restart=always
 RestartSec=5s
-StartLimitInterval=5min
-StartLimitBurst=5
 
 # Supplementary groups for hardware access
 SupplementaryGroups=audio video render input
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/var/lib/dawn-satellite /var/log/dawn-satellite /usr/local/etc/dawn-satellite
+# /etc/dawn-satellite is writable (satellite persists UI prefs to satellite.toml).
+# /etc/dawn (CA + OTA keyring) is deliberately NOT writable — root-owned trust anchor.
+ReadWritePaths=/var/lib/dawn-satellite /var/log/dawn-satellite /etc/dawn-satellite
 NoNewPrivileges=true
 ProtectHome=true
 PrivateTmp=true

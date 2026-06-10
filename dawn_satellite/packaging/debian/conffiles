@@ -1,0 +1,4 @@
+/etc/dawn-satellite/satellite.toml
+/etc/dawn-satellite/dawn-satellite.conf
+/etc/ld.so.conf.d/dawn-satellite.conf
+/etc/logrotate.d/dawn-satellite

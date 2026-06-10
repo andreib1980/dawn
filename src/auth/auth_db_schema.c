@@ -276,6 +276,8 @@ static const char *SCHEMA_SQL =
     "   uuid TEXT PRIMARY KEY,"
     "   current_version TEXT NOT NULL DEFAULT '',"
     "   target_version TEXT,"
+    "   target_platform TEXT," /* v60: platform the in-flight offer is for (binds the download
+                                  token) */
     "   state TEXT NOT NULL DEFAULT 'idle',"
     "   last_error TEXT,"
     "   token TEXT,"
@@ -3118,6 +3120,29 @@ int auth_db_create_schema(const char *db_path) {
       }
    }
 
+   /* v60 — ota_device_state.target_platform.  Binds the one-time download token to
+    * the platform the offer was for, so a device offered rpi/X cannot consume that
+    * token to fetch esp32/X.  Nullable (NULL = no in-flight offer), no backfill;
+    * cleared alongside target_version.  Single nullable ADD COLUMN — O(1).  Runs on
+    * any DB that already has the v59 table (which v59's migration just created for
+    * pre-59 DBs, so this ALTER follows it). */
+   bool v60_ok = (current_version >= 60) || (current_version == 0);
+   if (current_version > 0 && current_version < 60) {
+      rc = sqlite3_exec(s_db.db, "ALTER TABLE ota_device_state ADD COLUMN target_platform TEXT",
+                        NULL, NULL, &errmsg);
+      if (rc == SQLITE_OK) {
+         v60_ok = true;
+         OLOG_INFO("auth_db: v60 added ota_device_state.target_platform");
+      } else if (errmsg && strstr(errmsg, "duplicate column")) {
+         v60_ok = true;
+      } else {
+         OLOG_ERROR("auth_db: v60 ota_device_state.target_platform migration failed: %s",
+                    errmsg ? errmsg : "unknown");
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -3271,7 +3296,7 @@ int auth_db_create_schema(const char *db_path) {
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
-                              v55_ok && v56_ok && v57_ok && v58_ok && v59_ok;
+                              v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

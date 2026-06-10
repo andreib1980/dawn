@@ -1,0 +1,98 @@
+#!/bin/sh
+#
+# dawn-satellite-fetch-models — download a chosen ML model set into
+# /var/lib/dawn-satellite/models.  Run by the operator (root), NOT by the .deb
+# maintainer scripts (Debian policy: no network in postinst).  This is the
+# "choice + licensing" surface: each set carries a license note you must accept.
+#
+# Manifest-driven so models can change without editing this script.  For a set
+# NAME, it fetches:
+#     $MODELS_BASE_URL/NAME.manifest    — lines: "<dest-relpath>  <sha256>  <url>"
+#                                          ('#' comment lines allowed; the first
+#                                          comment block is shown as the license)
+# and downloads + sha256-verifies each entry into the models dir.
+#
+#   dawn-satellite-fetch-models --list            # list available sets
+#   dawn-satellite-fetch-models <set> [--accept]  # fetch a set (‑‑accept skips the prompt)
+#
+# Override the source with:  MODELS_BASE_URL=https://… dawn-satellite-fetch-models …
+set -eu
+
+MODELS_DIR="${MODELS_DIR:-/var/lib/dawn-satellite/models}"
+MODELS_BASE_URL="${MODELS_BASE_URL:-https://github.com/The-OASIS-Project/dawn/releases/download/models}"
+SERVICE_USER="${SERVICE_USER:-dawn}"
+ACCEPT=0
+SET=""
+
+die() {
+   echo "fetch-models: $*" >&2
+   exit 1
+}
+
+for arg in "$@"; do
+   case "$arg" in
+      --accept) ACCEPT=1 ;;
+      --list) SET="--list" ;;
+      -h | --help)
+         sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+         exit 0
+         ;;
+      -*) die "unknown option: $arg" ;;
+      *) SET="$arg" ;;
+   esac
+done
+
+command -v curl >/dev/null 2>&1 || die "curl is required"
+[ "$(id -u)" -eq 0 ] || die "must run as root (writes $MODELS_DIR)"
+
+fetch() { curl -fsSL --proto '=https' "$1"; } # https-only
+
+if [ -z "$SET" ]; then
+   die "usage: dawn-satellite-fetch-models <set> [--accept] | --list"
+fi
+
+if [ "$SET" = "--list" ]; then
+   echo "Available model sets (from $MODELS_BASE_URL/index.txt):"
+   fetch "$MODELS_BASE_URL/index.txt" || die "could not fetch the set index"
+   exit 0
+fi
+
+manifest="$(fetch "$MODELS_BASE_URL/$SET.manifest")" || die "no manifest for set '$SET' (try --list)"
+
+# Show the license/notice block (leading '#' comment lines) and gate on it.
+echo "=== Model set: $SET ==="
+printf '%s\n' "$manifest" | sed -n 's/^# \{0,1\}//p'
+echo "==================================================================="
+if [ "$ACCEPT" -ne 1 ]; then
+   printf "Download this set and accept the license(s) above? [y/N] "
+   read -r reply
+   case "$reply" in
+      y | Y | yes | YES) ;;
+      *) die "aborted (no models downloaded)" ;;
+   esac
+fi
+
+mkdir -p "$MODELS_DIR"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/dawn-models.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+printf '%s\n' "$manifest" | while IFS=' 	' read -r dest sha url rest; do
+   [ -n "${dest:-}" ] || continue
+   case "$dest" in '#'*) continue ;; esac
+   [ -n "${sha:-}" ] && [ -n "${url:-}" ] || die "malformed manifest line: $dest"
+   case "$dest" in *..*) die "manifest dest escapes models dir: $dest" ;; esac
+
+   echo "  → $dest"
+   out="$tmp/$(basename "$dest")"
+   curl -fL --proto '=https' -o "$out" "$url" || die "download failed: $url"
+   if [ "$sha" != "SKIP" ]; then
+      echo "$sha  $out" | sha256sum -c - >/dev/null 2>&1 || die "sha256 mismatch for $dest"
+   fi
+   target="$MODELS_DIR/$dest"
+   mkdir -p "$(dirname "$target")"
+   install -m 644 "$out" "$target"
+done
+
+chown -R "$SERVICE_USER:$SERVICE_USER" "$MODELS_DIR" 2>/dev/null || true
+echo "Done.  Models in $MODELS_DIR.  Enable voice in /etc/dawn-satellite/satellite.toml and:"
+echo "  sudo systemctl restart dawn-satellite"

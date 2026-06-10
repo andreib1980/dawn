@@ -41,6 +41,73 @@ Then give `/tmp/ca.crt` at the prompt. The installer stages it at `/etc/dawn/ca.
 
 For a manual step-by-step install (no installer script), jump to [Building for Raspberry Pi](#building-for-raspberry-pi). For the detailed build/config reference, read on.
 
+## Installing from a .deb (prebuilt)
+
+A prebuilt Tier-1 package is published on the GitHub release page
+(`dawn-satellite_<version>_arm64.deb`, Debian trixie / Raspberry Pi OS 64-bit):
+
+```bash
+sudo apt install ./dawn-satellite_2.1.0_arm64.deb   # pulls runtime Depends
+```
+
+This installs everything except the ML models (fetched separately — see below) and lays down the
+**Debian-correct layout**:
+
+| Path | What |
+|---|---|
+| `/usr/bin/dawn-satellite-launch` | frozen OTA rollback launcher (the systemd `ExecStart`; root-owned, never OTA-updated) |
+| `/var/lib/dawn-satellite/bin/dawn_satellite` | the binary (dawn-owned; **this** is what OTA swaps) |
+| `/usr/lib/dawn-satellite/*.so` | bundled non-apt libs (whisper/ggml/onnxruntime/piper/espeak-ng) |
+| `/etc/dawn-satellite/satellite.toml` | config (edit server URL, ASR/TTS, etc.) |
+| `/etc/dawn/{ca.crt,ota_pubkey}` | daemon CA + OTA verify key (root-owned, you provision these) |
+| `/var/lib/dawn-satellite/models/` | ML models (see *Fetching models*) |
+
+After install the service starts in text-only mode. To finish setup:
+
+```bash
+# 1. daemon CA (if your daemon uses SSL) + server URL
+sudo cp /tmp/ca.crt /etc/dawn/ca.crt && sudo chown root:root /etc/dawn/ca.crt
+sudoedit /etc/dawn-satellite/satellite.toml          # set server host/port, ca_cert_path
+# 2. OTA verify key (see "Over-the-air updates")  3. models (see below)
+sudo systemctl restart dawn-satellite
+```
+
+The prebuilt binary ships **unsigned** — OTA trust is rooted in *your* key, not the publisher's
+(see below). Verify the download against the release `SHA256SUMS` before installing.
+
+### Fetching models
+
+```bash
+sudo dawn-satellite-fetch-models --list          # show available sets + licenses
+sudo dawn-satellite-fetch-models <set>           # download + verify into /var/lib/dawn-satellite/models
+```
+
+Models are fetched (not bundled) so the package stays small and you choose the set + accept its
+license. Then enable voice in `satellite.toml` and `systemctl restart dawn-satellite`.
+
+## Over-the-air updates (OTA)
+
+The satellite applies signed binary updates pushed from the daemon (`dawn-admin ota push` or the
+WebUI satellite panel). The control plane runs over the existing DAP2 WebSocket; the binary is
+pulled over HTTPS, **Ed25519-verified against a keyring you provision**, atomically swapped, and the
+device self-restarts. A frozen launcher (`/usr/bin/dawn-satellite-launch`) does boot-count rollback —
+including for a binary that won't even launch — so a bad update can't brick the device.
+
+**One-time per fleet — provision your verify key (offline signing):**
+
+```bash
+./build-debug/ota-keytool keygen --out-dir /tmp/otakeys     # private key stays OFFLINE
+sudo install -m644 -o root -g root /tmp/otakeys/ota_signing.pub /etc/dawn/ota_pubkey
+sudo systemctl restart dawn-satellite
+```
+
+`/etc/dawn/ota_pubkey` is the root-owned, read-only **trust anchor** (the `dawn` service can read but
+not modify it). **Without it, the satellite refuses all OTA updates** (fail-closed). To roll out an
+update: build → `ota-keytool sign --image <binary> --version X.Y.Z --platform rpi --tier 1 --abi-tag
+debian-trixie-aarch64 --sk /tmp/otakeys/ota_signing.key` → place in the daemon's `[ota] release_dir`
+→ `dawn-admin ota push --uuid <uuid> --version X.Y.Z`. **Sign production releases with a non-empty
+`--min-version`** (the anti-rollback floor). See [OTA_DESIGN.md](OTA_DESIGN.md).
+
 ## Overview
 
 DAP2 enables satellite devices to extend DAWN's voice assistant capabilities to multiple rooms. All satellites use **WebSocket** on the same port as the WebUI (default 3000). This document covers **Tier 1** (Raspberry Pi) satellites, which handle ASR/TTS locally and send only text to the daemon. For the complete wire protocol reference (all message types, payloads, and binary framing), see [WEBSOCKET_PROTOCOL.md](WEBSOCKET_PROTOCOL.md).
@@ -151,7 +218,9 @@ The satellite searches for configuration in this order:
 2. `/etc/dawn/satellite.toml` (system-wide)
 3. `~/.config/dawn/satellite.toml` (user-specific)
 
-Use `--config /path/to/file.toml` to specify explicitly.
+Use `--config /path/to/file.toml` to specify explicitly. The systemd service (both the `.deb` and
+`install.sh`) passes `--config /etc/dawn-satellite/satellite.toml` — that is the canonical config for
+a deployed satellite; the search order above applies only to ad-hoc manual runs.
 
 ### Configuration Reference
 

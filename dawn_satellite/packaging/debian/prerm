@@ -1,0 +1,14 @@
+#!/bin/sh
+# dawn-satellite prerm — stop the service before files are removed/replaced.
+set -e
+
+case "$1" in
+   remove | upgrade | deconfigure)
+      if [ -d /run/systemd/system ]; then
+         systemctl stop dawn-satellite.service || true
+      fi
+      ;;
+   failed-upgrade) ;;
+esac
+
+exit 0

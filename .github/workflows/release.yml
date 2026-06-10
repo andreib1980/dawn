@@ -1,0 +1,71 @@
+# Release pipeline — builds the Tier-1 (Raspberry Pi, Debian trixie arm64)
+# satellite binaries and publishes them to a GitHub Release.
+#
+# Why arm64-native: the satellite must link the Pi's runtime (libwebsockets
+# .so.19 / glibc); an x86 build won't load on the Pi.  We use a GitHub-hosted
+# arm64 runner so build-pi.sh runs natively (no qemu) in the trixie container.
+#
+# OTA model: these binaries ship UNSIGNED.  Each operator runs `ota-keytool
+# keygen`, provisions their own pubkey at /etc/dawn/ota_pubkey, and signs
+# releases for their own fleet.  The published SHA256SUMS is the publisher-
+# integrity check operators verify BEFORE re-signing.  See docs/OTA_DESIGN.md.
+#
+# Prerequisite: the base build image
+# ghcr.io/the-oasis-project/dawn-satellite-build:trixie-arm64 should be PUBLIC
+# on GHCR so build-pi.sh can pull it.  If absent, build-pi.sh falls back to
+# building it from Dockerfile.pibase (correct, but slow on a fresh runner).
+#
+# Server (daemon) binaries are intentionally NOT built here (Jetson/CUDA can't
+# build on hosted runners; x86 server-mode deferred) — daemon is a local build.
+
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # manual run builds + validates the pipeline; publishes only on a tag
+
+permissions:
+  contents: write # create the release + upload assets (tag runs only)
+
+jobs:
+  client-arm64:
+    name: Tier-1 satellite (trixie arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout (with submodules — whisper.cpp is needed for the full build)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Build satellite + launcher (full voice, trixie-arm64 container)
+        run: SAT_BUILD=full ./dawn_satellite/build-pi.sh
+
+      - name: Build .deb (Tier-1 installer)
+        run: |
+          set -euo pipefail
+          # Tag vX.Y.Z → deb version X.Y.Z; manual dispatch falls back to git describe.
+          ver="${GITHUB_REF_NAME#v}"
+          DEB_VERSION="$ver" ./dawn_satellite/package-deb.sh
+
+      - name: Stage artifacts + checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp dawn_satellite/build-pi/dawn_satellite          dist/
+          cp dawn_satellite/build-pi/dawn-satellite-launch    dist/
+          cp dawn_satellite/build-pi/dawn-satellite_*.deb     dist/
+          ( cd dist && sha256sum dawn_satellite dawn-satellite-launch dawn-satellite_*.deb > SHA256SUMS )
+          echo "--- release artifacts ---"; ls -l dist; cat dist/SHA256SUMS
+
+      - name: Publish to GitHub Release (tag pushes only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets="$(ls dist/dawn_satellite dist/dawn-satellite-launch dist/dawn-satellite_*.deb dist/SHA256SUMS)"
+          # Create the release if it doesn't exist yet; otherwise update its assets.
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes $assets \
+            || gh release upload "$GITHUB_REF_NAME" $assets --clobber

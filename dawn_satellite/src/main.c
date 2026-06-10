@@ -30,6 +30,7 @@
 #include "voice_processing.h"
 
 #ifdef ENABLE_DAP2
+#include "ota_apply.h" /* OTA device-apply rides the DAP2 transport (Tier-1) */
 #include "ws_client.h"
 #else
 #include "dap_client.h"
@@ -60,6 +61,13 @@
  * at registration for OTA fleet visibility). */
 #include "satellite_version.h"
 #define VERSION DAWN_SATELLITE_FIRMWARE_VERSION
+
+/* Emitted into .rodata even though nothing references it (the `used` attribute
+ * blocks dead-stripping) so `strings <binary>` yields the exact compiled firmware
+ * version.  ota-release.sh greps this marker to refuse signing under a --version
+ * that doesn't match the binary — preventing a device that would report one version
+ * while the daemon expects another.  Do NOT remove the `used` attribute. */
+__attribute__((used)) const char dawn_satellite_version_marker[] = DAWN_SAT_FW_VERSION_MARKER;
 
 /* Global context for signal handler */
 static satellite_ctx_t *g_ctx = NULL;
@@ -827,6 +835,11 @@ int main(int argc, char *argv[]) {
 
    /* Initialize logging (console mode, bridges DAWN_LOG_* from common library) */
    init_logging(NULL, LOG_TO_CONSOLE);
+
+#ifdef ENABLE_DAP2
+   /* Sweep any stale OTA staging files left by a prior interrupted apply. */
+   ota_apply_cleanup_tmp();
+#endif
 
    /* Initialize config with defaults */
    satellite_config_init_defaults(&config);

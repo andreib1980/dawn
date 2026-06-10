@@ -184,6 +184,27 @@ static void test_download_path_traversal(void) {
                                                                path, sizeof(path)));
 }
 
+/* A download token issued for one platform must not fetch another platform's
+ * image of the same version (the token is bound to target_platform). */
+static void test_download_platform_bound_token(void) {
+   /* Stage an esp32 release at the SAME version, so only the platform binding —
+    * not a missing path — can reject the cross-platform fetch. */
+   make_release("esp32", OTA_PLATFORM_ESP32, 2, "2.1.0");
+   TEST_ASSERT_EQUAL_INT(SUCCESS, ota_init()); /* rescan so esp32/2.1.0 is known */
+
+   ota_offer_t offer;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, ota_begin_push(UUID_A, OTA_PLATFORM_RPI, "2.1.0", false, &offer));
+
+   char path[1024];
+   /* rpi-issued token must NOT authorize the esp32 image of the same version. */
+   TEST_ASSERT_EQUAL_INT(FAILURE, ota_authorize_image_download(UUID_A, "esp32", "2.1.0",
+                                                               offer.token, path, sizeof(path)));
+   /* The token survived the cross-platform attempt and still works for rpi. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, ota_authorize_image_download(UUID_A, "rpi", "2.1.0", offer.token,
+                                                               path, sizeof(path)));
+   TEST_ASSERT_NOT_NULL(strstr(path, "/rpi/2.1.0/image"));
+}
+
 static void test_finalize_on_register(void) {
    ota_offer_t offer;
    TEST_ASSERT_EQUAL_INT(SUCCESS, ota_begin_push(UUID_A, OTA_PLATFORM_RPI, "2.1.0", false, &offer));
@@ -195,6 +216,28 @@ static void test_finalize_on_register(void) {
    TEST_ASSERT_EQUAL_STRING("2.1.0", st.target_version);
 
    /* Reported == target → server commits success and clears the target. */
+   ota_finalize_on_register(UUID_A, "2.1.0");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, ota_db_get(UUID_A, &st));
+   TEST_ASSERT_EQUAL_STRING("success", st.state);
+   TEST_ASSERT_EQUAL_STRING("", st.target_version);
+}
+
+/* A device that has started applying (state past 'offered') and reconnects on a
+ * non-target version resolves the otherwise-stuck row to 'failed' (target kept so
+ * a later success register can still finalize) instead of hanging in-flight. */
+static void test_finalize_mismatch_after_apply(void) {
+   ota_offer_t offer;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, ota_begin_push(UUID_A, OTA_PLATFORM_RPI, "2.1.0", false, &offer));
+   /* Device progressed past the offer (e.g. began downloading) then came back on
+    * the OLD version — a rollback or an unbumped firmware-version header. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, ota_report_status(UUID_A, OTA_STATE_DOWNLOADING, NULL));
+   ota_finalize_on_register(UUID_A, "2.0.0");
+   ota_device_state_t st;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, ota_db_get(UUID_A, &st));
+   TEST_ASSERT_EQUAL_STRING("failed", st.state);
+   TEST_ASSERT_EQUAL_STRING("2.1.0", st.target_version); /* kept for self-correct */
+
+   /* The real success register that follows still finalizes via the success path. */
    ota_finalize_on_register(UUID_A, "2.1.0");
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, ota_db_get(UUID_A, &st));
    TEST_ASSERT_EQUAL_STRING("success", st.state);
@@ -225,7 +268,9 @@ int main(void) {
    RUN_TEST(test_download_token_single_use);
    RUN_TEST(test_download_wrong_token);
    RUN_TEST(test_download_path_traversal);
+   RUN_TEST(test_download_platform_bound_token);
    RUN_TEST(test_finalize_on_register);
+   RUN_TEST(test_finalize_mismatch_after_apply);
    RUN_TEST(test_reconcile_stale);
    return UNITY_END();
 }

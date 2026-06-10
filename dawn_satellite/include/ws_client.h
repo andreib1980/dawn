@@ -251,6 +251,15 @@ bool ws_client_is_registered(ws_client_t *client);
 int ws_client_send_query(ws_client_t *client, const char *text);
 
 /**
+ * @brief OTA control sends (server-bound).  Build JSON + enqueue; call without
+ *        the client mutex held.  @return 0 on success, -1 on failure (matches
+ *        the local ws_client_send_* convention, not SUCCESS/FAILURE).
+ */
+int ws_client_send_ota_ack(ws_client_t *client);
+int ws_client_send_ota_reject(ws_client_t *client, const char *reason);
+int ws_client_send_ota_status(ws_client_t *client, const char *state, const char *detail);
+
+/**
  * @brief Set callback for streaming responses
  *
  * @param client Client context

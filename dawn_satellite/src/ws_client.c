@@ -32,6 +32,9 @@
 /* Shared logging (same format as daemon) */
 #include "logging.h"
 
+/* OTA device-apply (offer handling + status flush + health/commit signals) */
+#include "ota_apply.h"
+
 #ifdef HAVE_OPUS
 #include "music_playback.h"
 #endif
@@ -401,6 +404,9 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
             }
 
             OLOG_INFO("Registered successfully, session_id=%u", session_id);
+            /* Commit point for any pending OTA: a healthy registration with the
+             * new binary clears the rollback probation marker. */
+            ota_apply_mark_healthy();
          } else {
             struct json_object *msg_obj;
             const char *err_msg = "Unknown error";
@@ -604,6 +610,21 @@ static void handle_message(ws_client_t *client, const char *msg, size_t len) {
             pthread_mutex_lock(&client->mutex);
          }
       }
+   } else if (strcmp(type, "ota_offer") == 0 && client->registered) {
+      /* Only honour offers after a successful (authenticated) registration —
+       * ignore a pre-registration / unauthenticated offer outright.
+       * Copy connection scalars under the lock, then hand off WITHOUT the mutex
+       * (ota_apply_handle_offer sends ack/reject via send_json, which locks) —
+       * mirror the volume_set unlock/relock pattern above. */
+      char uuid[64], host[256], ca[256];
+      snprintf(uuid, sizeof(uuid), "%s", client->identity.uuid);
+      snprintf(host, sizeof(host), "%s", client->host);
+      snprintf(ca, sizeof(ca), "%s", client->ca_cert_path);
+      uint16_t oport = client->port;
+      bool ossl = client->use_ssl;
+      pthread_mutex_unlock(&client->mutex);
+      ota_apply_handle_offer(client, uuid, host, oport, ossl, ca, payload);
+      pthread_mutex_lock(&client->mutex);
    } else {
       OLOG_DEBUG("Unknown message type: %s", type);
    }
@@ -906,6 +927,19 @@ static void *ws_service_thread(void *arg) {
          ws_client_ping(client);
          last_ping = now;
       }
+
+      /* Flush any pending OTA status from the (decoupled) apply worker.  This
+       * is the only place the worker's progress / terminal `failed` reaches the
+       * server — done here, on the WS thread, with a guaranteed-live client. */
+      if (client->registered) {
+         ota_apply_flush_status(client);
+      }
+
+      /* Liveness breadcrumb: once the (possibly freshly-OTA'd) process has run
+       * stably for ≥60 s, flag the rollback marker ran_ok so the launcher
+       * commits even if we can never reach the server.  Self-throttled (fires
+       * at most once per process); cheap time-compare otherwise. */
+      ota_apply_mark_running();
    }
 
    OLOG_INFO("WebSocket service thread stopped");
@@ -1176,6 +1210,52 @@ int ws_client_send_query(ws_client_t *client, const char *text) {
 
    OLOG_INFO("Query sent: %.50s%s", text, strlen(text) > 50 ? "..." : "");
    return 0;
+}
+
+/* OTA control sends (used by ota_apply.c).  All build JSON + send_json, which
+ * takes its own lock — call WITHOUT client->mutex held. */
+int ws_client_send_ota_ack(ws_client_t *client) {
+   if (!client) {
+      return -1;
+   }
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("ota_ack"));
+   json_object_object_add(msg, "payload", json_object_new_object());
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+   return ret;
+}
+
+int ws_client_send_ota_reject(ws_client_t *client, const char *reason) {
+   if (!client) {
+      return -1;
+   }
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("ota_reject"));
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "reason", json_object_new_string(reason ? reason : "rejected"));
+   json_object_object_add(msg, "payload", payload);
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+   OLOG_INFO("OTA: rejected offer: %s", reason ? reason : "rejected");
+   return ret;
+}
+
+int ws_client_send_ota_status(ws_client_t *client, const char *state, const char *detail) {
+   if (!client || !state) {
+      return -1;
+   }
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "type", json_object_new_string("ota_status"));
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "state", json_object_new_string(state));
+   if (detail && detail[0]) {
+      json_object_object_add(payload, "error", json_object_new_string(detail));
+   }
+   json_object_object_add(msg, "payload", payload);
+   int ret = send_json(client, msg);
+   json_object_put(msg);
+   return ret;
 }
 
 void ws_client_set_stream_callback(ws_client_t *client,
