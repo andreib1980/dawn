@@ -42,15 +42,19 @@ extern "C" {
 /* Last-error detail (human-readable). */
 #define OTA_ERROR_MAX 128
 
+/* Platform token ("rpi"/"esp32") incl. NUL — the in-flight offer's platform. */
+#define OTA_PLATFORM_STR_MAX 16
+
 /**
  * @brief In-memory view of an ota_device_state row.
  */
 typedef struct {
    char uuid[SATELLITE_UUID_MAX];
-   char current_version[OTA_VERSION_MAX]; /**< Device-reported running version */
-   char target_version[OTA_VERSION_MAX];  /**< Pushed target ("" when none) */
-   char state[OTA_STATE_MAX];             /**< OTA state-machine token */
-   char last_error[OTA_ERROR_MAX];        /**< Last failure detail ("" when none) */
+   char current_version[OTA_VERSION_MAX];      /**< Device-reported running version */
+   char target_version[OTA_VERSION_MAX];       /**< Pushed target ("" when none) */
+   char target_platform[OTA_PLATFORM_STR_MAX]; /**< In-flight offer's platform ("" = none) */
+   char state[OTA_STATE_MAX];                  /**< OTA state-machine token */
+   char last_error[OTA_ERROR_MAX];             /**< Last failure detail ("" when none) */
    time_t created_at;
    time_t updated_at;
 } ota_device_state_t;
@@ -102,15 +106,17 @@ int ota_db_set_state(const char *uuid, const char *state, const char *last_error
 /**
  * @brief Begin an update offer for a device — SINGLE-FLIGHT.
  *
- * Records target_version + a one-time download token (with expiry) and moves the
- * device to 'offered', but ONLY if it is not already mid-update.  Rejects with
- * AUTH_DB_LOCKED when an offer/download/apply is already in flight.
+ * Records target_version + target_platform + a one-time download token (with
+ * expiry) and moves the device to 'offered', but ONLY if it is not already
+ * mid-update.  Rejects with AUTH_DB_LOCKED when an offer/download/apply is
+ * already in flight.
  *
  * @return AUTH_DB_SUCCESS if claimed, AUTH_DB_LOCKED if already in-flight,
  *         AUTH_DB_FAILURE on error
  */
 int ota_db_begin_offer(const char *uuid,
                        const char *target_version,
+                       const char *target_platform,
                        const char *token,
                        time_t token_expires);
 
@@ -118,11 +124,16 @@ int ota_db_begin_offer(const char *uuid,
  * @brief Validate + consume the one-time download token (gates the HTTPS pull).
  *
  * Succeeds only if the token matches, has not expired, and matches the device's
- * current target_version; the token is cleared on success (single use).
+ * current target_version AND target_platform (so a token issued for one platform
+ * cannot fetch another platform's image); the token is cleared on success.
  *
  * @return AUTH_DB_SUCCESS if valid (and consumed), AUTH_DB_FAILURE otherwise
  */
-int ota_db_consume_token(const char *uuid, const char *version, const char *token, time_t now);
+int ota_db_consume_token(const char *uuid,
+                         const char *platform,
+                         const char *version,
+                         const char *token,
+                         time_t now);
 
 /**
  * @brief Clear target/token and return to idle (on success-finalize or abort).

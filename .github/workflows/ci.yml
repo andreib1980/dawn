@@ -123,7 +123,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake build-essential pkg-config \
-            libwebsockets-dev libjson-c-dev libasound2-dev libopus-dev
+            libwebsockets-dev libjson-c-dev libasound2-dev libopus-dev \
+            libcurl4-openssl-dev libsodium-dev
 
       - name: Configure (headless Tier 1, no ML deps)
         run: >

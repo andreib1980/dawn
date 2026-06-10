@@ -12,6 +12,7 @@ MODELS_DIR=""
 FONTS_DIR=""
 CONFIG_SRC=""
 CA_CERT_SRC=""
+OTA_PUBKEY_SRC=""
 SYMLINK_MODELS=false
 NO_DISPLAY=false
 UNINSTALL=false
@@ -20,7 +21,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SERVICE_USER="dawn"
 SERVICE_NAME="dawn-satellite"
 DATA_DIR="/var/lib/dawn-satellite"
-CONFIG_DIR="/usr/local/etc/dawn-satellite"
+CONFIG_DIR="/etc/dawn-satellite"
+LIB_DIR="/usr/lib/dawn-satellite"   # bundled non-apt .so (whisper/ggml/onnx/piper)
+LAUNCH_DIR="/usr/bin"               # frozen rollback launcher (root-owned, package layout)
 LOG_DIR="/var/log/dawn-satellite"
 
 # Colors for output
@@ -75,9 +78,10 @@ uninstall() {
         rm -f "/etc/logrotate.d/dawn-satellite"
     fi
 
-    # 4. Remove binary
+    # 4. Remove the launcher + any pre-migration binary location
+    rm -f "$LAUNCH_DIR/dawn-satellite-launch"   # frozen launcher (/usr/bin)
     if [ -f "/usr/local/bin/dawn_satellite" ]; then
-        log "Removing /usr/local/bin/dawn_satellite"
+        log "Removing /usr/local/bin/dawn_satellite (pre-migration)"
         rm -f "/usr/local/bin/dawn_satellite"
     fi
 
@@ -106,6 +110,12 @@ uninstall() {
     # 8. Remove whisper/ggml libs and ld.so.conf.d entry — only if the
     #    server is not installed (it may share these libraries).
     if [ ! -f "/etc/systemd/system/dawn-server.service" ]; then
+        # Bundled libs now live in $LIB_DIR; also sweep the pre-migration
+        # /usr/local/lib copies for older installs.
+        if [ -d "$LIB_DIR" ]; then
+            log "Removing bundled library dir: $LIB_DIR"
+            rm -rf "$LIB_DIR"
+        fi
         local removed=0
         for lib in /usr/local/lib/libwhisper.so* /usr/local/lib/libggml*.so*; do
             [ -e "$lib" ] || continue
@@ -113,13 +123,10 @@ uninstall() {
             removed=$((removed + 1))
         done
         if [ "$removed" -gt 0 ]; then
-            log "Removed $removed whisper/ggml library file(s) from /usr/local/lib"
+            log "Removed $removed pre-migration whisper/ggml library file(s) from /usr/local/lib"
         fi
 
-        if [ -f "/etc/ld.so.conf.d/dawn.conf" ]; then
-            log "Removing /etc/ld.so.conf.d/dawn.conf"
-            rm -f "/etc/ld.so.conf.d/dawn.conf"
-        fi
+        rm -f /etc/ld.so.conf.d/dawn-satellite.conf /etc/ld.so.conf.d/dawn.conf 2>/dev/null || true
         ldconfig
     else
         log "Keeping /etc/ld.so.conf.d/dawn.conf and whisper/ggml libs (dawn-server is still installed)"
@@ -155,6 +162,10 @@ parse_args() {
                 CA_CERT_SRC="$2"
                 shift 2
                 ;;
+            --ota-pubkey)
+                OTA_PUBKEY_SRC="$2"
+                shift 2
+                ;;
             --symlink-models)
                 SYMLINK_MODELS=true
                 shift
@@ -180,6 +191,7 @@ parse_args() {
                 echo "  --config PATH        Path to a pre-configured satellite.toml to install"
                 echo "                       (default: the template at $SCRIPT_DIR/satellite.toml)"
                 echo "  --ca-cert PATH       Daemon's ca.crt to install at /etc/dawn/ca.crt"
+                echo "  --ota-pubkey PATH    OTA verify keyring (hex pubkeys) → /etc/dawn/ota_pubkey"
                 echo "                       (required when the satellite config has ssl_verify=true)"
                 echo "  --symlink-models     Symlink models instead of copying (saves disk)"
                 echo "  --no-display         Skip video/render/input groups (headless satellite)"
@@ -187,10 +199,11 @@ parse_args() {
                 echo "  -h, --help           Show this help message"
                 echo ""
                 echo "Installed paths:"
-                echo "  Binary:  /usr/local/bin/dawn_satellite"
-                echo "  Config:  $CONFIG_DIR/satellite.toml"
-                echo "  Data:    $DATA_DIR/"
-                echo "  Logs:    $LOG_DIR/"
+                echo "  Launcher: $DATA_DIR/bin/dawn-satellite-launch (systemd ExecStart)"
+                echo "  Binary:   $DATA_DIR/bin/dawn_satellite (OTA-updatable)"
+                echo "  Config:   $CONFIG_DIR/satellite.toml"
+                echo "  Data:     $DATA_DIR/"
+                echo "  Logs:     $LOG_DIR/"
                 exit 0
                 ;;
             *)
@@ -209,8 +222,9 @@ find_binary() {
         return
     fi
 
-    # Search common build locations
+    # Search common build locations (build-pi is the trixie-container output)
     local search_paths=(
+        "$PROJECT_ROOT/dawn_satellite/build-pi/dawn_satellite"
         "$PROJECT_ROOT/dawn_satellite/build/dawn_satellite"
         "$PROJECT_ROOT/build-debug/dawn_satellite/dawn_satellite"
         "$PROJECT_ROOT/build-release/dawn_satellite/dawn_satellite"
@@ -219,6 +233,8 @@ find_binary() {
     for path in "${search_paths[@]}"; do
         if [ -f "$path" ]; then
             BINARY_PATH="$path"
+            # The OTA rollback launcher is built alongside the binary.
+            LAUNCHER_PATH="$(dirname "$path")/dawn-satellite-launch"
             log "Found binary: $BINARY_PATH"
             return
         fi
@@ -441,6 +457,9 @@ fi
 log "Creating directory structure"
 mkdir -p "$DATA_DIR/models"
 mkdir -p "$DATA_DIR/assets/fonts"
+mkdir -p "$DATA_DIR/bin"          # OTA: dawn-owned writable bin (atomic self-swap)
+mkdir -p "$DATA_DIR/ota/tmp"      # OTA: staging for downloads
+mkdir -p "$DATA_DIR/ota/rollback" # OTA: kept-aside previous binary
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$LOG_DIR"
 
@@ -467,10 +486,34 @@ if systemctl is-active --quiet "$SERVICE_NAME.service" 2>/dev/null; then
     systemctl stop "$SERVICE_NAME.service"
 fi
 
-# Install binary
-log "Installing binary to /usr/local/bin/dawn_satellite"
-cp "$BINARY_PATH" /usr/local/bin/dawn_satellite
-chmod 755 /usr/local/bin/dawn_satellite
+# Install binary into the dawn-owned writable bin dir (OTA atomic self-swap
+# needs the binary + rollback copy + staging on one filesystem the dawn user
+# can write).  NOT /usr/local/bin (root-owned, read-only under ProtectSystem).
+log "Installing binary to $DATA_DIR/bin/dawn_satellite"
+cp "$BINARY_PATH" "$DATA_DIR/bin/dawn_satellite"
+chmod 755 "$DATA_DIR/bin/dawn_satellite"
+
+# Seed the rollback slot with the freshly-installed binary so the very first
+# OTA always has a known-good restore target.
+cp "$BINARY_PATH" "$DATA_DIR/ota/rollback/dawn_satellite"
+chmod 755 "$DATA_DIR/ota/rollback/dawn_satellite"
+
+# Install the OTA rollback launcher (the systemd ExecStart) to the root-owned,
+# package-layout path /usr/bin — frozen, never OTA-updated, and NOT in the
+# dawn-writable tree so the service can't tamper with its own rollback agent.
+if [ -n "$LAUNCHER_PATH" ] && [ -f "$LAUNCHER_PATH" ]; then
+    log "Installing OTA launcher to $LAUNCH_DIR/dawn-satellite-launch"
+    install -m 755 -o root -g root "$LAUNCHER_PATH" "$LAUNCH_DIR/dawn-satellite-launch"
+    # Drop any pre-migration launcher from the old dawn-writable location.
+    rm -f "$DATA_DIR/bin/dawn-satellite-launch" 2>/dev/null || true
+else
+    warn "OTA launcher (dawn-satellite-launch) not found next to the binary — \
+OTA rollback will not function. Rebuild the satellite to produce it."
+fi
+
+# Remove any pre-migration binary so the old read-only path can't shadow the
+# new writable one (the service now ExecStarts the launcher).
+rm -f /usr/local/bin/dawn_satellite 2>/dev/null || true
 
 # Install whisper.cpp / ggml shared libraries.
 #
@@ -486,10 +529,11 @@ chmod 755 /usr/local/bin/dawn_satellite
 # "no libs found" warning in that case to avoid false alarms.
 BUILD_DIR="$(dirname "$BINARY_PATH")"
 configured_engine=$(parse_toml_str asr engine "$CONFIG_SRC" 2>/dev/null || echo "")
-log "Installing whisper/ggml shared libraries from $BUILD_DIR"
+log "Installing whisper/ggml shared libraries from $BUILD_DIR to $LIB_DIR"
+mkdir -p "$LIB_DIR"
 installed_libs=0
 while IFS= read -r -d '' lib; do
-    cp -a "$lib" /usr/local/lib/
+    cp -a "$lib" "$LIB_DIR/"
     installed_libs=$((installed_libs + 1))
 done < <(find "$BUILD_DIR" \
     \( -name 'libwhisper.so*' -o -name 'libggml*.so*' \) \
@@ -602,6 +646,36 @@ if [ -n "$CA_CERT_SRC" ]; then
     fi
 fi
 
+# Install the OTA verify keyring at /etc/dawn/ota_pubkey (root-owned, read-only
+# to the dawn-uid service — it is NOT under the service's ReadWritePaths, so the
+# satellite can read but never modify its own trust anchor).  Each operator
+# provisions THEIR OWN pubkey here (from `ota-keytool keygen`); a prebuilt binary
+# ships with no baked-in key.  Without this file the satellite refuses all OTA.
+if [ -n "$OTA_PUBKEY_SRC" ]; then
+    if [ -L "$OTA_PUBKEY_SRC" ]; then
+        error "OTA pubkey source is a symlink (refused): $OTA_PUBKEY_SRC"
+    fi
+    if [ ! -f "$OTA_PUBKEY_SRC" ]; then
+        error "OTA pubkey source not found or not a regular file: $OTA_PUBKEY_SRC"
+    fi
+    ota_pk_real=$(realpath -e --no-symlinks "$OTA_PUBKEY_SRC" 2>/dev/null) || ota_pk_real=""
+    if [ -z "$ota_pk_real" ]; then
+        error "OTA pubkey source path could not be canonicalized: $OTA_PUBKEY_SRC"
+    fi
+    # Sanity: at least one 64-hex-char line (an Ed25519 pubkey).
+    if ! grep -qE '^[0-9a-fA-F]{64}$' "$ota_pk_real"; then
+        error "OTA pubkey source has no 64-hex-char key line: $ota_pk_real"
+    fi
+    log "Installing OTA verify keyring to /etc/dawn/ota_pubkey"
+    mkdir -p /etc/dawn
+    cp --no-dereference "$ota_pk_real" /etc/dawn/ota_pubkey
+    chmod 644 /etc/dawn/ota_pubkey
+    chown root:root /etc/dawn/ota_pubkey
+elif [ ! -f /etc/dawn/ota_pubkey ]; then
+    warn "No OTA keyring at /etc/dawn/ota_pubkey — OTA updates will be REFUSED until you provision \
+one (ota-keytool keygen → install the pubkey there). Pass --ota-pubkey PATH to set it now."
+fi
+
 # Install configuration. Default rule: preserve an existing satellite.toml
 # (manual edits shouldn't be clobbered by a bare re-run of this script).
 # Exception: when --config was explicitly passed, the caller is the top-level
@@ -634,17 +708,18 @@ chmod 644 "$CONFIG_DIR/dawn-satellite.conf"
 log "Setting permissions"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 chmod -R 755 "$DATA_DIR"
+# OTA staging dirs must be 0700 — set AFTER the recursive 755 above (which would
+# otherwise clobber them); they hold transient downloads + the rollback copy.
+chmod 700 "$DATA_DIR/ota/tmp" "$DATA_DIR/ota/rollback"
 chown "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 chown -R root:root "$CONFIG_DIR"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/satellite.toml"
 
-# Ensure library path is configured
-log "Configuring library path"
-if [ ! -f /etc/ld.so.conf.d/dawn.conf ]; then
-    echo "/usr/local/lib" > /etc/ld.so.conf.d/dawn.conf
-    log "Added /usr/local/lib to library path"
-fi
+# Ensure the bundled-lib path is on the linker search path.
+log "Configuring library path ($LIB_DIR)"
+echo "$LIB_DIR" > /etc/ld.so.conf.d/dawn-satellite.conf
+rm -f /etc/ld.so.conf.d/dawn.conf 2>/dev/null || true   # retire the pre-migration /usr/local/lib entry
 # Always rebuild the linker cache — we may have just installed new
 # libwhisper.so* / libggml*.so* files above.
 ldconfig

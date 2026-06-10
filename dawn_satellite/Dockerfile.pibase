@@ -25,6 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git pkg-config autoconf automake libtool \
         libasound2-dev libwebsockets-dev libjson-c-dev libspdlog-dev libopus-dev \
+        libcurl4-openssl-dev libsodium-dev \
         libsdl2-dev libsdl2-ttf-dev libsdl2-gfx-dev libdrm-dev \
         unzip wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*

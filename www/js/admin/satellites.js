@@ -139,11 +139,11 @@
       if (isLocal || !online || !otaEnabled) return '';
       const versions = releaseVersionsForTier(sat.tier);
       if (versions.length === 0) return '';
-      const busy =
-         sat.ota_state &&
-         sat.ota_state !== 'idle' &&
-         sat.ota_state !== 'success' &&
-         sat.ota_state !== 'failed';
+      // "busy" mirrors the server's OTA_INFLIGHT_PREDICATE exactly (an update is
+      // actively in flight).  Everything else — idle/success/failed AND 'unknown'
+      // (state lost to a daemon restart, needs reconciliation) — is re-pushable.
+      const OTA_INFLIGHT = ['offered', 'downloading', 'verifying', 'applying', 'rebooting'];
+      const busy = OTA_INFLIGHT.includes(sat.ota_state);
       // escapeAttr (not escapeHtml) for attribute context — escapeHtml does not
       // escape quotes, and sat.name is attacker-controlled (set at registration
       // with no charset restriction).  See SEC review 2026-06-08.

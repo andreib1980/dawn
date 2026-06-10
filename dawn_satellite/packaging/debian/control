@@ -1,0 +1,17 @@
+Package: dawn-satellite
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: @MAINTAINER@
+Depends: @SHLIB_DEPS@, adduser
+Recommends: dawn-satellite-models
+Section: sound
+Priority: optional
+Homepage: https://github.com/The-OASIS-Project/dawn
+Description: DAWN voice satellite (Tier-1, Raspberry Pi)
+ Hands-free voice client for the DAWN assistant: local wake word, VAD, ASR and
+ TTS, talking to the DAWN daemon over the DAP2 WebSocket protocol.
+ .
+ Installs the frozen OTA rollback launcher (/usr/bin/dawn-satellite-launch) and
+ the OTA-updatable binary under /var/lib/dawn-satellite. Signed over-the-air
+ updates require provisioning an Ed25519 verify key at /etc/dawn/ota_pubkey;
+ ML models are fetched separately with dawn-satellite-fetch-models.

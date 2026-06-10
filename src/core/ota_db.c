@@ -101,10 +101,11 @@ int ota_db_get(const char *uuid, ota_device_state_t *out) {
    AUTH_DB_LOCK_OR_FAIL();
 
    sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT uuid, current_version, target_version, state, last_error, "
-                               "created_at, updated_at FROM ota_device_state WHERE uuid = ?",
-                               -1, &stmt, NULL);
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT uuid, current_version, target_version, target_platform, state, last_error, "
+       "created_at, updated_at FROM ota_device_state WHERE uuid = ?",
+       -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("ota_db: prepare get failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
@@ -119,10 +120,11 @@ int ota_db_get(const char *uuid, ota_device_state_t *out) {
       copy_text_col(out->uuid, sizeof(out->uuid), stmt, 0);
       copy_text_col(out->current_version, sizeof(out->current_version), stmt, 1);
       copy_text_col(out->target_version, sizeof(out->target_version), stmt, 2);
-      copy_text_col(out->state, sizeof(out->state), stmt, 3);
-      copy_text_col(out->last_error, sizeof(out->last_error), stmt, 4);
-      out->created_at = (time_t)sqlite3_column_int64(stmt, 5);
-      out->updated_at = (time_t)sqlite3_column_int64(stmt, 6);
+      copy_text_col(out->target_platform, sizeof(out->target_platform), stmt, 3);
+      copy_text_col(out->state, sizeof(out->state), stmt, 4);
+      copy_text_col(out->last_error, sizeof(out->last_error), stmt, 5);
+      out->created_at = (time_t)sqlite3_column_int64(stmt, 6);
+      out->updated_at = (time_t)sqlite3_column_int64(stmt, 7);
       result = AUTH_DB_SUCCESS;
    } else if (rc == SQLITE_DONE) {
       result = AUTH_DB_NOT_FOUND;
@@ -174,9 +176,10 @@ int ota_db_set_state(const char *uuid, const char *state, const char *last_error
 
 int ota_db_begin_offer(const char *uuid,
                        const char *target_version,
+                       const char *target_platform,
                        const char *token,
                        time_t token_expires) {
-   if (!uuid || uuid[0] == '\0' || !target_version || !token) {
+   if (!uuid || uuid[0] == '\0' || !target_version || !target_platform || !token) {
       return AUTH_DB_FAILURE;
    }
 
@@ -209,8 +212,8 @@ int ota_db_begin_offer(const char *uuid,
    sqlite3_stmt *upd = NULL;
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "UPDATE ota_device_state SET target_version = ?, state = 'offered', token = ?, "
-       "token_expires = ?, last_error = NULL, updated_at = ? "
+       "UPDATE ota_device_state SET target_version = ?, target_platform = ?, state = 'offered', "
+       "token = ?, token_expires = ?, last_error = NULL, updated_at = ? "
        "WHERE uuid = ? AND NOT (" OTA_INFLIGHT_PREDICATE ")",
        -1, &upd, NULL);
    if (rc != SQLITE_OK) {
@@ -219,10 +222,11 @@ int ota_db_begin_offer(const char *uuid,
       return AUTH_DB_FAILURE;
    }
    sqlite3_bind_text(upd, 1, target_version, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(upd, 2, token, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(upd, 3, (int64_t)token_expires);
-   sqlite3_bind_int64(upd, 4, now);
-   sqlite3_bind_text(upd, 5, uuid, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(upd, 2, target_platform, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(upd, 3, token, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(upd, 4, (int64_t)token_expires);
+   sqlite3_bind_int64(upd, 5, now);
+   sqlite3_bind_text(upd, 6, uuid, -1, SQLITE_TRANSIENT);
    rc = sqlite3_step(upd);
    int changes = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : -1;
    sqlite3_finalize(upd);
@@ -234,22 +238,28 @@ int ota_db_begin_offer(const char *uuid,
    return (changes == 1) ? AUTH_DB_SUCCESS : AUTH_DB_LOCKED;
 }
 
-int ota_db_consume_token(const char *uuid, const char *version, const char *token, time_t now) {
-   if (!uuid || uuid[0] == '\0' || !version || !token || token[0] == '\0') {
+int ota_db_consume_token(const char *uuid,
+                         const char *platform,
+                         const char *version,
+                         const char *token,
+                         time_t now) {
+   if (!uuid || uuid[0] == '\0' || !platform || platform[0] == '\0' || !version || !token ||
+       token[0] == '\0') {
       return AUTH_DB_FAILURE;
    }
 
    AUTH_DB_LOCK_OR_FAIL();
 
    /* Single-use: clear the token and advance to downloading, but only if it
-    * matches, is unexpired, and matches the current target_version.  The token
-    * is high-entropy + single-use + TTL-bound, so SQL equality is adequate. */
+    * matches, is unexpired, and matches the current target_version AND
+    * target_platform (so a token issued for rpi/X can't fetch esp32/X).  The
+    * token is high-entropy + single-use + TTL-bound, so SQL equality is adequate. */
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(
        s_db.db,
        "UPDATE ota_device_state SET token = NULL, state = 'downloading', updated_at = ? "
        "WHERE uuid = ? AND token IS NOT NULL AND token = ? AND target_version = ? "
-       "AND token_expires >= ?",
+       "AND target_platform = ? AND token_expires >= ?",
        -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("ota_db: prepare consume_token failed: %s", sqlite3_errmsg(s_db.db));
@@ -260,7 +270,8 @@ int ota_db_consume_token(const char *uuid, const char *version, const char *toke
    sqlite3_bind_text(stmt, 2, uuid, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 3, token, -1, SQLITE_TRANSIENT);
    sqlite3_bind_text(stmt, 4, version, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(stmt, 5, (int64_t)now);
+   sqlite3_bind_text(stmt, 5, platform, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(stmt, 6, (int64_t)now);
    rc = sqlite3_step(stmt);
    int changes = (rc == SQLITE_DONE) ? sqlite3_changes(s_db.db) : -1;
    sqlite3_finalize(stmt);
@@ -280,10 +291,11 @@ int ota_db_clear_target(const char *uuid, const char *final_state) {
 
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "UPDATE ota_device_state SET target_version = NULL, token = NULL, "
-                               "token_expires = NULL, state = ?, updated_at = ? WHERE uuid = ?",
-                               -1, &stmt, NULL);
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE ota_device_state SET target_version = NULL, target_platform = NULL, token = NULL, "
+       "token_expires = NULL, state = ?, updated_at = ? WHERE uuid = ?",
+       -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("ota_db: prepare clear_target failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();

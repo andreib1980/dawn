@@ -81,12 +81,40 @@ triggered** (dawn-admin / WebUI) to device/tier/all; **Tier 1 = binary(+libs) on
   `crypto_sign_verify_detached` over the exact bytes **first**, parses only after it returns 0.
   `abi_tag` carries the build target's OS/ABI identity (see §10) so a device rejects an image not
   built for its runtime.
-- **Downgrade policy lives inside the signed manifest** (`min_version`), not the WS offer. The
-  operator `allow_downgrade` only selects which signed release to push.
-- **Root of trust = a baked-in keyring** (current + next public key) per device, for rotation
-  without bricking; dual-sign during overlap; **offline split-custody backup** of private keys.
-  Signature compromise is NOT mitigated by rollback. ESP32 has no secure-boot/flash-encryption
-  (software-only RoT — a flash-access attacker can swap the pubkey; accepted v1, documented).
+- **Two independent version gates live in the signed manifest, not the WS offer.** Do not conflate
+  them (`ota_manifest_rollback_ok` enforces both):
+  - **Anti-rollback (automatic):** the device refuses any candidate whose `version` is *older than
+    what's installed* (`m.version < installed`). This is the real protection against pushing an old,
+    known-vulnerable build, and it needs **no configuration** — it is always on unless the operator
+    selects `allow_downgrade` at push time. `allow_downgrade` (unsigned, from the offer) only relaxes
+    this one check.
+  - **Anti-skip floor (`min_version`, optional):** the minimum version a device must *already be
+    running* to accept the update (`installed >= m.min_version`). Use it ONLY to force sequential
+    upgrades through a required-migration milestone (e.g. "don't jump straight to 3.0.0 without
+    passing through the 2.5.0 schema migration"). It is **empty by default** (`ota-release.sh` omits
+    `--min-version` unless asked) so a routine release installs on any older device — that is the
+    whole point of OTA. An empty `min_version` does **not** weaken anti-rollback; the two checks are
+    orthogonal.
+  - **Known residual (sec-H1, accepted v1):** `allow_downgrade` is unsigned, so a forged/MITM'd
+    trusted WSS session plus a genuinely-signed older image could land that older build. `min_version`
+    does **not** bound this (the replayed old image carries its own low floor); the only real bound is
+    that `allow_downgrade` defaults false and is operator-selected per push. **Phase 5 hardening:**
+    move the downgrade authorization *into* the signed manifest (a signed flag) so only the offline
+    signer can sanction a downgrade — deferred because it is a wire-format change to the shipped
+    Phase 2 manifest core + keytool.
+- **Root of trust = an operator-provisioned keyring** (current + next public key) per device, for
+  rotation without bricking; dual-sign during overlap; **offline split-custody backup** of private
+  keys. Signature compromise is NOT mitigated by rollback.
+  - **Tier 1 (RPi): the keyring is a runtime file `/etc/dawn/ota_pubkey`** (root-owned, `0644`, one
+    64-hex pubkey per line), NOT compiled into the binary. It lives **outside** the service's
+    `ReadWritePaths`, so under `ProtectSystem=strict` the dawn-uid satellite can *read* it but never
+    *modify* its own trust anchor — a stronger anchor than a key baked into the (necessarily dawn-
+    writable, for self-swap) binary. Hardcoded path (not `satellite.toml`, which is dawn-writable).
+    **Fail-closed:** no `/etc/dawn/ota_pubkey` → every OTA offer is rejected. This is also what lets
+    a **prebuilt binary be distributed** (e.g. on GitHub) with no baked-in key — each operator runs
+    `ota-keytool keygen` and provisions *their own* pubkey, then signs releases for *their own* fleet.
+  - ESP32 has no secure-boot/flash-encryption (software-only RoT — a flash-access attacker can swap
+    the pubkey; accepted v1, documented).
 - **TLS mandatory for OTA.** Reject `ota_*` and `/api/ota/...` when `!lws_is_ssl(wsi)`; device
   verifies CA + hostname. The image is **integrity-protected, not confidential**; the download
   token is an anti-abuse/DoS gate, not secrecy.
@@ -130,7 +158,7 @@ triggered** (dawn-admin / WebUI) to device/tier/all; **Tier 1 = binary(+libs) on
   `lws_cancel_service`. Hold the session lock only to resolve+enqueue; **never hold the auth_db leaf
   lock while taking a session lock.** Offline → `state=offer_pending`, deliver on next register.
 
-### 5. State machine — `ota_device_state(uuid PK, current_version, target_version, state, last_error, token, token_expires, updated_at)`
+### 5. State machine — `ota_device_state(uuid PK, current_version, target_version, target_platform, state, last_error, token, token_expires, updated_at)`
 - **DB = single source of truth.** States: `idle → offered → downloading → verifying → applying →
   rebooting → success | failed | offer_pending`.
 - **Single-flight:** reject new push if state ∈ {offered…rebooting} unless `--force-abort`.
@@ -138,15 +166,27 @@ triggered** (dawn-admin / WebUI) to device/tier/all; **Tier 1 = binary(+libs) on
   reconnect.
 - **Register-time finalize / server-owned commit:** on reconnect, reported `firmware_version ==
   target` → `success`. Device does NOT self-validate purely on "I connected."
+- **Register-time mismatch resolution:** if a device that had progressed past `offered` reconnects
+  reporting a version ≠ target (rollback, crash-recovery, or an image whose firmware-version header
+  was never bumped), the otherwise-stuck in-flight row is moved to `failed` so the panel unsticks and
+  the release is re-pushable. `target_version` is **kept** so a genuine success register that follows
+  (e.g. a brief same-process WS reconnect mid-apply) still finalizes via the commit branch above.
+  Lifecycle of that kept target: it is cleared by the next push (`begin_offer` overwrites it) or a
+  successful finalize; a device that permanently stays on the old version leaves a `failed` row with a
+  stale `target_version` until the operator re-pushes — acceptable for v1 (re-push works; the row is
+  out of the in-flight set so it doesn't block). `reconcile_stale` only touches in-flight rows, not
+  `failed`, so it will not self-clear that target.
 
 ### 6. WS control messages + download route
 - S→C `ota_offer {version, platform, size, sha256, url, token, allow_downgrade}` (advisory;
   authority is the signed manifest).
 - C→S `ota_ack` / `ota_reject {reason}` / `ota_status {state, progress, error, running_partition?}`.
 - `GET /api/ota/<platform>/<version>/{image,manifest,sig}` — **token is the primary auth gate:**
-  one-time (server ledger), bound to authenticated session uuid + version, short TTL, constant-time.
-  Path hardening: platform enum whitelist, semver regex, `realpath` prefix vs `release_dir`. IP
-  rate-limiter is a coarse DoS guard only; cap/stagger concurrent downloads.
+  one-time (server ledger), bound to authenticated session uuid + version **+ platform** (v60:
+  `ota_device_state.target_platform`, set at `begin_offer`, matched in `consume_token`), short TTL,
+  constant-time. The platform binding stops a token issued for `rpi/X` from fetching `esp32/X`'s image
+  when both are staged. Path hardening: platform enum whitelist, semver regex, `realpath` prefix vs
+  `release_dir`. IP rate-limiter is a coarse DoS guard only; cap/stagger concurrent downloads.
 
 ### 7. Tier 1 (RPi) apply
 - **ABI check first.** Before download/apply the device verifies the manifest's `abi_tag` matches
@@ -251,7 +291,8 @@ A Jetson-built aarch64 binary **will not run on the Pi** even though both are ar
   reconnect reports new version → server commits; ESP32 same with reboot-to-clean + partition
   rollback (pull power mid-update → boots old slot, NVS/secret intact).
 - **Negative (must reject):** bad signature; SHA-256 mismatch; duplicate-key/oversized manifest;
-  expired / wrong-uuid / replayed token; downgrade below signed `min_version`; path traversal;
+  expired / wrong-uuid / replayed token; downgrade (older `version`) without `allow_downgrade`;
+  install below an `min_version` anti-skip floor; path traversal;
   plaintext (non-TLS) OTA attempt.
 - **Resilience:** RPi crash-on-boot new binary → auto-rollback before `StartLimitBurst`; daemon
   restart mid-update → reconciled on reconnect; `push all` → canary first.

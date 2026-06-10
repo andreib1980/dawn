@@ -100,6 +100,41 @@ static long read_exact_file(const char *path, uint8_t *buf, size_t max) {
    return (long)n;
 }
 
+/* Read + parse <dir>/manifest into @p out, requiring it deserialize cleanly and
+ * its platform match @p expect.  When @p raw_out (capacity @p raw_cap >=
+ * OTA_MANIFEST_WIRE_SIZE) is given, the raw bytes are returned there too (the
+ * offer path needs them to inline the manifest).  Returns SUCCESS or FAILURE; a
+ * missing/short file fails silently (the caller logs as appropriate), a present-
+ * but-corrupt/mismatched manifest is logged here.  One source of truth for the
+ * read+validate shared by the startup scan and the per-offer fresh read. */
+static int read_manifest_from_dir(const char *dir,
+                                  ota_platform_t expect,
+                                  ota_manifest_t *out,
+                                  uint8_t *raw_out,
+                                  size_t raw_cap) {
+   if (raw_out && raw_cap < OTA_MANIFEST_WIRE_SIZE) {
+      return FAILURE;
+   }
+   uint8_t local[OTA_MANIFEST_WIRE_SIZE];
+   uint8_t *raw = raw_out ? raw_out : local;
+   char mpath[OTA_PATH_MAX + 16]; /* dir + "/manifest" */
+   snprintf(mpath, sizeof(mpath), "%s/manifest", dir);
+   if (read_exact_file(mpath, raw, OTA_MANIFEST_WIRE_SIZE) != (long)OTA_MANIFEST_WIRE_SIZE) {
+      return FAILURE; /* missing/short manifest — caller decides whether to log */
+   }
+   if (ota_manifest_deserialize(raw, OTA_MANIFEST_WIRE_SIZE, out) != SUCCESS) {
+      OLOG_WARNING("ota: malformed manifest in %s", dir);
+      return FAILURE;
+   }
+   /* Trust the operator's signed artifact for metadata; the DEVICE verifies the
+    * signature.  Sanity-check the dir name matches the manifest's platform. */
+   if (out->platform != expect) {
+      OLOG_WARNING("ota: %s manifest platform mismatch", dir);
+      return FAILURE;
+   }
+   return SUCCESS;
+}
+
 /* Load <release_dir>/<platform>/<version>/manifest for one version dir. */
 static void load_one_release(const char *release_dir,
                              const char *platform_str,
@@ -116,26 +151,11 @@ static void load_one_release(const char *release_dir,
    }
 
    char dir[OTA_PATH_MAX];
-   char mpath[OTA_PATH_MAX + 16]; /* dir + "/manifest" */
    snprintf(dir, sizeof(dir), "%s/%s/%s", release_dir, platform_str, version);
-   snprintf(mpath, sizeof(mpath), "%s/manifest", dir);
-
-   uint8_t raw[OTA_MANIFEST_WIRE_SIZE];
-   long n = read_exact_file(mpath, raw, sizeof(raw));
-   if (n != (long)OTA_MANIFEST_WIRE_SIZE) {
-      return; /* missing/short manifest — skip */
-   }
 
    ota_release_t *r = &s_releases[s_release_count];
-   if (ota_manifest_deserialize(raw, (size_t)n, &r->manifest) != SUCCESS) {
-      OLOG_WARNING("ota: malformed manifest in %s — skipping", dir);
-      return;
-   }
-   /* Trust the operator's signed artifact for metadata; the DEVICE verifies the
-    * signature.  Sanity-check the dir name matches the manifest's platform. */
-   if (r->manifest.platform != platform) {
-      OLOG_WARNING("ota: %s manifest platform mismatch — skipping", dir);
-      return;
+   if (read_manifest_from_dir(dir, platform, &r->manifest, NULL, 0) != SUCCESS) {
+      return; /* missing/malformed/mismatched — skip (helper logged corruption) */
    }
    r->platform = platform;
    r->tier = r->manifest.tier;
@@ -156,7 +176,7 @@ static void scan_releases(const char *release_dir) {
          continue; /* platform has no releases yet */
       }
       struct dirent *e;
-      while ((e = readdir(d)) != NULL) {
+      while ((e = readdir(d)) != NULL && s_release_count < OTA_MAX_RELEASES) {
          if (e->d_name[0] == '.') {
             continue;
          }
@@ -279,38 +299,19 @@ int ota_begin_push(const char *uuid,
       return FAILURE;
    }
 
-   /* One-time download token. */
-   uint8_t tok[OTA_TOKEN_BYTES];
-   randombytes_buf(tok, sizeof(tok));
-   char tok_hex[OTA_TOKEN_HEX + 1];
-   sodium_bin2hex(tok_hex, sizeof(tok_hex), tok, sizeof(tok));
-
-   time_t expires = time(NULL) + g_config.ota.download_token_ttl_sec;
-   int rc = ota_db_begin_offer(uuid, version, tok_hex, expires);
-   if (rc == AUTH_DB_LOCKED) {
-      return AUTH_DB_LOCKED;
-   }
-   if (rc != AUTH_DB_SUCCESS) {
-      return FAILURE;
-   }
-
-   memset(out, 0, sizeof(*out));
-   snprintf(out->platform_str, sizeof(out->platform_str), "%s", platform_str);
-   snprintf(out->version, sizeof(out->version), "%s", version);
-   snprintf(out->url_path, sizeof(out->url_path), "/api/ota/%s/%s/image", platform_str, version);
-   snprintf(out->token, sizeof(out->token), "%s", tok_hex);
-   sodium_bin2hex(out->sha256_hex, sizeof(out->sha256_hex), r->manifest.sha256, OTA_SHA256_BYTES);
-   out->image_size = r->manifest.image_size;
-   out->allow_downgrade = allow_downgrade;
-
-   /* Inline the (tiny) manifest + signature so the device can verify before it
-    * pulls the image; only the image goes over the token-gated HTTPS route. */
+   /* Read the manifest + signature FRESH from disk at offer time (the startup
+    * cache `r->manifest` is only for listing/metadata).  This (a) lets a re-staged
+    * release take effect without a daemon restart and (b) guarantees the inlined
+    * manifest can never skew against its on-disk signature — a cached manifest
+    * paired with a re-signed on-disk .sig would fail the device's verify with a
+    * misleading "bad signature".  Do this BEFORE ota_db_begin_offer so a disk
+    * error can't leave a dangling half-begun offer. */
    uint8_t raw[OTA_MANIFEST_WIRE_SIZE];
-   size_t raw_len = 0;
-   if (ota_manifest_serialize(&r->manifest, raw, sizeof(raw), &raw_len) != SUCCESS) {
+   ota_manifest_t m;
+   if (read_manifest_from_dir(r->dir, platform, &m, raw, sizeof(raw)) != SUCCESS) {
+      OLOG_ERROR("ota: cannot load manifest for %s/%s offer", platform_str, version);
       return FAILURE;
    }
-   sodium_bin2hex(out->manifest_hex, sizeof(out->manifest_hex), raw, raw_len);
 
    char sigpath[OTA_PATH_MAX + 16]; /* dir + "/manifest.sig" */
    snprintf(sigpath, sizeof(sigpath), "%s/manifest.sig", r->dir);
@@ -319,6 +320,34 @@ int ota_begin_push(const char *uuid,
       OLOG_ERROR("ota: missing/short signature %s", sigpath);
       return FAILURE;
    }
+
+   /* One-time download token. */
+   uint8_t tok[OTA_TOKEN_BYTES];
+   randombytes_buf(tok, sizeof(tok));
+   char tok_hex[OTA_TOKEN_HEX + 1];
+   sodium_bin2hex(tok_hex, sizeof(tok_hex), tok, sizeof(tok));
+
+   time_t expires = time(NULL) + g_config.ota.download_token_ttl_sec;
+   int rc = ota_db_begin_offer(uuid, version, platform_str, tok_hex, expires);
+   if (rc == AUTH_DB_LOCKED) {
+      return AUTH_DB_LOCKED;
+   }
+   if (rc != AUTH_DB_SUCCESS) {
+      return FAILURE;
+   }
+
+   /* All offer fields come from the same fresh-from-disk manifest/sig (the image
+    * itself is read fresh at download time), so manifest_hex, sha256, image_size
+    * and sig_hex are mutually consistent. */
+   memset(out, 0, sizeof(*out));
+   snprintf(out->platform_str, sizeof(out->platform_str), "%s", platform_str);
+   snprintf(out->version, sizeof(out->version), "%s", version);
+   snprintf(out->url_path, sizeof(out->url_path), "/api/ota/%s/%s/image", platform_str, version);
+   snprintf(out->token, sizeof(out->token), "%s", tok_hex);
+   sodium_bin2hex(out->sha256_hex, sizeof(out->sha256_hex), m.sha256, OTA_SHA256_BYTES);
+   out->image_size = m.image_size;
+   out->allow_downgrade = allow_downgrade;
+   sodium_bin2hex(out->manifest_hex, sizeof(out->manifest_hex), raw, sizeof(raw));
    sodium_bin2hex(out->sig_hex, sizeof(out->sig_hex), sig, sizeof(sig));
 
    OLOG_INFO("ota: offer %s/%s to %s (token ttl=%ds)", platform_str, version, uuid,
@@ -341,7 +370,7 @@ int ota_authorize_image_download(const char *uuid,
       return FAILURE;
    }
 
-   if (ota_db_consume_token(uuid, version, token, time(NULL)) != AUTH_DB_SUCCESS) {
+   if (ota_db_consume_token(uuid, platform_str, version, token, time(NULL)) != AUTH_DB_SUCCESS) {
       OLOG_WARNING("ota: download token rejected for %s %s/%s", uuid, platform_str, version);
       return FAILURE;
    }
@@ -382,11 +411,33 @@ void ota_finalize_on_register(const char *uuid, const char *reported_version) {
    if (ota_db_get(uuid, &st) != AUTH_DB_SUCCESS) {
       return;
    }
+   if (st.target_version[0] == '\0') {
+      return; /* nothing in flight — ordinary registration */
+   }
+
    /* Server-owned commit: only when the device reconnects reporting exactly the
     * version we targeted.  (Connecting alone does not prove a good image, so we
     * never let the device self-declare success.) */
-   if (st.target_version[0] != '\0' && strcmp(reported_version, st.target_version) == 0) {
+   if (strcmp(reported_version, st.target_version) == 0) {
       ota_db_clear_target(uuid, OTA_STATE_SUCCESS);
       OLOG_INFO("ota: %s updated to %s (committed)", uuid, reported_version);
+      return;
+   }
+
+   /* Target pending, but the device is alive reporting a DIFFERENT version.  Once
+    * a device has started applying (state past 'offered'), a reconnect on the old
+    * version means the update concluded without reaching the target — a rollback,
+    * a crash-recovery, or an image whose firmware-version header was never bumped.
+    * Resolve the otherwise-stuck in-flight row to 'failed' so the panel unsticks
+    * and the release is re-pushable.  We KEEP target_version: if this was instead
+    * a brief same-process WS reconnect mid-apply (the apply window is sub-second),
+    * the real success register that follows still finalizes via the branch above.
+    * A device that merely reconnects at 'offered' (acked nothing yet) is left alone. */
+   if (strcmp(st.state, OTA_STATE_OFFERED) != 0) {
+      char err[OTA_ERROR_MAX];
+      snprintf(err, sizeof(err), "device reported %s, expected target %s", reported_version,
+               st.target_version);
+      ota_db_set_state(uuid, OTA_STATE_FAILED, err);
+      OLOG_WARNING("ota: %s update to %s did not take — %s", uuid, st.target_version, err);
    }
 }

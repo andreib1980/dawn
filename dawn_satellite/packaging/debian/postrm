@@ -1,0 +1,30 @@
+#!/bin/sh
+# dawn-satellite postrm.
+set -e
+
+case "$1" in
+   remove)
+      if [ -d /run/systemd/system ]; then
+         systemctl disable dawn-satellite.service || true
+         systemctl daemon-reload || true
+      fi
+      ldconfig || true
+      # remove ≠ purge: keep /var/lib state + /etc config (operator may reinstall).
+      ;;
+   purge)
+      rm -rf /var/lib/dawn-satellite /var/log/dawn-satellite /etc/dawn-satellite
+      rm -f /etc/ld.so.conf.d/dawn-satellite.conf
+      ldconfig || true
+      if [ -d /run/systemd/system ]; then
+         systemctl daemon-reload || true
+      fi
+      # Deliberately NOT removed on purge: the 'dawn' system user, and /etc/dawn
+      # (CA + OTA keyring) — these may be shared with the daemon or hold operator
+      # trust material.  Remove by hand if you truly want them gone.
+      ;;
+   upgrade | failed-upgrade | abort-install | abort-upgrade | disappear)
+      ldconfig || true
+      ;;
+esac
+
+exit 0

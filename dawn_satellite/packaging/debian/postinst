@@ -1,0 +1,70 @@
+#!/bin/sh
+# dawn-satellite postinst — runs offline (no network, per Debian policy).
+set -e
+
+DATA_DIR=/var/lib/dawn-satellite
+LIB_DIR=/usr/lib/dawn-satellite
+PRISTINE="$LIB_DIR/dawn_satellite.dist"
+LIVE="$DATA_DIR/bin/dawn_satellite"
+ROLLBACK="$DATA_DIR/ota/rollback/dawn_satellite"
+
+case "$1" in
+   configure)
+      # 1. System user/group.
+      if ! getent group dawn >/dev/null; then
+         addgroup --system dawn
+      fi
+      if ! getent passwd dawn >/dev/null; then
+         adduser --system --ingroup dawn --home "$DATA_DIR" --no-create-home \
+            --shell /usr/sbin/nologin --gecos "DAWN satellite" dawn
+      fi
+      # Hardware-access groups (best-effort; some may not exist on a given host).
+      for g in audio video render input; do
+         if getent group "$g" >/dev/null 2>&1; then
+            adduser dawn "$g" >/dev/null 2>&1 || true
+         fi
+      done
+
+      # 2. State directories (OTA scaffold + models/fonts/logs).
+      mkdir -p "$DATA_DIR/bin" "$DATA_DIR/ota/tmp" "$DATA_DIR/ota/rollback" \
+         "$DATA_DIR/models" "$DATA_DIR/assets/fonts" /var/log/dawn-satellite
+      chown -R dawn:dawn "$DATA_DIR" /var/log/dawn-satellite
+      chmod 700 "$DATA_DIR/ota/tmp" "$DATA_DIR/ota/rollback"
+
+      # 3. Seed the OTA-updatable live binary + rollback slot from the pristine
+      #    packaged copy.  apt owns the pristine (read-only /usr/lib); OTA mutates
+      #    the live copy.  (Re)configure refreshes both to the packaged version;
+      #    OTA can re-swap the live copy between apt actions.
+      if [ -f "$PRISTINE" ]; then
+         install -m 755 -o dawn -g dawn "$PRISTINE" "$LIVE"
+         install -m 755 -o dawn -g dawn "$PRISTINE" "$ROLLBACK"
+      fi
+
+      # 4. Linker cache for the bundled libs (ld.so.conf.d shipped by the package).
+      ldconfig || true
+
+      # 5. satellite.toml must stay dawn-writable (the satellite persists UI prefs).
+      if [ -f /etc/dawn-satellite/satellite.toml ]; then
+         chown dawn:dawn /etc/dawn-satellite/satellite.toml || true
+      fi
+
+      # 6. systemd.
+      if [ -d /run/systemd/system ]; then
+         systemctl daemon-reload || true
+         systemctl enable dawn-satellite.service || true
+         systemctl restart dawn-satellite.service || true
+      fi
+
+      # 7. First-install guidance (fresh install only: $2 is the old version on upgrade).
+      if [ -z "${2:-}" ]; then
+         echo "dawn-satellite installed.  Next steps:"
+         echo "  * OTA verify key:  sudo install -m644 -o root -g root <your>.pub /etc/dawn/ota_pubkey"
+         echo "  * ML models:       sudo dawn-satellite-fetch-models   (voice mode needs these)"
+         echo "  * Edit /etc/dawn-satellite/satellite.toml (server, CA), then:"
+         echo "      sudo systemctl restart dawn-satellite"
+      fi
+      ;;
+   abort-upgrade | abort-remove | abort-deconfigure) ;;
+esac
+
+exit 0

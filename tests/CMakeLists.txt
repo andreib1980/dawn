@@ -155,6 +155,34 @@ dawn_add_unit_test(test_ota
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${SODIUM_LIBRARIES}
    LABEL   ci)
 
+# Satellite-side OTA host tests.  These compile dawn_satellite/ sources directly
+# (libc / libsodium / json-c only — no SDL/curl/ws) and run natively, so the
+# device-apply decision logic regression-tests in CI without a real RPi.
+dawn_add_unit_test(test_ota_marker
+   SOURCES test_ota_marker.c
+           ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
+   INCLUDES ${SRC_ROOT}/dawn_satellite/include
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_ota_launch
+   SOURCES test_ota_launch.c
+           ${SRC_ROOT}/dawn_satellite/src/ota_launch_core.c
+           ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
+   INCLUDES ${SRC_ROOT}/dawn_satellite/include
+   DEFINES OTA_DATA_DIR="/tmp/dawn_test_ota_launch"
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_ota_apply
+   SOURCES test_ota_apply.c
+           ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c
+           ${SRC_ROOT}/src/core/ota_manifest.c
+   INCLUDES ${SRC_ROOT}/dawn_satellite/include
+   DEFINES OTA_KEYRING_PATH="/tmp/dawn_test_ota_keyring"
+   LIBS    unity ${SODIUM_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_scheduler
    SOURCES test_scheduler.c test_scheduler_stub.c
            ${SRC_ROOT}/src/core/scheduler_db.c
