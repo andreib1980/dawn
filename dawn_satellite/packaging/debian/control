@@ -3,7 +3,7 @@ Version: @VERSION@
 Architecture: @ARCH@
 Maintainer: @MAINTAINER@
 Depends: @SHLIB_DEPS@, adduser
-Recommends: dawn-satellite-models
+Recommends: curl, unzip, ca-certificates
 Section: sound
 Priority: optional
 Homepage: https://github.com/The-OASIS-Project/dawn

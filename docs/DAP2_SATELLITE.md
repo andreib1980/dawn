@@ -78,12 +78,15 @@ The prebuilt binary ships **unsigned** — OTA trust is rooted in *your* key, no
 ### Fetching models
 
 ```bash
-sudo dawn-satellite-fetch-models --list          # show available sets + licenses
-sudo dawn-satellite-fetch-models <set>           # download + verify into /var/lib/dawn-satellite/models
+sudo dawn-satellite-fetch-models                 # VAD + Piper TTS + Vosk-small (matches the shipped config)
+sudo dawn-satellite-fetch-models --asr whisper --whisper-model base   # use Whisper instead
 ```
 
-Models are fetched (not bundled) so the package stays small and you choose the set + accept its
-license. Then enable voice in `satellite.toml` and `systemctl restart dawn-satellite`.
+Models are fetched (not bundled) so the package stays small and you accept their licenses. The helper
+downloads straight from upstream over HTTPS — Silero VAD + the Piper "Alba" voice from the DAWN repo,
+and your chosen ASR (Vosk from alphacephei.com, or Whisper from HuggingFace) — into
+`/var/lib/dawn-satellite/models`. Pick the ASR that matches `[asr] engine` in `satellite.toml`
+(default `vosk`), then `systemctl restart dawn-satellite`.
 
 ## Over-the-air updates (OTA)
 
