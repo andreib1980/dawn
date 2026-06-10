@@ -651,9 +651,9 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    /* Get reconnect secret for client to save */
    char *session_secret = session_get_reconnect_secret(session);
 
-   OLOG_INFO("Satellite: Registered '%s' (%s) tier=%d location='%s' session=%u user=%d",
-             identity.name, identity.uuid, tier, identity.location, session->session_id,
-             conn->auth_user_id);
+   OLOG_INFO("Satellite: Registered '%s' (%s) tier=%d location='%s' fw=%s session=%u user=%d",
+             identity.name, identity.uuid, tier, identity.location,
+             firmware_version[0] ? firmware_version : "?", session->session_id, conn->auth_user_id);
 
    /* Send registration acknowledgment with reconnect secret
     * SECURITY: Client MUST save this secret and provide it on reconnection.

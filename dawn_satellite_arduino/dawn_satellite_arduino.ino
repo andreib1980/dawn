@@ -46,6 +46,17 @@
 #include "arduino_secrets.h"
 #include "ca_cert.h"
 
+/* OTA device-apply (docs/OTA_DESIGN.md §8) lives in ota_apply.cpp — a real C++
+ * translation unit, not a second .ino (Arduino's .ino auto-prototype generator
+ * would hoist prototypes for functions taking the sketch-defined ota_rec_t type
+ * above its typedef and break the build).  This header gives us the three entry
+ * points + OTA_ABI_TAG + FIRMWARE_VERSION (via satellite_version.h). */
+#include "ota_apply.h"
+
+/* SET_LOOP_TASK_STACK_SIZE is placed just above setup() (not here) — at the top
+ * ctags misreads the macro as the first function definition and hoists the
+ * sketch's auto-prototypes above the NeoPixelMode enum, breaking the build. */
+
 /* ── Configuration (from arduino_secrets.h — gitignored) ─────────────────── */
 const char *ssid = SECRET_SSID;
 const char *password = SECRET_PASSWORD;
@@ -71,9 +82,8 @@ const char *SATELLITE_LOCATION = SECRET_SATELLITE_LOCATION;
 /* ── TFT Display ───────────────────────────────────────────────────────────── */
 #define TFT_BACKLIGHT 45
 
-/* Firmware version reported to the daemon at registration for OTA fleet
- * visibility (docs/OTA_DESIGN.md §1).  Bump on every released sketch. */
-#define FIRMWARE_VERSION "2.0.0"
+/* FIRMWARE_VERSION (satellite_version.h) + the OTA_* config (ota_apply.h) are
+ * included above so they're shared verbatim with ota_apply.cpp. */
 
 /* ── Audio configuration ───────────────────────────────────────────────────── */
 #define SAMPLE_RATE 16000
@@ -121,7 +131,10 @@ static_assert(AUDIO_SEND_CHUNK_BYTES >= AUDIO_SEND_CHUNK_SAMPLES * 2 + 1,
 #define MAX_DISPLAY_STRING 100
 
 /* ── JSON buffer size ─────────────────────────────────────────────────────── */
-#define MAX_JSON_SIZE 1024 /* #15: reduced from 4096 — DAP2 messages are typically <512 bytes */
+/* DAP2 text messages are typically <512 B, but the ota_offer carries hex
+ * manifest(328) + sig(128) + sha256(64) + token(64) ≈ 800–850 B with the
+ * envelope, so the guard must clear it or the offer is silently dropped. */
+#define MAX_JSON_SIZE 1536
 
 /* ── Debounce ──────────────────────────────────────────────────────────────── */
 #define DEBOUNCE_TIME 50
@@ -155,7 +168,9 @@ uint32_t sessionId = 0;
 
 /* ── NVS persistence ─────────────────────────────────────────────────────── */
 Preferences nvsPrefs;
-static char persistentUUID[37] = {0};
+/* External linkage (not static): ota_apply.cpp references it via `extern char
+ * persistentUUID[]` to build the download URL. */
+char persistentUUID[37] = {0};
 
 /* ── Audio send buffer (allocated in PSRAM) ────────────────────────────────── */
 uint8_t *wsSendBuf = NULL;
@@ -573,13 +588,12 @@ void sendRegistration() {
    caps["local_tts"] = false;
    caps["wake_word"] = false;
    caps["push_to_talk"] = true;
-   /* OTA apply lands in Phase 4 (needs the dual-partition table); until then the
-    * device reports its version but does not advertise OTA capability, so the
-    * server will not send it update offers. */
-   caps["ota"] = false;
+   /* Phase 4: device-apply implemented (ota_apply.cpp) — advertise OTA so the
+    * server will send signed update offers for platform=esp32, tier=2. */
+   caps["ota"] = true;
 
    JsonObject hw = payload["hardware"].to<JsonObject>();
-   hw["platform"] = "esp32s3";
+   hw["platform"] = OTA_ABI_TAG; /* must equal the manifest abi_tag the device checks */
    hw["memory_mb"] = ESP.getPsramSize() / (1024 * 1024);
 
    /* Include registration key if configured */
@@ -644,6 +658,9 @@ void handleTextMessage(uint8_t *payload, size_t length) {
                saveReconnectSecret();
             }
          }
+         /* Commit a freshly-applied OTA: registering proves the new image runs +
+          * reaches the server, so clear the verify-state guard (ota_apply.cpp). */
+         ota_on_registered();
          setNeoPixelMode(NEO_IDLE_CYCLING);
          updateTFTStatus("Ready", ST77XX_WHITE, true);
 #if DEBUG_VERBOSE
@@ -718,6 +735,10 @@ void handleTextMessage(uint8_t *payload, size_t length) {
       snprintf(errBuf, sizeof(errBuf), "Err: %s", safeCode);
       updateTFTStatus(errBuf, ST77XX_RED);
       setNeoPixelMode(NEO_ERROR);
+   } else if (strcmp(type, "ota_offer") == 0) {
+      /* Server→satellite update offer (docs/OTA_DESIGN.md §8). The decision +
+       * verify + reboot-into-apply all live in ota_apply.cpp. */
+      ota_handle_offer(doc["payload"].as<JsonObject>());
    }
 }
 
@@ -1161,6 +1182,13 @@ void reportMemoryUsage() {
  * Setup
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Bump the loop-task stack from the 8 KB default so the synchronous Ed25519
+ * verify (TweetNaCl ref code) + ArduinoJson offer parse can't overflow it.
+ * arduino-esp32 reads this global at startup.  Placed here (below all type
+ * definitions) so ctags doesn't treat the macro as the first function and hoist
+ * the sketch's auto-prototypes above the types they use. */
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 void setup() {
    Serial.begin(115200);
    delay(1000);
@@ -1183,9 +1211,31 @@ void setup() {
    strip.show();
    updateTFTStatus("LEDs ready", ST77XX_GREEN);
 
+   /* Load persistent UUID + reconnect secret (NVS, no PSRAM needed) before the
+    * OTA boot path — the download sub-path needs persistentUUID for its URL. */
+   loadOrCreateUUID();
+   loadReconnectSecret();
+
+   /* OTA boot path (docs/OTA_DESIGN.md §8) — MUST run before the PSRAM check and
+    * buffer allocations below.  Two reasons: (1) the verify-state guard increments
+    * the NVS boot counter HERE, so it advances on every reboot even if a later
+    * step hangs (e.g. the audio ps_malloc on a mis-built image) — if this ran
+    * after such a hang the device would reboot-loop forever and never reach the
+    * rollback threshold; (2) the download sub-path runs WiFi-only with maximal
+    * free heap and esp_restart()s, so it never reaches these allocations anyway.
+    * It applies a pending download and reboots (never returns), reverts a
+    * crash/hang-looping update and reboots, or returns for a normal boot — arming
+    * a verify-boot watchdog when a just-flashed image is awaiting registration. */
+   ota_boot_path();
+
    /* Initialize PSRAM */
    if (psramFound()) {
-      Serial.println("PSRAM found and initialized");
+      /* Print size/free here so an OTA vs USB-flash boot can be compared: a
+       * verbatim-flashed OTA image whose header SPI/PSRAM flags weren't patched
+       * (esptool patches them on USB write; OTA does not) can report PSRAM
+       * found but a near-zero usable heap, which fails the ps_malloc below. */
+      Serial.printf("PSRAM found: size=%lu free=%lu bytes\n",
+                    (unsigned long)ESP.getPsramSize(), (unsigned long)ESP.getFreePsram());
       updateTFTStatus("Memory OK", ST77XX_GREEN);
    } else {
       Serial.println("PSRAM not found! Enable PSRAM in board config.");
@@ -1223,10 +1273,6 @@ void setup() {
    }
 
    updateTFTStatus("Buffers OK", ST77XX_GREEN);
-
-   /* Load persistent UUID and reconnect secret from NVS flash */
-   loadOrCreateUUID();
-   loadReconnectSecret();
 
    /* Initialize button and ADC */
    pinMode(BUTTON_PIN, INPUT_PULLUP);

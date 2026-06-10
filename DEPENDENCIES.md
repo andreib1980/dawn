@@ -81,6 +81,15 @@ This document tracks all third-party dependencies used by the DAWN project.
 | cuSOLVER | NVIDIA EULA | Linear algebra |
 | cuRAND | NVIDIA EULA | Random number generation |
 
+### ESP32 Satellite Firmware (Tier 2, vendored)
+
+Arduino-ecosystem libraries (WebSockets, ArduinoJson, Adafruit GFX/ST7789/NeoPixel) are listed in
+`dawn_satellite_arduino/README.md`. The OTA device-apply path adds one **vendored** dependency:
+
+| Library | License | Purpose |
+|---------|---------|---------|
+| TweetNaCl | Public domain | Ed25519 signature verification of the OTA manifest on the ESP32 (`crypto_sign_ed25519_tweet_open`; bundles SHA-512). Dropped into `dawn_satellite_arduino/tweetnacl.{c,h}` unmodified from upstream (<https://tweetnacl.cr.yp.to/>). Verify-only; the sketch supplies the `randombytes()` stub. Chosen over mbedTLS because Ed25519 isn't enabled in the stock arduino-esp32 mbedTLS config. |
+
 ## Build Tools
 
 | Tool | Version | Purpose |
@@ -89,6 +98,7 @@ This document tracks all third-party dependencies used by the DAWN project.
 | Meson | 0.63+ | WebRTC AEC build |
 | GCC/G++ | 11+ | C/C++ compiler |
 | pkg-config | - | Library discovery |
+| arduino-cli | 1.5+ | ESP32 Tier-2 satellite firmware build (`dawn_satellite_arduino/build-esp32.sh`, local + CI) |
 
 ## Optional Commercial APIs
 

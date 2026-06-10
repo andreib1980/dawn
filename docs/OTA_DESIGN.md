@@ -43,16 +43,22 @@ Committed on branch `satellite_ota` (`a38c901` Phase 1, `9593abc` satellite buil
   CLI `ota list`/`push` + all error paths, token mint (ttl=120s), offer delivery over dawn-kitchen's
   WS, single-flight lock, and the WebUI panel (gating, confirm, push, busy-state).
 
-**REMAINING:**
-- **Phase 3 (RPi apply)** — install-path migration R1 (§7), device-side `abi_tag` check, libcurl
-  download + libsodium verify-before-commit (0700, no TOCTOU), binary swap + self-restart,
-  boot-count rollback (< systemd StartLimitBurst).
-- **Phase 4 (ESP32 apply)** — reboot-to-clean OTA, `partitions.csv` dual-OTA bootstrap (already
-  added), `Update` flow + WDT + sector-aligned writes, Ed25519 verify, native partition rollback.
-- **Phase 5 (hardening)** — canary-then-rollout for `push all`, audit log.
+**DONE — device apply (both tiers):**
+- **Phase 3 (RPi apply)** — install-path migration, device-side `abi_tag` check, libcurl download +
+  libsodium verify-before-commit (0700, no TOCTOU), atomic binary swap + self-restart, launcher-owned
+  boot-count rollback. Distribution pipeline (.deb, `release.yml`, `ota-release.sh`), runtime keyring
+  (`/etc/dawn/ota_pubkey`), offer fresh-read + finalize mismatch-resolution + platform-bound download
+  token (auth_db v60), and host test suites (`test_ota_apply`/`_launch`/`_marker`). Live-verified
+  2.0.0→2.2.0 on dawn-kitchen.
+- **Phase 4 (ESP32 apply)** — see §8. `dawn_satellite_arduino/ota_apply.cpp`: offer verify (TweetNaCl
+  Ed25519) → NVS hand-off → reboot → WiFi-only download via `esp_ota_ops` + SHA-256 → boot switch →
+  NVS boot-count guard rollback. **Live-verified 2.1.0→2.2.0 end-to-end on the ESP32-S3 (Office Speaker)
+  2026-06-10** — happy path through to daemon `committed` + WebUI `success`. See §8 for the rollback-gap
+  limitation (a hang in `setup()` doesn't reboot, so the boot-count guard can't revert it).
 
-NOTE: the server can now offer/serve/track updates, but **satellites do not yet apply `ota_offer`**
-(that's Phase 3/4). Pushing to a current satellite is harmless (unknown WS type ignored by design).
+**REMAINING:**
+- **Phase 5 (hardening)** — canary-then-rollout for `push all`, audit log; (optional) ESP32 native
+  rollback via a custom IDF bootloader.
 
 ---
 
@@ -205,19 +211,54 @@ triggered** (dawn-admin / WebUI) to device/tier/all; **Tier 1 = binary(+libs) on
   the rollback copy at the **top of startup** if marker persists and **boot-count ≥ threshold
   (< systemd `StartLimitBurst=5`)**. Server-owned commit clears the marker on confirmed reconnect.
 
-### 8. Tier 2 (ESP32) apply — reboot-to-clean-state
-- **RAM is the gate, not flash.** On accept: `pending_ota` + token in NVS, **reboot**; a minimal-
-  allocation boot path (audio buffers not yet `ps_malloc`'d) runs download→verify→flash.
-- Hand-author `partitions.csv` with explicit byte math: two ~0x1F0000 app slots + otadata, **NVS at
-  stock offset/size** to preserve `uuid`/`recon_sec` across the one-time bootstrap re-flash (or
-  document re-provisioning), **no spiffs**. CI/build assertion: `.bin` < ~85% of slot size.
-- Stream HTTPS via `WiFiClientSecure` (mbedTLS) into the inactive partition with
-  `Update.begin/write/end`; **sector-aligned 4KB writes**; **feed the WDT each chunk**. SHA-256
-  during write; **verify Ed25519 sig + hash before setting boot partition.** Verify lib: vendored
-  `ed25519-donna` (~10-20KB) or confirmed mbedTLS Ed25519.
-- **Rollback:** `esp_ota_set_boot_partition` + reboot; `esp_ota_mark_app_valid_cancel_rollback` only
-  after server confirms reported-version==target; `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. Raw
-  `.bin`. Skip resume (~3-9s transfer).
+### 8. Tier 2 (ESP32) apply — reboot-to-clean-state *(SHIPPED — Phase 4, 2026-06-10; `dawn_satellite_arduino/ota_apply.cpp`)*
+As built (a few deliberate deviations from the original sketch below, all noted):
+- **RAM is the gate, not flash.** A two-state NVS record (`'D'` download / `'V'` verify) drives it. At
+  offer time (full heap, WS up) the manifest is **Ed25519-verified, cross-checked, and the authenticated
+  metadata stored in NVS**, then `esp_restart()`. `ota_boot_path()` runs first in `setup()` — before
+  WiFi/audio/WS — so the download has maximal free *internal* heap and only one mbedTLS session (no
+  concurrent WS TLS).
+- `partitions.csv`: two 0x1E0000 app slots + otadata, **NVS at stock 0x9000/0x5000** (preserves
+  `uuid`/`recon_sec` across the bootstrap re-flash), no spiffs use. Runtime guard `OTA_MAX_IMAGE_BYTES`
+  = slot − 64 KB (`static_assert`); build-time advisory: `.bin` < ~85% of slot.
+- **Download path** (`'D'`): WiFi + **NTP sync first** (WiFiClientSecure cert dates need real time, else
+  every download fails), then `HTTPClient` over `WiFiClientSecure(setCACert)`. Streams 4 KB chunks
+  (non-blocking `read()`, 180 s wall-clock + 20 s stall caps) via **`esp_ota_ops` directly** (not the
+  Arduino `Update` wrapper — so the boot-partition switch happens only *after* the hash check, not inside
+  `Update.end`). The loop-task WDT is dropped for the download (the TLS handshake is one long blocking
+  call). Order: incomplete → `esp_ota_abort`; complete → `esp_ota_end` → **re-read the COMMITTED flash and
+  SHA-256 it** (verify the on-flash artifact, not just the received stream — like Tier-1 hashes the swapped
+  fd) → `esp_ota_set_boot_partition(next)` → NVS `state=V, boots=0` → reboot. **One attempt, fail-closed:**
+  any failure clears state, restores the WDT, and boots the OLD image (server's register-time
+  mismatch-resolution marks it `failed`; operator re-pushes). Verify lib: **vendored TweetNaCl** (Ed25519
+  + SHA-512, public domain) used only at offer time; the download path needs only HW SHA-256.
+- **Rollback — NVS boot-count guard (primary), + `mark_app_valid` belt-and-suspenders.** *Deviation + why:*
+  the stock Arduino-IDE precompiled bootloader does **not** enable `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`,
+  so native auto-revert isn't guaranteed without a custom bootloader (an ESP-IDF/PlatformIO build —
+  deferred, see memory `project_esp32_stays_arduino`). Primary mechanism: in `'V'` state the guard
+  increments `boots` (persisted FIRST), and at `boots >= 3` reverts to the **explicit known-good slot
+  recorded by label at flash time** (`esp_ota_get_running_partition()->label`, found via
+  `esp_partition_find_first` — not inferred via `get_next_update_partition`, so a crash-timing quirk can't
+  make it "revert" onto the bad image), and only if that slot holds a bootable app (first byte `0xE9`) —
+  switching to a blank slot would brick. Belt-and-suspenders: a successful registration calls
+  `esp_ota_mark_app_valid_cancel_rollback()` (a harmless no-op if the bootloader lacks rollback, but if
+  this core build *did* enable it, it cancels the bootloader's own pending-verify so the two mechanisms
+  don't fight) and clears the record. **Verify-boot watchdog (closes the hang-without-reboot gap):** the
+  boot-count guard above only advances on *reboots*, so on its own it catches a *reboot loop* but NOT an
+  image that boots once and then **hangs** in `setup()` (SHA verification doesn't save you — a perfectly
+  intact image can still hang; observed live 2026-06-10, a `PSRAM=opi` build on this QSPI-PSRAM board mapped
+  zero PSRAM so the audio `ps_malloc` returned NULL and the sketch `while(1)`-hung, never rebooting, which
+  soft-bricked the device until a USB reflash). To close it, the `'V'` boot arms a one-shot `esp_timer`
+  (`OTA_VERIFY_REGISTER_TIMEOUT_MS`, 90 s) that runs on its own high-priority task — so it fires even through
+  a wedged loop task — and force-`esp_restart()`s if the new image hasn't successfully registered in time;
+  that reboot re-enters `ota_boot_path()` (which now runs **before** the PSRAM/buffer allocations, so the
+  counter advances even when a later step hangs), incrementing `boots` toward the revert. `ota_on_registered()`
+  disarms it on a healthy registration (clearing the record before disarming so a timer firing at the
+  boundary is harmless). 90 s × 3 boots ≈ 4.5 min worst-case recovery; it is generous so a slow-but-healthy
+  network registration is not false-reverted. Remaining residual: a crash/hang in the *very first* lines of
+  `setup()` before `ota_boot_path()` runs (Serial/TFT/NeoPixel init) is still not counted — but those are
+  fixed, allocation-free init calls. Native rollback (custom bootloader) is the heavier alternative if the
+  ESP32 moves to an IDF build.
 
 ### 9. Config / secrets / DB
 - `[ota]` in dawn.toml: `enabled`, `release_dir`, `download_token_ttl_sec`, `require_tls`(=true).
@@ -277,8 +318,9 @@ A Jetson-built aarch64 binary **will not run on the Pi** even though both are ar
 3. **Tier 1 (RPi) apply:** install-path migration (R1, §7); **device-side `abi_tag` check** (§10);
    libcurl download, libsodium verify-before-commit (0700, no TOCTOU), swap+self-restart,
    boot-count rollback.
-4. **Tier 2 (ESP32) apply:** reboot-to-clean OTA, Update flow (WDT + sector-aligned), verify, native
-   rollback.
+4. **Tier 2 (ESP32) apply:** reboot-to-clean OTA, esp_ota stream (WDT + 4 KB chunks), Ed25519 verify
+   (TweetNaCl) + SHA-256, **NVS boot-count guard** rollback (native rollback needs a custom bootloader —
+   deferred; see §8). *(SHIPPED 2026-06-10.)*
 5. **Hardening:** canary-then-rollout for `push all`, anti-rollback enforcement audit, audit log,
    docs. (Resume intentionally dropped both tiers v1.)
 

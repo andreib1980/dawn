@@ -1,0 +1,29 @@
+#ifndef OTA_PUBKEY_H
+#define OTA_PUBKEY_H
+
+/*
+ * OTA verify keyring for the Tier-2 ESP32 satellite — the device's trust anchor
+ * for signed over-the-air updates (docs/OTA_DESIGN.md §8/§9).  This is the ESP32
+ * analogue of the Tier-1 /etc/dawn/ota_pubkey file.
+ *
+ * Copy this to ota_pubkey.h (gitignored) and paste YOUR operator Ed25519 PUBLIC
+ * key(s) below.  The public key is NOT secret — it just pins which signer this
+ * device trusts, so each operator signs releases for their own fleet (the
+ * prebuilt sketch ships unsigned; you bake your own key).
+ *
+ * Get the hex from the public key you sign releases with, e.g.:
+ *     sudo ./dawn_satellite/ota-release.sh keygen        # one-time, on the daemon host
+ *     xxd -p -c32 /etc/dawn/signing/ota_signing.pub      # 64 hex chars (32-byte Ed25519 pubkey)
+ *
+ * Provide 1 or 2 keys (current first, optional next for rotation).  Each entry
+ * is exactly 64 lowercase/uppercase hex characters.
+ */
+
+#define OTA_PUBKEY_COUNT 1
+
+static const char *const OTA_PUBKEY_HEX[OTA_PUBKEY_COUNT] = {
+   "0000000000000000000000000000000000000000000000000000000000000000", /* <-- replace */
+   /* "next rotation key (optional) — also bump OTA_PUBKEY_COUNT to 2", */
+};
+
+#endif /* OTA_PUBKEY_H */
