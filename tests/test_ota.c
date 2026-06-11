@@ -268,11 +268,29 @@ static void test_reconcile_stale(void) {
    TEST_ASSERT_EQUAL_STRING("unknown", st.state);
 }
 
+/* Trust-boundary state allowlist: only the OTA_STATE_* tokens are accepted; a
+ * device-supplied unknown/empty/NULL token (or a case/whitespace variant) is
+ * rejected before it can be persisted or dodge the in-flight predicate. */
+static void test_state_is_valid(void) {
+   TEST_ASSERT_TRUE(ota_state_is_valid(OTA_STATE_IDLE));
+   TEST_ASSERT_TRUE(ota_state_is_valid(OTA_STATE_DOWNLOADING));
+   TEST_ASSERT_TRUE(ota_state_is_valid(OTA_STATE_SUCCESS));
+   TEST_ASSERT_TRUE(ota_state_is_valid(OTA_STATE_FAILED));
+   TEST_ASSERT_TRUE(ota_state_is_valid(OTA_STATE_UNKNOWN));
+
+   TEST_ASSERT_FALSE(ota_state_is_valid(NULL));
+   TEST_ASSERT_FALSE(ota_state_is_valid(""));
+   TEST_ASSERT_FALSE(ota_state_is_valid("bogus"));
+   TEST_ASSERT_FALSE(ota_state_is_valid("DOWNLOADING"));  /* case-sensitive */
+   TEST_ASSERT_FALSE(ota_state_is_valid("downloading ")); /* trailing space */
+}
+
 int main(void) {
    if (sodium_init() < 0) {
       return 1;
    }
    UNITY_BEGIN();
+   RUN_TEST(test_state_is_valid);
    RUN_TEST(test_resolve_latest);
    RUN_TEST(test_begin_push_offer_fields);
    RUN_TEST(test_begin_push_unknown_release);

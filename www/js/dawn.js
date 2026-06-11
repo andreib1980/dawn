@@ -211,6 +211,14 @@
                   // LLM errors - show toast and add to transcript
                   DawnToast.show(msg.payload.message, 'error');
                   DawnTranscript.addEntry('system', `Error: ${msg.payload.message}`);
+               } else if (msg.payload.code === 'OTA_ERROR') {
+                  // OTA push/rollout failures: surface in the admin panel (toast +
+                  // re-enable the disabled Push/Roll Out buttons), not the chat
+                  // transcript hidden behind the settings overlay.
+                  DawnToast.show(msg.payload.message, 'error');
+                  if (typeof DawnSatellites !== 'undefined') {
+                     DawnSatellites.handleOtaError();
+                  }
                } else {
                   DawnTranscript.addEntry('system', `Error: ${msg.payload.message}`);
                }

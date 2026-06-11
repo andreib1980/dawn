@@ -485,6 +485,8 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
    /* Firmware version (optional — legacy firmware omits it).  Recorded in
     * ota_device_state for fleet visibility and the OTA register-time finalize
     * check (Phase 2).  See docs/OTA_DESIGN.md §1. */
+   /* Satellite-supplied firmware version; width-clamped at the DB chokepoint
+    * (ota_db_report_version) before it's persisted. */
    const char *firmware_version = "";
    struct json_object *fw_obj;
    if (json_object_object_get_ex(payload, "firmware_version", &fw_obj)) {

@@ -134,6 +134,23 @@ static void test_bad_signature(void) {
    json_object_put(o);
 }
 
+/* ---- bad token charset --------------------------------------------------- */
+/* The token is spliced raw into the download URL query string, so a right-length
+ * but non-hex token (a stray '&' could split the query) must be rejected. */
+static void test_reject_bad_token(void) {
+   struct json_object *o = make_offer("2.3.0", DEV_ABI, "", 1000, 0, false, g_sk);
+   char bad[OTA_OFFER_TOKEN_HEX + 1];
+   memset(bad, 'a', OTA_OFFER_TOKEN_HEX);
+   bad[OTA_OFFER_TOKEN_HEX - 1] = '&'; /* correct length, non-hex char */
+   bad[OTA_OFFER_TOKEN_HEX] = '\0';
+   json_object_object_add(o, "token", json_object_new_string(bad)); /* replaces the key */
+   ota_manifest_t m;
+   char r[OTA_DETAIL_BUF] = "";
+   TEST_ASSERT_EQUAL_INT(OTA_DECIDE_REJECT, decide(o, "2.2.0", DEV_ABI, &m, r, sizeof(r)));
+   TEST_ASSERT_EQUAL_STRING("bad token", r);
+   json_object_put(o);
+}
+
 /* ---- row 4: abi mismatch ------------------------------------------------ */
 static void test_abi_mismatch(void) {
    struct json_object *o = make_offer("2.3.0", "debian-bookworm-aarch64", "", 1000, 0, false, g_sk);
@@ -295,6 +312,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_accept_newer);
    RUN_TEST(test_bad_signature);
+   RUN_TEST(test_reject_bad_token);
    RUN_TEST(test_abi_mismatch);
    RUN_TEST(test_already_current);
    RUN_TEST(test_downgrade_blocked_then_allowed);

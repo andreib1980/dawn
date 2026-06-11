@@ -442,6 +442,24 @@ int ota_report_status(const char *uuid, const char *state, const char *error) {
    return ota_db_set_state(uuid, state, error);
 }
 
+bool ota_state_is_valid(const char *state) {
+   if (!state) {
+      return false;
+   }
+   /* Keep in sync with the OTA_STATE_* defines in include/core/ota_db.h. */
+   static const char *const k[] = {
+      OTA_STATE_IDLE,      OTA_STATE_OFFERED,  OTA_STATE_DOWNLOADING,
+      OTA_STATE_VERIFYING, OTA_STATE_APPLYING, OTA_STATE_REBOOTING,
+      OTA_STATE_SUCCESS,   OTA_STATE_FAILED,   OTA_STATE_UNKNOWN,
+   };
+   for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+      if (strcmp(state, k[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 void ota_finalize_on_register(const char *uuid, const char *reported_version) {
    if (!uuid || !uuid[0] || !reported_version || !reported_version[0]) {
       return;

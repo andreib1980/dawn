@@ -25,6 +25,7 @@
 #define _GNU_SOURCE /* fopen("re") */
 #endif
 
+#include <ctype.h>
 #include <json-c/json.h>
 #include <sodium.h>
 #include <stdio.h>
@@ -196,6 +197,15 @@ ota_decide_t ota_apply_decide(struct json_object *payload,
    }
    if (!url_path_ok(url_path)) {
       return reject(reason, reason_size, "bad url_path");
+   }
+   /* The token is interpolated raw into the download URL query string (unlike
+    * sha/manifest/sig, which are hex-decoded), so validate its charset here —
+    * mirroring the uuid guard in ota_apply.c — to keep a stray '&'/'#'/space from
+    * splitting or truncating the query.  It is documented as a 32-byte hex token. */
+   for (const char *p = token; *p; p++) {
+      if (!isxdigit((unsigned char)*p)) {
+         return reject(reason, reason_size, "bad token");
+      }
    }
 
    uint8_t raw[OTA_MANIFEST_WIRE_SIZE], sig[OTA_SIG_BYTES], sha[OTA_SHA256_BYTES];
