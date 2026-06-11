@@ -48,8 +48,9 @@ endif()
 add_definitions(-DPLATFORM_${PLATFORM})
 message(STATUS "Building for platform: ${PLATFORM}")
 
-# Define the version number in the header file directly
-set(VERSION_NUMBER "1.0.0")
+# VERSION_NUMBER is the single source of truth in include/version.h — do NOT also
+# define it here (a -D would redefine the header's value and warn).  Only GIT_SHA,
+# computed at configure time, is passed through as a -D below.
 
 # Try to get the current Git SHA
 execute_process(
@@ -66,9 +67,8 @@ if(NOT GIT_SHA_RESULT EQUAL 0)
     set(GIT_SHA "unknown")
 endif()
 
-# Pass version info to the compiler
+# Pass the Git SHA to the compiler (VERSION_NUMBER lives in include/version.h).
 add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
-add_definitions(-DVERSION_NUMBER=\"${VERSION_NUMBER}\")
 
 # Include directories for new source layout
 include_directories(include)
