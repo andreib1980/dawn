@@ -42,6 +42,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "ui/metrics.h"
+#include "version.h"
 
 /* ============================================================================
  * Color Pair Definitions
