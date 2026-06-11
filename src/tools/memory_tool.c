@@ -44,6 +44,9 @@ static const treg_param_t memory_params[] = {
        .name = "action",
        .description =
            "Memory action: 'remember' (store a fact), 'search' (find memories), "
+           "'get' (retrieve specific memories EXACTLY by numeric ID — the deterministic "
+           "counterpart to 'search'; use when you already know the ID(s) and want the exact "
+           "stored text rather than a relevance-ranked match), "
            "'forget' (remove memories by numeric ID — DELETE permanently, or MERGE duplicates "
            "while keeping one by also setting 'replaced_by'; use search/recent/find_duplicates "
            "first to find the IDs), 'recent' (list recent memories), "
@@ -58,9 +61,10 @@ static const treg_param_t memory_params[] = {
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "remember", "search", "forget", "recent", "find_duplicates", "save_contact",
-                        "find_contact", "list_contacts", "delete_contact", "merge_entities" },
-       .enum_count = 10,
+       .enum_values = { "remember", "search", "get", "forget", "recent", "find_duplicates",
+                        "save_contact", "find_contact", "list_contacts", "delete_contact",
+                        "merge_entities" },
+       .enum_count = 11,
    },
    {
        .name = "query",
@@ -78,6 +82,9 @@ static const treg_param_t memory_params[] = {
            "freely, e.g. [\"User prefers dark mode\", {\"text\": \"Movie The Odyssey on "
            "2026-07-22 7:00 PM\", \"expires_at\": \"2026-07-22\"}].\n"
            "  search:          STRING — keywords (3-8 words work best).\n"
+           "  get:             NUMERIC ID(s) — one ID, or a comma-separated list, e.g. '7858' "
+           "or '7858,7854'. Returns those exact memories verbatim (no ranking); non-numeric "
+           "tokens are ignored.\n"
            "  forget:          NUMERIC ID(s) — one fact ID, or a comma-separated list to "
            "bulk-delete, e.g. '4711' or '4711,4712,4713' (max 50). IDs come from a prior "
            "search/recent/find_duplicates result; non-numeric tokens are ignored.\n"

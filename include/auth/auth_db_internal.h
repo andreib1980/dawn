@@ -49,7 +49,7 @@
  * ============================================================================= */
 
 /* Current schema version */
-#define AUTH_DB_SCHEMA_VERSION 60
+#define AUTH_DB_SCHEMA_VERSION 61
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -272,6 +272,11 @@ typedef struct {
    sqlite3_stmt *stmt_doc_chunk_read;
    sqlite3_stmt *stmt_doc_list_all;
    sqlite3_stmt *stmt_doc_update_global;
+   /* v61 — document_chunks_fts (BM25 lexical channel) + stable-id note edit. */
+   sqlite3_stmt *stmt_doc_chunk_fts_insert;
+   sqlite3_stmt *stmt_doc_chunk_fts_delete;
+   sqlite3_stmt *stmt_doc_chunk_search_bm25;
+   sqlite3_stmt *stmt_doc_chunk_update;
 
    /* === Calendar module statements (calendar_db.c) === */
    sqlite3_stmt *stmt_cal_acct_create;

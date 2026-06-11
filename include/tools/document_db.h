@@ -74,6 +74,20 @@ typedef struct {
    int64_t created_at; /* v35 — chunk origin timestamp; 0 = unknown */
 } document_chunk_t;
 
+/* v61: one lexical (BM25) candidate from document_db_chunk_search_bm25.  Carries
+ * enough to fuse with the semantic channel and format a citation — no embedding
+ * (the lexical side doesn't need it). */
+typedef struct {
+   int64_t id; /* chunk id (== FTS rowid) */
+   int chunk_index;
+   int64_t document_id;
+   char filename[DOC_FILENAME_MAX]; /* the label, for label-match scoring */
+   char filetype[DOC_FILETYPE_MAX];
+   int num_chunks; /* parent doc chunk count (1 == note / whole-record) */
+   int64_t created_at;
+   char text[DOC_CHUNK_TEXT_MAX];
+} doc_bm25_hit_t;
+
 /* =============================================================================
  * Document CRUD
  * ============================================================================= */
@@ -150,6 +164,98 @@ int document_db_update_global(int64_t doc_id, bool is_global);
  * @return SUCCESS (0) on success, FAILURE (1) on error
  */
 int document_db_delete(int64_t doc_id);
+
+/**
+ * @brief Delete a document, its chunks, AND its document_chunks_fts rows (v61).
+ *
+ * The contentless FTS5 index is NOT reached by the document_chunks FK cascade
+ * (no SQL trigger can run the C stemmer), so a plain document_db_delete leaves
+ * orphan FTS rows that bias global IDF.  Use this for any document that may have
+ * been FTS-indexed.  Permission checks remain the caller's responsibility
+ * (mirrors document_db_delete).
+ * @return SUCCESS (0) on success, FAILURE (1) on error
+ */
+int document_db_delete_indexed(int64_t doc_id);
+
+/**
+ * @brief Index one chunk into document_chunks_fts (v61 BM25 lexical channel).
+ *
+ * Called by the ingest pipeline right after document_db_chunk_create.  Stems are
+ * computed by the CALLER outside the auth_db lock (leaf-lock rule); this performs
+ * only the locked insert.  Soft: a no-op (returns FAILURE) if the v61 migration
+ * has not completed, so ingest still succeeds and search degrades to semantic.
+ *
+ * @param chunk_id      document_chunks.id (== FTS rowid)
+ * @param label_stems   pre-stemmed filename/label (memory_stem_string output)
+ * @param body_stems    pre-stemmed chunk text
+ * @return SUCCESS (0) on success, FAILURE (1) if not indexed
+ */
+int document_db_chunk_index_fts(int64_t chunk_id, const char *label_stems, const char *body_stems);
+
+/**
+ * @brief Stable-id in-place edit of a single-chunk note (v61).
+ *
+ * Gated on filetype == "note" && num_chunks == 1 && owner == user_id — a forged
+ * request cannot rewrite an uploaded multi-chunk document.  Swaps the chunk text
+ * + embedding, rebuilds the two FTS rows, and updates the document filename +
+ * file_hash in ONE transaction, keeping doc_id / is_global / inbound pointers
+ * stable.  The new embedding + new_hash are computed by the caller (the engine /
+ * sha256 live a layer up); stemming is done here from the live + new text.
+ *
+ * @param user_id   Owner (gate)
+ * @param doc_id    Note document id
+ * @param new_label New label (== new filename)
+ * @param new_text  New note body
+ * @param new_emb   Embedding of new_text (dims floats)
+ * @param dims      Embedding dimensions
+ * @param norm      L2 norm of new_emb
+ * @param new_hash  SHA-256 hex of new_text (caller-computed)
+ * @return SUCCESS (0) on success, FAILURE (1) if not a note / not owned / error
+ */
+int document_db_note_update(int user_id,
+                            int64_t doc_id,
+                            const char *new_label,
+                            const char *new_text,
+                            const float *new_emb,
+                            int dims,
+                            float norm,
+                            const char *new_hash);
+
+/**
+ * @brief Find a document by EXACT (case-insensitive) label/filename (v61).
+ *
+ * Unlike document_db_find_by_name (substring LIKE), this matches the whole name
+ * exactly, so "Bio" never resolves to "Public Bio".  Used for note-overwrite
+ * routing and delete-by-label.
+ *
+ * @param user_id   Scope (own docs + global)
+ * @param label     Exact filename/label to match (COLLATE NOCASE)
+ * @param note_only If true, restrict to filetype 'note'
+ * @param[out] out  Matched document
+ * @return SUCCESS (0) if found, FAILURE (1) if not found / error
+ */
+int document_db_find_by_label_exact(int user_id,
+                                    const char *label,
+                                    bool note_only,
+                                    document_t *out);
+
+/** Kind filter for document_db_list_filtered (v61). */
+typedef enum {
+   DOC_KIND_ALL = 0,   /**< notes + documents */
+   DOC_KIND_DOCS = 1,  /**< documents only (filetype != 'note') */
+   DOC_KIND_NOTES = 2, /**< notes only */
+} doc_kind_t;
+
+/**
+ * @brief List documents filtered by kind (v61).  Paginated; own docs + global.
+ * @return SUCCESS (0) on success, FAILURE (1) on error
+ */
+int document_db_list_filtered(int user_id,
+                              doc_kind_t kind,
+                              document_t *out,
+                              int limit,
+                              int offset,
+                              int *count_out);
 
 /**
  * @brief Count documents owned by a specific user (excludes global)
@@ -234,6 +340,33 @@ int document_db_chunk_search_load(int user_id,
                                   float *embedding_buf,
                                   int dims,
                                   int max_count,
+                                  int *count_out);
+
+/**
+ * @brief Lexical (BM25) chunk search — the v61 keyword candidate set.
+ *
+ * Runs the column-weighted FTS5 bm25() query over document_chunks_fts and
+ * returns its OWN ranked candidates (NOT a re-rank of the semantic top-K), so a
+ * semantically-buried but lexically-matching chunk still surfaces.  Scores are
+ * sigmoid-normalized to [0, 1] (memory_bm25_normalize) for fusion with cosine.
+ *
+ * @param user_id      User scope (own docs + global)
+ * @param query        Raw query text (stemmed internally)
+ * @param label_weight BM25 weight for the label/filename column (e.g. 3.0)
+ * @param body_weight  BM25 weight for the chunk-text column (e.g. 1.0)
+ * @param out          [out] Hit array (caller-allocated, max_hits entries)
+ * @param out_scores   [out] Normalized [0,1] score per hit (parallel array)
+ * @param max_hits     Capacity of out / out_scores
+ * @param[out] count_out Number of hits written (must not be NULL)
+ * @return SUCCESS (0) on success (incl. 0 hits / FTS not yet migrated), FAILURE (1) on error
+ */
+int document_db_chunk_search_bm25(int user_id,
+                                  const char *query,
+                                  float label_weight,
+                                  float body_weight,
+                                  doc_bm25_hit_t *out,
+                                  float *out_scores,
+                                  int max_hits,
                                   int *count_out);
 
 #ifdef __cplusplus

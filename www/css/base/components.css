@@ -219,6 +219,35 @@
    margin-top: 0.25rem;
 }
 
+.dawn-form .form-hint.warning {
+   color: var(--warning);
+}
+
+/* -----------------------------------------------------------------------------
+ * Standalone input (.dawn-input)
+ * Shared form-input styling for inputs OUTSIDE a .dawn-form (search boxes,
+ * single fields).  Mirrors the .dawn-form input look.
+ * -------------------------------------------------------------------------- */
+.dawn-input {
+   width: 100%;
+   box-sizing: border-box;
+   background: var(--bg-tertiary);
+   border: 1px solid var(--border-color);
+   border-radius: 6px;
+   padding: 0.5rem 0.75rem;
+   color: var(--text-primary);
+   font-size: 0.875rem;
+}
+
+.dawn-input:focus {
+   outline: none;
+   border-color: var(--accent);
+}
+
+.dawn-input::placeholder {
+   color: var(--text-tertiary);
+}
+
 /* -----------------------------------------------------------------------------
  * Split Button (.dawn-split-btn)
  * A main button joined to a dropdown chevron, opening a popup menu.

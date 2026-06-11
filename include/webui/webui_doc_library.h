@@ -57,4 +57,19 @@ void handle_doc_library_index(ws_connection_t *conn, json_object *payload);
  */
 void handle_doc_library_toggle_global(ws_connection_t *conn, json_object *payload);
 
+/**
+ * @brief Save a new note (single-chunk document, filename == label) (v61).
+ * Payload: { "label": "...", "text": "..." }
+ * Response type: doc_library_note_save_response
+ * Rejects a duplicate label (edits go through note_update).
+ */
+void handle_doc_library_note_save(ws_connection_t *conn, json_object *payload);
+
+/**
+ * @brief Edit an existing note in place — stable id (v61).
+ * Payload: { "id": <doc_id>, "label": "...", "text": "..." }
+ * Response type: doc_library_note_update_response
+ */
+void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload);
+
 #endif /* WEBUI_DOC_LIBRARY_H */

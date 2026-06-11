@@ -483,9 +483,15 @@
    }
 
    .doc-library-item-global,
-   .doc-library-item-delete {
+   .doc-library-item-delete,
+   .doc-library-item-edit {
       opacity: 1;
       padding: 10px;
+   }
+
+   .note-editor .form-actions .btn-primary,
+   .note-editor .form-actions .btn-link {
+      flex: 1;
    }
 }
 
@@ -495,4 +501,133 @@
       width: 320px;
       right: 10px;
    }
+}
+
+/* =============================================================================
+ * v61: Notes tab — search, tabs, note editor, NOTE items
+ * ============================================================================= */
+
+/* This project has NO global `.hidden { display:none }` utility — every
+ * consumer scopes its own rule.  These three new toggle targets need theirs,
+ * or the editor + new-note bar render on load and the upload area never hides. */
+.note-editor.hidden,
+.doc-library-notes-actions.hidden,
+.doc-library-upload.hidden {
+   display: none;
+}
+
+.doc-library-search {
+   padding: 0 1rem 0.5rem;
+}
+
+.doc-library-tabs {
+   display: flex;
+   gap: 0.25rem;
+   padding: 0 1rem;
+   border-bottom: 1px solid var(--border-color);
+}
+
+.doc-library-tab {
+   background: none;
+   border: none;
+   border-bottom: 2px solid transparent;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+   font-weight: 500;
+   padding: 0.5rem 0.75rem;
+   cursor: pointer;
+   transition:
+      color 0.15s,
+      border-color 0.15s;
+}
+
+.doc-library-tab:hover {
+   color: var(--text-primary);
+}
+
+.doc-library-tab[aria-selected='true'] {
+   color: var(--accent);
+   border-bottom-color: var(--accent);
+}
+
+.doc-library-tab:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+   border-radius: 4px;
+}
+
+.doc-library-notes-actions {
+   padding: 0.75rem 1rem;
+}
+
+.doc-library-notes-actions .btn-primary {
+   width: 100%;
+}
+
+/* Inline note editor — the form itself reuses the .dawn-form primitive */
+.note-editor {
+   padding: 0.75rem 1rem;
+   border-bottom: 1px solid var(--border-color);
+   background: var(--bg-secondary);
+}
+
+.note-editor textarea {
+   width: 100%;
+   box-sizing: border-box;
+   resize: vertical;
+   font-family: inherit;
+}
+
+.note-editor .form-group input[type='text'] {
+   width: 100%;
+   box-sizing: border-box;
+}
+
+/* NOTE type badge — accent cyan, distinct from PDF/DOCX/TXT.  Fill matches the
+ * 0.15-opacity weight of the PDF/DOCX/TXT siblings (not the fainter
+ * --accent-subtle) so it reads with the same visual weight. */
+.doc-library-item-icon.note {
+   background: rgba(45, 212, 191, 0.15);
+   color: var(--accent);
+   font-size: 0.58rem;
+}
+
+/* Body-preview meta line for notes — clamp to one line */
+.doc-library-item.note-item .doc-library-item-meta {
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+/* Pencil edit affordance — same hover-reveal as global/delete */
+.doc-library-item-edit {
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   cursor: pointer;
+   padding: 4px;
+   border-radius: 4px;
+   opacity: 0;
+   transition:
+      opacity 0.15s,
+      color 0.15s;
+   flex-shrink: 0;
+   line-height: 1;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+}
+
+.doc-library-item:hover .doc-library-item-edit {
+   opacity: 1;
+}
+
+.doc-library-item-edit:hover {
+   color: var(--accent);
+}
+
+.doc-library-item-edit:focus-visible {
+   opacity: 1;
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
 }

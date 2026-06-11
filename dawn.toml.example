@@ -434,6 +434,19 @@
                                   # Range: 1-500
                                   # Env: DAWN_DOCUMENTS_MAX_INDEXED_DOCUMENTS
 
+# --- Hybrid document search (v61): lexical BM25 + semantic cosine + phrase bonus ---
+# Document search fuses a keyword (BM25) channel with the semantic (embedding)
+# channel.  The label/filename column is weighted high so a "note" saved under a
+# label is retrieved exactly by that label.  Defaults are tuned to match the
+# memory subsystem's keyword/vector balance; raise fts_label_weight if exact-label
+# lookups under-rank, or search_min_score to suppress weak matches.
+# fts_label_weight = 3.0          # BM25 weight for the label/filename column (0-100)
+# fts_body_weight = 1.0           # BM25 weight for the chunk-text column (0-100)
+# hybrid_keyword_weight = 0.3     # Lexical (BM25) fusion weight (0-1)
+# hybrid_vector_weight = 0.7      # Semantic (cosine) fusion weight (0-1)
+# phrase_bonus_weight = 0.25      # Ordered/contiguous phrase-match bonus scale (0-1)
+# search_min_score = 0.3          # Post-fusion relevance gate; below this is dropped (0-1)
+
 # =============================================================================
 # Persistent Memory System
 # =============================================================================

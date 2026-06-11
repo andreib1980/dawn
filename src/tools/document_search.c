@@ -48,12 +48,13 @@
 #define DOC_SEARCH_MAX_RESULTS 5
 #define DOC_SEARCH_MAX_CONTEXT_TOKENS 2000
 #define DOC_SEARCH_MAX_CHUNKS 10000
-#define DOC_SEARCH_KEYWORD_BOOST 0.15f
-/* Extra weight for keyword matches where the query word starts with a capital
- * letter (proper noun / person name).  Benchmarked at 1.0 on LoCoMo (+0.7pp
- * overall); stacks additively with DOC_SEARCH_KEYWORD_BOOST. */
-#define DOC_SEARCH_PROPER_NOUN_BOOST 1.0f
-#define DOC_SEARCH_MIN_SCORE 0.3f
+/* v61 hybrid search: lexical BM25 candidate cap, and the count of top-cosine
+ * candidates the (more expensive) phrase bonus is computed over.  Phrase bonus
+ * runs on union(semantic top-N, ALL lexical hits) so an exact-label note with
+ * weak cosine still gets scored even if it falls below the semantic top-N. */
+#define DOC_SEARCH_BM25_CAND_LIMIT 50
+#define DOC_SEARCH_PHRASE_TOPN 50
+#define DOC_SEARCH_PHRASE_MAX_TOKENS 256
 
 /* =============================================================================
  * Forward Declarations
@@ -79,10 +80,13 @@ static const treg_param_t doc_search_params[] = {
 static const tool_metadata_t doc_search_metadata = {
    .name = "document_search",
    .device_string = "document search",
-   .description = "Search the user's uploaded documents for relevant information. "
-                  "Use this when the user asks about content they've previously uploaded "
-                  "(PDFs, manuals, notes, etc.). Returns relevant excerpts with source "
-                  "citations. Do NOT use this for general web searches.",
+   .description = "Search the user's saved documents and notes (hybrid keyword + semantic). "
+                  "Use this for content they've uploaded (PDFs, manuals) OR authored reference "
+                  "text they filed under a label — a bio, an elevator pitch, an address, a saved "
+                  "note. Results rank EXACT label matches first, so to pull back a specific saved "
+                  "item ask for its label (e.g. 'public bio'). For the verbatim full text of a "
+                  "known note, prefer document_read with its exact label. Returns excerpts with "
+                  "source citations. Do NOT use this for general web searches.",
    .params = doc_search_params,
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
@@ -109,34 +113,7 @@ static bool doc_search_is_available(void) {
 }
 
 /* =============================================================================
- * Internal: Case-insensitive substring search
- * ============================================================================= */
-
-static bool contains_keyword(const char *text, const char *keyword, int keyword_len) {
-   if (!text || !keyword || keyword_len <= 0)
-      return false;
-
-   for (const char *p = text; *p; p++) {
-      if (tolower((unsigned char)*p) == tolower((unsigned char)keyword[0])) {
-         bool match = true;
-         int matched = 1;
-         for (int i = 1; i < keyword_len && p[i]; i++) {
-            if (tolower((unsigned char)p[i]) != tolower((unsigned char)keyword[i])) {
-               match = false;
-               break;
-            }
-            matched++;
-         }
-         if (match && matched == keyword_len &&
-             (p[keyword_len] == '\0' || !isalnum((unsigned char)p[keyword_len])))
-            return true;
-      }
-   }
-   return false;
-}
-
-/* =============================================================================
- * Internal: Tokenize query into words for keyword boosting
+ * Internal: Query tokenization (shared by the phrase bonus)
  * ============================================================================= */
 
 typedef struct {
@@ -167,42 +144,116 @@ static void tokenize_query(const char *query, query_words_t *qw) {
 }
 
 /* =============================================================================
- * Internal: Compute keyword match ratio
+ * Internal: Ordered / contiguous phrase bonus (v61, Req 3)
+ *
+ * BM25 is bag-of-words; this adds the "how many words match AND how many match
+ * IN ORDER" signal the user asked for.  Returns max(ordered_ratio,
+ * contiguous_ratio) in [0, 1]: ordered_ratio is the fraction of query words that
+ * appear in the text in their query order; contiguous_ratio is the longest run
+ * of query words appearing back-to-back in the text, over the query length.  An
+ * exact label phrase ("Public Bio") yields 1.0.
  * ============================================================================= */
 
-static float keyword_score(const char *text, const query_words_t *qw) {
-   if (qw->count == 0)
+/* Case-insensitive token equality. */
+static bool tok_eq_ci(const char *a, int al, const char *b, int bl) {
+   if (al != bl)
+      return false;
+   for (int i = 0; i < al; i++) {
+      if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i]))
+         return false;
+   }
+   return true;
+}
+
+/* Tokenize `text` into up to `max` (start,len) spans over alnum runs. */
+static int tokenize_text_spans(const char *text, const char **starts, int *lens, int max) {
+   int n = 0;
+   const char *p = text;
+   while (*p && n < max) {
+      while (*p && !isalnum((unsigned char)*p))
+         p++;
+      if (!*p)
+         break;
+      const char *start = p;
+      while (*p && isalnum((unsigned char)*p))
+         p++;
+      starts[n] = start;
+      lens[n] = (int)(p - start);
+      n++;
+   }
+   return n;
+}
+
+static float phrase_bonus(const char *text, const query_words_t *qw) {
+   if (!text || qw->count == 0)
       return 0.0f;
 
-   float score = 0.0f;
-   for (int i = 0; i < qw->count; i++) {
-      if (contains_keyword(text, qw->words[i], qw->lengths[i])) {
-         float weight = 1.0f;
-         if (isupper((unsigned char)qw->words[i][0]))
-            weight += DOC_SEARCH_PROPER_NOUN_BOOST;
-         score += weight;
+   const char *tstart[DOC_SEARCH_PHRASE_MAX_TOKENS];
+   int tlen[DOC_SEARCH_PHRASE_MAX_TOKENS];
+   int nt = tokenize_text_spans(text, tstart, tlen, DOC_SEARCH_PHRASE_MAX_TOKENS);
+   if (nt == 0)
+      return 0.0f;
+   const int nq = qw->count;
+
+   /* Ordered: greedy in-order match of query words against the text stream. */
+   int ordered = 0;
+   int ti = 0;
+   for (int qi = 0; qi < nq; qi++) {
+      for (int p = ti; p < nt; p++) {
+         if (tok_eq_ci(tstart[p], tlen[p], qw->words[qi], qw->lengths[qi])) {
+            ordered++;
+            ti = p + 1;
+            break;
+         }
       }
    }
-   return score / (float)qw->count;
+
+   /* Contiguous: longest run of consecutive query words appearing back-to-back
+    * in the text (any starting offset in the query). */
+   int best_run = 0;
+   for (int ts = 0; ts < nt; ts++) {
+      for (int qs = 0; qs < nq; qs++) {
+         int run = 0;
+         while (ts + run < nt && qs + run < nq &&
+                tok_eq_ci(tstart[ts + run], tlen[ts + run], qw->words[qs + run],
+                          qw->lengths[qs + run]))
+            run++;
+         if (run > best_run)
+            best_run = run;
+      }
+   }
+
+   float ordered_ratio = (float)ordered / (float)nq;
+   float contiguous_ratio = (float)best_run / (float)nq;
+   return ordered_ratio > contiguous_ratio ? ordered_ratio : contiguous_ratio;
 }
 
 /* =============================================================================
  * Search Callback
  * ============================================================================= */
 
+/* One fused candidate: a chunk scored by the semantic channel, the lexical (BM25)
+ * channel, or both, plus the phrase bonus.  text/filename point into the backing
+ * chunks[] or lexical-hit arrays (valid for the function's lifetime). */
 typedef struct {
-   int index;
-   float score;
-} scored_chunk_t;
+   int64_t chunk_id;
+   const char *text;
+   const char *filename;
+   int chunk_index;
+   int64_t created_at;
+   float cosine; /* pure cosine, 0 if lexical-only */
+   float bm25;   /* normalized [0,1], 0 if semantic-only */
+   float hybrid; /* fused score (sorted on) */
+} cand_t;
 
-static int score_compare(const void *a, const void *b) {
-   float sa = ((const scored_chunk_t *)a)->score;
-   float sb = ((const scored_chunk_t *)b)->score;
-   if (sb > sa)
-      return 1;
-   if (sb < sa)
-      return -1;
-   return 0;
+static int cand_compare_cosine(const void *a, const void *b) {
+   float ca = ((const cand_t *)a)->cosine, cb = ((const cand_t *)b)->cosine;
+   return (cb > ca) - (cb < ca);
+}
+
+static int cand_compare_hybrid(const void *a, const void *b) {
+   float ha = ((const cand_t *)a)->hybrid, hb = ((const cand_t *)b)->hybrid;
+   return (hb > ha) - (hb < ha);
 }
 
 static char *doc_search_callback(const char *action, char *value, int *should_respond) {
@@ -251,54 +302,117 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       return strdup("No documents indexed. Upload documents via the WebUI first.");
    }
 
-   /* Score all chunks — cosine similarity only (first pass) */
-   scored_chunk_t *scores = malloc((size_t)chunk_count * sizeof(scored_chunk_t));
-   if (!scores) {
+   /* Parse the query once for temporal expressions.  Skip the work when the
+    * feature is disabled (temporal_weight == 0), matching the facts path. */
+   time_query_t tq = { 0 };
+   float temporal_weight = g_config.memory.temporal_weight;
+   if (temporal_weight > 0.0f)
+      time_query_parse(value, (int64_t)time(NULL), &tq);
+
+   /* ---- Channel 2: lexical (BM25), its OWN candidate set (NOT a re-rank of the
+    * semantic top-K).  A chunk the semantic channel buries still surfaces here. */
+   doc_bm25_hit_t *lex = calloc(DOC_SEARCH_BM25_CAND_LIMIT, sizeof(doc_bm25_hit_t));
+   float *lex_scores = calloc(DOC_SEARCH_BM25_CAND_LIMIT, sizeof(float));
+   int lex_count = 0;
+   if (lex && lex_scores) {
+      document_db_chunk_search_bm25(user_id, value, g_config.documents.fts_label_weight,
+                                    g_config.documents.fts_body_weight, lex, lex_scores,
+                                    DOC_SEARCH_BM25_CAND_LIMIT, &lex_count);
+   }
+
+   /* ---- Fuse.  Candidate pool = every loaded semantic chunk (+ any lexical-only
+    * hit not present in the loaded set, possible only when the semantic load was
+    * capped on a very large corpus). */
+   cand_t *cand = calloc((size_t)chunk_count + (size_t)lex_count, sizeof(cand_t));
+   if (!cand) {
       free(query_vec);
       free(chunks);
       free(emb_buf);
+      free(lex);
+      free(lex_scores);
       return strdup("Error: memory allocation failed.");
    }
 
-   /* Parse the query once for temporal expressions (#3).  Skip the work when
-    * the feature is disabled (temporal_weight == 0), matching the facts path. */
-   time_query_t tq = { 0 };
-   float temporal_weight = g_config.memory.temporal_weight;
-   if (temporal_weight > 0.0f) {
-      time_query_parse(value, (int64_t)time(NULL), &tq);
-   }
+   const float vec_w = g_config.documents.hybrid_vector_weight;
+   const float kw_w = g_config.documents.hybrid_keyword_weight;
+   const float phrase_w = g_config.documents.phrase_bonus_weight;
 
+   int ncand = 0;
    for (int i = 0; i < chunk_count; i++) {
       float cosine = embedding_engine_cosine_with_norms(query_vec, chunks[i].embedding, dims,
                                                         query_norm, chunks[i].embedding_norm);
-      /* Additive temporal boost — same shape as memory_embeddings_hybrid_search.
-       * Chunks with no created_at (legacy rows) forfeit the bonus silently. */
-      if (tq.found && chunks[i].created_at > 0) {
-         cosine += temporal_weight * time_query_proximity(&tq, chunks[i].created_at);
-      }
-      scores[i].index = i;
-      scores[i].score = cosine;
+      cand[ncand].chunk_id = chunks[i].id;
+      cand[ncand].text = chunks[i].text;
+      cand[ncand].filename = chunks[i].doc_filename;
+      cand[ncand].chunk_index = chunks[i].chunk_index;
+      cand[ncand].created_at = chunks[i].created_at;
+      cand[ncand].cosine = cosine;
+      cand[ncand].bm25 = 0.0f;
+      ncand++;
    }
-
    free(query_vec);
 
-   /* Sort by cosine score descending */
-   qsort(scores, (size_t)chunk_count, sizeof(scored_chunk_t), score_compare);
-
-   /* Apply keyword boosting only to top candidates (second pass) */
-   query_words_t qw;
-   tokenize_query(value, &qw);
-
-   int top_n = chunk_count < 50 ? chunk_count : 50;
-   for (int i = 0; i < top_n; i++) {
-      float kw = keyword_score(chunks[scores[i].index].text, &qw);
-      scores[i].score += kw * DOC_SEARCH_KEYWORD_BOOST;
+   /* Merge lexical hits by chunk id: set bm25 on the existing cand, or append a
+    * lexical-only cand (cosine 0). */
+   for (int j = 0; j < lex_count; j++) {
+      int found = -1;
+      for (int k = 0; k < ncand; k++) {
+         if (cand[k].chunk_id == lex[j].id) {
+            found = k;
+            break;
+         }
+      }
+      if (found >= 0) {
+         cand[found].bm25 = lex_scores[j];
+      } else {
+         cand[ncand].chunk_id = lex[j].id;
+         cand[ncand].text = lex[j].text;
+         cand[ncand].filename = lex[j].filename;
+         cand[ncand].chunk_index = lex[j].chunk_index;
+         cand[ncand].created_at = lex[j].created_at;
+         cand[ncand].cosine = 0.0f;
+         cand[ncand].bm25 = lex_scores[j];
+         ncand++;
+      }
    }
 
-   /* Re-sort just the top candidates after keyword boosting */
-   qsort(scores, (size_t)top_n, sizeof(scored_chunk_t), score_compare);
+   /* Base hybrid (pre-phrase): vec*cosine + kw*bm25 (+ temporal proximity). */
+   for (int i = 0; i < ncand; i++) {
+      float h = vec_w * cand[i].cosine + kw_w * cand[i].bm25;
+      if (tq.found && cand[i].created_at > 0)
+         h += temporal_weight * time_query_proximity(&tq, cand[i].created_at);
+      cand[i].hybrid = h;
+   }
 
-   /* Format top results with token budget */
+   /* Phrase bonus over union(semantic top-N by cosine, ALL lexical hits) (M-4):
+    * sort by cosine to find the top-N; bm25>0 cands are always eligible so an
+    * exact-label note that ranks below the semantic top-N still gets its bonus. */
+   query_words_t qw;
+   tokenize_query(value, &qw);
+   if (phrase_w > 0.0f && qw.count > 0) {
+      qsort(cand, (size_t)ncand, sizeof(cand_t), cand_compare_cosine);
+      for (int i = 0; i < ncand; i++) {
+         if (i >= DOC_SEARCH_PHRASE_TOPN && cand[i].bm25 <= 0.0f)
+            continue;
+         /* Label (filename) AND body — the label phrase is the strongest
+          * exact-retrieval signal; take the max. */
+         float pb_label = phrase_bonus(cand[i].filename, &qw);
+         float pb_body = phrase_bonus(cand[i].text, &qw);
+         cand[i].hybrid += phrase_w * (pb_label > pb_body ? pb_label : pb_body);
+      }
+   }
+
+   /* Final ranking by fused score. */
+   qsort(cand, (size_t)ncand, sizeof(cand_t), cand_compare_hybrid);
+
+   const float min_score = g_config.documents.search_min_score;
+   int total_matches = 0;
+   for (int i = 0; i < ncand; i++) {
+      if (cand[i].hybrid >= min_score)
+         total_matches++;
+   }
+
+   /* Format top results with token budget. */
    int max_results = DOC_SEARCH_MAX_RESULTS;
    int token_budget = DOC_SEARCH_MAX_CONTEXT_TOKENS;
    int result_buf_size = token_budget * 5; /* ~5 chars per token, generous */
@@ -306,39 +420,33 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
    if (!result) {
       free(chunks);
       free(emb_buf);
-      free(scores);
+      free(lex);
+      free(lex_scores);
+      free(cand);
       return strdup("Error: memory allocation failed.");
-   }
-
-   int pos = 0;
-   int shown = 0;
-   int total_matches = 0;
-
-   /* Count matches above threshold */
-   for (int i = 0; i < chunk_count; i++) {
-      if (scores[i].score >= DOC_SEARCH_MIN_SCORE)
-         total_matches++;
    }
 
    if (total_matches == 0) {
       free(chunks);
       free(emb_buf);
-      free(scores);
+      free(lex);
+      free(lex_scores);
+      free(cand);
       free(result);
       return strdup("No relevant documents found for this query.");
    }
 
+   int pos = 0;
+   int shown = 0;
    pos += snprintf(result + pos, (size_t)(result_buf_size - pos),
                    "DOCUMENT SEARCH RESULTS (showing up to %d of %d matches):\n", max_results,
                    total_matches);
 
-   for (int i = 0; i < chunk_count && shown < max_results; i++) {
-      if (scores[i].score < DOC_SEARCH_MIN_SCORE)
+   for (int i = 0; i < ncand && shown < max_results; i++) {
+      if (cand[i].hybrid < min_score)
          break;
 
-      document_chunk_t *c = &chunks[scores[i].index];
-      int chunk_tokens = ((int)strlen(c->text) + 3) / 4;
-
+      int chunk_tokens = ((int)strlen(cand[i].text) + 3) / 4;
       if (shown > 0 && chunk_tokens > token_budget)
          break; /* Would exceed budget */
 
@@ -346,14 +454,13 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
       token_budget -= chunk_tokens;
 
       pos += snprintf(result + pos, (size_t)(result_buf_size - pos),
-                      "\n[%d] (score: %.2f) %s, chunk %d:\n%s\n", shown, scores[i].score,
-                      c->doc_filename, c->chunk_index + 1, c->text);
+                      "\n[%d] (score: %.2f) %s, chunk %d:\n%s\n", shown, cand[i].hybrid,
+                      cand[i].filename, cand[i].chunk_index + 1, cand[i].text);
 
       if (pos >= result_buf_size - 256)
          break;
    }
 
-   /* Add truncation notice if needed */
    int omitted = total_matches - shown;
    if (omitted > 0) {
       snprintf(result + pos, (size_t)(result_buf_size - pos),
@@ -364,7 +471,8 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
 
    free(chunks);
    free(emb_buf);
-   free(scores);
-
+   free(lex);
+   free(lex_scores);
+   free(cand);
    return result;
 }

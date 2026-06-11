@@ -456,6 +456,18 @@ typedef struct {
    int max_extracted_size_kb; /* Max extracted text in KB (default: 1024, range: 128-4096) */
    int max_index_size_kb;     /* Max document text for RAG indexing in KB (default: 2048) */
    int max_indexed_documents; /* Max indexed documents per user (default: 50, range: 1-500) */
+   /* v61 hybrid document search (lexical BM25 + semantic cosine + phrase bonus).
+    * fts_*_weight are FTS5 per-column BM25 weights (label weighted high so an
+    * exact-label match dominates); hybrid_*_weight fuse the lexical and semantic
+    * channels; phrase_bonus_weight scales the ordered/contiguous-phrase bonus;
+    * search_min_score is the post-fusion relevance gate (relocated from the old
+    * DOC_SEARCH_MIN_SCORE constant — recalibrated for the re-weighted score). */
+   float fts_label_weight;      /* BM25 weight for the label/filename column (default: 3.0) */
+   float fts_body_weight;       /* BM25 weight for the chunk-text column (default: 1.0) */
+   float hybrid_keyword_weight; /* Lexical (BM25) fusion weight (default: 0.3, range: 0-1) */
+   float hybrid_vector_weight;  /* Semantic (cosine) fusion weight (default: 0.7, range: 0-1) */
+   float phrase_bonus_weight;   /* Ordered/contiguous phrase-bonus scale (default: 0.25, 0-1) */
+   float search_min_score;      /* Post-fusion relevance gate (default: 0.3, range: 0-1) */
 } documents_config_t;
 
 /* =============================================================================

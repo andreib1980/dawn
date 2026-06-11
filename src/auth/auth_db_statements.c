@@ -1648,6 +1648,67 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* === v61: document_chunks_fts (BM25 lexical channel) ===
+    * Soft-fail (WARNING + NULL) like the memory_facts_fts statements: these
+    * depend on the v61 virtual table, so a DB on which the migration hasn't yet
+    * completed must still start — document search falls back to pure-semantic. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT INTO document_chunks_fts(rowid, label_stems, body_stems) "
+                           "VALUES (?, ?, ?)",
+                           -1, &s_db.stmt_doc_chunk_fts_insert, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare doc_chunk_fts_insert failed: %s — "
+                   "document FTS sync inactive until v61 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_doc_chunk_fts_insert = NULL;
+   }
+   /* Contentless FTS5 requires the 'delete' command (no content column to read
+    * the prior value from), so the original stems must be supplied. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "INSERT INTO document_chunks_fts(document_chunks_fts, rowid, "
+                           "label_stems, body_stems) VALUES('delete', ?, ?, ?)",
+                           -1, &s_db.stmt_doc_chunk_fts_delete, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare doc_chunk_fts_delete failed: %s — "
+                   "document FTS sync inactive until v61 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_doc_chunk_fts_delete = NULL;
+   }
+   /* Column-weighted BM25 lexical candidate set (its OWN candidates — NOT a
+    * boost over the semantic top-K).  ?1=MATCH expr, ?2=label weight,
+    * ?3=body weight, ?4=user_id, ?5=limit.  bm25() is negative-for-relevant
+    * (ORDER BY score ASC); the caller flips sign before sigmoid-normalizing.
+    * Global-IDF caveat: per-user safety is the JOIN + (user_id=? OR is_global=1)
+    * filter, not the index. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
+                           "d.filetype, d.num_chunks, c.created_at, "
+                           "bm25(document_chunks_fts, ?2, ?3) AS score "
+                           "FROM document_chunks_fts "
+                           "JOIN document_chunks c ON c.id = document_chunks_fts.rowid "
+                           "JOIN documents d ON d.id = c.document_id "
+                           "WHERE document_chunks_fts MATCH ?1 "
+                           "AND (d.user_id = ?4 OR d.is_global = 1) "
+                           "ORDER BY score ASC LIMIT ?5",
+                           -1, &s_db.stmt_doc_chunk_search_bm25, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: prepare doc_chunk_search_bm25 failed: %s — "
+                   "lexical document search inactive until v61 migration completes",
+                   sqlite3_errmsg(s_db.db));
+      s_db.stmt_doc_chunk_search_bm25 = NULL;
+   }
+   /* Stable-id note edit: replace the single chunk's text + embedding in place
+    * (document_chunks always exists, so this is hard-fail).  ?1=text,
+    * ?2=embedding, ?3=embedding_norm, ?4=created_at, ?5=chunk id. */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE document_chunks SET text = ?, embedding = ?, "
+                           "embedding_norm = ?, created_at = ? WHERE id = ?",
+                           -1, &s_db.stmt_doc_chunk_update, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare doc_chunk_update failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* === Calendar statements === */
 
    rc = sqlite3_prepare_v2(
@@ -2416,6 +2477,14 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_doc_chunk_read);
    if (s_db.stmt_doc_update_global)
       sqlite3_finalize(s_db.stmt_doc_update_global);
+   if (s_db.stmt_doc_chunk_fts_insert)
+      sqlite3_finalize(s_db.stmt_doc_chunk_fts_insert);
+   if (s_db.stmt_doc_chunk_fts_delete)
+      sqlite3_finalize(s_db.stmt_doc_chunk_fts_delete);
+   if (s_db.stmt_doc_chunk_search_bm25)
+      sqlite3_finalize(s_db.stmt_doc_chunk_search_bm25);
+   if (s_db.stmt_doc_chunk_update)
+      sqlite3_finalize(s_db.stmt_doc_chunk_update);
 
    /* Calendar statements */
    if (s_db.stmt_cal_acct_create)

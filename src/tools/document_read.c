@@ -58,8 +58,10 @@ static bool doc_read_is_available(void);
 static const treg_param_t doc_read_params[] = {
    {
        .name = "document",
-       .description = "The document filename (or partial name) to read. "
-                      "Use the name from document_search results.",
+       .description = "The document filename, or a saved note's exact label, to read. "
+                      "Use the name/label from document_search results. For a saved note this "
+                      "returns its VERBATIM text — the deterministic way to pull back exact "
+                      "reference text (a bio, pitch, address) the user filed under that label.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = true,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -86,10 +88,12 @@ static const treg_param_t doc_read_params[] = {
 static const tool_metadata_t doc_read_metadata = {
    .name = "document_read",
    .device_string = "document reader",
-   .description = "Read the contents of a specific uploaded document, page by page. "
-                  "Use this when you need to read or summarize an entire document rather than "
-                  "searching for specific information. Returns chunks in order with pagination. "
-                  "First call with just the document name, then use start_chunk to read more.",
+   .description = "Read the contents of a specific saved document or note, page by page. "
+                  "Use this when you need an entire document, OR the EXACT verbatim text of a "
+                  "note the user filed under a label (a bio, pitch, saved answer) — prefer this "
+                  "over document_search or memory recall when the user asks for 'my <label>'. "
+                  "Returns chunks in order with pagination. First call with just the name/label, "
+                  "then use start_chunk to read more.",
    .params = doc_read_params,
    .param_count = 3,
    .device_type = TOOL_DEVICE_TYPE_GETTER,

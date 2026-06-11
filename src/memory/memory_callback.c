@@ -1153,27 +1153,22 @@ static char *memory_action_remember(int user_id, const char *value) {
 /* Max fact IDs accepted in one bulk 'forget' call — bounds the response size. */
 #define MAX_FORGET_IDS 50
 
-static char *memory_action_forget(int user_id, const char *fact_text, int64_t replaced_by) {
-   if (!fact_text || strlen(fact_text) == 0) {
-      return strdup("Please specify the fact ID(s) to forget (e.g. '42' or '42,57,91'). Use "
-                    "'search', 'recent', or 'find_duplicates' first to find the IDs.");
-   }
-
-   /* Parse one or more comma-separated numeric fact IDs.  Numeric-only tokens are
-    * required (guards against accidental fuzzy-text deletion); non-numeric tokens
-    * are counted and ignored.  A single valid ID keeps the detailed response. */
-   int64_t ids[MAX_FORGET_IDS];
+/* Parse one or more comma/space-separated POSITIVE numeric fact IDs into `out`
+ * (capacity `max`).  Numeric-only tokens are required (guards against accidental
+ * fuzzy-text operations); non-numeric / non-positive tokens are counted in
+ * *invalid_out and skipped.  *capped_out is set when more than `max` IDs were
+ * present.  Returns the number of IDs written.  Shared by 'forget' and 'get'. */
+static int parse_id_list(const char *s, int64_t *out, int max, int *invalid_out, bool *capped_out) {
    int id_count = 0;
    int invalid_count = 0;
    bool capped = false;
 
-   const char *s = fact_text;
-   while (*s) {
+   while (s && *s) {
       while (*s == ',' || *s == ' ' || *s == '\t')
          s++;
       if (!*s)
          break;
-      if (id_count >= MAX_FORGET_IDS) {
+      if (id_count >= max) {
          capped = true;
          break;
       }
@@ -1189,9 +1184,27 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
             s++;
          continue;
       }
-      ids[id_count++] = (int64_t)v;
+      out[id_count++] = (int64_t)v;
       s = after;
    }
+
+   if (invalid_out)
+      *invalid_out = invalid_count;
+   if (capped_out)
+      *capped_out = capped;
+   return id_count;
+}
+
+static char *memory_action_forget(int user_id, const char *fact_text, int64_t replaced_by) {
+   if (!fact_text || strlen(fact_text) == 0) {
+      return strdup("Please specify the fact ID(s) to forget (e.g. '42' or '42,57,91'). Use "
+                    "'search', 'recent', or 'find_duplicates' first to find the IDs.");
+   }
+
+   int64_t ids[MAX_FORGET_IDS];
+   int invalid_count = 0;
+   bool capped = false;
+   int id_count = parse_id_list(fact_text, ids, MAX_FORGET_IDS, &invalid_count, &capped);
 
    if (id_count == 0) {
       return strdup("Please provide numeric fact ID(s) (e.g. '42' or '42,57,91'). Use 'search', "
@@ -1305,6 +1318,75 @@ static char *memory_action_forget(int user_id, const char *fact_text, int64_t re
    if (capped)
       snprintf(msg + pos, FORGET_MSG_SZ - pos, " (capped at %d IDs per call)", MAX_FORGET_IDS);
    return msg;
+}
+
+/* =============================================================================
+ * Action: Get (deterministic retrieval by ID)
+ *
+ * The exact-fetch counterpart to 'search': returns specific facts verbatim by
+ * numeric ID, bypassing relevance ranking entirely.  Use when the ID(s) are
+ * already known (from a prior search/recent/find_duplicates result) and the
+ * exact stored text is wanted — search is semantic and can bury an exact
+ * record under its near-twins.  Shares the 'forget' ID parser (positive,
+ * comma/space-separated, non-numeric tokens ignored, capped at MAX_FORGET_IDS).
+ * ============================================================================= */
+static char *memory_action_get(int user_id, const char *value) {
+   if (!value || !value[0]) {
+      return strdup("Please provide one or more numeric memory IDs to retrieve (e.g. '7858' or "
+                    "'7858,7854'). IDs come from a prior search/recent/find_duplicates result.");
+   }
+
+   int64_t ids[MAX_FORGET_IDS];
+   int invalid_count = 0;
+   bool capped = false;
+   int id_count = parse_id_list(value, ids, MAX_FORGET_IDS, &invalid_count, &capped);
+
+   if (id_count == 0) {
+      return strdup("Please provide numeric memory ID(s) (e.g. '7858' or '7858,7854').");
+   }
+
+   strbuf_t sb;
+   strbuf_init(&sb, 1024);
+   strbuf_append(&sb, "Memories:\n");
+
+   int found = 0;
+   char nf_ids[400] = "";
+   size_t nf_len = 0;
+   for (int i = 0; i < id_count; i++) {
+      memory_fact_t fact;
+      /* memory_db_fact_get is user-scoped at the SQL layer, so a foreign or
+       * absent ID simply misses — no cross-user leak. */
+      if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
+         strbuf_appendf(&sb, "- [ID:%lld] %s\n", (long long)ids[i], fact.fact_text);
+         found++;
+      } else if (nf_len < sizeof(nf_ids) - 1) {
+         nf_len += (size_t)snprintf(nf_ids + nf_len, sizeof(nf_ids) - nf_len, "%s%lld",
+                                    nf_len ? ", " : "", (long long)ids[i]);
+         if (nf_len >= sizeof(nf_ids))
+            nf_len = sizeof(nf_ids) - 1;
+      }
+   }
+
+   if (found == 0) {
+      strbuf_free(&sb);
+      char msg[480];
+      snprintf(msg, sizeof(msg),
+               "No memories found for ID(s): %s. They may have been forgotten or aren't yours.",
+               nf_ids);
+      return strdup(msg);
+   }
+
+   if (nf_ids[0])
+      strbuf_appendf(&sb, "(not found: %s)\n", nf_ids);
+   if (capped)
+      strbuf_appendf(&sb, "(capped at %d IDs per call)\n", MAX_FORGET_IDS);
+
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("Memory query failed: response too large or out of memory.");
+   }
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Memory query failed: out of memory.");
 }
 
 /* =============================================================================
@@ -1996,6 +2078,12 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond) {
             replaced_by = 0;
       }
       return memory_action_forget(user_id, forget_ids, replaced_by);
+   } else if (strcmp(actionName, "get") == 0) {
+      /* Deterministic exact-fetch by numeric ID(s); base-extract so the parser
+       * ignores any encoded suffix. */
+      char get_ids[1024] = "";
+      tool_param_extract_base(value, get_ids, sizeof(get_ids));
+      return memory_action_get(user_id, get_ids);
    } else if (strcmp(actionName, "find_duplicates") == 0) {
       return memory_action_find_duplicates(user_id, value);
    } else if (strcmp(actionName, "recent") == 0) {
