@@ -2176,6 +2176,7 @@ int main(int argc, char *argv[]) {
       if (argc < 3) {
          fprintf(stderr, "Error: Missing ota subcommand\n");
          fprintf(stderr, "Usage: %s ota list\n", argv[0]);
+         fprintf(stderr, "       %s ota rescan\n", argv[0]);
          fprintf(stderr, "       %s ota push --uuid <uuid> --version <v> [--allow-downgrade]\n",
                  argv[0]);
          return 1;
@@ -2236,8 +2237,24 @@ int main(int argc, char *argv[]) {
          return 1;
       }
 
+      if (strcmp(subcmd, "rescan") == 0) {
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[256];
+         admin_resp_code_t resp = admin_client_ota_rescan(fd, response, sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
       fprintf(stderr, "Error: Unknown ota subcommand: %s\n", subcmd);
-      fprintf(stderr, "Available: list, push\n");
+      fprintf(stderr, "Available: list, rescan, push\n");
       return 1;
    }
 

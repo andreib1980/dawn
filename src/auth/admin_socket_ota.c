@@ -93,6 +93,27 @@ int handle_ota_list_cmd(int client_fd) {
 }
 
 /* =============================================================================
+ * OTA: rescan — re-load the release dir into the in-memory store at runtime so a
+ * freshly-staged release is pushable without a daemon restart.  No payload.
+ * ============================================================================= */
+
+int handle_ota_rescan_cmd(int client_fd) {
+   if (!ota_enabled()) {
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS,
+                                "OTA is disabled ([ota].enabled = false).");
+   }
+   int count = 0;
+   if (ota_rescan(&count) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "OTA rescan failed.");
+   }
+   char msg[64];
+   snprintf(msg, sizeof(msg), "Rescanned release store: %d release%s.", count,
+            (count == 1) ? "" : "s");
+   OLOG_INFO("OTA: admin rescanned release store (%d release(s))", count);
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}
+
+/* =============================================================================
  * OTA: push — offer an update to one device by uuid.
  *
  * Wire format (see admin_socket.h "OTA payloads"):

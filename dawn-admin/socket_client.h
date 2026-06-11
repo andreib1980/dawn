@@ -834,6 +834,18 @@ admin_resp_code_t admin_client_messaging_reenable_channel(int fd,
 admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len);
 
 /**
+ * @brief Re-scan the daemon's release directory into its in-memory store.
+ *
+ * Makes a freshly-staged release pushable without restarting the daemon.
+ *
+ * @param fd        Connected socket FD.
+ * @param response  Output buffer for the daemon status text.
+ * @param resp_len  Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_ota_rescan(int fd, char *response, size_t resp_len);
+
+/**
  * @brief Push an update offer to one satellite by uuid.
  *
  * The daemon resolves the device's tier→platform, mints a one-time download

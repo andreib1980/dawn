@@ -1792,6 +1792,13 @@ admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len)
    return recv_text_response(fd, response, resp_len);
 }
 
+admin_resp_code_t admin_client_ota_rescan(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_OTA_RESCAN, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_ota_push(int fd,
                                         const char *uuid,
                                         const char *version,

@@ -218,9 +218,10 @@ typedef enum {
     * 0xC0..0xCF is reserved for OTA (0xB0 band belongs to the coding harness).
     * Both commands trust SO_PEERCRED (root/daemon UID) like the messaging
     * operator commands — no admin-auth prefix.  See docs/OTA_DESIGN.md. */
-   ADMIN_MSG_OTA_LIST = 0xC0, /**< list available releases (text table) */
-   ADMIN_MSG_OTA_PUSH = 0xC1, /**< push an update offer to one device by uuid */
-   /* Next free OTA opcode: 0xC2.  (Range ends 0xCF.) */
+   ADMIN_MSG_OTA_LIST = 0xC0,   /**< list available releases (text table) */
+   ADMIN_MSG_OTA_PUSH = 0xC1,   /**< push an update offer to one device by uuid */
+   ADMIN_MSG_OTA_RESCAN = 0xC2, /**< re-scan release dir into the store (no payload) */
+   /* Next free OTA opcode: 0xC3.  (Range ends 0xCF.) */
 } admin_msg_type_t;
 
 /**
@@ -487,6 +488,10 @@ typedef struct __attribute__((packed)) {
  * ADMIN_MSG_OTA_LIST — no payload.  Response body is the available releases
  *   as an aligned text table (PLATFORM/TIER/VERSION) plus an enabled/disabled
  *   header line.
+ *
+ * ADMIN_MSG_OTA_RESCAN — no payload.  Re-scans the release dir into the in-memory
+ *   store so a freshly-staged release is pushable without a daemon restart.
+ *   Response is a short text status with the post-rescan release count.
  *
  * ADMIN_MSG_OTA_PUSH — wire format (little-endian):
  *   Byte 0:        flags  (bit 0 = allow_downgrade)

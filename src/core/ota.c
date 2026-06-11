@@ -23,6 +23,7 @@
 
 #include <dirent.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sodium.h>
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +49,11 @@ typedef struct {
 static ota_release_t s_releases[OTA_MAX_RELEASES];
 static int s_release_count = 0;
 static bool s_enabled = false;
+/* Guards s_releases / s_release_count.  The store was load-once-at-init until
+ * ota_rescan() made it a runtime writer (admin thread) concurrent with readers
+ * on the WebUI/admin threads (ota_begin_push, list).  Readers copy out under the
+ * lock and never hold a pointer into the array across a possible rescan. */
+static pthread_mutex_t s_release_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static const char *platform_to_str(ota_platform_t p) {
    switch (p) {
@@ -221,19 +227,28 @@ bool ota_enabled(void) {
    return s_enabled;
 }
 
-static const ota_release_t *find_release(ota_platform_t platform, const char *version) {
+/* Copy the matched release into @p out under the store lock and return true on a
+ * hit.  Copy-out (not a pointer into s_releases) so the caller can use it across
+ * the offer build without racing a concurrent ota_rescan() rewriting the array. */
+static bool find_release_copy(ota_platform_t platform, const char *version, ota_release_t *out) {
+   bool found = false;
+   pthread_mutex_lock(&s_release_mutex);
    for (int i = 0; i < s_release_count; i++) {
       if (s_releases[i].platform == platform && strcmp(s_releases[i].version, version) == 0) {
-         return &s_releases[i];
+         *out = s_releases[i];
+         found = true;
+         break;
       }
    }
-   return NULL;
+   pthread_mutex_unlock(&s_release_mutex);
+   return found;
 }
 
 int ota_resolve_latest(ota_platform_t platform, int tier, char *out_version, size_t out_size) {
    if (!out_version || out_size == 0) {
       return FAILURE;
    }
+   pthread_mutex_lock(&s_release_mutex);
    const ota_release_t *best = NULL;
    for (int i = 0; i < s_release_count; i++) {
       const ota_release_t *r = &s_releases[i];
@@ -249,15 +264,35 @@ int ota_resolve_latest(ota_platform_t platform, int tier, char *out_version, siz
          best = r;
       }
    }
-   if (!best) {
+   int rc = FAILURE;
+   if (best) {
+      snprintf(out_version, out_size, "%s", best->version);
+      rc = SUCCESS;
+   }
+   pthread_mutex_unlock(&s_release_mutex);
+   return rc;
+}
+
+int ota_rescan(int *count_out) {
+   if (!s_enabled) {
       return FAILURE;
    }
-   snprintf(out_version, out_size, "%s", best->version);
+   pthread_mutex_lock(&s_release_mutex);
+   scan_releases(g_config.ota.release_dir);
+   int n = s_release_count;
+   pthread_mutex_unlock(&s_release_mutex);
+   if (count_out) {
+      *count_out = n;
+   }
+   OLOG_INFO("ota: rescanned release store, %d release(s)", n);
    return SUCCESS;
 }
 
 int ota_release_count(void) {
-   return s_release_count;
+   pthread_mutex_lock(&s_release_mutex);
+   int n = s_release_count;
+   pthread_mutex_unlock(&s_release_mutex);
+   return n;
 }
 
 int ota_release_info(int index,
@@ -265,7 +300,9 @@ int ota_release_info(int index,
                      int *tier_out,
                      char *version_out,
                      size_t version_size) {
+   pthread_mutex_lock(&s_release_mutex);
    if (index < 0 || index >= s_release_count) {
+      pthread_mutex_unlock(&s_release_mutex);
       return FAILURE;
    }
    const ota_release_t *r = &s_releases[index];
@@ -278,6 +315,7 @@ int ota_release_info(int index,
    if (version_out && version_size > 0) {
       snprintf(version_out, version_size, "%s", r->version);
    }
+   pthread_mutex_unlock(&s_release_mutex);
    return SUCCESS;
 }
 
@@ -293,8 +331,8 @@ int ota_begin_push(const char *uuid,
    if (!platform_str) {
       return FAILURE;
    }
-   const ota_release_t *r = find_release(platform, version);
-   if (!r) {
+   ota_release_t rel;
+   if (!find_release_copy(platform, version, &rel)) {
       OLOG_WARNING("ota: no release %s/%s to push", platform_str, version);
       return FAILURE;
    }
@@ -308,13 +346,13 @@ int ota_begin_push(const char *uuid,
     * error can't leave a dangling half-begun offer. */
    uint8_t raw[OTA_MANIFEST_WIRE_SIZE];
    ota_manifest_t m;
-   if (read_manifest_from_dir(r->dir, platform, &m, raw, sizeof(raw)) != SUCCESS) {
+   if (read_manifest_from_dir(rel.dir, platform, &m, raw, sizeof(raw)) != SUCCESS) {
       OLOG_ERROR("ota: cannot load manifest for %s/%s offer", platform_str, version);
       return FAILURE;
    }
 
    char sigpath[OTA_PATH_MAX + 16]; /* dir + "/manifest.sig" */
-   snprintf(sigpath, sizeof(sigpath), "%s/manifest.sig", r->dir);
+   snprintf(sigpath, sizeof(sigpath), "%s/manifest.sig", rel.dir);
    uint8_t sig[OTA_SIG_BYTES];
    if (read_exact_file(sigpath, sig, sizeof(sig)) != (long)OTA_SIG_BYTES) {
       OLOG_ERROR("ota: missing/short signature %s", sigpath);
