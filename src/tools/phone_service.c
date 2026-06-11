@@ -344,10 +344,16 @@ static void play_ringtone(void) {
  * next request. TTS announcements are handled separately for immediate feedback.
  */
 static void inject_local_context(const char *message) {
+   /* Session context injection is a WebUI/multi-client feature; in a WebUI-less
+    * build there is no session to inject into. */
+#ifdef ENABLE_WEBUI
    session_t *session = session_get_local();
    if (session) {
       session_add_message(session, "system", message);
    }
+#else
+   (void)message;
+#endif
 }
 
 /**
@@ -735,7 +741,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
        * sender-in-channels check, and the per-sender rate limits all
        * live inside messaging_engine_handle_sms_inbound — see
        * docs/MESSAGING_CHANNELS_DESIGN.md §7. */
-      int sms_handled = messaging_engine_handle_sms_inbound(sender, contact_name, body, time(NULL));
+      /* Messaging-channel routing is a WebUI build feature; without it, inbound
+       * SMS always falls through to the legacy local-context path below. */
+      int sms_handled = 0;
+#ifdef ENABLE_WEBUI
+      sms_handled = messaging_engine_handle_sms_inbound(sender, contact_name, body, time(NULL));
+#endif
 
       /* Only announce + surface to MIRAGE when the message is NOT
        * destined for the LLM.  SUCCESS = engine queued for LLM

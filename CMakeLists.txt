@@ -211,6 +211,19 @@ if(NOT SQLITE3_FOUND)
     message(STATUS "SQLite3: Found (${SQLITE3_VERSION}) - required for music metadata")
 endif()
 
+# libsodium is always required (crypto_store + memory + calendar use it,
+# independent of the auth/WebUI subsystem — they are compiled in every preset).
+if(NOT SODIUM_FOUND)
+    pkg_check_modules(SODIUM REQUIRED libsodium)
+    if(NOT SODIUM_FOUND)
+        message(FATAL_ERROR
+            "libsodium not found.\n"
+            "Install with: sudo apt-get install libsodium-dev")
+    endif()
+    include_directories(${SODIUM_INCLUDE_DIRS})
+    message(STATUS "libsodium: Found (${SODIUM_VERSION}) - required for crypto_store")
+endif()
+
 # Multi-client session support (required if WebUI is enabled)
 # Provides session manager and worker pool for concurrent client handling
 if(ENABLE_WEBUI)
@@ -620,7 +633,6 @@ if(ENABLE_WEBUI)
         src/core/worker_pool.c
         src/core/text_filter.c
         src/core/rate_limiter.c
-        src/core/embedding_engine.c
         # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c
         src/messaging/messaging_engine_session.c
@@ -677,11 +689,24 @@ list(APPEND DAWN_SOURCES
     src/tools/external_focus_adapters_init.c
 )
 
-# Database core + memory subsystem (always compiled — memory works in all modes)
+# Database core + memory subsystem (always compiled — memory works in all modes).
+# embedding_engine.c lives here, not in the ENABLE_WEBUI block: the memory
+# subsystem (memory_embeddings.c) depends on it in every mode (e.g. the local /
+# ci presets with WEBUI off).
 list(APPEND DAWN_SOURCES
+    src/core/embedding_engine.c
     src/auth/auth_db_core.c
     src/auth/auth_db_schema.c
     src/auth/auth_db_statements.c
+    # DB-layer tables depended on by the always-compiled memory / OTA / tool
+    # subsystems (extraction, summaries, history, satellite OTA, image tools), so
+    # they can't live in the ENABLE_AUTH-gated block below (breaks local / ci with
+    # WEBUI off).  The admin-socket transports that USE these stay AUTH-gated.
+    src/auth/auth_db_conv.c
+    src/auth/auth_db_user.c
+    src/auth/auth_db_settings.c
+    src/auth/auth_db_satellite.c
+    src/image_store.c
     src/memory/memory_db.c
     src/memory/memory_db_facts.c
     src/memory/memory_db_summaries.c
@@ -732,18 +757,13 @@ if(ENABLE_AUTH)
         src/auth/admin_socket_memory_entity.c
         src/auth/admin_socket_messaging.c
         src/auth/admin_socket_ota.c
-        src/auth/auth_db_user.c
-        src/auth/auth_db_settings.c
         src/auth/auth_db_session.c
         src/auth/auth_db_rate_limit.c
         src/auth/auth_db_audit.c
         src/auth/auth_db_maint.c
-        src/auth/auth_db_conv.c
         src/auth/auth_db_metrics.c
-        src/auth/auth_db_satellite.c
         src/auth/auth_crypto.c
         src/auth/auth_maintenance.c
-        src/image_store.c
     )
 endif()
 
@@ -877,11 +897,9 @@ endif()
 # Always link SQLite3 (music metadata database)
 target_link_libraries(dawn ${SQLITE3_LIBRARIES})
 
-# Conditionally link libsodium for authentication
-if(ENABLE_AUTH)
-    target_link_libraries(dawn ${SODIUM_LIBRARIES})
-    message(STATUS "Linking auth libraries (libsodium)")
-endif()
+# libsodium is linked unconditionally — crypto_store, the memory subsystem, and
+# the calendar tool all use it regardless of the auth/WebUI subsystem.
+target_link_libraries(dawn ${SODIUM_LIBRARIES})
 
 # Conditionally link ASR library (Vosk OR Whisper, not both)
 if(ENABLE_VOSK)

@@ -305,8 +305,10 @@ else()
     message(STATUS "DAWN: Email tool DISABLED")
 endif()
 
-# Shared OAuth WebUI (needed by calendar or email for Google OAuth)
-if(DAWN_ENABLE_CALENDAR_TOOL OR DAWN_ENABLE_EMAIL_TOOL)
+# Shared OAuth WebUI handler (needed by calendar or email for Google OAuth).
+# It's a WebUI surface (conn_require_auth / send_json_response), so only compile
+# it when WebUI is on — otherwise the local / ci presets fail to link.
+if((DAWN_ENABLE_CALENDAR_TOOL OR DAWN_ENABLE_EMAIL_TOOL) AND ENABLE_WEBUI)
     list(APPEND TOOL_SOURCES src/webui/webui_oauth.c)
 endif()
 

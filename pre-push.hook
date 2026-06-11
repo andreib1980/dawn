@@ -50,7 +50,8 @@ fi
 BUILD_LOG=$(mktemp -t dawn-prepush-build.XXXXXX.log)
 TEST_LOG=$(mktemp -t dawn-prepush-test.XXXXXX.log)
 SAT_LOG=$(mktemp -t dawn-prepush-satellite.XXXXXX.log)
-trap 'rm -f "$BUILD_LOG" "$TEST_LOG" "$SAT_LOG"' EXIT
+SMOKE_LOG=$(mktemp -t dawn-prepush-smoke.XXXXXX.log)
+trap 'rm -f "$BUILD_LOG" "$TEST_LOG" "$SAT_LOG" "$SMOKE_LOG"' EXIT
 
 echo -e "${BLUE}Pre-push: building tests-ci in $BUILD_DIR…${NC}"
 if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
@@ -120,6 +121,37 @@ else
    echo -e "${YELLOW}  Bootstrap the headless check CI runs:${NC}"
    echo -e "${YELLOW}  cmake -S dawn_satellite -B dawn_satellite/build-min \\${NC}"
    echo -e "${YELLOW}    -DENABLE_VAD=OFF -DENABLE_VOSK_ASR=OFF -DENABLE_TTS=OFF${NC}"
+fi
+
+# Build-config smoke test: compile + LINK the full dawn binary across the preset
+# matrix (WEBUI on/off, email on/off).  The tests-ci build above links only the
+# test binaries, so a daemon that fails to link in a given config — e.g. without
+# WebUI (the local/ci presets) — slips through.  smoke_test.sh reuses its own
+# per-preset build dirs incrementally and never touches build-debug, so this is a
+# relink of what changed, not a clean rebuild.  Only runs when all four dirs are
+# already bootstrapped, so it never forces a slow cold build inside the hook —
+# bootstrap once with ./tests/smoke_test.sh.
+SMOKE_READY=1
+for d in build-local build-full build-debug build-debug-email; do
+   [ -f "$d/CMakeCache.txt" ] || SMOKE_READY=0
+done
+if [ "$SMOKE_READY" -eq 1 ]; then
+   echo -e "${BLUE}Pre-push: build-config smoke test (preset matrix)…${NC}"
+   if ! ./tests/smoke_test.sh > "$SMOKE_LOG" 2>&1; then
+      echo -e "${RED}Smoke test FAILED.  Summary:${NC}"
+      grep -E "FAIL|Binary not found|Some tests" "$SMOKE_LOG" | tail -12
+      echo
+      echo -e "${YELLOW}Reproduce: ./tests/smoke_test.sh${NC}"
+      echo -e "${YELLOW}Bypass:    git push --no-verify${NC}"
+      PRESERVED=$(mktemp -t dawn-prepush-smoke-failed.XXXXXX.log)
+      cp "$SMOKE_LOG" "$PRESERVED"
+      echo -e "${YELLOW}Full log preserved at: $PRESERVED${NC}"
+      exit 1
+   fi
+   echo -e "${GREEN}Pre-push: build-config smoke test passed (4 presets).${NC}"
+else
+   echo -e "${YELLOW}Pre-push: smoke preset dirs not all bootstrapped; skipping build-config smoke test.${NC}"
+   echo -e "${YELLOW}  Bootstrap once: ./tests/smoke_test.sh${NC}"
 fi
 
 # Optional local-only pre-push extension.  Gitignored (*.local.hook).
