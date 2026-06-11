@@ -172,30 +172,40 @@ dawn_add_unit_test(test_ota_rollout
 # Satellite-side OTA host tests.  These compile dawn_satellite/ sources directly
 # (libc / libsodium / json-c only — no SDL/curl/ws) and run natively, so the
 # device-apply decision logic regression-tests in CI without a real RPi.
-dawn_add_unit_test(test_ota_marker
-   SOURCES test_ota_marker.c
-           ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
-   INCLUDES ${SRC_ROOT}/dawn_satellite/include
-   LIBS    unity
-   LABEL   ci)
+#
+# Guarded on the satellite tree being present: the Docker server image excludes
+# dawn_satellite/ (.dockerignore) while add_subdirectory(tests) is unconditional,
+# so without this guard `cmake --preset server` fails its configure step on the
+# missing sources.  The daemon-side OTA tests above never reference dawn_satellite/
+# and stay enabled everywhere.
+if(EXISTS ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c)
+   dawn_add_unit_test(test_ota_marker
+      SOURCES test_ota_marker.c
+              ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
+      INCLUDES ${SRC_ROOT}/dawn_satellite/include
+      LIBS    unity
+      LABEL   ci)
 
-dawn_add_unit_test(test_ota_launch
-   SOURCES test_ota_launch.c
-           ${SRC_ROOT}/dawn_satellite/src/ota_launch_core.c
-           ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
-   INCLUDES ${SRC_ROOT}/dawn_satellite/include
-   DEFINES OTA_DATA_DIR="/tmp/dawn_test_ota_launch"
-   LIBS    unity
-   LABEL   ci)
+   dawn_add_unit_test(test_ota_launch
+      SOURCES test_ota_launch.c
+              ${SRC_ROOT}/dawn_satellite/src/ota_launch_core.c
+              ${SRC_ROOT}/dawn_satellite/src/ota_marker.c
+      INCLUDES ${SRC_ROOT}/dawn_satellite/include
+      DEFINES OTA_DATA_DIR="/tmp/dawn_test_ota_launch"
+      LIBS    unity
+      LABEL   ci)
 
-dawn_add_unit_test(test_ota_apply
-   SOURCES test_ota_apply.c
-           ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c
-           ${SRC_ROOT}/src/core/ota_manifest.c
-   INCLUDES ${SRC_ROOT}/dawn_satellite/include
-   DEFINES OTA_KEYRING_PATH="/tmp/dawn_test_ota_keyring"
-   LIBS    unity ${SODIUM_LIBRARIES} ${JSONC_LIBRARIES}
-   LABEL   ci)
+   dawn_add_unit_test(test_ota_apply
+      SOURCES test_ota_apply.c
+              ${SRC_ROOT}/dawn_satellite/src/ota_apply_decide.c
+              ${SRC_ROOT}/src/core/ota_manifest.c
+      INCLUDES ${SRC_ROOT}/dawn_satellite/include
+      DEFINES OTA_KEYRING_PATH="/tmp/dawn_test_ota_keyring"
+      LIBS    unity ${SODIUM_LIBRARIES} ${JSONC_LIBRARIES}
+      LABEL   ci)
+else()
+   message(STATUS "DAWN tests: dawn_satellite/ absent — skipping satellite-side OTA host tests")
+endif()
 
 dawn_add_unit_test(test_scheduler
    SOURCES test_scheduler.c test_scheduler_stub.c
