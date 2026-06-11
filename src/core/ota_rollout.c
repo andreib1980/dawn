@@ -64,9 +64,9 @@ static struct {
 } s_ro;
 
 static pthread_mutex_t s_ro_mutex = PTHREAD_MUTEX_INITIALIZER;
-static ota_rollout_push_fn s_push_fn = NULL;
+static ota_rollout_push_fn_t s_push_fn = NULL;
 
-void ota_rollout_set_push_fn(ota_rollout_push_fn fn) {
+void ota_rollout_set_push_fn(ota_rollout_push_fn_t fn) {
    pthread_mutex_lock(&s_ro_mutex);
    s_push_fn = fn;
    pthread_mutex_unlock(&s_ro_mutex);
@@ -155,7 +155,7 @@ int ota_rollout_start(ota_platform_t platform,
    pthread_mutex_lock(&s_ro_mutex);
    bool busy = (s_ro.state == RO_STARTING || s_ro.state == RO_WAIT_CANARY ||
                 s_ro.state == RO_FANNING);
-   ota_rollout_push_fn push_fn = s_push_fn;
+   ota_rollout_push_fn_t push_fn = s_push_fn;
    if (!busy && push_fn) {
       s_ro.state = RO_STARTING;
    }
@@ -348,7 +348,7 @@ void ota_rollout_on_fail(const char *uuid, const char *version) {
 void ota_rollout_tick(time_t now) {
    /* Phase A: under the lock, decide what to do and snapshot the fan-out list. */
    pthread_mutex_lock(&s_ro_mutex);
-   ota_rollout_push_fn push_fn = s_push_fn;
+   ota_rollout_push_fn_t push_fn = s_push_fn;
 
    if (s_ro.state == RO_WAIT_CANARY && now > s_ro.deadline) {
       s_ro.targets[0].failed = true;
