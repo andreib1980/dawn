@@ -52,6 +52,12 @@ int webui_ota_push(const char *uuid, const char *version, bool allow_downgrade);
 void handle_ota_push(ws_connection_t *conn, struct json_object *payload);
 void handle_ota_list(ws_connection_t *conn);
 
+/* Fleet rollout (canary-then-rollout) — admin-gated WS surface mirroring the
+ * dawn-admin `ota push-all` / `rollout-status` / `rollout-abort` commands. */
+void handle_ota_push_all(ws_connection_t *conn, struct json_object *payload);
+void handle_ota_rollout_status(ws_connection_t *conn);
+void handle_ota_rollout_abort(ws_connection_t *conn);
+
 #ifdef __cplusplus
 }
 #endif

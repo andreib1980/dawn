@@ -844,6 +844,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       handle_ota_list(conn);
    } else if (strcmp(type, "ota_push") == 0) {
       handle_ota_push(conn, payload);
+   } else if (strcmp(type, "ota_push_all") == 0) {
+      handle_ota_push_all(conn, payload);
+   } else if (strcmp(type, "ota_rollout_status") == 0) {
+      handle_ota_rollout_status(conn);
+   } else if (strcmp(type, "ota_rollout_abort") == 0) {
+      handle_ota_rollout_abort(conn);
    }
    /* Messaging channel management (user-scoped) */
    else if (strcmp(type, "list_channels") == 0) {

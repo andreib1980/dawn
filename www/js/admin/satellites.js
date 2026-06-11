@@ -11,12 +11,18 @@
    let otaReleases = []; // [{ platform, tier, version }]
    let otaEnabled = false;
    let refreshInterval = null;
+   // Fleet-rollout panel state (persists across the 30s list re-render so an
+   // active rollout's status line isn't lost).
+   let fleetType = 'esp32'; // selected platform for push-all
+   let fleetStatusText = ''; // last rollout status line from the daemon
+   let fleetPollTimer = null; // status poll while a rollout is in flight
    let callbacks = {
       showConfirmModal: null,
       trapFocus: null,
    };
 
    const REFRESH_INTERVAL_MS = 30000;
+   const FLEET_POLL_INTERVAL_MS = 4000; // status poll cadence during a rollout
    const LOCAL_PSEUDO_UUID = '00000000-0000-0000-0000-000000000000';
 
    /* =============================================================================
@@ -66,9 +72,53 @@
       }
    }
 
+   function requestOtaPushAll(platform, version, allowDowngrade) {
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({
+            type: 'ota_push_all',
+            payload: { platform, version, allow_downgrade: !!allowDowngrade },
+         });
+      }
+   }
+
+   function requestRolloutStatus() {
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({ type: 'ota_rollout_status' });
+      }
+   }
+
+   function requestRolloutAbort() {
+      if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
+         DawnWS.send({ type: 'ota_rollout_abort' });
+      }
+   }
+
    // Tier → release platform string (tier 1 = RPi, tier 2 = ESP32).
    function platformForTier(tier) {
       return tier === 2 ? 'esp32' : 'rpi';
+   }
+
+   // Versions available for a platform string (newest first by store order).
+   function releaseVersionsForPlatform(platform) {
+      return otaReleases.filter((r) => r.platform === platform).map((r) => r.version);
+   }
+
+   // A rollout is "active" (still working) when its status line names a
+   // non-terminal state — used to gate the Abort button + status polling.
+   function rolloutIsActive(statusText) {
+      return /—\s*(waiting on canary|rolling out)\b/.test(statusText || '');
+   }
+
+   function startFleetPolling() {
+      stopFleetPolling();
+      fleetPollTimer = setInterval(requestRolloutStatus, FLEET_POLL_INTERVAL_MS);
+   }
+
+   function stopFleetPolling() {
+      if (fleetPollTimer) {
+         clearInterval(fleetPollTimer);
+         fleetPollTimer = null;
+      }
    }
 
    // Available release versions for a device's platform (newest first by the
@@ -155,7 +205,7 @@
          '<div class="satellite-controls satellite-ota-controls">' +
          '<label class="satellite-control-group">' +
          '<span class="control-label">Update to:</span>' +
-         '<select class="satellite-ota-version" data-uuid="' +
+         '<select class="satellite-ota-version" aria-label="Update version" data-uuid="' +
          escapeAttr(sat.uuid) +
          '"' +
          (busy ? ' disabled' : '') +
@@ -176,6 +226,75 @@
          '"' +
          (busy ? ' disabled title="Update already in progress"' : '') +
          '>Push Update</button>' +
+         '</div>'
+      );
+   }
+
+   // Fleet rollout panel: pick a satellite type + version, roll it out to the
+   // whole fleet (canary first).  Rendered at the bottom of the satellite list.
+   // Hidden when OTA is disabled or no release exists for any platform.
+   function buildFleetRolloutPanel() {
+      if (!otaEnabled) return '';
+      const platforms = [];
+      if (releaseVersionsForPlatform('esp32').length > 0) platforms.push('esp32');
+      if (releaseVersionsForPlatform('rpi').length > 0) platforms.push('rpi');
+      if (platforms.length === 0) return '';
+      if (platforms.indexOf(fleetType) === -1) fleetType = platforms[0];
+
+      let typeOpts = '';
+      for (const p of platforms) {
+         const label = p === 'esp32' ? 'ESP32 (Tier 2)' : 'Raspberry Pi (Tier 1)';
+         typeOpts +=
+            '<option value="' +
+            p +
+            '"' +
+            (p === fleetType ? ' selected' : '') +
+            '>' +
+            label +
+            '</option>';
+      }
+      let verOpts = '';
+      for (const v of releaseVersionsForPlatform(fleetType)) {
+         verOpts += '<option value="' + escapeAttr(v) + '">' + escapeHtml(v) + '</option>';
+      }
+
+      const active = rolloutIsActive(fleetStatusText);
+      const statusLine = fleetStatusText || 'No rollout has run.';
+      return (
+         '<div class="satellite-fleet-rollout">' +
+         '<h4 class="satellite-fleet-rollout-title">Fleet Rollout</h4>' +
+         '<p class="satellite-fleet-rollout-desc">Roll a release out to every online device of a type — ' +
+         'one canary first; the rest follow only after it updates and re-registers successfully.</p>' +
+         '<div class="satellite-controls">' +
+         '<label class="satellite-control-group">' +
+         '<span class="control-label">Type:</span>' +
+         // aria-label: the .control-label <span> is styled text, not a wired
+         // <label for>, so the select needs its own accessible name.
+         '<select class="fleet-rollout-type" aria-label="Satellite type">' +
+         typeOpts +
+         '</select>' +
+         '</label>' +
+         '<label class="satellite-control-group">' +
+         '<span class="control-label">Version:</span>' +
+         '<select class="fleet-rollout-version" aria-label="Release version">' +
+         verOpts +
+         '</select>' +
+         '</label>' +
+         '<label class="satellite-control-group satellite-ota-downgrade">' +
+         '<input type="checkbox" class="fleet-rollout-allow-downgrade">' +
+         '<span class="control-label">Allow downgrade</span>' +
+         '</label>' +
+         '<button class="btn fleet-rollout-start-btn">Roll Out</button>' +
+         '</div>' +
+         '<div class="satellite-fleet-rollout-status">' +
+         '<span class="control-label">Status:</span> ' +
+         // aria-live: the 4s poll mutates this via textContent — announce progress.
+         '<span id="fleet-rollout-status-text" aria-live="polite" aria-atomic="true">' +
+         escapeHtml(statusLine) +
+         '</span>' +
+         '<button class="btn fleet-rollout-refresh-btn">Refresh</button>' +
+         (active ? '<button class="btn fleet-rollout-abort-btn">Abort</button>' : '') +
+         '</div>' +
          '</div>'
       );
    }
@@ -307,6 +426,7 @@
             '</div>';
       }
 
+      html += buildFleetRolloutPanel();
       list.innerHTML = html;
       attachEventListeners();
    }
@@ -424,6 +544,83 @@
             }
          });
       });
+
+      // Fleet rollout panel: type switch repopulates versions in place; Roll Out /
+      // Abort go through the shared confirm modal (confirm() fallback).
+      const fleetTypeSel = document.querySelector('.fleet-rollout-type');
+      if (fleetTypeSel) {
+         fleetTypeSel.addEventListener('change', function () {
+            fleetType = this.value;
+            const verSel = document.querySelector('.fleet-rollout-version');
+            if (verSel) {
+               let opts = '';
+               for (const v of releaseVersionsForPlatform(fleetType)) {
+                  opts += '<option value="' + escapeAttr(v) + '">' + escapeHtml(v) + '</option>';
+               }
+               verSel.innerHTML = opts;
+            }
+         });
+      }
+
+      const fleetStartBtn = document.querySelector('.fleet-rollout-start-btn');
+      if (fleetStartBtn) {
+         fleetStartBtn.addEventListener('click', function () {
+            const typeSel = document.querySelector('.fleet-rollout-type');
+            const verSel = document.querySelector('.fleet-rollout-version');
+            const dgCb = document.querySelector('.fleet-rollout-allow-downgrade');
+            const platform = typeSel ? typeSel.value : fleetType;
+            const version = verSel ? verSel.value : '';
+            const allowDowngrade = dgCb ? dgCb.checked : false;
+            if (!version) return;
+            const typeLabel = platform === 'esp32' ? 'ESP32' : 'Raspberry Pi';
+            let msg =
+               'Roll out ' +
+               version +
+               ' to ALL online ' +
+               typeLabel +
+               ' devices?\n\n' +
+               'A canary goes first; the rest follow only if it updates successfully.';
+            if (allowDowngrade) msg += '\n\nDowngrade is ALLOWED for this rollout.';
+            const doRollout = function () {
+               // Guard against a double-submit of this high-blast-radius action;
+               // the next renderSatelliteList() recreates the button enabled.
+               fleetStartBtn.disabled = true;
+               requestOtaPushAll(platform, version, allowDowngrade);
+            };
+            if (callbacks.showConfirmModal) {
+               callbacks.showConfirmModal(msg, doRollout, {
+                  title: 'Fleet Rollout',
+                  okText: 'Roll Out',
+                  danger: true, // whole-fleet action — render OK in the danger style
+               });
+            } else if (confirm(msg)) {
+               doRollout();
+            }
+         });
+      }
+
+      const fleetRefreshBtn = document.querySelector('.fleet-rollout-refresh-btn');
+      if (fleetRefreshBtn) {
+         fleetRefreshBtn.addEventListener('click', requestRolloutStatus);
+      }
+
+      const fleetAbortBtn = document.querySelector('.fleet-rollout-abort-btn');
+      if (fleetAbortBtn) {
+         fleetAbortBtn.addEventListener('click', function () {
+            const msg = 'Abort the in-progress rollout? Devices not yet offered are skipped.';
+            const doAbort = function () {
+               requestRolloutAbort();
+            };
+            if (callbacks.showConfirmModal) {
+               callbacks.showConfirmModal(msg, doAbort, {
+                  title: 'Abort Rollout',
+                  okText: 'Abort',
+               });
+            } else if (confirm(msg)) {
+               doAbort();
+            }
+         });
+      }
    }
 
    /* =============================================================================
@@ -440,6 +637,7 @@
          clearInterval(refreshInterval);
          refreshInterval = null;
       }
+      stopFleetPolling();
    }
 
    /* =============================================================================
@@ -493,6 +691,10 @@
       otaEnabled = !!payload.enabled;
       otaReleases = Array.isArray(payload.releases) ? payload.releases : [];
       renderSatelliteList();
+      // Reflect any rollout already in flight (e.g. after a page reload).
+      if (otaEnabled) {
+         requestRolloutStatus();
+      }
    }
 
    function handleOtaPushResponse(payload) {
@@ -508,6 +710,50 @@
             DawnToast.show('Failed to push update', 'error');
          }
       }
+   }
+
+   // Update only the status text in place (avoids a full re-render that would
+   // reset the panel's selections); re-render only on an active↔idle transition
+   // so the Abort button appears/disappears.
+   function updateFleetStatusDisplay() {
+      const el = document.getElementById('fleet-rollout-status-text');
+      if (!el) return; // panel not in the DOM (section collapsed / OTA off)
+      el.textContent = fleetStatusText || 'No rollout has run.';
+      const hasAbort = !!document.querySelector('.fleet-rollout-abort-btn');
+      if (rolloutIsActive(fleetStatusText) !== hasAbort) {
+         renderSatelliteList();
+      }
+   }
+
+   function handleOtaPushAllResponse(payload) {
+      if (payload && payload.success) {
+         fleetStatusText = payload.summary || '';
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload.summary || 'Rollout started', 'success');
+         }
+         updateFleetStatusDisplay();
+         startFleetPolling();
+      }
+      // Failures arrive via the generic OTA_ERROR path (toast), like ota_push.
+   }
+
+   function handleOtaRolloutStatusResponse(payload) {
+      if (!payload) return;
+      fleetStatusText = typeof payload.status === 'string' ? payload.status : '';
+      updateFleetStatusDisplay();
+      if (!rolloutIsActive(fleetStatusText)) {
+         stopFleetPolling(); // terminal/idle — no need to keep polling
+      }
+   }
+
+   function handleOtaRolloutAbortResponse(payload) {
+      if (typeof DawnToast !== 'undefined') {
+         DawnToast.show(
+            payload && payload.aborted ? 'Rollout aborted' : 'No rollout in progress',
+            'info'
+         );
+      }
+      requestRolloutStatus(); // pull the post-abort status line
    }
 
    /* =============================================================================
@@ -897,6 +1143,9 @@
       handleDeleteResponse: handleDeleteResponse,
       handleOtaListResponse: handleOtaListResponse,
       handleOtaPushResponse: handleOtaPushResponse,
+      handleOtaPushAllResponse: handleOtaPushAllResponse,
+      handleOtaRolloutStatusResponse: handleOtaRolloutStatusResponse,
+      handleOtaRolloutAbortResponse: handleOtaRolloutAbortResponse,
       handleRegistrationKeyResponse: handleRegistrationKeyResponse,
       handleReconnect: function () {
          /* Re-render to un-disable any stuck controls, then refresh if section is open */
