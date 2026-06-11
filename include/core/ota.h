@@ -131,6 +131,18 @@ int ota_authorize_image_download(const char *uuid,
 int ota_report_status(const char *uuid, const char *state, const char *error);
 
 /**
+ * @brief Validate a device-reported OTA state token against the known set.
+ *
+ * Satellite-supplied state strings cross a trust boundary; callers should reject
+ * anything not in the OTA_STATE_* set before persisting it (an unknown token also
+ * dodges the in-flight predicate logic).
+ *
+ * @param state NUL-terminated token (may be NULL).
+ * @return true if @p state is one of the recognized OTA_STATE_* values.
+ */
+bool ota_state_is_valid(const char *state);
+
+/**
  * @brief Server-owned commit: called at registration with the device's reported
  *        version.  If it matches the in-flight target, marks the update success.
  */

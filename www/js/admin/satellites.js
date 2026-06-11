@@ -106,7 +106,7 @@
    // A rollout is "active" (still working) when its status line names a
    // non-terminal state — used to gate the Abort button + status polling.
    function rolloutIsActive(statusText) {
-      return /—\s*(waiting on canary|rolling out)\b/.test(statusText || '');
+      return /—\s*(starting|waiting on canary|rolling out)\b/.test(statusText || '');
    }
 
    function startFleetPolling() {
@@ -705,11 +705,23 @@
          // Refresh so the in-flight ota_state shows on the card.
          requestListSatellites();
       } else {
-         renderSatelliteList(); // re-enable the push button
+         // Defensive fallback: the daemon reports push failures via a generic
+         // {type:error, code:OTA_ERROR} (handled in dawn.js -> handleOtaError),
+         // not an ota_push_response with success:false, so this branch is a
+         // safety net in case that contract ever changes.
+         handleOtaError();
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show('Failed to push update', 'error');
          }
       }
+   }
+
+   // A push / rollout request failed: the daemon replies with a generic
+   // {type:error, code:OTA_ERROR}, which dawn.js routes here.  Re-render so the
+   // disabled Push / Roll Out buttons become usable again immediately instead of
+   // staying dead until the next 30 s auto-refresh.  (dawn.js shows the toast.)
+   function handleOtaError() {
+      renderSatelliteList();
    }
 
    // Update only the status text in place (avoids a full re-render that would
@@ -741,7 +753,14 @@
       if (!payload) return;
       fleetStatusText = typeof payload.status === 'string' ? payload.status : '';
       updateFleetStatusDisplay();
-      if (!rolloutIsActive(fleetStatusText)) {
+      if (rolloutIsActive(fleetStatusText)) {
+         // A rollout is in flight but THIS tab didn't start it (page reload,
+         // section reopen, or a second admin tab): startFleetPolling was never
+         // called, so resume polling instead of leaving the status frozen.
+         if (!fleetPollTimer) {
+            startFleetPolling();
+         }
+      } else {
          stopFleetPolling(); // terminal/idle — no need to keep polling
       }
    }
@@ -1146,6 +1165,7 @@
       handleOtaPushAllResponse: handleOtaPushAllResponse,
       handleOtaRolloutStatusResponse: handleOtaRolloutStatusResponse,
       handleOtaRolloutAbortResponse: handleOtaRolloutAbortResponse,
+      handleOtaError: handleOtaError,
       handleRegistrationKeyResponse: handleRegistrationKeyResponse,
       handleReconnect: function () {
          /* Re-render to un-disable any stuck controls, then refresh if section is open */

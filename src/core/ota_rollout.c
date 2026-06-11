@@ -36,6 +36,7 @@
 
 typedef enum {
    RO_IDLE = 0,    /* nothing has run, or the last one is reported done/failed */
+   RO_STARTING,    /* slot claimed by ota_rollout_start, not yet armed (busy) */
    RO_WAIT_CANARY, /* canary offer delivered, waiting for its commit */
    RO_FANNING,     /* canary committed; fan-out wave pushed, waiting on the rest */
    RO_DONE,        /* terminal: all settled (committed or failed/timed-out) */
@@ -131,9 +132,33 @@ int ota_rollout_start(ota_platform_t platform,
       return FAILURE;                                     \
    } while (0)
 
+/* As RO_FAIL, but first releases the slot we claimed below (RO_STARTING ->
+ * RO_IDLE) so a failed start never wedges the single-rollout slot.  The
+ * state==RO_STARTING guard is always true on the pre-push failure paths; it
+ * matters only after the canary push, where a concurrent abort may have already
+ * flipped the slot to RO_FAILED (don't clobber that). */
+#define RO_FAIL_CLAIMED(...)             \
+   do {                                  \
+      pthread_mutex_lock(&s_ro_mutex);   \
+      if (s_ro.state == RO_STARTING) {   \
+         s_ro.state = RO_IDLE;           \
+      }                                  \
+      pthread_mutex_unlock(&s_ro_mutex); \
+      RO_FAIL(__VA_ARGS__);              \
+   } while (0)
+
+   /* Claim the single-rollout slot atomically.  Both the admin-socket thread and
+    * the WebUI lws thread can call this concurrently; without claiming under the
+    * lock, both could read busy=false, both push a canary, and the second arm
+    * (step 4) would silently orphan the first rollout.  RO_STARTING marks the slot
+    * taken until step 4 arms it (or a failure releases it). */
    pthread_mutex_lock(&s_ro_mutex);
-   bool busy = (s_ro.state == RO_WAIT_CANARY || s_ro.state == RO_FANNING);
+   bool busy = (s_ro.state == RO_STARTING || s_ro.state == RO_WAIT_CANARY ||
+                s_ro.state == RO_FANNING);
    ota_rollout_push_fn push_fn = s_push_fn;
+   if (!busy && push_fn) {
+      s_ro.state = RO_STARTING;
+   }
    pthread_mutex_unlock(&s_ro_mutex);
 
    if (busy) {
@@ -148,7 +173,7 @@ int ota_rollout_start(ota_platform_t platform,
    memset(&cs, 0, sizeof(cs));
    cs.tier = tier;
    if (satellite_db_list(collect_candidate, &cs) != AUTH_DB_SUCCESS) {
-      RO_FAIL("Failed to enumerate satellites.");
+      RO_FAIL_CLAIMED("Failed to enumerate satellites.");
    }
 
    /* 2) Resolve eligibility (online + not already on the target) outside the
@@ -175,7 +200,7 @@ int ota_rollout_start(ota_platform_t platform,
    skipped += cs.n_overflowed; /* matching devices past the cap (never examined) */
 
    if (n == 0) {
-      RO_FAIL("No eligible devices (none online, or all already on %s).", version);
+      RO_FAIL_CLAIMED("No eligible devices (none online, or all already on %s).", version);
    }
 
    /* 3) Push the canary (targets[0]) synchronously — we're on the admin thread,
@@ -189,11 +214,18 @@ int ota_rollout_start(ota_platform_t platform,
       const char *why = (rc == AUTH_DB_LOCKED)      ? "already mid-update"
                         : (rc == AUTH_DB_NOT_FOUND) ? "went offline"
                                                     : "push failed";
-      RO_FAIL("Canary %s could not be offered (%s) — rollout not started.", targets[0].uuid, why);
+      RO_FAIL_CLAIMED("Canary %s could not be offered (%s) — rollout not started.", targets[0].uuid,
+                      why);
    }
 
-   /* 4) Arm the rollout. */
+   /* 4) Arm the rollout.  Only if the slot is still ours (RO_STARTING) — an
+    *    operator abort during the start window flips it to RO_FAILED, in which
+    *    case we leave it alone rather than resurrect an aborted rollout. */
    pthread_mutex_lock(&s_ro_mutex);
+   if (s_ro.state != RO_STARTING) {
+      pthread_mutex_unlock(&s_ro_mutex);
+      RO_FAIL("Rollout was aborted during startup.");
+   }
    memset(&s_ro, 0, sizeof(s_ro));
    s_ro.state = RO_WAIT_CANARY;
    s_ro.platform = platform;
@@ -394,6 +426,8 @@ void ota_rollout_tick(time_t now) {
 
 static const char *ro_state_str(ro_state_t s) {
    switch (s) {
+      case RO_STARTING:
+         return "starting";
       case RO_WAIT_CANARY:
          return "waiting on canary";
       case RO_FANNING:
@@ -429,6 +463,13 @@ int ota_rollout_status(char *buf, size_t len) {
       pthread_mutex_unlock(&s_ro_mutex);
       return SUCCESS;
    }
+   if (s_ro.state == RO_STARTING) {
+      /* Transient pre-arm window: s_ro isn't populated yet, so the full summary
+       * below would print empty platform/version.  Report it plainly instead. */
+      snprintf(buf, len, "Rollout starting…");
+      pthread_mutex_unlock(&s_ro_mutex);
+      return SUCCESS;
+   }
    int committed = 0, failed = 0;
    for (int i = 0; i < s_ro.n_targets; i++) {
       committed += s_ro.targets[i].committed ? 1 : 0;
@@ -452,7 +493,8 @@ int ota_rollout_status(char *buf, size_t len) {
 
 int ota_rollout_abort(void) {
    pthread_mutex_lock(&s_ro_mutex);
-   bool was_active = (s_ro.state == RO_WAIT_CANARY || s_ro.state == RO_FANNING);
+   bool was_active = (s_ro.state == RO_STARTING || s_ro.state == RO_WAIT_CANARY ||
+                      s_ro.state == RO_FANNING);
    if (was_active) {
       s_ro.state = RO_FAILED;
       s_ro.needs_fanout = false;

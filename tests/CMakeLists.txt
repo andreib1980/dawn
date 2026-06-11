@@ -155,6 +155,20 @@ dawn_add_unit_test(test_ota
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${SODIUM_LIBRARIES}
    LABEL   ci)
 
+# Fleet rollout orchestrator (canary-then-fan-out state machine + slot-claim
+# invariants).  Externals (satellite_db_list / ota_db_get / sessions / transport)
+# are stubbed IN the test TU (not a sibling *_stub.c) — deliberate: ota_rollout.c
+# is the sole consumer here, so there's no stub to share, and a future new external
+# dep should surface as a link error in this TU.  ENABLE_MULTI_CLIENT forces the
+# extern session_find_by_uuid decl (vs the header's inline NULL stub) so the test's
+# online-check stub is the one that runs.
+dawn_add_unit_test(test_ota_rollout
+   SOURCES test_ota_rollout.c
+           ${SRC_ROOT}/src/core/ota_rollout.c
+   DEFINES ENABLE_MULTI_CLIENT
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Satellite-side OTA host tests.  These compile dawn_satellite/ sources directly
 # (libc / libsodium / json-c only — no SDL/curl/ws) and run natively, so the
 # device-apply decision logic regression-tests in CI without a real RPi.

@@ -38,6 +38,10 @@ case "$1" in
       if [ -f "$PRISTINE" ]; then
          install -m 755 -o dawn -g dawn "$PRISTINE" "$LIVE"
          install -m 755 -o dawn -g dawn "$PRISTINE" "$ROLLBACK"
+         # The packaged binary is now ground truth — drop any in-flight OTA
+         # probation marker so the launcher doesn't count boots against (or roll
+         # back) a binary apt just replaced.
+         rm -f "$DATA_DIR/ota/pending"
       fi
 
       # 4. Linker cache for the bundled libs (ld.so.conf.d shipped by the package).

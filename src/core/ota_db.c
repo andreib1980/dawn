@@ -71,9 +71,13 @@ int ota_db_report_version(const char *uuid, const char *version) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Clamp the (satellite-supplied at registration) version to the column width
+    * at the DB chokepoint — same rationale as ota_db_set_state's error clamp. */
+   char ver_clamped[OTA_VERSION_MAX];
+   snprintf(ver_clamped, sizeof(ver_clamped), "%s", version);
    int64_t now = (int64_t)time(NULL);
    sqlite3_bind_text(stmt, 1, uuid, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_text(stmt, 2, version, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_text(stmt, 2, ver_clamped, -1, SQLITE_TRANSIENT);
    sqlite3_bind_int64(stmt, 3, now);
    sqlite3_bind_int64(stmt, 4, now);
 
@@ -155,9 +159,16 @@ int ota_db_set_state(const char *uuid, const char *state, const char *last_error
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
    }
+   /* Clamp the (possibly satellite-supplied) free-text error to the column width
+    * here at the DB chokepoint, so every caller — the webui status/reject paths
+    * and the internal failure path in ota.c — gets one enforced bound rather than
+    * each transport seam re-clamping.  (The parallel state-token *validity* check
+    * stays at the trust boundary: ota_state_is_valid in webui_ota.c.) */
    sqlite3_bind_text(stmt, 1, state, -1, SQLITE_TRANSIENT);
    if (last_error && last_error[0]) {
-      sqlite3_bind_text(stmt, 2, last_error, -1, SQLITE_TRANSIENT);
+      char err_clamped[OTA_ERROR_MAX];
+      snprintf(err_clamped, sizeof(err_clamped), "%s", last_error);
+      sqlite3_bind_text(stmt, 2, err_clamped, -1, SQLITE_TRANSIENT);
    } else {
       sqlite3_bind_null(stmt, 2);
    }

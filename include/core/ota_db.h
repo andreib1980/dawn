@@ -83,7 +83,9 @@ int ota_db_report_version(const char *uuid, const char *version);
 int ota_db_get(const char *uuid, ota_device_state_t *out);
 
 /* OTA state-machine tokens (DB is the single source of truth — §5).  In-flight
- * states are the ones a fresh push must not interrupt. */
+ * states are the ones a fresh push must not interrupt.
+ * NOTE: keep this set in sync with ota_state_is_valid() in src/core/ota.c — a new
+ * token added here must be added to that allowlist or it will be rejected. */
 #define OTA_STATE_IDLE "idle"
 #define OTA_STATE_OFFERED "offered"
 #define OTA_STATE_DOWNLOADING "downloading"

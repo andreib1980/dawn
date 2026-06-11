@@ -51,6 +51,13 @@ void handle_ota_status(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
    const char *state = json_object_get_string(state_obj);
+   /* Satellite-supplied: reject unknown state tokens (they would be stored
+    * verbatim and dodge the in-flight predicate).  Free-text fields (error/reason
+    * /version) are width-clamped at the DB chokepoint in ota_db.c. */
+   if (!ota_state_is_valid(state)) {
+      send_error_impl(conn->wsi, "INVALID_MESSAGE", "ota_status invalid 'state'");
+      return;
+   }
    const char *error = NULL;
    struct json_object *err_obj = NULL;
    if (json_object_object_get_ex(payload, "error", &err_obj)) {
