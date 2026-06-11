@@ -127,7 +127,9 @@ within a few boots, an NVS guard reverts to the old slot. See `docs/OTA_DESIGN.m
         --abi-tag esp32s3 --image <path-to>.ino.bin --push <device-uuid>
    ```
    (`esp32s3` must match the `abi_tag` the device checks; `ota-release.sh` already accepts `--platform
-   esp32`.) Restart the daemon if it hasn't scanned the new release dir.
+   esp32`.) `ota-release.sh` auto-rescans the running daemon after staging, so the release is pushable
+   without a restart; add `--allow-downgrade` to push an older version. Omit `--push` to only stage
+   (then roll out from the WebUI Fleet Rollout panel or `dawn-admin ota push-all`).
 
 ## Upload & Run
 
