@@ -258,6 +258,125 @@
 }
 
 /* =============================================================================
+ * Fleet Rollout panel (push-all canary rollout) — bottom of the satellite list.
+ * Reuses the .satellite-controls / .satellite-control-group layout above.
+ * ============================================================================= */
+.satellite-fleet-rollout {
+   margin-top: 1rem;
+   padding: 1rem;
+   border: 1px solid var(--border-color);
+   border-radius: 8px;
+   background: var(--bg-tertiary);
+}
+
+.satellite-fleet-rollout-title {
+   margin: 0 0 0.25rem;
+   font-size: 0.95rem;
+   color: var(--text-primary);
+}
+
+.satellite-fleet-rollout-desc {
+   margin: 0 0 0.75rem;
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+}
+
+.fleet-rollout-type,
+.fleet-rollout-version {
+   padding: 4px 8px;
+   font-size: 0.85rem;
+   background: var(--bg-primary);
+   color: var(--text-primary);
+   border: 1px solid var(--border-color);
+   border-radius: 4px;
+   min-height: 32px;
+   min-width: 100px;
+}
+
+/* Outline-accent, intentionally mirroring the per-device .satellite-ota-push-btn
+ * for local consistency rather than the solid shared .btn-primary. */
+.fleet-rollout-start-btn {
+   flex-shrink: 0;
+   background: transparent;
+   border: 1px solid var(--accent);
+   color: var(--accent);
+   padding: 0.25rem 0.75rem;
+   font-size: 0.8rem;
+   border-radius: 4px;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.fleet-rollout-start-btn:hover:not(:disabled) {
+   background: var(--accent-hover);
+}
+
+.fleet-rollout-start-btn:disabled {
+   opacity: 0.5;
+   cursor: wait; /* disabled = rollout request in flight (re-enabled on next render) */
+}
+
+.satellite-fleet-rollout-status {
+   display: flex;
+   align-items: center;
+   flex-wrap: wrap;
+   gap: 0.5rem;
+   margin-top: 0.75rem;
+   padding-top: 0.75rem;
+   border-top: 1px solid var(--border-color);
+   font-size: 0.85rem;
+   color: var(--text-primary);
+}
+
+#fleet-rollout-status-text {
+   color: var(--text-secondary);
+}
+
+.fleet-rollout-refresh-btn {
+   background: transparent;
+   border: 1px solid var(--border-color);
+   color: var(--text-secondary);
+   padding: 0.2rem 0.6rem;
+   font-size: 0.78rem;
+   border-radius: 4px;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.fleet-rollout-refresh-btn:hover {
+   border-color: var(--accent);
+   color: var(--accent);
+}
+
+.fleet-rollout-abort-btn {
+   background: transparent;
+   border: 1px solid var(--error);
+   color: var(--error);
+   padding: 0.2rem 0.6rem;
+   font-size: 0.78rem;
+   border-radius: 4px;
+   cursor: pointer;
+   transition: all var(--transition-fast);
+}
+
+.fleet-rollout-abort-btn:hover {
+   background: rgba(239, 68, 68, 0.15);
+}
+
+/* Selects need explicit focus rings; the buttons are `.btn` and inherit the
+ * global .btn:focus-visible accent outline.  Abort overrides it with --error. */
+.fleet-rollout-type:focus-visible,
+.fleet-rollout-version:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.fleet-rollout-abort-btn:focus-visible {
+   outline: 2px solid var(--error);
+   outline-offset: 2px;
+}
+
+/* =============================================================================
  * Focus & Accessibility
  * ============================================================================= */
 
@@ -300,13 +419,18 @@
 
    .satellite-user-select,
    .satellite-ha-area,
-   .satellite-ota-version {
+   .satellite-ota-version,
+   .fleet-rollout-type,
+   .fleet-rollout-version {
       width: 100%;
       min-height: 44px;
    }
 
    .satellite-delete-btn,
-   .satellite-ota-push-btn {
+   .satellite-ota-push-btn,
+   .fleet-rollout-start-btn,
+   .fleet-rollout-refresh-btn,
+   .fleet-rollout-abort-btn {
       min-height: 44px;
       padding: 0.5rem 1rem;
    }

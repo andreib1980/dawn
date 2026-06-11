@@ -480,6 +480,18 @@
                if (typeof DawnSatellites !== 'undefined')
                   DawnSatellites.handleOtaPushResponse(msg.payload);
                break;
+            case 'ota_push_all_response':
+               if (typeof DawnSatellites !== 'undefined')
+                  DawnSatellites.handleOtaPushAllResponse(msg.payload);
+               break;
+            case 'ota_rollout_status_response':
+               if (typeof DawnSatellites !== 'undefined')
+                  DawnSatellites.handleOtaRolloutStatusResponse(msg.payload);
+               break;
+            case 'ota_rollout_abort_response':
+               if (typeof DawnSatellites !== 'undefined')
+                  DawnSatellites.handleOtaRolloutAbortResponse(msg.payload);
+               break;
             // Messaging channel management responses (user-scoped)
             case 'list_channels_response':
                if (typeof DawnMessaging !== 'undefined')

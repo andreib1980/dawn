@@ -27,6 +27,8 @@
 #include "auth/auth_db.h"
 #include "core/ota.h"
 #include "core/ota_db.h"
+#include "core/ota_manifest.h" /* ota_platform_t */
+#include "core/ota_rollout.h"
 #include "core/session_manager.h"
 #include "logging.h"
 
@@ -190,6 +192,84 @@ void handle_ota_push(ws_connection_t *conn, struct json_object *payload) {
    json_object_object_add(p, "success", json_object_new_boolean(1));
    json_object_object_add(p, "uuid", json_object_new_string(uuid));
    json_object_object_add(p, "version", json_object_new_string(version));
+   json_object_object_add(resp, "payload", p);
+   send_json_response(conn, resp);
+   json_object_put(resp);
+}
+
+void handle_ota_push_all(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_admin(conn)) {
+      return;
+   }
+   struct json_object *pl = NULL, *v = NULL, *d = NULL;
+   if (!payload || !json_object_object_get_ex(payload, "platform", &pl) ||
+       !json_object_object_get_ex(payload, "version", &v)) {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "ota_push_all requires platform + version");
+      return;
+   }
+   const char *platform_s = json_object_get_string(pl);
+   const char *version = json_object_get_string(v);
+   bool allow_downgrade = false;
+   if (json_object_object_get_ex(payload, "allow_downgrade", &d)) {
+      allow_downgrade = json_object_get_boolean(d);
+   }
+
+   ota_platform_t platform;
+   int tier;
+   if (platform_s && strcmp(platform_s, "esp32") == 0) {
+      platform = OTA_PLATFORM_ESP32;
+      tier = 2;
+   } else if (platform_s && strcmp(platform_s, "rpi") == 0) {
+      platform = OTA_PLATFORM_RPI;
+      tier = 1;
+   } else {
+      send_error_impl(conn->wsi, "INVALID_PARAM", "platform must be 'rpi' or 'esp32'");
+      return;
+   }
+
+   char summary[256];
+   int rc = ota_rollout_start(platform, tier, version, allow_downgrade, summary, sizeof(summary));
+   if (rc != SUCCESS) {
+      send_error_impl(conn->wsi, "OTA_ERROR",
+                      summary[0] ? summary : "rollout could not be started");
+      return;
+   }
+   struct json_object *resp = json_object_new_object();
+   json_object_object_add(resp, "type", json_object_new_string("ota_push_all_response"));
+   struct json_object *p = json_object_new_object();
+   json_object_object_add(p, "success", json_object_new_boolean(1));
+   json_object_object_add(p, "summary", json_object_new_string(summary));
+   json_object_object_add(resp, "payload", p);
+   send_json_response(conn, resp);
+   json_object_put(resp);
+}
+
+void handle_ota_rollout_status(ws_connection_t *conn) {
+   if (!conn_require_admin(conn)) {
+      return;
+   }
+   char status[512];
+   if (ota_rollout_status(status, sizeof(status)) != SUCCESS) {
+      status[0] = '\0';
+   }
+   struct json_object *resp = json_object_new_object();
+   json_object_object_add(resp, "type", json_object_new_string("ota_rollout_status_response"));
+   struct json_object *p = json_object_new_object();
+   json_object_object_add(p, "status", json_object_new_string(status));
+   json_object_object_add(resp, "payload", p);
+   send_json_response(conn, resp);
+   json_object_put(resp);
+}
+
+void handle_ota_rollout_abort(ws_connection_t *conn) {
+   if (!conn_require_admin(conn)) {
+      return;
+   }
+   bool aborted = (ota_rollout_abort() == SUCCESS);
+   struct json_object *resp = json_object_new_object();
+   json_object_object_add(resp, "type", json_object_new_string("ota_rollout_abort_response"));
+   struct json_object *p = json_object_new_object();
+   json_object_object_add(p, "aborted", json_object_new_boolean(aborted));
    json_object_object_add(resp, "payload", p);
    send_json_response(conn, resp);
    json_object_put(resp);
