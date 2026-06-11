@@ -218,10 +218,13 @@ typedef enum {
     * 0xC0..0xCF is reserved for OTA (0xB0 band belongs to the coding harness).
     * Both commands trust SO_PEERCRED (root/daemon UID) like the messaging
     * operator commands — no admin-auth prefix.  See docs/OTA_DESIGN.md. */
-   ADMIN_MSG_OTA_LIST = 0xC0,   /**< list available releases (text table) */
-   ADMIN_MSG_OTA_PUSH = 0xC1,   /**< push an update offer to one device by uuid */
-   ADMIN_MSG_OTA_RESCAN = 0xC2, /**< re-scan release dir into the store (no payload) */
-   /* Next free OTA opcode: 0xC3.  (Range ends 0xCF.) */
+   ADMIN_MSG_OTA_LIST = 0xC0,           /**< list available releases (text table) */
+   ADMIN_MSG_OTA_PUSH = 0xC1,           /**< push an update offer to one device by uuid */
+   ADMIN_MSG_OTA_RESCAN = 0xC2,         /**< re-scan release dir into the store (no payload) */
+   ADMIN_MSG_OTA_PUSH_ALL = 0xC3,       /**< canary-then-rollout to a platform/tier */
+   ADMIN_MSG_OTA_ROLLOUT_STATUS = 0xC4, /**< current/last rollout status (no payload) */
+   ADMIN_MSG_OTA_ROLLOUT_ABORT = 0xC5,  /**< abort an in-progress rollout (no payload) */
+   /* Next free OTA opcode: 0xC6.  (Range ends 0xCF.) */
 } admin_msg_type_t;
 
 /**
@@ -492,6 +495,15 @@ typedef struct __attribute__((packed)) {
  * ADMIN_MSG_OTA_RESCAN — no payload.  Re-scans the release dir into the in-memory
  *   store so a freshly-staged release is pushable without a daemon restart.
  *   Response is a short text status with the post-rescan release count.
+ *
+ * ADMIN_MSG_OTA_PUSH_ALL — wire format (little-endian):
+ *   Byte 0:        flags  (bit 0 = allow_downgrade)
+ *   Byte 1:        tier   (1 = RPi, 2 = ESP32; platform derived from tier)
+ *   Bytes 2..:     version  (no NUL; length = payload_len - 2)
+ *   Starts a canary-then-rollout; response is a one-line summary.
+ *
+ * ADMIN_MSG_OTA_ROLLOUT_STATUS / _ABORT — no payload.  Status returns a text line;
+ *   abort halts an in-progress rollout (the remaining devices are not touched).
  *
  * ADMIN_MSG_OTA_PUSH — wire format (little-endian):
  *   Byte 0:        flags  (bit 0 = allow_downgrade)

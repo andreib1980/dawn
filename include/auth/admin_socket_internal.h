@@ -70,10 +70,13 @@ int handle_messaging_link_attempts(int client_fd, const char *payload, uint16_t 
 int handle_messaging_reenable_channel(int client_fd, const char *payload, uint16_t payload_len);
 
 /* OTA operator handlers (admin_socket_ota.c).  Dispatched from handle_client()
- * in admin_socket.c against ADMIN_MSG_OTA_* opcodes (0xC0-0xC2). */
+ * in admin_socket.c against ADMIN_MSG_OTA_* opcodes (0xC0-0xC5). */
 int handle_ota_list_cmd(int client_fd);
 int handle_ota_push_cmd(int client_fd, const char *payload, uint16_t payload_len);
 int handle_ota_rescan_cmd(int client_fd);
+int handle_ota_push_all_cmd(int client_fd, const char *payload, uint16_t payload_len);
+int handle_ota_rollout_status_cmd(int client_fd);
+int handle_ota_rollout_abort_cmd(int client_fd);
 
 #ifdef __cplusplus
 }

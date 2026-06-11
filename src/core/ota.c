@@ -31,6 +31,7 @@
 
 #include "config/dawn_config.h"
 #include "core/ota_db.h"
+#include "core/ota_rollout.h"
 #include "logging.h"
 
 #define OTA_MAX_RELEASES 64
@@ -459,6 +460,7 @@ void ota_finalize_on_register(const char *uuid, const char *reported_version) {
    if (strcmp(reported_version, st.target_version) == 0) {
       ota_db_clear_target(uuid, OTA_STATE_SUCCESS);
       OLOG_INFO("ota: %s updated to %s (committed)", uuid, reported_version);
+      ota_rollout_on_commit(uuid, reported_version); /* advance any active rollout */
       return;
    }
 
@@ -477,5 +479,6 @@ void ota_finalize_on_register(const char *uuid, const char *reported_version) {
                st.target_version);
       ota_db_set_state(uuid, OTA_STATE_FAILED, err);
       OLOG_WARNING("ota: %s update to %s did not take — %s", uuid, st.target_version, err);
+      ota_rollout_on_fail(uuid, reported_version); /* halt/advance any active rollout */
    }
 }

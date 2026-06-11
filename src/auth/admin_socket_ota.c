@@ -33,6 +33,8 @@
 #include "auth/admin_socket_internal.h"
 #include "auth/auth_db.h"
 #include "core/ota.h"
+#include "core/ota_manifest.h" /* ota_platform_t */
+#include "core/ota_rollout.h"
 #include "dawn_error.h"
 #include "logging.h"
 
@@ -166,4 +168,65 @@ int handle_ota_push_cmd(int client_fd, const char *payload, uint16_t payload_len
          return send_text_response(client_fd, ADMIN_RESP_FAILURE,
                                    "No matching release for the device, or push failed");
    }
+}
+
+/* =============================================================================
+ * OTA: push-all — canary-then-rollout to a platform/tier.
+ *
+ * Wire format:
+ *   Byte 0:     flags (bit 0 = allow_downgrade)
+ *   Byte 1:     tier  (1 = RPi, 2 = ESP32; platform derived from tier)
+ *   Bytes 2..:  version (length = payload_len - 2)
+ * ============================================================================= */
+
+int handle_ota_push_all_cmd(int client_fd, const char *payload, uint16_t payload_len) {
+   /* Minimum: flags + tier + 1 version byte = 3. */
+   if (!payload || payload_len < 3) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid ota push-all payload");
+   }
+   if (!ota_enabled()) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                                "OTA is disabled ([ota].enabled = false).");
+   }
+   uint8_t flags = (uint8_t)payload[0];
+   uint8_t tier = (uint8_t)payload[1];
+   if (tier != 1 && tier != 2) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid tier (must be 1 or 2)");
+   }
+   uint16_t ver_len = (uint16_t)(payload_len - 2);
+   if (ver_len == 0 || ver_len > ADMIN_OTA_VERSION_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid version");
+   }
+   char version[ADMIN_OTA_VERSION_MAX + 1];
+   memcpy(version, payload + 2, ver_len);
+   version[ver_len] = '\0';
+
+   bool allow_downgrade = (flags & ADMIN_OTA_FLAG_ALLOW_DOWNGRADE) != 0;
+   ota_platform_t platform = (tier == 2) ? OTA_PLATFORM_ESP32 : OTA_PLATFORM_RPI;
+
+   char summary[256];
+   int rc = ota_rollout_start(platform, tier, version, allow_downgrade, summary, sizeof(summary));
+   if (rc == SUCCESS) {
+      OLOG_INFO("OTA: admin started rollout of %s (tier %d)%s", version, tier,
+                allow_downgrade ? " (allow-downgrade)" : "");
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS, summary);
+   }
+   return send_text_response(client_fd, ADMIN_RESP_FAILURE,
+                             summary[0] ? summary : "Rollout could not be started");
+}
+
+int handle_ota_rollout_status_cmd(int client_fd) {
+   char buf[512];
+   if (ota_rollout_status(buf, sizeof(buf)) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Could not read rollout status");
+   }
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, buf);
+}
+
+int handle_ota_rollout_abort_cmd(int client_fd) {
+   if (ota_rollout_abort() != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS, "No rollout in progress.");
+   }
+   OLOG_INFO("OTA: admin aborted in-progress rollout");
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, "Rollout aborted.");
 }
