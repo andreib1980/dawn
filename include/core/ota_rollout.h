@@ -52,14 +52,22 @@ extern "C" {
 #define OTA_ROLLOUT_MAX_TARGETS 64
 
 /**
- * @brief Register the per-device delivery function (transport layer, Layer 4).
+ * @brief Per-device delivery function (transport layer, Layer 4).
+ *
+ * Signature matches webui_ota_push(): returns
+ * AUTH_DB_SUCCESS | AUTH_DB_LOCKED | AUTH_DB_NOT_FOUND | AUTH_DB_FAILURE.
+ */
+typedef int (*ota_rollout_push_fn_t)(const char *uuid, const char *version, bool allow_downgrade);
+
+/**
+ * @brief Register the per-device delivery function.
  *
  * Called once at init with webui_ota_push.  Until set, ota_rollout_start() fails
- * (no way to deliver an offer).  Signature matches webui_ota_push():
- *   returns AUTH_DB_SUCCESS | AUTH_DB_LOCKED | AUTH_DB_NOT_FOUND | AUTH_DB_FAILURE.
+ * (no way to deliver an offer).
+ *
+ * @param fn Delivery callback, or NULL to clear it.
  */
-typedef int (*ota_rollout_push_fn)(const char *uuid, const char *version, bool allow_downgrade);
-void ota_rollout_set_push_fn(ota_rollout_push_fn fn);
+void ota_rollout_set_push_fn(ota_rollout_push_fn_t fn);
 
 /**
  * @brief Start a canary-then-rollout of @p version to a platform/tier.

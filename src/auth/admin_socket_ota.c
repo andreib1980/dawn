@@ -126,6 +126,10 @@ int handle_ota_rescan_cmd(int client_fd) {
  * ============================================================================= */
 
 int handle_ota_push_cmd(int client_fd, const char *payload, uint16_t payload_len) {
+   if (!ota_enabled()) {
+      return send_text_response(client_fd, ADMIN_RESP_SUCCESS,
+                                "OTA is disabled ([ota].enabled = false).");
+   }
    /* Minimum: flags + uuid_len + 1 uuid byte + 1 version byte = 4. */
    if (!payload || payload_len < 4) {
       return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid ota push payload");

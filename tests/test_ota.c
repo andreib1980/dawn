@@ -285,12 +285,33 @@ static void test_state_is_valid(void) {
    TEST_ASSERT_FALSE(ota_state_is_valid("downloading ")); /* trailing space */
 }
 
+/* A pending offer the startup reconcile rewrote to 'unknown' must NOT be
+ * auto-failed when the device reconnects on the old version — it never started
+ * applying.  Regression for the restart-fails-pending-offers bug: only the truly
+ * in-progress states (downloading/verifying/applying/rebooting) auto-fail. */
+static void test_finalize_unknown_not_failed(void) {
+   ota_offer_t offer;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, ota_begin_push(UUID_A, OTA_PLATFORM_RPI, "2.1.0", false, &offer));
+   /* Simulate startup reconcile flipping the stale 'offered' row to 'unknown'. */
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, ota_db_reconcile_stale(time(NULL) + 100, &n));
+   ota_device_state_t st;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, ota_db_get(UUID_A, &st));
+   TEST_ASSERT_EQUAL_STRING("unknown", st.state);
+   /* Device reconnects on the OLD version — never applied, so not a failure. */
+   ota_finalize_on_register(UUID_A, "2.0.0");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, ota_db_get(UUID_A, &st));
+   TEST_ASSERT_EQUAL_STRING("unknown", st.state);        /* left alone, not 'failed' */
+   TEST_ASSERT_EQUAL_STRING("2.1.0", st.target_version); /* target kept for a fresh push */
+}
+
 int main(void) {
    if (sodium_init() < 0) {
       return 1;
    }
    UNITY_BEGIN();
    RUN_TEST(test_state_is_valid);
+   RUN_TEST(test_finalize_unknown_not_failed);
    RUN_TEST(test_resolve_latest);
    RUN_TEST(test_begin_push_offer_fields);
    RUN_TEST(test_begin_push_unknown_release);

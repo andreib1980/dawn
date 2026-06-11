@@ -482,16 +482,25 @@ void ota_finalize_on_register(const char *uuid, const char *reported_version) {
       return;
    }
 
-   /* Target pending, but the device is alive reporting a DIFFERENT version.  Once
-    * a device has started applying (state past 'offered'), a reconnect on the old
-    * version means the update concluded without reaching the target — a rollback,
-    * a crash-recovery, or an image whose firmware-version header was never bumped.
-    * Resolve the otherwise-stuck in-flight row to 'failed' so the panel unsticks
-    * and the release is re-pushable.  We KEEP target_version: if this was instead
-    * a brief same-process WS reconnect mid-apply (the apply window is sub-second),
-    * the real success register that follows still finalizes via the branch above.
-    * A device that merely reconnects at 'offered' (acked nothing yet) is left alone. */
-   if (strcmp(st.state, OTA_STATE_OFFERED) != 0) {
+   /* Target pending, but the device is alive reporting a DIFFERENT version.  Only
+    * treat this as a failed update when the device had actually STARTED applying
+    * (downloading / verifying / applying / rebooting): a reconnect on the old
+    * version from one of those means the update concluded without reaching the
+    * target — a rollback, a crash-recovery, or an unbumped firmware-version header.
+    * Resolve the otherwise-stuck row to 'failed' so the panel unsticks and the
+    * release is re-pushable.  We KEEP target_version: if this was instead a brief
+    * same-process WS reconnect mid-apply (the apply window is sub-second), the real
+    * success register that follows still finalizes via the branch above.
+    *
+    * States 'offered' (acked nothing yet) and 'unknown' (e.g. a stale offer the
+    * startup reconcile rewrote — never a real in-progress update) are NOT failures:
+    * the device never started applying, so leave the row for a fresh push rather
+    * than mislabel it failed. */
+   bool in_progress = strcmp(st.state, OTA_STATE_DOWNLOADING) == 0 ||
+                      strcmp(st.state, OTA_STATE_VERIFYING) == 0 ||
+                      strcmp(st.state, OTA_STATE_APPLYING) == 0 ||
+                      strcmp(st.state, OTA_STATE_REBOOTING) == 0;
+   if (in_progress) {
       char err[OTA_ERROR_MAX];
       snprintf(err, sizeof(err), "device reported %s, expected target %s", reported_version,
                st.target_version);

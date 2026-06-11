@@ -140,6 +140,15 @@ int webui_ota_push(const char *uuid, const char *version, bool allow_downgrade) 
       }
       return AUTH_DB_NOT_FOUND;
    }
+   /* Only offer to a device that advertised OTA support at registration
+    * (DAP2 capabilities.ota).  Offering to one that didn't opt in would, if its
+    * firmware ignores the offer, wedge the single-flight 'offered' row until the
+    * download token expires. */
+   if (!session->capabilities.ota) {
+      session_release(session);
+      OLOG_WARNING("OTA: %s does not advertise OTA capability — push refused", uuid);
+      return AUTH_DB_FAILURE;
+   }
 
    ota_offer_t offer;
    int rc = ota_begin_push(uuid, platform, version, allow_downgrade, &offer);
