@@ -34,7 +34,10 @@ Committed on branch `satellite_ota` (`a38c901` Phase 1, `9593abc` satellite buil
   `admin_socket.h`, `src/auth/admin_socket_ota.c` (`handle_ota_list_cmd`/`handle_ota_push_cmd`,
   push delegates to `webui_ota_push` so it shares the WebUI spine), `dawn-admin ota list` +
   `dawn-admin ota push --uuid <u> --version <v> [--allow-downgrade]` (client in
-  `dawn-admin/socket_client.{c,h}`). (b) **WebUI admin panel**: per-online-device version picker +
+  `dawn-admin/socket_client.{c,h}`).  **`dawn-admin ota rescan`** (opcode `0xC2`) re-scans the release
+  dir into the in-memory store so a freshly-staged release is pushable **without a daemon restart** —
+  `ota-release.sh` auto-calls it after staging (best-effort), and `--allow-downgrade` is threaded
+  through `ota-release.sh --push`.  (b) **WebUI admin panel**: per-online-device version picker +
   allow-downgrade + Push button in `www/js/admin/satellites.js` (fetches `ota_list`, sends
   `ota_push`, renders in-flight `ota_state`), dispatch in `dawn.js`, styles in
   `www/css/components/satellites.css`. Four-agent review applied (escapeAttr XSS fix incl. the
@@ -66,7 +69,11 @@ Committed on branch `satellite_ota` (`a38c901` Phase 1, `9593abc` satellite buil
     `0xC3`–`0xC5`, `dawn-admin ota push-all/rollout-status/rollout-abort`). One canary first; the rest
     fan out only after it re-registers on the new version; a canary revert or timeout halts the rollout.
     **v1 scope: online devices** of the platform/tier not already on the target (offline → skipped, not
-    queued — offer-pending-on-reconnect is a future add). Single active rollout, in-memory.
+    queued — offer-pending-on-reconnect is a future add). Single active rollout, in-memory.  **WebUI
+    surface — SHIPPED**: a "Fleet Rollout" panel at the bottom of the satellite-management area
+    (`www/js/admin/satellites.js` + `satellites.css`): satellite-type + version + allow-downgrade →
+    Roll Out, with a polled status line + Abort (WS `ota_push_all`/`ota_rollout_status`/`ota_rollout_abort`
+    in `webui_ota.c`).
   - **Still open:** audit log of OTA operations; anti-rollback enforcement audit; (deferred) signed
     `allow_downgrade` in the manifest (wire-format change); (optional) ESP32 native rollback via a
     custom IDF bootloader.
