@@ -2422,6 +2422,12 @@ static int handle_client(int client_fd) {
          return handle_ota_push_cmd(client_fd, payload, header.payload_len);
       case ADMIN_MSG_OTA_RESCAN:
          return handle_ota_rescan_cmd(client_fd);
+      case ADMIN_MSG_OTA_PUSH_ALL:
+         return handle_ota_push_all_cmd(client_fd, payload, header.payload_len);
+      case ADMIN_MSG_OTA_ROLLOUT_STATUS:
+         return handle_ota_rollout_status_cmd(client_fd);
+      case ADMIN_MSG_OTA_ROLLOUT_ABORT:
+         return handle_ota_rollout_abort_cmd(client_fd);
 
       default:
          OLOG_WARNING("Unknown message type: 0x%02x", header.msg_type);

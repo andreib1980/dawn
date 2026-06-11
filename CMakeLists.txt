@@ -652,6 +652,7 @@ list(APPEND DAWN_SOURCES
     src/core/ota_db.c
     src/core/ota_manifest.c
     src/core/ota.c
+    src/core/ota_rollout.c
 )
 
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)

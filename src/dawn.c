@@ -64,6 +64,7 @@
 #include "core/embedding_engine.h"
 #include "core/ocp_helpers.h"
 #include "core/ota.h"
+#include "core/ota_rollout.h"
 #include "core/path_utils.h"
 #include "core/session_manager.h"
 #include "core/wake_word.h"
@@ -97,6 +98,7 @@
 #ifdef ENABLE_WEBUI
 #include "webui/webui_internal.h" /* dawn_build_prompt declaration (Phase 1e) */
 #include "webui/webui_music_server.h"
+#include "webui/webui_ota.h" /* webui_ota_push — registered as the rollout delivery fn */
 #include "webui/webui_server.h"
 #endif
 #include "auth/auth_db.h"
@@ -2367,6 +2369,13 @@ mqtt_disabled:
    if (ota_init() != SUCCESS) {
       OLOG_WARNING("OTA init failed - over-the-air updates disabled");
    }
+#ifdef ENABLE_WEBUI
+   /* Wire the fleet-rollout orchestrator's delivery to the WS push path (keeps
+    * ota_rollout free of the webui dependency — it calls back through this).
+    * Without WebUI there is no delivery transport, so a rollout simply refuses
+    * to start ("No delivery transport registered"). */
+   ota_rollout_set_push_fn(webui_ota_push);
+#endif
 
    /* Initialize memory embeddings (non-fatal — falls back to keyword search) */
    if (g_config.memory.enabled && g_config.memory.embedding_provider[0] != '\0') {
@@ -2437,6 +2446,17 @@ mqtt_disabled:
 
    OLOG_INFO("Listening...\n");
    while (!quit) {
+      /* OTA fleet-rollout heartbeat: canary-deadline check + deferred fan-out
+       * delivery. Gated to once per second (a 600s canary timeout needs no finer). */
+      {
+         static time_t s_last_rollout_tick = 0;
+         time_t now_rollout = time(NULL);
+         if (now_rollout != s_last_rollout_tick) {
+            s_last_rollout_tick = now_rollout;
+            ota_rollout_tick(now_rollout);
+         }
+      }
+
 #ifdef ENABLE_TUI
       // TUI update and input handling (runs at roughly 10-20 Hz based on loop timing)
       if (enable_tui) {

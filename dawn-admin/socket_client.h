@@ -846,6 +846,30 @@ admin_resp_code_t admin_client_ota_list(int fd, char *response, size_t resp_len)
 admin_resp_code_t admin_client_ota_rescan(int fd, char *response, size_t resp_len);
 
 /**
+ * @brief Start a canary-then-rollout of a version to a whole platform/tier.
+ *
+ * @param fd              Connected socket FD.
+ * @param tier            Target tier (1 = RPi, 2 = ESP32; platform derived).
+ * @param version         Release version to roll out.
+ * @param allow_downgrade Permit offering older-than-installed.
+ * @param response        Output buffer for the daemon summary text.
+ * @param resp_len        Size of response buffer.
+ * @return Daemon response code.
+ */
+admin_resp_code_t admin_client_ota_push_all(int fd,
+                                            int tier,
+                                            const char *version,
+                                            bool allow_downgrade,
+                                            char *response,
+                                            size_t resp_len);
+
+/** @brief Fetch the current/last fleet-rollout status (text). */
+admin_resp_code_t admin_client_ota_rollout_status(int fd, char *response, size_t resp_len);
+
+/** @brief Abort an in-progress fleet rollout. */
+admin_resp_code_t admin_client_ota_rollout_abort(int fd, char *response, size_t resp_len);
+
+/**
  * @brief Push an update offer to one satellite by uuid.
  *
  * The daemon resolves the device's tier→platform, mints a one-time download

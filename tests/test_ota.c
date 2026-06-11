@@ -38,6 +38,18 @@
 /* ota.c references the global config; provide it for the test link. */
 dawn_config_t g_config;
 
+/* ota.c's finalize path calls the rollout hooks; test_ota exercises the offer/
+ * manifest/db logic, not fleet rollout, and doesn't link ota_rollout.c (which
+ * would drag in session_manager). Stub them — no-ops with no rollout active. */
+void ota_rollout_on_commit(const char *uuid, const char *version) {
+   (void)uuid;
+   (void)version;
+}
+void ota_rollout_on_fail(const char *uuid, const char *version) {
+   (void)uuid;
+   (void)version;
+}
+
 #define UUID_A "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
 #define UUID_B "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
 

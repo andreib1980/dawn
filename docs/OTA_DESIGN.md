@@ -52,13 +52,24 @@ Committed on branch `satellite_ota` (`a38c901` Phase 1, `9593abc` satellite buil
   2.0.0→2.2.0 on dawn-kitchen.
 - **Phase 4 (ESP32 apply)** — see §8. `dawn_satellite_arduino/ota_apply.cpp`: offer verify (TweetNaCl
   Ed25519) → NVS hand-off → reboot → WiFi-only download via `esp_ota_ops` + SHA-256 → boot switch →
-  NVS boot-count guard rollback. **Live-verified 2.1.0→2.2.0 end-to-end on the ESP32-S3 (Office Speaker)
-  2026-06-10** — happy path through to daemon `committed` + WebUI `success`. See §8 for the rollback-gap
-  limitation (a hang in `setup()` doesn't reboot, so the boot-count guard can't revert it).
+  NVS boot-count guard rollback, **plus a verify-boot `esp_timer` watchdog** so an image that boots but
+  hangs in `setup()` (not just a reboot loop) still advances the guard to revert. **Live-verified
+  end-to-end on the ESP32-S3 (Office Speaker) 2026-06-10**: clean 2.1.0→2.2.0 and 2.2.0→2.3.0 through to
+  daemon `committed` + WebUI `success`, AND the watchdog rollback — a deliberately-broken (`PSRAM=opi`)
+  push hung in `setup()` and self-reverted to the prior slot, no USB reflash. Residual caveat (§8): a
+  crash in the *first* lines of `setup()` before `ota_boot_path()` runs (Serial/TFT init) still isn't
+  counted, but those are fixed, allocation-free calls.
 
 **REMAINING:**
-- **Phase 5 (hardening)** — canary-then-rollout for `push all`, audit log; (optional) ESP32 native
-  rollback via a custom IDF bootloader.
+- **Phase 5 (hardening)** — partial:
+  - **`push all` canary-then-rollout — SHIPPED 2026-06-11** (`src/core/ota_rollout.c`, admin opcodes
+    `0xC3`–`0xC5`, `dawn-admin ota push-all/rollout-status/rollout-abort`). One canary first; the rest
+    fan out only after it re-registers on the new version; a canary revert or timeout halts the rollout.
+    **v1 scope: online devices** of the platform/tier not already on the target (offline → skipped, not
+    queued — offer-pending-on-reconnect is a future add). Single active rollout, in-memory.
+  - **Still open:** audit log of OTA operations; anti-rollback enforcement audit; (deferred) signed
+    `allow_downgrade` in the manifest (wire-format change); (optional) ESP32 native rollback via a
+    custom IDF bootloader.
 
 ---
 

@@ -2179,6 +2179,11 @@ int main(int argc, char *argv[]) {
          fprintf(stderr, "       %s ota rescan\n", argv[0]);
          fprintf(stderr, "       %s ota push --uuid <uuid> --version <v> [--allow-downgrade]\n",
                  argv[0]);
+         fprintf(
+             stderr,
+             "       %s ota push-all --platform <rpi|esp32> --version <v> [--allow-downgrade]\n",
+             argv[0]);
+         fprintf(stderr, "       %s ota rollout-status | rollout-abort\n", argv[0]);
          return 1;
       }
       const char *subcmd = argv[2];
@@ -2253,8 +2258,71 @@ int main(int argc, char *argv[]) {
          return 1;
       }
 
+      if (strcmp(subcmd, "push-all") == 0) {
+         const char *platform = NULL;
+         const char *version = NULL;
+         bool allow_downgrade = false;
+         for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--platform") == 0 && i + 1 < argc) {
+               platform = argv[++i];
+            } else if (strcmp(argv[i], "--version") == 0 && i + 1 < argc) {
+               version = argv[++i];
+            } else if (strcmp(argv[i], "--allow-downgrade") == 0) {
+               allow_downgrade = true;
+            } else {
+               fprintf(stderr, "Error: Unknown option for ota push-all: %s\n", argv[i]);
+               return 1;
+            }
+         }
+         int tier = platform && strcmp(platform, "esp32") == 0 ? 2
+                    : platform && strcmp(platform, "rpi") == 0 ? 1
+                                                               : 0;
+         if (tier == 0 || !version || !version[0]) {
+            fprintf(stderr, "Error: --platform <rpi|esp32> and --version <v> are required\n");
+            fprintf(
+                stderr,
+                "Usage: %s ota push-all --platform <rpi|esp32> --version <v> [--allow-downgrade]\n",
+                argv[0]);
+            return 1;
+         }
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = admin_client_ota_push_all(fd, tier, version, allow_downgrade,
+                                                            response, sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
+      if (strcmp(subcmd, "rollout-status") == 0 || strcmp(subcmd, "rollout-abort") == 0) {
+         bool abort_it = (strcmp(subcmd, "rollout-abort") == 0);
+         int fd = admin_client_connect();
+         if (fd < 0) {
+            return 1;
+         }
+         char response[512];
+         admin_resp_code_t resp = abort_it ? admin_client_ota_rollout_abort(fd, response,
+                                                                            sizeof(response))
+                                           : admin_client_ota_rollout_status(fd, response,
+                                                                             sizeof(response));
+         admin_client_disconnect(fd);
+         if (resp == ADMIN_RESP_SUCCESS) {
+            printf("%s\n", response);
+            return 0;
+         }
+         fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+         return 1;
+      }
+
       fprintf(stderr, "Error: Unknown ota subcommand: %s\n", subcmd);
-      fprintf(stderr, "Available: list, rescan, push\n");
+      fprintf(stderr, "Available: list, rescan, push, push-all, rollout-status, rollout-abort\n");
       return 1;
    }
 

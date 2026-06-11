@@ -1827,3 +1827,43 @@ admin_resp_code_t admin_client_ota_push(int fd,
    }
    return recv_text_response(fd, response, resp_len);
 }
+
+admin_resp_code_t admin_client_ota_push_all(int fd,
+                                            int tier,
+                                            const char *version,
+                                            bool allow_downgrade,
+                                            char *response,
+                                            size_t resp_len) {
+   if (!version || !version[0] || (tier != 1 && tier != 2)) {
+      return ADMIN_RESP_FAILURE;
+   }
+   size_t vlen = strlen(version);
+   if (vlen == 0 || vlen > ADMIN_OTA_VERSION_MAX) {
+      return ADMIN_RESP_FAILURE;
+   }
+   /* Wire: byte 0 = flags, byte 1 = tier, [version]. */
+   uint8_t buf[2 + ADMIN_OTA_VERSION_MAX];
+   buf[0] = (uint8_t)(allow_downgrade ? ADMIN_OTA_FLAG_ALLOW_DOWNGRADE : 0);
+   buf[1] = (uint8_t)tier;
+   memcpy(buf + 2, version, vlen);
+   uint16_t total = (uint16_t)(2 + vlen);
+
+   if (send_message(fd, ADMIN_MSG_OTA_PUSH_ALL, (const char *)buf, total) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_ota_rollout_status(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_OTA_ROLLOUT_STATUS, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
+admin_resp_code_t admin_client_ota_rollout_abort(int fd, char *response, size_t resp_len) {
+   if (send_message(fd, ADMIN_MSG_OTA_ROLLOUT_ABORT, NULL, 0) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
