@@ -58,8 +58,13 @@
 extern void text_to_speech(char *text);
 extern int tts_wait_for_completion(int timeout_ms);
 
-/* Forward declaration for WebUI notification (implemented in Phase 4) */
-#ifdef ENABLE_WEBUI
+/* Weak no-op fallbacks for the scheduler broadcast / TTS / messaging hooks,
+ * compiled ONLY when WebUI is OFF so the scheduler builds + runs standalone (the
+ * local / ci presets).  When WebUI is on, the strong overrides in
+ * webui_broadcasts.c (and messaging_engine.c for the channel hook) are linked
+ * instead.  scheduler.c calls scheduler_broadcast_events_changed unconditionally,
+ * so a definition must exist in every build. */
+#ifndef ENABLE_WEBUI
 void scheduler_broadcast_notification(const sched_event_t *event, const char *text)
     __attribute__((weak));
 void scheduler_broadcast_notification(const sched_event_t *event, const char *text) {

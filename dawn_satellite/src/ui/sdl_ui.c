@@ -46,6 +46,7 @@
 #include "audio_playback.h"
 #include "logging.h"
 #include "satellite_config.h"
+#include "satellite_version.h" /* DAWN_SATELLITE_FIRMWARE_VERSION */
 #include "ui/backlight.h"
 #include "ui/ui_alarm.h"
 #include "ui/ui_colors.h"
@@ -89,7 +90,7 @@
 #ifndef HAVE_SDL2_GFX
 static const int DOT_DX[15] = { 14, 13, 13, 13, 13, 13, 12, 12, 11, 10, 9, 8, 7, 5, 0 };
 #endif
-#define INFO_ROW_COUNT 5      /* Server, Device, IP, Uptime, Session */
+#define INFO_ROW_COUNT 6      /* Server, Device, IP, Uptime, Session, Version */
 #define ORB_HIT_RADIUS 180    /* Tap/long-press detection radius around orb center */
 #define SWIPE_ZONE_FRAC 0.20f /* Top 20% of screen for swipe-down trigger */
 /* Music panel width = screen width minus orb area (ORB_PANEL_WIDTH + 1).
@@ -374,7 +375,7 @@ static void panel_cache_init(sdl_ui_t *ui) {
    }
 
    /* Settings panel info labels — rendered white, tinted per theme via SDL_SetTextureColorMod */
-   static const char *info_labels[] = { "Server", "Device", "IP", "Uptime", "Session" };
+   static const char *info_labels[] = { "Server", "Device", "IP", "Uptime", "Session", "Version" };
    for (int i = 0; i < INFO_ROW_COUNT; i++) {
       ui->panel_cache.info_labels[i] = build_white_label(r, font, info_labels[i],
                                                          &ui->panel_cache.info_label_w[i],
@@ -648,7 +649,10 @@ static void render_panel_settings(sdl_ui_t *ui, SDL_Renderer *r, float offset) {
    } else {
       snprintf(buf, sizeof(buf), "\xe2\x80\x94"); /* em-dash UTF-8 */
    }
-   render_info_row(ui, r, 4, buf, text_x, text_y, value_x_offset);
+   text_y += render_info_row(ui, r, 4, buf, text_x, text_y, value_x_offset) + row_spacing;
+
+   /* Version (compiled-in firmware version, static) */
+   render_info_row(ui, r, 5, DAWN_SATELLITE_FIRMWARE_VERSION, text_x, text_y, value_x_offset);
 
    /* ---- Right-side sliders (brightness + volume) ---- */
    if (ui->sliders_initialized) {

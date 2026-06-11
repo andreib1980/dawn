@@ -311,8 +311,12 @@ int calendar_service_remove_account(int64_t account_id) {
    calendar_account_t acct;
    if (calendar_db_account_get(account_id, &acct) == 0 && strcmp(acct.auth_type, "oauth") == 0 &&
        acct.oauth_account_key[0]) {
-      /* Check if email service still uses this OAuth account before revoking */
+      /* Check if email service still uses this shared OAuth account before
+       * revoking the token.  Only meaningful when the email tool is built in —
+       * without it there are no email accounts and nothing else holds this grant,
+       * so don't link-depend on email_db (calendar can be enabled with email off). */
       bool email_uses_account = false;
+#ifdef DAWN_ENABLE_EMAIL_TOOL
       email_account_t email_accts[EMAIL_MAX_ACCOUNTS];
       int email_count = 0;
       email_db_account_list(acct.user_id, email_accts, EMAIL_MAX_ACCOUNTS, &email_count);
@@ -324,6 +328,7 @@ int calendar_service_remove_account(int64_t account_id) {
          }
       }
       sodium_memzero(email_accts, sizeof(email_accts));
+#endif
 
       if (email_uses_account) {
          OLOG_INFO("calendar: keeping OAuth token for '%s' (still used by email)",
