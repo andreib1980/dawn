@@ -34,6 +34,10 @@
 #include "memory/memory_bm25.h"
 
 #include <math.h>
+#include <string.h>
+
+#include "logging.h"
+#include "memory/memory_types.h"
 
 /* Query-length tier breakpoints (inclusive upper bound for each tier).
  * Adapted from mem0/utils/scoring.py::get_bm25_params (Apache-2.0).
@@ -90,4 +94,59 @@ float memory_bm25_normalize(float raw_score, float midpoint, float steepness) {
    if (s > 1.0f)
       s = 1.0f;
    return s;
+}
+
+/* Promoted from memory_db_facts.c (was a file-static) when document search
+ * became the second FTS5 consumer.  Builds `"a" OR "b" OR ...` from a
+ * space-separated stem string. */
+int memory_bm25_build_match_expr(const char *stemmed, char *out, size_t out_sz) {
+   if (!out || out_sz == 0)
+      return 0;
+   out[0] = '\0';
+   if (!stemmed || !stemmed[0])
+      return 0;
+   /* Working copy for strtok_r since we can't mutate the input.  Sized to
+    * MEMORY_FACT_STEMS_MAX (matches the upstream memory_stem_string buffer) so
+    * long queries don't silently lose trailing tokens. */
+   char buf[MEMORY_FACT_STEMS_MAX];
+   size_t in_len = strlen(stemmed);
+   if (in_len >= sizeof(buf)) {
+      OLOG_WARNING("memory_bm25_build_match_expr: stem string len=%zu >= buf=%zu, truncating",
+                   in_len, sizeof(buf));
+      in_len = sizeof(buf) - 1;
+   }
+   memcpy(buf, stemmed, in_len);
+   buf[in_len] = '\0';
+
+   size_t off = 0;
+   int count = 0;
+   char *saveptr = NULL;
+   char *tok = strtok_r(buf, " ", &saveptr);
+   while (tok != NULL) {
+      size_t tlen = strlen(tok);
+      if (tlen >= 1) {
+         /* Need 4 + tlen for ` OR "x"` or 2 + tlen for `"x"` plus NUL. */
+         size_t need = (count > 0 ? 4 : 0) + tlen + 2 + 1;
+         if (off + need >= out_sz)
+            break;
+         if (count > 0) {
+            memcpy(out + off, " OR ", 4);
+            off += 4;
+         }
+         out[off++] = '"';
+         /* Strip embedded double-quotes from tokens — they'd break FTS5 phrase
+          * parsing.  Standard tokenization removes these; the defensive copy
+          * keeps the path safe against future tokenizer changes. */
+         for (size_t i = 0; i < tlen; i++) {
+            if (tok[i] != '"') {
+               out[off++] = tok[i];
+            }
+         }
+         out[off++] = '"';
+         count++;
+      }
+      tok = strtok_r(NULL, " ", &saveptr);
+   }
+   out[off] = '\0';
+   return count;
 }

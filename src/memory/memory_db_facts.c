@@ -406,73 +406,8 @@ static int fts5_delete_fact_stems_locked(int64_t fact_id, const char *fact_stems
    return 0;
 }
 
-/* Build an FTS5 MATCH expression from a stemmed query string.
- *
- * Input: space-separated stems from memory_stem_string.
- * Output: `"stem1" OR "stem2" OR "stem3"` — bare quoted tokens joined
- *         with OR so FTS5 ranks by how many tokens hit (BM25 sums).
- *
- * Each token is double-quoted to defang any FTS5 special chars that
- * survive stemming (defensive — unicode61 tokenizer should already
- * have stripped them at index time, but a search-side typo or
- * pre-stemmed garbage shouldn't crash MATCH parsing).  Returns count of
- * tokens emitted.  out is NUL-terminated even on overflow.
- */
-static int build_fts5_match_expr(const char *stemmed, char *out, size_t out_sz) {
-   if (!out || out_sz == 0)
-      return 0;
-   out[0] = '\0';
-   if (!stemmed || !stemmed[0])
-      return 0;
-   /* Working copy for strtok_r since we can't mutate the input.  Sized to
-    * MEMORY_FACT_STEMS_MAX (matches the upstream memory_stem_string buffer
-    * size) so long queries don't silently lose trailing tokens — the prior
-    * 1024-byte cap dropped tokens past index 1023 with no log, halving
-    * BM25 recall on long queries. */
-   char buf[MEMORY_FACT_STEMS_MAX];
-   size_t in_len = strlen(stemmed);
-   if (in_len >= sizeof(buf)) {
-      OLOG_WARNING("build_fts5_match_expr: stem string len=%zu >= buf=%zu, truncating "
-                   "(MEMORY_FACT_STEMS_MAX too small for this query)",
-                   in_len, sizeof(buf));
-      in_len = sizeof(buf) - 1;
-   }
-   memcpy(buf, stemmed, in_len);
-   buf[in_len] = '\0';
-
-   size_t off = 0;
-   int count = 0;
-   char *saveptr = NULL;
-   char *tok = strtok_r(buf, " ", &saveptr);
-   while (tok != NULL) {
-      size_t tlen = strlen(tok);
-      if (tlen >= 1) {
-         /* Need 4 + tlen for ` OR "x"` or 2 + tlen for `"x"` plus NUL. */
-         size_t need = (count > 0 ? 4 : 0) + tlen + 2 + 1;
-         if (off + need >= out_sz)
-            break;
-         if (count > 0) {
-            memcpy(out + off, " OR ", 4);
-            off += 4;
-         }
-         out[off++] = '"';
-         /* Strip embedded double-quotes from tokens — they'd break FTS5
-          * phrase parsing.  Standard tokenization removes these, but the
-          * defensive copy makes the path safe against future tokenizer
-          * changes. */
-         for (size_t i = 0; i < tlen; i++) {
-            if (tok[i] != '"') {
-               out[off++] = tok[i];
-            }
-         }
-         out[off++] = '"';
-         count++;
-      }
-      tok = strtok_r(NULL, " ", &saveptr);
-   }
-   out[off] = '\0';
-   return count;
-}
+/* build_fts5_match_expr was promoted to memory_bm25_build_match_expr (memory_bm25.c)
+ * when document search became the second FTS5 consumer.  See memory_bm25.h. */
 
 /* v48: BM25-ranked fact search via FTS5.
  *
@@ -519,7 +454,7 @@ int memory_db_fact_search_bm25_since(int user_id,
 
    /* 2. Build the FTS5 MATCH expression. */
    char match_expr[2048];
-   int n_emitted = build_fts5_match_expr(stems, match_expr, sizeof(match_expr));
+   int n_emitted = memory_bm25_build_match_expr(stems, match_expr, sizeof(match_expr));
    if (n_emitted <= 0)
       return MEMORY_DB_SUCCESS;
    (void)n_terms; /* kept for diagnostics; n_emitted is the authoritative count */

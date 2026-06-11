@@ -697,6 +697,7 @@ list(APPEND DAWN_SOURCES
     src/core/embedding_engine.c
     src/auth/auth_db_core.c
     src/auth/auth_db_schema.c
+    src/auth/auth_db_migrations.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
     # subsystems (extraction, summaries, history, satellite OTA, image tools), so

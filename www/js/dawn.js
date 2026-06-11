@@ -690,6 +690,14 @@
                if (typeof DawnDocLibrary !== 'undefined')
                   DawnDocLibrary.handleToggleGlobalResponse(msg.payload);
                break;
+            case 'doc_library_note_save_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleNoteSaveResponse(msg.payload);
+               break;
+            case 'doc_library_note_update_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleNoteUpdateResponse(msg.payload);
+               break;
             // Calendar account management
             case 'calendar_list_accounts_response':
                if (typeof DawnCalendarAccounts !== 'undefined')

@@ -981,6 +981,84 @@ Format rules:
                   All Users
                </label>
             </div>
+            <div class="doc-library-search">
+               <input
+                  type="search"
+                  id="doc-library-search-input"
+                  class="dawn-input"
+                  placeholder="Search documents &amp; notes"
+                  aria-label="Search documents and notes"
+                  autocomplete="off"
+               />
+            </div>
+            <div class="doc-library-tabs" role="tablist" aria-label="Document scope">
+               <button
+                  type="button"
+                  class="doc-library-tab"
+                  role="tab"
+                  id="doc-library-tab-documents"
+                  data-scope="documents"
+                  aria-selected="true"
+                  aria-controls="doc-library-list"
+                  tabindex="0"
+               >
+                  Documents
+               </button>
+               <button
+                  type="button"
+                  class="doc-library-tab"
+                  role="tab"
+                  id="doc-library-tab-notes"
+                  data-scope="notes"
+                  aria-selected="false"
+                  aria-controls="doc-library-list"
+                  tabindex="-1"
+               >
+                  Notes
+               </button>
+            </div>
+            <!-- Notes tab: create a new note -->
+            <div id="doc-library-notes-actions" class="doc-library-notes-actions hidden">
+               <button type="button" id="doc-library-new-note" class="btn-primary">
+                  + New note
+               </button>
+            </div>
+            <!-- Inline note editor (create / edit) -->
+            <div id="doc-library-note-editor" class="note-editor hidden">
+               <form class="dawn-form" id="doc-library-note-form" autocomplete="off">
+                  <div class="form-group">
+                     <label for="doc-library-note-label">Label</label>
+                     <input
+                        type="text"
+                        id="doc-library-note-label"
+                        maxlength="80"
+                        placeholder="e.g. Public Bio"
+                     />
+                     <div class="form-hint" id="doc-library-note-label-hint">
+                        Friday can read this back to you by label.
+                     </div>
+                  </div>
+                  <div class="form-group">
+                     <label for="doc-library-note-text">Text</label>
+                     <textarea
+                        id="doc-library-note-text"
+                        rows="6"
+                        maxlength="4000"
+                        placeholder="The exact text to keep…"
+                     ></textarea>
+                     <div class="form-hint"><span id="doc-library-note-count">0</span> / 4000</div>
+                  </div>
+                  <div class="form-error" id="doc-library-note-error"></div>
+                  <div class="form-actions">
+                     <button type="button" id="doc-library-note-cancel" class="btn-link">
+                        Cancel
+                     </button>
+                     <button type="submit" id="doc-library-note-save" class="btn-primary">
+                        Save note
+                     </button>
+                  </div>
+               </form>
+            </div>
             <div class="doc-library-upload">
                <div id="doc-library-dropzone" class="doc-library-dropzone">
                   <input type="file" id="doc-library-file-input" accept=".pdf,.docx,.txt,.md" />
@@ -1012,7 +1090,12 @@ Format rules:
                   Share globally (all users)
                </label>
             </div>
-            <div id="doc-library-list" class="doc-library-list">
+            <div
+               id="doc-library-list"
+               class="doc-library-list"
+               role="tabpanel"
+               aria-labelledby="doc-library-tab-documents"
+            >
                <div class="doc-library-empty">No documents indexed yet</div>
             </div>
             <div class="doc-library-footer">

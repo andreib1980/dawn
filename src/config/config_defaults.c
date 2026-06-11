@@ -280,6 +280,14 @@ void config_set_defaults(dawn_config_t *config) {
    config->documents.max_extracted_size_kb = 1024;
    config->documents.max_index_size_kb = 2048;
    config->documents.max_indexed_documents = 50;
+   /* v61 hybrid document search.  Reuse the memory subsystem's 0.3/0.7
+    * keyword/vector magnitudes for cross-subsystem consistency. */
+   config->documents.fts_label_weight = 3.0f;
+   config->documents.fts_body_weight = 1.0f;
+   config->documents.hybrid_keyword_weight = 0.3f;
+   config->documents.hybrid_vector_weight = 0.7f;
+   config->documents.phrase_bonus_weight = 0.25f;
+   config->documents.search_min_score = 0.3f;
 
    /* Vision - per-upload image size and dimension limits */
    config->vision.max_image_size_kb = 4096;

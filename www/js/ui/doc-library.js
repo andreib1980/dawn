@@ -10,6 +10,10 @@
    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
    const PAGE_SIZE = 20;
 
+   const NOTE_MAX_LEN = 4000;
+   const NOTE_LABEL_MAX = 80;
+   const SEARCH_DEBOUNCE_MS = 250;
+
    let state = {
       documents: [],
       isOpen: false,
@@ -18,7 +22,14 @@
       offset: 0,
       hasMore: false,
       showAll: false,
+      scope: 'documents', // 'documents' | 'notes'
+      query: '',
+      editingId: null, // null = create; note id = editing
+      editorDirty: false,
+      editorTrigger: null, // element to restore focus to on editor close
    };
+
+   let searchTimer = null;
 
    let callbacks = {
       trapFocus: null,
@@ -54,11 +65,61 @@
       el.showAllCheck = document.getElementById('doc-library-show-all');
       el.globalLabel = document.getElementById('doc-library-global-label');
       el.globalCheck = document.getElementById('doc-library-global-check');
+      // v61: tabs, search, note editor
+      el.searchInput = document.getElementById('doc-library-search-input');
+      el.tabs = el.popover ? el.popover.querySelectorAll('.doc-library-tab') : [];
+      el.uploadArea = el.popover ? el.popover.querySelector('.doc-library-upload') : null;
+      el.notesActions = document.getElementById('doc-library-notes-actions');
+      el.newNoteBtn = document.getElementById('doc-library-new-note');
+      el.editor = document.getElementById('doc-library-note-editor');
+      el.noteForm = document.getElementById('doc-library-note-form');
+      el.noteLabel = document.getElementById('doc-library-note-label');
+      el.noteText = document.getElementById('doc-library-note-text');
+      el.noteCount = document.getElementById('doc-library-note-count');
+      el.noteError = document.getElementById('doc-library-note-error');
+      el.noteLabelHint = document.getElementById('doc-library-note-label-hint');
+      el.noteCancel = document.getElementById('doc-library-note-cancel');
 
       if (!el.btn || !el.popover) return;
 
       el.btn.addEventListener('click', toggle);
       el.closeBtn.addEventListener('click', close);
+
+      // Tabs (roving tabindex + ←/→/Home/End per WAI-ARIA)
+      el.tabs.forEach((tab) => {
+         tab.addEventListener('click', () => setScope(tab.dataset.scope));
+         tab.addEventListener('keydown', onTabKeydown);
+      });
+
+      // Search (debounced live; Enter submits immediately)
+      if (el.searchInput) {
+         el.searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(runSearch, SEARCH_DEBOUNCE_MS);
+         });
+         el.searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+               e.preventDefault();
+               clearTimeout(searchTimer);
+               runSearch();
+            }
+         });
+      }
+
+      // Note editor
+      if (el.newNoteBtn) el.newNoteBtn.addEventListener('click', () => openEditor(null));
+      if (el.noteCancel) el.noteCancel.addEventListener('click', () => requestCloseEditor());
+      if (el.noteForm) el.noteForm.addEventListener('submit', onNoteSubmit);
+      if (el.noteText) {
+         el.noteText.addEventListener('input', () => {
+            state.editorDirty = true;
+            updateNoteCount();
+         });
+      }
+      if (el.noteLabel)
+         el.noteLabel.addEventListener('input', () => {
+            state.editorDirty = true;
+         });
 
       // Load More button
       if (el.loadMoreBtn) {
@@ -113,10 +174,89 @@
          }
       });
 
-      // Close on Escape
+      // Close on Escape — editor first (nested), then the popover.  Bail if the
+      // confirm modal is open so its OWN Escape handler can close it without us
+      // re-spawning the discard dialog underneath.
       document.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape' && state.isOpen) close();
+         if (e.key !== 'Escape' || !state.isOpen) return;
+         const confirmModal = document.getElementById('confirm-modal');
+         if (confirmModal && !confirmModal.classList.contains('hidden')) return;
+         if (el.editor && !el.editor.classList.contains('hidden')) {
+            requestCloseEditor();
+         } else {
+            close();
+         }
       });
+   }
+
+   /* =============================================================================
+    * Tabs + search
+    * ============================================================================= */
+
+   function setScope(scope) {
+      if (scope !== 'documents' && scope !== 'notes') return;
+      // Guard an unsaved editor before navigating away (consistent with Cancel/ESC)
+      if (state.editorDirty && callbacks.showConfirmModal) {
+         callbacks.showConfirmModal('Discard changes to this note?', () => applyScope(scope), {
+            title: 'Discard note',
+            okText: 'Discard',
+         });
+         return;
+      }
+      applyScope(scope);
+   }
+
+   function applyScope(scope) {
+      state.scope = scope;
+      closeEditor(false);
+      // Roving tabindex + aria
+      el.tabs.forEach((tab) => {
+         const active = tab.dataset.scope === scope;
+         tab.setAttribute('aria-selected', active ? 'true' : 'false');
+         tab.tabIndex = active ? 0 : -1;
+      });
+      // Active tabpanel labelling (a11y)
+      if (el.list) {
+         el.list.setAttribute('aria-labelledby', `doc-library-tab-${scope}`);
+      }
+      // Primary action morphs per tab: upload on Documents, "+ New note" on Notes
+      if (el.uploadArea) el.uploadArea.classList.toggle('hidden', scope !== 'documents');
+      if (el.notesActions) el.notesActions.classList.toggle('hidden', scope !== 'notes');
+      // Reset list for the new scope
+      state.documents = [];
+      state.offset = 0;
+      state.hasMore = false;
+      requestList(0);
+      updateSearchPlaceholder();
+   }
+
+   function updateSearchPlaceholder() {
+      if (!el.searchInput) return;
+      el.searchInput.placeholder = state.scope === 'notes' ? 'Search notes' : 'Search documents';
+   }
+
+   function onTabKeydown(e) {
+      const tabs = Array.from(el.tabs);
+      const idx = tabs.indexOf(e.currentTarget);
+      let next = -1;
+      if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = tabs.length - 1;
+      if (next >= 0) {
+         e.preventDefault();
+         tabs[next].focus();
+         setScope(tabs[next].dataset.scope);
+      }
+   }
+
+   function runSearch() {
+      const q = el.searchInput ? el.searchInput.value.trim() : '';
+      state.query = q;
+      state.documents = [];
+      state.offset = 0;
+      state.hasMore = false;
+      requestList(0);
    }
 
    /* =============================================================================
@@ -145,11 +285,11 @@
          focusTrapCleanup = callbacks.trapFocus(el.popover);
       }
 
-      // Reset and fetch first page
-      state.documents = [];
-      state.offset = 0;
-      state.hasMore = false;
-      requestList(0);
+      // Reset to a clean state: Documents tab, no search, editor closed
+      closeEditor(false);
+      state.query = '';
+      if (el.searchInput) el.searchInput.value = '';
+      setScope('documents');
    }
 
    function close() {
@@ -176,9 +316,20 @@
 
    function requestList(offset) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
-      const payload = { limit: PAGE_SIZE, offset: offset || 0 };
+      const payload = { limit: PAGE_SIZE, offset: offset || 0, scope: state.scope };
       if (state.showAll) payload.show_all = true;
+      if (state.query) payload.query = state.query;
       DawnWS.send({ type: 'doc_library_list', payload });
+   }
+
+   function requestNoteSave(label, text) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({ type: 'doc_library_note_save', payload: { label, text } });
+   }
+
+   function requestNoteUpdate(id, label, text) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({ type: 'doc_library_note_update', payload: { id, label, text } });
    }
 
    function requestDelete(docId) {
@@ -302,6 +453,126 @@
    }
 
    /* =============================================================================
+    * Note editor (create / edit)
+    * ============================================================================= */
+
+   function openEditor(note) {
+      if (!el.editor) return;
+      // Remember what to return focus to when the editor closes (WCAG 2.4.3)
+      state.editorTrigger = document.activeElement;
+      state.editingId = note ? note.id : null;
+      state.editorDirty = false;
+      el.noteLabel.value = note ? note.filename : '';
+      el.noteText.value = note ? note.text || '' : '';
+      el.noteLabelHint.textContent = note
+         ? 'Changing the label changes how you’ll refer to this.'
+         : 'Friday can read this back to you by label.';
+      hideNoteError();
+      updateNoteCount();
+      el.editor.classList.remove('hidden');
+      if (el.notesActions) el.notesActions.classList.add('hidden');
+      el.noteLabel.focus();
+   }
+
+   // restoreFocus: return focus to the opener (cancel/save/ESC); NOT on tab-switch.
+   function closeEditor(restoreFocus) {
+      if (!el.editor) return;
+      const wasOpen = !el.editor.classList.contains('hidden');
+      el.editor.classList.add('hidden');
+      state.editingId = null;
+      state.editorDirty = false;
+      hideNoteError();
+      // Restore the "+ New note" affordance on the Notes tab
+      if (el.notesActions) el.notesActions.classList.toggle('hidden', state.scope !== 'notes');
+      if (restoreFocus && wasOpen && state.editorTrigger && state.editorTrigger.focus) {
+         state.editorTrigger.focus();
+      }
+      state.editorTrigger = null;
+   }
+
+   // Cancel/ESC: confirm if there are unsaved changes
+   function requestCloseEditor() {
+      if (state.editorDirty && callbacks.showConfirmModal) {
+         callbacks.showConfirmModal('Discard changes to this note?', () => closeEditor(true), {
+            title: 'Discard note',
+            okText: 'Discard',
+         });
+      } else {
+         closeEditor(true);
+      }
+   }
+
+   function updateNoteCount() {
+      if (!el.noteCount || !el.noteText) return;
+      const len = el.noteText.value.length;
+      el.noteCount.textContent = len;
+      el.noteCount.parentElement.classList.toggle('warning', len > NOTE_MAX_LEN - 200);
+   }
+
+   function showNoteError(msg) {
+      if (!el.noteError) return;
+      el.noteError.textContent = msg;
+      el.noteError.classList.add('visible');
+   }
+
+   function hideNoteError() {
+      if (el.noteError) el.noteError.classList.remove('visible');
+   }
+
+   function onNoteSubmit(e) {
+      e.preventDefault();
+      const label = el.noteLabel.value.trim();
+      const text = el.noteText.value.trim();
+      if (!label) {
+         showNoteError('A label is required.');
+         el.noteLabel.focus();
+         return;
+      }
+      if (label.length > NOTE_LABEL_MAX) {
+         showNoteError(`Label is too long (max ${NOTE_LABEL_MAX}).`);
+         return;
+      }
+      if (!text) {
+         showNoteError('The note text is required.');
+         el.noteText.focus();
+         return;
+      }
+      hideNoteError();
+      if (state.editingId) {
+         requestNoteUpdate(state.editingId, label, text);
+      } else {
+         requestNoteSave(label, text);
+      }
+   }
+
+   function handleNoteSaveResponse(payload) {
+      if (!payload?.success) {
+         showNoteError(payload?.error || 'Could not save the note.');
+         return;
+      }
+      closeEditor(true);
+      if (typeof DawnToast !== 'undefined') DawnToast.show('Note saved', 'success');
+      refreshList();
+   }
+
+   function handleNoteUpdateResponse(payload) {
+      if (!payload?.success) {
+         showNoteError(payload?.error || 'Could not update the note.');
+         return;
+      }
+      closeEditor(true);
+      if (typeof DawnToast !== 'undefined') DawnToast.show('Note updated', 'success');
+      refreshList();
+   }
+
+   function refreshList() {
+      state.documents = [];
+      state.offset = 0;
+      state.hasMore = false;
+      requestList(0);
+   }
+
+   /* =============================================================================
     * File Upload → Extract → Index
     * ============================================================================= */
 
@@ -369,28 +640,49 @@
    }
 
    function renderDocItem(doc) {
+      const isNote = doc.is_note || doc.filetype === 'note';
       const date = new Date(doc.created_at * 1000).toLocaleDateString();
       const globalBadge = doc.is_global ? '<span class="global-badge">GLOBAL</span>' : '';
       const ownerBadge =
          state.showAll && doc.owner_name
             ? `<span class="owner-badge">${escapeHtml(doc.owner_name)}</span>`
             : '';
-      const safeType = (doc.filetype || '').replace(/[^a-z0-9]/g, '');
+      const safeType = isNote ? 'note' : (doc.filetype || '').replace(/[^a-z0-9]/g, '');
+      const iconLabel = isNote ? 'NOTE' : escapeHtml(doc.filetype || '');
+      // Notes: body preview + edited date; documents: chunk count + date
+      const meta = isNote
+         ? `${escapeHtml((doc.text || '').slice(0, 90))}${(doc.text || '').length > 90 ? '…' : ''}`
+         : `${doc.num_chunks} chunks &middot; ${date}`;
+      const pencilSvg =
+         '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+      const editBtn = isNote
+         ? `<button type="button" class="doc-library-item-edit" data-id="${doc.id}" title="Edit note" aria-label="Edit note">${pencilSvg}</button>`
+         : '';
       const globeSvg =
          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
       const globalToggle = canToggleGlobal()
          ? `<button type="button" class="doc-library-item-global" data-id="${doc.id}" data-global="${doc.is_global ? '1' : '0'}" title="${doc.is_global ? 'Make private' : 'Share globally'}" aria-label="${doc.is_global ? 'Make private' : 'Share globally'}">${globeSvg}</button>`
          : '';
       return `
-      <div class="doc-library-item" data-id="${doc.id}">
-         <div class="doc-library-item-icon ${safeType}">${escapeHtml(doc.filetype || '')}</div>
+      <div class="doc-library-item${isNote ? ' note-item' : ''}" data-id="${doc.id}">
+         <div class="doc-library-item-icon ${safeType}">${iconLabel}</div>
          <div class="doc-library-item-info">
             <div class="doc-library-item-name" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
-            <div class="doc-library-item-meta">${doc.num_chunks} chunks &middot; ${date}${globalBadge}${ownerBadge}</div>
+            <div class="doc-library-item-meta">${meta}${globalBadge}${ownerBadge}</div>
          </div>
+         ${editBtn}
          ${globalToggle}
          <button type="button" class="doc-library-item-delete" data-id="${doc.id}" title="Delete">&times;</button>
       </div>`;
+   }
+
+   function handleEditClick(btn) {
+      btn.addEventListener('click', (e) => {
+         e.stopPropagation();
+         const id = parseInt(btn.dataset.id, 10);
+         const doc = state.documents.find((d) => d.id === id);
+         if (doc) openEditor(doc);
+      });
    }
 
    function handleDeleteClick(btn) {
@@ -427,13 +719,20 @@
       container.querySelectorAll('.doc-library-item-global').forEach((btn) => {
          handleGlobalClick(btn);
       });
+      container.querySelectorAll('.doc-library-item-edit').forEach((btn) => {
+         handleEditClick(btn);
+      });
    }
 
    function renderList() {
       if (!el.list) return;
 
       if (state.documents.length === 0) {
-         el.list.innerHTML = '<div class="doc-library-empty">No documents indexed yet</div>';
+         let msg;
+         if (state.query) msg = `No ${state.scope} match “${escapeHtml(state.query)}”.`;
+         else if (state.scope === 'notes') msg = 'No notes yet. Create one with “+ New note”.';
+         else msg = 'No documents indexed yet';
+         el.list.innerHTML = `<div class="doc-library-empty">${msg}</div>`;
          return;
       }
 
@@ -459,6 +758,8 @@
          if (delBtn) handleDeleteClick(delBtn);
          const globalBtn = item.querySelector('.doc-library-item-global');
          if (globalBtn) handleGlobalClick(globalBtn);
+         const editBtn = item.querySelector('.doc-library-item-edit');
+         if (editBtn) handleEditClick(editBtn);
       });
    }
 
@@ -534,5 +835,7 @@
       handleDeleteResponse,
       handleIndexResponse,
       handleToggleGlobalResponse,
+      handleNoteSaveResponse,
+      handleNoteUpdateResponse,
    };
 })();

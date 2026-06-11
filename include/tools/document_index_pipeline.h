@@ -88,6 +88,51 @@ int document_index_text(int user_id,
  */
 const char *document_index_error_string(int error_code);
 
+/**
+ * @brief Save a short authored note — a single-chunk document, filename == label (v61).
+ *
+ * Bypasses the chunker and rejects anything that would split (M-1), so the note
+ * invariant num_chunks == 1 holds by construction on both the WebUI and tool
+ * paths.  filetype is set to "note".  No hash-dedup (same body under different
+ * labels is allowed).
+ *
+ * @param user_id   Owner
+ * @param label     Human label (becomes filename); required
+ * @param text      Note body; required
+ * @param text_len  Byte length of text
+ * @param is_global Whether visible to all users (WebUI admin only)
+ * @param[out] out  Result (doc_id, error_code, error_msg)
+ * @return DOC_INDEX_SUCCESS or a DOC_INDEX_ERROR_* code (also set in out->error_code)
+ */
+int document_index_note(int user_id,
+                        const char *label,
+                        const char *text,
+                        size_t text_len,
+                        bool is_global,
+                        doc_index_result_t *out);
+
+/**
+ * @brief Edit an existing note in place — re-embed + stable-id DB swap (v61).
+ *
+ * Re-embeds new_text and delegates to document_db_note_update, which enforces the
+ * filetype=="note" && num_chunks==1 && owner gate.  Same single-chunk cap as
+ * document_index_note.
+ *
+ * @param user_id   Owner (gate)
+ * @param doc_id    Note document id
+ * @param new_label New label (== new filename)
+ * @param new_text  New note body
+ * @param new_len   Byte length of new_text
+ * @param[out] out  Result
+ * @return DOC_INDEX_SUCCESS or a DOC_INDEX_ERROR_* code
+ */
+int document_note_update(int user_id,
+                         int64_t doc_id,
+                         const char *new_label,
+                         const char *new_text,
+                         size_t new_len,
+                         doc_index_result_t *out);
+
 #ifdef __cplusplus
 }
 #endif

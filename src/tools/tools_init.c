@@ -86,6 +86,7 @@
 #endif
 #ifdef DAWN_ENABLE_DOCUMENT_SEARCH_TOOL
 #include "tools/document_index_tool.h"
+#include "tools/document_manage.h"
 #include "tools/document_read.h"
 #include "tools/document_search.h"
 #endif
@@ -259,6 +260,9 @@ int tools_register_all(void) {
    }
    if (document_index_tool_register() != 0) {
       OLOG_WARNING("Failed to register document_index tool");
+   }
+   if (document_manage_tool_register() != 0) {
+      OLOG_WARNING("Failed to register document_manage tool");
    }
 #endif
 

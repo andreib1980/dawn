@@ -92,6 +92,7 @@ endfunction()
 set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
     ${SRC_ROOT}/src/auth/auth_db_schema.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -345,7 +346,21 @@ dawn_add_unit_test(test_document_chunker
 dawn_add_unit_test(test_document_db
    SOURCES test_document_db.c test_document_db_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
-   LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}
+           # v61: document_db.c now stems label/body for the FTS sync helpers and
+           # runs the BM25 lexical search (build_match_expr + normalize).
+           ${SRC_ROOT}/src/memory/memory_stem.c
+           ${SRC_ROOT}/src/memory/memory_bm25.c
+   LIBS    dawn_common unity sqlite3 pthread stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# v61: the "bios" search-quality test — exact-label lexical ranking (conv 809).
+# Uses the REAL auth_db (v61 schema + prepared statements) via AUTH_DB_SOURCES,
+# which already bundles memory_stem.c + memory_bm25.c.
+dawn_add_unit_test(test_document_search_bm25
+   SOURCES test_document_search_bm25.c
+           ${SRC_ROOT}/src/tools/document_db.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_embedding_engine
@@ -603,7 +618,8 @@ dawn_add_unit_test(test_memory_score_floor
 dawn_add_unit_test(test_memory_bm25
    SOURCES test_memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
-   LIBS    unity m
+   # dawn_common supplies log_message (memory_bm25_build_match_expr logs on truncation).
+   LIBS    dawn_common unity m
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_stem

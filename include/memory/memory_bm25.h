@@ -43,6 +43,8 @@
 #ifndef MEMORY_BM25_H
 #define MEMORY_BM25_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -88,6 +90,25 @@ void memory_bm25_get_params(int num_terms, float *midpoint_out, float *steepness
  * @return Normalized score in [0, 1].  Returns 0 for non-finite inputs.
  */
 float memory_bm25_normalize(float raw_score, float midpoint, float steepness);
+
+/**
+ * @brief Build an FTS5 MATCH expression from a space-separated stem string.
+ *
+ * Produces `"stem1" OR "stem2" OR ...` — bare quoted tokens joined with OR so
+ * bm25() ranks by how many tokens hit.  Each token is double-quoted (embedded
+ * `"` stripped) to defend against FTS5 special characters.  Output is truncated
+ * to fit @p out_sz; tokens past the cap are dropped.
+ *
+ * Promoted from a file-static in memory_db_facts.c when document search became
+ * the second consumer — both the memory and document FTS5 channels build the
+ * identical OR-of-quoted-stems expression.
+ *
+ * @param stemmed  Space-separated stems (memory_stem_string output); may be NULL/empty.
+ * @param out      [out] Destination buffer for the MATCH expression.
+ * @param out_sz   Capacity of @p out.
+ * @return Number of tokens emitted (0 if nothing to match).
+ */
+int memory_bm25_build_match_expr(const char *stemmed, char *out, size_t out_sz);
 
 #ifdef __cplusplus
 }

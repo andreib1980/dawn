@@ -1019,10 +1019,19 @@ static void parse_documents(toml_table_t *table, documents_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = {
-      "max_file_size_kb",  "max_documents",         "max_pages", "max_extracted_size_kb",
-      "max_index_size_kb", "max_indexed_documents", NULL
-   };
+   static const char *const known_keys[] = { "max_file_size_kb",
+                                             "max_documents",
+                                             "max_pages",
+                                             "max_extracted_size_kb",
+                                             "max_index_size_kb",
+                                             "max_indexed_documents",
+                                             "fts_label_weight",
+                                             "fts_body_weight",
+                                             "hybrid_keyword_weight",
+                                             "hybrid_vector_weight",
+                                             "phrase_bonus_weight",
+                                             "search_min_score",
+                                             NULL };
    warn_unknown_keys(table, "documents", known_keys);
 
    PARSE_INT(table, "max_file_size_kb", config->max_file_size_kb);
@@ -1042,6 +1051,21 @@ static void parse_documents(toml_table_t *table, documents_config_t *config) {
 
    PARSE_INT(table, "max_indexed_documents", config->max_indexed_documents);
    CONFIG_CLAMP(config->max_indexed_documents, 1, 500);
+
+   /* v61 hybrid document search weights.  Column weights may exceed 1 (label is
+    * boosted ~3x over body); fusion/phrase/gate weights stay in [0,1]. */
+   PARSE_DOUBLE(table, "fts_label_weight", config->fts_label_weight);
+   CONFIG_CLAMP(config->fts_label_weight, 0.0f, 100.0f);
+   PARSE_DOUBLE(table, "fts_body_weight", config->fts_body_weight);
+   CONFIG_CLAMP(config->fts_body_weight, 0.0f, 100.0f);
+   PARSE_DOUBLE(table, "hybrid_keyword_weight", config->hybrid_keyword_weight);
+   CONFIG_CLAMP(config->hybrid_keyword_weight, 0.0f, 1.0f);
+   PARSE_DOUBLE(table, "hybrid_vector_weight", config->hybrid_vector_weight);
+   CONFIG_CLAMP(config->hybrid_vector_weight, 0.0f, 1.0f);
+   PARSE_DOUBLE(table, "phrase_bonus_weight", config->phrase_bonus_weight);
+   CONFIG_CLAMP(config->phrase_bonus_weight, 0.0f, 1.0f);
+   PARSE_DOUBLE(table, "search_min_score", config->search_min_score);
+   CONFIG_CLAMP(config->search_min_score, 0.0f, 1.0f);
 }
 
 static void parse_vision(toml_table_t *table, vision_config_t *config) {
