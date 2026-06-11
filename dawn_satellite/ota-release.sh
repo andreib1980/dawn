@@ -28,6 +28,8 @@
 #   --key PATH          signing key (default /etc/dawn/signing/ota_signing.key)
 #   --release-dir DIR   daemon release store (default: [ota].release_dir from dawn.toml, else /var/lib/dawn/ota)
 #   --push UUID         after staging, dawn-admin ota push to this device
+#   --allow-downgrade   permit pushing an older version than the device runs
+#                       (only meaningful with --push; passed to dawn-admin ota push)
 #   --keytool PATH      ota-keytool (default: build-debug/ota-keytool)
 #   --force             sign even if --version != the binary's compiled version
 #                       (the device would report a different version than the daemon
@@ -44,7 +46,7 @@ VERSION_HEADER="$REPO_ROOT/dawn_satellite/include/satellite_version.h"
 DEFAULT_IMAGE="$REPO_ROOT/dawn_satellite/build-pi/dawn_satellite"
 PLATFORM="rpi"; TIER="1"; ABI="debian-trixie-aarch64"
 IMAGE="$DEFAULT_IMAGE"
-VERSION=""; MIN_VERSION=""; PUSH_UUID=""; RELEASE_DIR=""; FORCE=0
+VERSION=""; MIN_VERSION=""; PUSH_UUID=""; RELEASE_DIR=""; FORCE=0; ALLOW_DOWNGRADE=0
 
 die() { echo "ota-release: $*" >&2; exit 1; }
 
@@ -84,9 +86,10 @@ while [ $# -gt 0 ]; do
       --key)         KEY="$2"; shift 2 ;;
       --release-dir) RELEASE_DIR="$2"; shift 2 ;;
       --push)        PUSH_UUID="$2"; shift 2 ;;
+      --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
       --keytool)     KEYTOOL="$2"; shift 2 ;;
       --force)       FORCE=1; shift ;;
-      -h|--help)     sed -n '3,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      -h|--help)     sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
       *) die "unknown option: $1" ;;
    esac
 done
@@ -170,11 +173,25 @@ sign_args=(sign --sk "$KEY" --image "$DIR/image" --version "$VERSION" \
 [ -n "$MIN_VERSION" ] && sign_args+=(--min-version "$MIN_VERSION")
 "$KEYTOOL" "${sign_args[@]}"
 echo "==> staged: $DIR/{image,manifest,manifest.sig}  (min_version=${MIN_VERSION:-none} abi=$ABI)"
-echo "    NOTE: the daemon scans release_dir at startup — restart it so 'dawn-admin ota list' sees this."
+
+admin="$REPO_ROOT/build-debug/dawn-admin/dawn-admin"
+[ -x "$admin" ] || admin="dawn-admin"
+
+# Tell a running daemon to re-scan so this release is pushable without a restart.
+# Best-effort: if the daemon is down (or OTA disabled) this just prints an error
+# and staging still succeeded — the next daemon start scans release_dir anyway.
+echo "==> rescanning daemon release store"
+if ! "$admin" ota rescan; then
+   echo "    NOTE: rescan failed (daemon down?) — restart the daemon so it sees this release." >&2
+fi
 
 if [ -n "$PUSH_UUID" ]; then
-   admin="$REPO_ROOT/build-debug/dawn-admin/dawn-admin"
-   [ -x "$admin" ] || admin="dawn-admin"
-   echo "==> pushing $VERSION to $PUSH_UUID"
-   "$admin" ota push --uuid "$PUSH_UUID" --version "$VERSION"
+   push_args=(ota push --uuid "$PUSH_UUID" --version "$VERSION")
+   dg_note=""
+   if [ "$ALLOW_DOWNGRADE" -eq 1 ]; then
+      push_args+=(--allow-downgrade)
+      dg_note=" (allow-downgrade)"
+   fi
+   echo "==> pushing $VERSION to $PUSH_UUID$dg_note"
+   "$admin" "${push_args[@]}"
 fi

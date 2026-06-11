@@ -65,6 +65,18 @@ int ota_init(void);
 bool ota_enabled(void);
 
 /**
+ * @brief Re-scan the release directory into the in-memory store at runtime.
+ *
+ * Lets a freshly-staged release (e.g. just written by ota-release.sh) become
+ * pushable without restarting the daemon.  Thread-safe against concurrent
+ * readers (push/list).  Fails (no-op) if OTA is disabled.
+ *
+ * @param count_out Optional; receives the release count after the rescan.
+ * @return SUCCESS, or FAILURE if OTA is disabled.
+ */
+int ota_rescan(int *count_out);
+
+/**
  * @brief Latest available version for a platform/tier, or FAILURE if none.
  */
 int ota_resolve_latest(ota_platform_t platform, int tier, char *out_version, size_t out_size);
