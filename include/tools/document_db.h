@@ -130,6 +130,8 @@ int document_db_create(int user_id,
 
 /**
  * @brief Correct a document's stored chunk count (e.g. after embed failures).
+ * @param doc_id     Document id to update.
+ * @param num_chunks New chunk count (must be >= 0).
  * @return SUCCESS (0) / FAILURE (1 = invalid args / DB error).
  */
 int document_db_set_num_chunks(int64_t doc_id, int num_chunks);
