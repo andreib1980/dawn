@@ -94,6 +94,9 @@ static void print_usage(const char *prog) {
    fprintf(stderr, "  memory backfill-note-glosses <user>  Create memory→note bridge glosses for\n"
                    "                                       existing notes (Phase 9, idempotent)\n");
    fprintf(stderr,
+           "  memory rebuild-document-fts          Rebuild the document search (FTS) index\n"
+           "                                       (v61 recovery; global, idempotent)\n");
+   fprintf(stderr,
            "  memory cleanup-meta-facts --user <u> [--dry-run|--confirm-delete]\n"
            "                                     Bulk-delete pre-existing meta-fact rows\n");
    fprintf(stderr, "  memory summarize-missing --user <u> [--dry-run|--confirm] [--max N]\n"
@@ -1218,6 +1221,26 @@ static int cmd_memory_backfill_note_glosses(const char *username) {
    }
 }
 
+static int cmd_memory_rebuild_document_fts(void) {
+   int fd = admin_client_connect();
+   if (fd < 0) {
+      return 1;
+   }
+
+   char response[256];
+   admin_resp_code_t resp = admin_client_memory_rebuild_document_fts(fd, response,
+                                                                     sizeof(response));
+   admin_client_disconnect(fd);
+
+   if (resp == ADMIN_RESP_SUCCESS) {
+      printf("%s\n", response);
+      return 0;
+   } else {
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+      return 1;
+   }
+}
+
 static int cmd_memory_reextract(const char *username,
                                 bool confirm,
                                 bool keep_summaries,
@@ -1783,6 +1806,10 @@ int main(int argc, char *argv[]) {
             return 1;
          }
          return cmd_memory_backfill_note_glosses(argv[3]);
+      }
+
+      if (strcmp(subcmd, "rebuild-document-fts") == 0) {
+         return cmd_memory_rebuild_document_fts();
       }
 
       if (strcmp(subcmd, "cleanup-meta-facts") == 0) {

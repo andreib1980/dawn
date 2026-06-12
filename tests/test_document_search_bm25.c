@@ -200,6 +200,37 @@ void test_find_by_label_exact(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, document_db_find_by_label_exact(1, "Public", true, &doc));
 }
 
+/* v61 recovery: the admin rebuild clears + re-indexes every live chunk from
+ * scratch, so searches keep working after a from-scratch rebuild. */
+void test_rebuild_fts_reindexes_all(void) {
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_rebuild_fts(&count));
+   TEST_ASSERT_EQUAL_INT(3, count); /* three seeded single-chunk notes */
+
+   doc_bm25_hit_t hits[10];
+   float scores[10];
+   int n = 0;
+   document_db_chunk_search_bm25(1, "public bio", TEST_BM25_LABEL_WEIGHT, TEST_BM25_BODY_WEIGHT,
+                                 hits, scores, 10, &n);
+   TEST_ASSERT_GREATER_THAN_INT(0, n);
+   TEST_ASSERT_EQUAL_STRING("Public Bio", hits[0].filename);
+}
+
+/* Rebuild scopes the index to LIVE chunks only.  A plain document_db_delete
+ * leaves an FTS orphan (the recovery scenario); the from-scratch rebuild reindexes
+ * 2, not 3, and the survivors still retrieve. */
+void test_rebuild_fts_scopes_to_live_chunks(void) {
+   int64_t doc_id = doc_id_for_label("dragon con bio");
+   TEST_ASSERT_GREATER_THAN_INT(0, doc_id);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete(doc_id)); /* plain delete → FTS orphan */
+
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_rebuild_fts(&count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+
+   TEST_ASSERT_GREATER_THAN_INT(0, doc_id_for_label("public bio"));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_exact_label_ranks_first);
@@ -208,5 +239,7 @@ int main(void) {
    RUN_TEST(test_note_update_stable_id);
    RUN_TEST(test_note_delete_indexed);
    RUN_TEST(test_find_by_label_exact);
+   RUN_TEST(test_rebuild_fts_reindexes_all);
+   RUN_TEST(test_rebuild_fts_scopes_to_live_chunks);
    return UNITY_END();
 }

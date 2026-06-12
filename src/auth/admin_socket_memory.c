@@ -576,3 +576,23 @@ int handle_memory_backfill_note_glosses(int client_fd, const char *payload, uint
             username, created, existing, failed);
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
 }
+
+/* =============================================================================
+ * Rebuild the document_chunks_fts index (v61) — recovery path for a partial
+ * migration backfill or FTS orphans.  Global (the FTS index spans all users), so
+ * no payload.  Idempotent: clears and re-indexes every live chunk.
+ * ============================================================================= */
+int handle_memory_rebuild_document_fts(int client_fd, const char *payload, uint16_t payload_len) {
+   (void)payload;
+   (void)payload_len;
+
+   int indexed = 0;
+   if (document_db_rebuild_fts(&indexed) != SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR,
+                                "Document FTS rebuild failed (is the v61 migration applied?)");
+   }
+
+   char msg[128];
+   snprintf(msg, sizeof(msg), "Rebuilt document search index: %d chunk(s) indexed.", indexed);
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}

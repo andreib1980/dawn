@@ -196,7 +196,11 @@ typedef enum {
     * (one-time remediation for notes filed before the bridge shipped). */
    ADMIN_MSG_MEMORY_BACKFILL_NOTE_GLOSSES = 0x91,
 
-   /* Next free memory opcode: 0x92. */
+   /* v61: rebuild the document_chunks_fts index from scratch (recovery path for a
+    * partial migration backfill or FTS orphans).  Global, no payload. */
+   ADMIN_MSG_MEMORY_REBUILD_DOCUMENT_FTS = 0x92,
+
+   /* Next free memory opcode: 0x93. */
 
    /* Phase 7: Messaging channels (Phase 4 + Phase 6 operator commands).
     * Opcode range 0xA0..0xAF is reserved for messaging — Phase 6 will

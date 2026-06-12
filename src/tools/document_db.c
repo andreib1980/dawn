@@ -673,6 +673,105 @@ int document_db_delete_indexed(int64_t doc_id) {
    return result;
 }
 
+/* Rebuild the entire document_chunks_fts index from scratch (v61 recovery path).
+ * Recovers from a partial migration backfill (the v48-style policy advances the
+ * schema version even if the backfill is interrupted) and from FTS orphans left
+ * when delete_indexed hits its OOM fallback (it leaves rows whose chunks are gone).
+ *
+ * Clears the whole contentless index with the 'delete-all' command (valid for
+ * contentless/external-content FTS5 tables) so we never need each row's ORIGINAL
+ * stems, then re-stems + re-inserts every live chunk.  Processes one row per
+ * lock-cycle (keyset cursor on the PK): stemming runs OUTSIDE the auth_db leaf
+ * lock, the locked insert reuses document_db_chunk_index_fts.  One-shot admin op,
+ * so per-row prepares are acceptable; *count_out (optional) gets rows indexed. */
+int document_db_rebuild_fts(int *count_out) {
+   if (count_out)
+      *count_out = 0;
+
+   if (memory_stem_init() != SUCCESS) {
+      OLOG_ERROR("document_db: rebuild_fts could not init stemmer");
+      return FAILURE;
+   }
+
+   /* Phase 1: clear the whole contentless index in one statement. */
+   pthread_mutex_lock(&s_db.mutex);
+   if (!s_db.initialized) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return FAILURE;
+   }
+   int rc = sqlite3_exec(
+       s_db.db, "INSERT INTO document_chunks_fts(document_chunks_fts) VALUES('delete-all')", NULL,
+       NULL, NULL);
+   pthread_mutex_unlock(&s_db.mutex);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("document_db: rebuild_fts delete-all failed (v61 migration not run?): rc=%d",
+                   rc);
+      return FAILURE;
+   }
+
+   /* Phase 2: keyset cursor over every live chunk, one row per lock-cycle. */
+   int64_t cursor = 0;
+   int total = 0;
+   for (;;) {
+      int64_t id = 0;
+      char filename[DOC_FILENAME_MAX];
+      char *text = NULL;
+      bool got = false;
+      bool oom = false;
+
+      pthread_mutex_lock(&s_db.mutex);
+      if (!s_db.initialized) {
+         pthread_mutex_unlock(&s_db.mutex);
+         return FAILURE;
+      }
+      sqlite3_stmt *stmt = NULL;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "SELECT c.id, c.text, d.filename FROM document_chunks c "
+                             "JOIN documents d ON d.id = c.document_id "
+                             "WHERE c.id > ? ORDER BY c.id ASC LIMIT 1",
+                             -1, &stmt, NULL) == SQLITE_OK) {
+         sqlite3_bind_int64(stmt, 1, cursor);
+         if (sqlite3_step(stmt) == SQLITE_ROW) {
+            id = sqlite3_column_int64(stmt, 0);
+            const char *t = (const char *)sqlite3_column_text(stmt, 1);
+            const char *fn = (const char *)sqlite3_column_text(stmt, 2);
+            text = strdup(t ? t : "");
+            if (text) {
+               snprintf(filename, sizeof(filename), "%s", fn ? fn : "");
+               got = true;
+            } else {
+               oom = true;
+            }
+         }
+      }
+      sqlite3_finalize(stmt);
+      pthread_mutex_unlock(&s_db.mutex);
+
+      if (oom) {
+         OLOG_ERROR("document_db: rebuild_fts OOM at cursor %lld", (long long)cursor);
+         return FAILURE;
+      }
+      if (!got)
+         break;
+      cursor = id;
+
+      /* Stem outside the lock (leaf-lock rule). */
+      char label_stems[MEMORY_FACT_STEMS_MAX];
+      char body_stems[MEMORY_FACT_STEMS_MAX];
+      (void)memory_stem_string(filename, label_stems, sizeof(label_stems));
+      (void)memory_stem_string(text, body_stems, sizeof(body_stems));
+      free(text);
+
+      if (document_db_chunk_index_fts(id, label_stems, body_stems) == SUCCESS)
+         total++;
+   }
+
+   if (count_out)
+      *count_out = total;
+   OLOG_INFO("document_db: rebuild_fts indexed %d chunk(s)", total);
+   return SUCCESS;
+}
+
 /* Lexical (BM25) chunk search — the v61 keyword candidate set.  Mirrors
  * memory_db_fact_search_bm25_since: stem the query, build the OR-of-quoted-stems
  * MATCH expression, run the column-weighted bm25() statement, and sigmoid-
