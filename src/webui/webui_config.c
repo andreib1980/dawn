@@ -1030,6 +1030,21 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       CONFIG_CLAMP(config->documents.max_extracted_size_kb, 128, 4096);
       CONFIG_CLAMP(config->documents.max_index_size_kb, 128, 10240);
       CONFIG_CLAMP(config->documents.max_indexed_documents, 1, 500);
+      /* Hybrid-search tuning weights (v61) */
+      JSON_TO_CONFIG_DOUBLE(section, "fts_label_weight", config->documents.fts_label_weight);
+      JSON_TO_CONFIG_DOUBLE(section, "fts_body_weight", config->documents.fts_body_weight);
+      JSON_TO_CONFIG_DOUBLE(section, "hybrid_keyword_weight",
+                            config->documents.hybrid_keyword_weight);
+      JSON_TO_CONFIG_DOUBLE(section, "hybrid_vector_weight",
+                            config->documents.hybrid_vector_weight);
+      JSON_TO_CONFIG_DOUBLE(section, "phrase_bonus_weight", config->documents.phrase_bonus_weight);
+      JSON_TO_CONFIG_DOUBLE(section, "search_min_score", config->documents.search_min_score);
+      CONFIG_CLAMP(config->documents.fts_label_weight, 0.0f, 100.0f);
+      CONFIG_CLAMP(config->documents.fts_body_weight, 0.0f, 100.0f);
+      CONFIG_CLAMP(config->documents.hybrid_keyword_weight, 0.0f, 1.0f);
+      CONFIG_CLAMP(config->documents.hybrid_vector_weight, 0.0f, 1.0f);
+      CONFIG_CLAMP(config->documents.phrase_bonus_weight, 0.0f, 1.0f);
+      CONFIG_CLAMP(config->documents.search_min_score, 0.0f, 1.0f);
    }
 
    /* [vision] — per-upload image size and dimension limits */

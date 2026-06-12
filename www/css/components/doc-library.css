@@ -47,7 +47,12 @@
    border: 1px solid var(--accent-border);
    border-radius: 12px;
    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-   z-index: 1000;
+   /* Sit BELOW the settings overlay/panel (998/999) so opening Settings slides
+    * out over this panel — same as the music panel (997).  This matters because
+    * the panel is sticky (no outside-click close), so it can be open at the same
+    * time as the settings panel; the memory/scheduler popovers (z-index 1000)
+    * close on the settings-button outside-click, so they don't need this. */
+   z-index: 997;
    display: flex;
    flex-direction: column;
    opacity: 1;
@@ -511,6 +516,7 @@
  * consumer scopes its own rule.  These three new toggle targets need theirs,
  * or the editor + new-note bar render on load and the upload area never hides. */
 .note-editor.hidden,
+.note-viewer.hidden,
 .doc-library-notes-actions.hidden,
 .doc-library-upload.hidden {
    display: none;
@@ -581,6 +587,59 @@
 .note-editor .form-group input[type='text'] {
    width: 100%;
    box-sizing: border-box;
+}
+
+/* Read-only note viewer — clicking a note name opens this (distinct from the
+ * hover-pencil edit).  Mirrors the .note-editor chrome (same padding/border/bg). */
+.note-viewer {
+   padding: 0.75rem 1rem;
+   border-bottom: 1px solid var(--border-color);
+   background: var(--bg-secondary);
+}
+
+.note-viewer-header {
+   margin-bottom: 0.5rem;
+}
+
+.note-viewer-label {
+   margin: 0;
+   font-size: 0.95rem;
+   font-weight: 600;
+   color: var(--accent);
+   word-break: break-word;
+}
+
+.note-viewer-body {
+   max-height: 240px;
+   overflow-y: auto;
+   white-space: pre-wrap;
+   word-break: break-word;
+   font-size: 0.85rem;
+   line-height: 1.5;
+   color: var(--text-primary);
+   margin-bottom: 0.75rem;
+}
+
+.note-viewer-actions {
+   display: flex;
+   justify-content: flex-end;
+   align-items: center;
+   gap: 0.5rem;
+}
+
+/* The note name doubles as the open-viewer affordance — show it's clickable */
+.doc-library-item.note-item .doc-library-item-name {
+   cursor: pointer;
+}
+
+.doc-library-item.note-item .doc-library-item-name:hover {
+   color: var(--accent);
+}
+
+.doc-library-item-name.note-name-clickable:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+   border-radius: 3px;
 }
 
 /* NOTE type badge — accent cyan, distinct from PDF/DOCX/TXT.  Fill matches the

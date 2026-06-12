@@ -1588,6 +1588,19 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->documents.max_index_size_kb));
    json_object_object_add(documents, "max_indexed_documents",
                           json_object_new_int(config->documents.max_indexed_documents));
+   /* Hybrid-search tuning weights (v61) */
+   json_object_object_add(documents, "fts_label_weight",
+                          json_object_new_double(config->documents.fts_label_weight));
+   json_object_object_add(documents, "fts_body_weight",
+                          json_object_new_double(config->documents.fts_body_weight));
+   json_object_object_add(documents, "hybrid_keyword_weight",
+                          json_object_new_double(config->documents.hybrid_keyword_weight));
+   json_object_object_add(documents, "hybrid_vector_weight",
+                          json_object_new_double(config->documents.hybrid_vector_weight));
+   json_object_object_add(documents, "phrase_bonus_weight",
+                          json_object_new_double(config->documents.phrase_bonus_weight));
+   json_object_object_add(documents, "search_min_score",
+                          json_object_new_double(config->documents.search_min_score));
    json_object_object_add(root, "documents", documents);
 
    /* [vision] - per-upload image size and dimension limits */
@@ -2259,6 +2272,12 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "max_extracted_size_kb = %d\n", config->documents.max_extracted_size_kb);
    fprintf(fp, "max_index_size_kb = %d\n", config->documents.max_index_size_kb);
    fprintf(fp, "max_indexed_documents = %d\n", config->documents.max_indexed_documents);
+   fprintf(fp, "fts_label_weight = %.2f\n", config->documents.fts_label_weight);
+   fprintf(fp, "fts_body_weight = %.2f\n", config->documents.fts_body_weight);
+   fprintf(fp, "hybrid_keyword_weight = %.2f\n", config->documents.hybrid_keyword_weight);
+   fprintf(fp, "hybrid_vector_weight = %.2f\n", config->documents.hybrid_vector_weight);
+   fprintf(fp, "phrase_bonus_weight = %.2f\n", config->documents.phrase_bonus_weight);
+   fprintf(fp, "search_min_score = %.2f\n", config->documents.search_min_score);
 
    /* [vision] controls per-upload image size and dimension limits */
    fprintf(fp, "\n[vision]\n");

@@ -1023,6 +1023,29 @@ Format rules:
                   + New note
                </button>
             </div>
+            <!-- Read-only note viewer (opened by clicking a note name) -->
+            <div
+               id="doc-library-note-viewer"
+               class="note-viewer hidden"
+               role="region"
+               aria-label="Note"
+            >
+               <div class="note-viewer-header">
+                  <h4 id="doc-library-note-viewer-label" class="note-viewer-label"></h4>
+               </div>
+               <div id="doc-library-note-viewer-text" class="note-viewer-body"></div>
+               <div class="note-viewer-actions">
+                  <button type="button" id="doc-library-note-viewer-close" class="btn-link">
+                     Close
+                  </button>
+                  <button type="button" id="doc-library-note-viewer-edit" class="btn-secondary">
+                     Edit
+                  </button>
+                  <button type="button" id="doc-library-note-viewer-delete" class="btn-secondary">
+                     Delete
+                  </button>
+               </div>
+            </div>
             <!-- Inline note editor (create / edit) -->
             <div id="doc-library-note-editor" class="note-editor hidden">
                <form class="dawn-form" id="doc-library-note-form" autocomplete="off">
