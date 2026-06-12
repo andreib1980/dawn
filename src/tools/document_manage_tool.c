@@ -27,6 +27,7 @@
  * by label).  is_global is always false — the LLM cannot publish to all users.
  */
 
+#include <json-c/json.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,6 +105,13 @@ typedef struct {
 static docmgmt_pending_t s_pending[DOCMGMT_MAX_PENDING];
 static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Serializes edit/append read→modify→write so two concurrent edits of the same
+ * note can't clobber each other (the tool worker + a WebUI editor are different
+ * threads).  Coarse but correct; edits are infrequent.  Tool-vs-WebUI-direct
+ * races on the same note remain documented-acceptable for single-user until the
+ * B1b CAS-by-hash upgrade. */
+static pthread_mutex_t s_edit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* Stage (or replace) the pending deletion for a user.  Caller-locked. */
 static void stage_pending_locked(int user_id, int64_t doc_id, const char *label, bool is_note) {
    time_t now = time(NULL);
@@ -173,15 +181,19 @@ static const treg_param_t doc_manage_params[] = {
            "Document management action: 'save_note' (file a short piece of authored reference "
            "text — a bio, pitch, address, canned answer — under a LABEL so it can be retrieved "
            "EXACTLY later; re-saving the same label OVERWRITES it), 'save_text' (store a longer "
-           "piece of text as a normal searchable document under a title), 'list' (show the "
-           "documents and notes the user has stored), 'delete' (request deletion of a note or "
-           "document by its label — this does NOT delete immediately; it asks the user to "
-           "confirm), 'confirm_delete' (carry out the deletion the user just approved).",
+           "piece of text as a normal searchable document under a title), 'edit' (change part of "
+           "an existing note WITHOUT resending the whole thing — supply the exact text to find and "
+           "what to replace it with), 'append' (add text to the end of an existing note), 'list' "
+           "(show the documents and notes the user has stored), 'delete' (request deletion of a "
+           "note or document by its label — this does NOT delete immediately; it asks the user to "
+           "confirm), 'confirm_delete' (carry out the deletion the user just approved). Prefer "
+           "'edit'/'append' over re-saving when updating living text the user keeps current.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "save_note", "save_text", "list", "delete", "confirm_delete" },
-       .enum_count = 5,
+       .enum_values = { "save_note", "save_text", "edit", "append", "list", "delete",
+                        "confirm_delete" },
+       .enum_count = 7,
    },
    {
        .name = "label",
@@ -203,13 +215,27 @@ static const treg_param_t doc_manage_params[] = {
    },
    {
        .name = "text",
-       .description = "The text to store. Required by save_note and save_text; the full verbatim "
-                      "content the user wants kept. Must be the LAST argument. Not used by other "
-                      "actions.",
+       .description = "The text to store. Required by save_note and save_text (the full verbatim "
+                      "content the user wants kept) and by append (the text to add to the end of "
+                      "the note). Must be the LAST argument for those actions. Not used by edit / "
+                      "list / delete / confirm_delete.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "text",
+   },
+   {
+       .name = "change",
+       .description =
+           "Required by 'edit'. A JSON object given as a string: "
+           "{\"find\": \"<exact text already in the note>\", \"replace\": \"<new text>\"}. "
+           "The 'find' text must appear in the note EXACTLY ONCE — read the note first "
+           "(document_read) and copy the snippet verbatim. If it could match more than one place, "
+           "include more surrounding text to make it unique. Must be the LAST argument for 'edit'.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "change",
    },
 };
 
@@ -217,12 +243,15 @@ static const tool_metadata_t doc_manage_metadata = {
    .name = "document_manage",
    .device_string = "document manager",
    .description =
-       "Save, list, and delete the user's stored documents and notes. Use 'save_note' to file "
-       "exact reference text (a bio, an elevator pitch, an address, a saved answer) under a "
-       "label the user can ask for later by name; 'save_text' for longer documents; 'list' to "
+       "Save, edit, list, and delete the user's stored documents and notes. Use 'save_note' to "
+       "file exact reference text (a bio, an elevator pitch, an address, a saved answer) under a "
+       "label the user can ask for later by name; 'save_text' for longer documents; 'edit' / "
+       "'append' to update an existing note in place WITHOUT resending the whole thing; 'list' to "
        "see what's stored; and 'delete' to remove something (which always asks the user to "
-       "confirm first). To READ or SEARCH stored content, use document_read / document_search "
-       "instead.",
+       "confirm first). This is the home for verbatim, living text the user maintains and "
+       "retrieves exactly — when such a value changes, EDIT the note rather than storing the new "
+       "value as a memory (memory is for facts learned in passing, not authored reference text). "
+       "To READ or SEARCH stored content, use document_read / document_search instead.",
    .params = doc_manage_params,
    .param_count = 5,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
@@ -313,6 +342,152 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
             overwrite ? "Updated (overwrote existing)" : "Saved", title, res.num_chunks,
             res.num_chunks == 1 ? "" : "s");
    return strdup(msg);
+}
+
+/* Resolve a single editable note the caller owns, by exact label.  Loads its one
+ * chunk's text into *text_out (heap, caller frees).  Returns SUCCESS, or FAILURE
+ * with *err set to a user-facing reason. */
+static int load_editable_note(int user_id,
+                              const char *label,
+                              document_t *doc_out,
+                              char **text_out,
+                              const char **err) {
+   *text_out = NULL;
+   if (!label || !label[0]) {
+      *err = "Tell me which note (its label/name).";
+      return FAILURE;
+   }
+   /* Owner-scoped: find_by_label_exact also matches GLOBAL notes (not ours to
+    * edit), and the M-5 invariant is single-chunk note owned by the caller. */
+   if (document_db_find_by_label_exact(user_id, label, true, doc_out) != SUCCESS ||
+       doc_out->user_id != user_id || strcmp(doc_out->filetype, "note") != 0 ||
+       doc_out->num_chunks != 1) {
+      *err = "No editable note by that name was found (it may be a multi-part document, global, or "
+             "not yours).";
+      return FAILURE;
+   }
+   document_chunk_t chunk;
+   int n = 0;
+   if (document_db_chunk_read(doc_out->id, &chunk, 1, 0, &n) != SUCCESS || n < 1) {
+      *err = "Couldn't read the note's current text.";
+      return FAILURE;
+   }
+   *text_out = strdup(chunk.text);
+   if (!*text_out) {
+      *err = "Out of memory.";
+      return FAILURE;
+   }
+   return SUCCESS;
+}
+
+/* Commit edited note text via the stable-id note update (re-embed + FTS rebuild,
+ * keeps doc_id/is_global/gloss-pointer).  Returns the user-facing message. */
+static char *commit_note_text(int user_id,
+                              int64_t doc_id,
+                              const char *label,
+                              const char *new_text,
+                              const char *ok_msg) {
+   doc_index_result_t res;
+   if (document_note_update(user_id, doc_id, label, new_text, strlen(new_text), &res) !=
+       DOC_INDEX_SUCCESS) {
+      char msg[256];
+      snprintf(msg, sizeof(msg), "Couldn't update the note: %s", res.error_msg);
+      return strdup(msg);
+   }
+   return strdup(ok_msg);
+}
+
+/* edit: find/replace in a note.  `change` is a JSON object given as a string:
+ * {"find": "...", "replace": "..."}.  Carried as the terminal tail param so its
+ * content (incl. "::", newlines) survives the ::field::value flattening intact —
+ * the JSON escaping is what makes find/replace safe regardless of content. */
+static char *do_edit(int user_id, const char *label, const char *change_json) {
+   if (!change_json || !change_json[0])
+      return strdup("To edit, provide 'change' as {\"find\": \"...\", \"replace\": \"...\"}.");
+
+   struct json_object *change = json_tokener_parse(change_json);
+   if (!change || !json_object_is_type(change, json_type_object)) {
+      if (change)
+         json_object_put(change);
+      return strdup("'change' must be a JSON object: {\"find\": \"...\", \"replace\": \"...\"}.");
+   }
+   struct json_object *find_obj = NULL, *replace_obj = NULL;
+   const char *find = json_object_object_get_ex(change, "find", &find_obj)
+                          ? json_object_get_string(find_obj)
+                          : NULL;
+   const char *replace = json_object_object_get_ex(change, "replace", &replace_obj)
+                             ? json_object_get_string(replace_obj)
+                             : NULL;
+   if (!find || !find[0] || !replace_obj) { /* replace may legitimately be "" (a deletion) */
+      json_object_put(change);
+      return strdup("'change' needs a non-empty 'find' and a 'replace' (use \"\" to delete).");
+   }
+
+   char *result = NULL;
+   pthread_mutex_lock(&s_edit_mutex);
+
+   document_t doc;
+   char *old = NULL;
+   const char *err = NULL;
+   if (load_editable_note(user_id, label, &doc, &old, &err) != SUCCESS) {
+      result = strdup(err);
+   } else {
+      /* Unique-match contract (mirrors str_replace): 0 / >1 are errors that leave
+       * the note untouched, never a guess. */
+      char *new_text = NULL;
+      int occ = docmgmt_find_replace_once(old, find, replace, &new_text);
+      if (occ == 0) {
+         result = strdup("That exact text isn't in the note — use document_read to get the current "
+                         "text and copy the snippet verbatim.");
+      } else if (occ >= 2) {
+         result = strdup("That text appears more than once — include more surrounding text in "
+                         "'find' to make it unique.");
+      } else if (!new_text) {
+         result = strdup("Out of memory.");
+      } else {
+         char ok[DOCMGMT_CONFIRM_MSG_MAX];
+         snprintf(ok, sizeof(ok), "Edited note '%s' (replaced 1 occurrence).", doc.filename);
+         result = commit_note_text(user_id, doc.id, doc.filename, new_text, ok);
+         OLOG_INFO("document_manage edit: note id=%lld find_len=%zu", (long long)doc.id,
+                   strlen(find));
+         free(new_text);
+      }
+   }
+   pthread_mutex_unlock(&s_edit_mutex);
+   free(old);
+   json_object_put(change);
+   return result;
+}
+
+/* append: add text to the end of an existing note (newline-joined). */
+static char *do_append(int user_id, const char *label, const char *text) {
+   if (!text || !text[0])
+      return strdup("To append, provide the text to add.");
+
+   char *result = NULL;
+   pthread_mutex_lock(&s_edit_mutex);
+
+   document_t doc;
+   char *old = NULL;
+   const char *err = NULL;
+   if (load_editable_note(user_id, label, &doc, &old, &err) != SUCCESS) {
+      result = strdup(err); /* nonexistent note → error, never auto-create */
+   } else {
+      char *new_text = docmgmt_append_text(old, text);
+      if (!new_text) {
+         result = strdup("Out of memory.");
+      } else {
+         char ok[DOCMGMT_CONFIRM_MSG_MAX];
+         snprintf(ok, sizeof(ok), "Appended to note '%s'.", doc.filename);
+         result = commit_note_text(user_id, doc.id, doc.filename, new_text, ok);
+         OLOG_INFO("document_manage append: note id=%lld add_len=%zu", (long long)doc.id,
+                   strlen(text));
+         free(new_text);
+      }
+   }
+   pthread_mutex_unlock(&s_edit_mutex);
+   free(old);
+   return result;
 }
 
 static char *do_list(int user_id) {
@@ -430,9 +605,21 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       return do_delete_request(user_id, label, id);
    }
 
-   /* save_note / save_text: text is the terminal (tail) param.  Buffer sized to
-    * DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk size, so a
-    * multi-chunk save_text document isn't clipped at 4 KB. */
+   /* edit: the JSON 'change' object is the terminal (tail) param. */
+   if (strcmp(act, "edit") == 0) {
+      char *change = malloc(DOCMGMT_SAVE_TEXT_MAX);
+      if (!change)
+         return strdup("Out of memory.");
+      change[0] = '\0';
+      tool_param_extract_custom_tail(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
+      char *result = do_edit(user_id, label, change);
+      free(change);
+      return result;
+   }
+
+   /* save_note / save_text / append: text is the terminal (tail) param.  Buffer
+    * sized to DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk
+    * size, so a multi-chunk save_text document isn't clipped at 4 KB. */
    char *text = malloc(DOCMGMT_SAVE_TEXT_MAX);
    if (!text)
       return strdup("Out of memory.");
@@ -444,6 +631,8 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       result = do_save_note(user_id, label, text);
    else if (strcmp(act, "save_text") == 0)
       result = do_save_text(user_id, label, text);
+   else if (strcmp(act, "append") == 0)
+      result = do_append(user_id, label, text);
    else
       result = strdup("Unknown document_manage action.");
 

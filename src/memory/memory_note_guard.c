@@ -168,20 +168,58 @@ static void guard_collect_tool(memory_note_guard_t *g,
          return;
       }
       const char *action = json_object_get_string(action_obj);
-      if (!action || (strcmp(action, "save_note") != 0 && strcmp(action, "save_text") != 0)) {
+      if (!action) {
          return;
-      }
-      struct json_object *text_obj = NULL;
-      const char *text = NULL;
-      if (json_object_object_get_ex(input, "text", &text_obj)) {
-         text = json_object_get_string(text_obj);
       }
       struct json_object *label_obj = NULL;
       const char *label = NULL;
       if (json_object_object_get_ex(input, "label", &label_obj)) {
          label = json_object_get_string(label_obj);
       }
-      guard_add_body(g, text, label);
+      /* The content-bearing arg differs by action: save_note/save_text/append
+       * carry it in 'text'; edit carries the new text in change.replace (a JSON
+       * object the LLM passes as a string).  All of it is note content that must
+       * NOT be re-mined into memory at session end.
+       * NOTE: the action→content-field map is also encoded in
+       * guard_redact_save_input() (which blanks the field in the tool-call args) —
+       * a new content-bearing action must be added in BOTH places. */
+      if (strcmp(action, "save_note") == 0 || strcmp(action, "save_text") == 0 ||
+          strcmp(action, "append") == 0) {
+         struct json_object *text_obj = NULL;
+         const char *text = NULL;
+         if (json_object_object_get_ex(input, "text", &text_obj)) {
+            text = json_object_get_string(text_obj);
+         }
+         guard_add_body(g, text, label);
+      } else if (strcmp(action, "edit") == 0) {
+         struct json_object *change_obj = NULL;
+         if (json_object_object_get_ex(input, "change", &change_obj)) {
+            /* 'change' may arrive as a JSON string (the declared shape) or, from a
+             * lenient provider, already an object — handle both. */
+            struct json_object *parsed = NULL;
+            bool owned = false;
+            if (json_object_is_type(change_obj, json_type_string)) {
+               parsed = json_tokener_parse(json_object_get_string(change_obj));
+               owned = true;
+            } else if (json_object_is_type(change_obj, json_type_object)) {
+               parsed = change_obj;
+            }
+            /* Register BOTH replace (the new content) and find (the located
+             * snippet — existing note text the model copied verbatim) so neither
+             * survives in a user turn to be re-mined. */
+            struct json_object *replace_obj = NULL;
+            if (parsed && json_object_object_get_ex(parsed, "replace", &replace_obj)) {
+               guard_add_body(g, json_object_get_string(replace_obj), label);
+            }
+            struct json_object *find_obj = NULL;
+            if (parsed && json_object_object_get_ex(parsed, "find", &find_obj)) {
+               guard_add_body(g, json_object_get_string(find_obj), label);
+            }
+            if (owned && parsed) {
+               json_object_put(parsed);
+            }
+         }
+      }
    } else if (strcmp(name, "document_read") == 0 || strcmp(name, "document_search") == 0) {
       guard_add_read_id(g, id);
    }
@@ -411,9 +449,12 @@ static char *guard_redact_bodies_in_text(const memory_note_guard_t *g, const cha
  * Redaction — message rebuild
  * ============================================================================= */
 
-/* If @p input is a document_manage save_note/save_text call carrying text,
- * return a new object copying its fields with `text` replaced by the plain
- * marker; else NULL (no change). */
+/* If @p input is a document_manage call that carries note content, return a new
+ * object copying its fields with the content field replaced by the plain marker;
+ * else NULL (no change).  The content field is `text` for save_note/save_text/
+ * append and `change` for edit (the new text lives in change.replace).
+ * NOTE: the action→content-field map mirrors guard_collect_tool() — a new
+ * content-bearing action must be added in BOTH places. */
 static struct json_object *guard_redact_save_input(struct json_object *input) {
    if (!input || !json_object_is_type(input, json_type_object)) {
       return NULL;
@@ -423,15 +464,24 @@ static struct json_object *guard_redact_save_input(struct json_object *input) {
       return NULL;
    }
    const char *action = json_object_get_string(action_obj);
-   if (!action || (strcmp(action, "save_note") != 0 && strcmp(action, "save_text") != 0)) {
+   if (!action) {
       return NULL;
    }
-   struct json_object *text_obj = NULL;
-   if (!json_object_object_get_ex(input, "text", &text_obj)) {
+   const char *content_key = NULL;
+   if (strcmp(action, "save_note") == 0 || strcmp(action, "save_text") == 0 ||
+       strcmp(action, "append") == 0) {
+      content_key = "text";
+   } else if (strcmp(action, "edit") == 0) {
+      content_key = "change";
+   } else {
+      return NULL;
+   }
+   struct json_object *content_obj = NULL;
+   if (!json_object_object_get_ex(input, content_key, &content_obj)) {
       return NULL; /* nothing to hide */
    }
-   const char *text = json_object_get_string(text_obj);
-   if (!text || !*text) {
+   const char *content = json_object_get_string(content_obj);
+   if (!content || !*content) {
       return NULL;
    }
    struct json_object *out = json_object_new_object();
@@ -439,7 +489,7 @@ static struct json_object *guard_redact_save_input(struct json_object *input) {
       return NULL;
    }
    json_object_object_foreach(input, key, val) {
-      if (strcmp(key, "text") == 0) {
+      if (strcmp(key, content_key) == 0) {
          json_object_object_add(out, key, json_object_new_string(GUARD_FILED_MARKER_PLAIN));
       } else {
          json_object_object_add(out, key, json_object_get(val));

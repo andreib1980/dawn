@@ -136,6 +136,34 @@ static char *save_note_args_json(const char *label, const char *text) {
    return s;
 }
 
+/* edit args: `change` is a JSON object carried as a STRING (the declared shape). */
+static char *edit_args_json(const char *label, const char *find, const char *replace) {
+   struct json_object *change = json_object_new_object();
+   json_object_object_add(change, "find", json_object_new_string(find));
+   json_object_object_add(change, "replace", json_object_new_string(replace));
+   char *change_str = strdup(json_object_to_json_string_ext(change, JSON_C_TO_STRING_PLAIN));
+   json_object_put(change);
+
+   struct json_object *o = json_object_new_object();
+   json_object_object_add(o, "action", json_object_new_string("edit"));
+   json_object_object_add(o, "label", json_object_new_string(label));
+   json_object_object_add(o, "change", json_object_new_string(change_str));
+   free(change_str);
+   char *s = strdup(json_object_to_json_string_ext(o, JSON_C_TO_STRING_PLAIN));
+   json_object_put(o);
+   return s;
+}
+
+static char *append_args_json(const char *label, const char *text) {
+   struct json_object *o = json_object_new_object();
+   json_object_object_add(o, "action", json_object_new_string("append"));
+   json_object_object_add(o, "label", json_object_new_string(label));
+   json_object_object_add(o, "text", json_object_new_string(text));
+   char *s = strdup(json_object_to_json_string_ext(o, JSON_C_TO_STRING_PLAIN));
+   json_object_put(o);
+   return s;
+}
+
 /* Redact one message and return its serialized JSON (caller frees). */
 static char *redact_to_string(const memory_note_guard_t *g, struct json_object *msg) {
    struct json_object *out = memory_note_guard_redact(g, msg);
@@ -352,6 +380,66 @@ static void test_disabled_by_config(void) {
    json_object_put(history);
 }
 
+/* B1a: an 'edit' carries the new note content in change.replace — that content
+ * must be redacted from history too, or it gets re-mined into memory. */
+static void test_openai_edit_redacts_replace_body(void) {
+   char *args = edit_args_json("Public Bio", "old summary", BIO);
+   struct json_object *history = json_object_new_array();
+   struct json_object *u1 = msg_user_text("Update my Public Bio to read: " BIO);
+   struct json_object *a1 = msg_openai_tool_call("call_1", "document_manage", args);
+   json_object_array_add(history, json_object_get(u1));
+   json_object_array_add(history, json_object_get(a1));
+
+   memory_note_guard_t *g = memory_note_guard_create(history);
+   TEST_ASSERT_NOT_NULL(g);
+   TEST_ASSERT_TRUE(memory_note_guard_active(g));
+
+   char *ru1 = redact_to_string(g, u1);
+   char *ra1 = redact_to_string(g, a1);
+   TEST_ASSERT_NULL(strstr(ru1, "veteran systems engineer"));
+   TEST_ASSERT_NOT_NULL(strstr(ru1, "filed to notes store"));
+   TEST_ASSERT_NULL(strstr(ra1, "veteran systems engineer"));
+
+   free(ru1);
+   free(ra1);
+   free(args);
+   json_object_put(u1);
+   json_object_put(a1);
+   json_object_put(history);
+   memory_note_guard_free(g);
+}
+
+/* B1a: an 'append' carries new note content in `text` (Claude shape here). */
+static void test_claude_append_redacts_text_body(void) {
+   struct json_object *input = json_object_new_object();
+   json_object_object_add(input, "action", json_object_new_string("append"));
+   json_object_object_add(input, "label", json_object_new_string("Public Bio"));
+   json_object_object_add(input, "text", json_object_new_string(BIO));
+
+   struct json_object *history = json_object_new_array();
+   struct json_object *u1 = msg_user_text("Add this to my Public Bio: " BIO);
+   struct json_object *a1 = msg_claude_tool_use("toolu_1", "document_manage", input);
+   json_object_array_add(history, json_object_get(u1));
+   json_object_array_add(history, json_object_get(a1));
+
+   memory_note_guard_t *g = memory_note_guard_create(history);
+   TEST_ASSERT_NOT_NULL(g);
+   TEST_ASSERT_TRUE(memory_note_guard_active(g));
+
+   char *ru1 = redact_to_string(g, u1);
+   char *ra1 = redact_to_string(g, a1);
+   TEST_ASSERT_NULL(strstr(ru1, "veteran systems engineer"));
+   TEST_ASSERT_NOT_NULL(strstr(ru1, "filed to notes store"));
+   TEST_ASSERT_NULL(strstr(ra1, "veteran systems engineer"));
+
+   free(ru1);
+   free(ra1);
+   json_object_put(u1);
+   json_object_put(a1);
+   json_object_put(history);
+   memory_note_guard_free(g);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_openai_save_note_redacts_body_and_args);
@@ -362,5 +450,7 @@ int main(void) {
    RUN_TEST(test_short_body_not_scanned_in_user_message);
    RUN_TEST(test_inert_without_document_tools);
    RUN_TEST(test_disabled_by_config);
+   RUN_TEST(test_openai_edit_redacts_replace_body);
+   RUN_TEST(test_claude_append_redacts_text_body);
    return UNITY_END();
 }

@@ -30,6 +30,30 @@ extern "C" {
 /** Register the document_manage tool with the tool registry. */
 int document_manage_tool_register(void);
 
+/* Pure text-edit helpers (no DB / embedding deps) — exposed for unit testing the
+ * find/replace + append contract independent of the storage layer. */
+
+/**
+ * @brief Replace the single occurrence of `find` in `src` with `replace`.
+ *
+ * Unique-match contract (mirrors str_replace): the edit only applies when `find`
+ * occurs EXACTLY once.  `replace` may be "" (a deletion).
+ *
+ * @param src     Source text (NUL-terminated).
+ * @param find    Exact substring to locate (must be non-empty).
+ * @param replace Replacement text ("" deletes the match).
+ * @param out     On a unique match, set to a heap result (caller frees); else NULL.
+ * @return Occurrence count clamped to {0, 1, 2} (2 = "two or more"); on a unique
+ *         match (1), *out is the result, or NULL on allocation failure.
+ */
+int docmgmt_find_replace_once(const char *src, const char *find, const char *replace, char **out);
+
+/**
+ * @brief Append `text` to `src`, newline-joined if `src` doesn't already end in '\n'.
+ * @return Heap result (caller frees), or NULL on allocation failure.
+ */
+char *docmgmt_append_text(const char *src, const char *text);
+
 #ifdef __cplusplus
 }
 #endif
