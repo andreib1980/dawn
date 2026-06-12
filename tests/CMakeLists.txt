@@ -363,6 +363,13 @@ dawn_add_unit_test(test_document_search_bm25
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+# document_manage edit/append pure text ops (B1a) — no storage deps
+dawn_add_unit_test(test_document_manage
+   SOURCES test_document_manage.c
+           ${SRC_ROOT}/src/tools/document_edit_ops.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_embedding_engine
    SOURCES test_embedding_engine.c test_embedding_engine_stub.c
            ${SRC_ROOT}/src/core/embedding_engine.c
