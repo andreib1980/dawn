@@ -614,6 +614,19 @@ admin_resp_code_t admin_client_memory_backfill_note_glosses(int fd,
                                                             size_t resp_len);
 
 /**
+ * @brief Rebuild the document search (FTS) index from scratch (v61 recovery).
+ *
+ * Global (the FTS index spans all users); no payload.  Idempotent recovery path
+ * for a partial migration backfill or FTS orphans.
+ *
+ * @param fd Connected admin socket.
+ * @param response Output buffer for the daemon's text response.
+ * @param resp_len Size of response buffer.
+ * @return Response code from daemon.
+ */
+admin_resp_code_t admin_client_memory_rebuild_document_fts(int fd, char *response, size_t resp_len);
+
+/**
  * @brief Bulk-delete pre-existing meta-fact rows by LIKE pattern.
  *
  * Targets interaction-event entries (e.g. "User asked about X") that were

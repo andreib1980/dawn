@@ -193,6 +193,20 @@ int document_db_delete_indexed(int64_t doc_id);
 int document_db_chunk_index_fts(int64_t chunk_id, const char *label_stems, const char *body_stems);
 
 /**
+ * @brief Rebuild the entire document_chunks_fts index from scratch (v61 recovery).
+ *
+ * Recovery path for a partial v61 migration backfill (version advances even if the
+ * backfill is interrupted) or FTS orphans left by delete_indexed's OOM fallback.
+ * Clears the contentless index ('delete-all'), then re-stems + re-inserts every
+ * live chunk.  Stemming runs outside the auth_db leaf lock.  Global (the FTS index
+ * spans all users); admin-gated by the socket.  Safe to re-run (idempotent).
+ *
+ * @param count_out Optional: number of chunks indexed (may be NULL).
+ * @return SUCCESS (0) on success, FAILURE (1) on error (incl. migration not run).
+ */
+int document_db_rebuild_fts(int *count_out);
+
+/**
  * @brief Stable-id in-place edit of a single-chunk note (v61).
  *
  * Gated on filetype == "note" && num_chunks == 1 && owner == user_id — a forged
