@@ -63,7 +63,8 @@ static struct {
    int64_t *ids;
    float *embeddings; /* flat: count * dims */
    float *norms;
-   int64_t *created_ats; /* per-fact created_at, parallel to ids */
+   int64_t *created_ats;  /* per-fact created_at, parallel to ids */
+   int64_t *note_doc_ids; /* per-fact note_doc_id (v61): >0 = bridge gloss */
    int count;
    int capacity;
    int dims;
@@ -531,10 +532,12 @@ static void cache_free_data(void) {
    free(s_cache.embeddings);
    free(s_cache.norms);
    free(s_cache.created_ats);
+   free(s_cache.note_doc_ids);
    s_cache.ids = NULL;
    s_cache.embeddings = NULL;
    s_cache.norms = NULL;
    s_cache.created_ats = NULL;
+   s_cache.note_doc_ids = NULL;
    s_cache.count = 0;
    s_cache.capacity = 0;
    s_cache.valid = false;
@@ -557,15 +560,20 @@ static int cache_load(int user_id) {
    s_cache.embeddings = malloc((size_t)cap * (size_t)dims * sizeof(float));
    s_cache.norms = malloc(cap * sizeof(float));
    s_cache.created_ats = malloc(cap * sizeof(int64_t));
+   /* calloc (not malloc): a future append path that forgets to set this field
+    * fails safe — a 0 slot is treated as a non-gloss, never the reverse. */
+   s_cache.note_doc_ids = calloc((size_t)cap, sizeof(int64_t));
 
-   if (!s_cache.ids || !s_cache.embeddings || !s_cache.norms || !s_cache.created_ats) {
+   if (!s_cache.ids || !s_cache.embeddings || !s_cache.norms || !s_cache.created_ats ||
+       !s_cache.note_doc_ids) {
       cache_free_data();
       return FAILURE;
    }
 
    int loaded = 0;
    if (memory_db_fact_get_embeddings(user_id, dims, s_cache.ids, s_cache.embeddings, s_cache.norms,
-                                     s_cache.created_ats, cap, &loaded) != MEMORY_DB_SUCCESS) {
+                                     s_cache.created_ats, s_cache.note_doc_ids, cap,
+                                     &loaded) != MEMORY_DB_SUCCESS) {
       cache_free_data();
       return FAILURE;
    }
@@ -687,6 +695,13 @@ static int cache_append_locked(int user_id,
    memcpy(s_cache.embeddings + (size_t)idx * (size_t)dims, vec, (size_t)dims * sizeof(float));
    s_cache.norms[idx] = norm;
    s_cache.created_ats[idx] = created_at;
+   /* A fact appended to the warm cache (store_precomputed) is by construction a
+    * non-gloss — bridge glosses go through embed_and_store → invalidate → full
+    * reload.  Must be set explicitly: the array is allocated uninitialized and
+    * nearest_fact/find_duplicate_clusters skip entries with note_doc_id > 0, so a
+    * garbage slot could silently drop a real fact from paraphrase-dedup. */
+   if (s_cache.note_doc_ids)
+      s_cache.note_doc_ids[idx] = 0;
    s_cache.count++;
    return SUCCESS;
 }
@@ -765,6 +780,11 @@ int memory_embeddings_nearest_fact(int user_id,
       /* Skip facts without embeddings — pre-bge-small-swap rows that
        * have not yet been recompute-worker'd will have norm == 0. */
       if (s_cache.norms[i] < 1e-6f)
+         continue;
+      /* Skip memory→note bridge glosses (v61): they stay in the cache for
+       * semantic retrieval (hybrid_search walks the same array) but must never
+       * be a paraphrase-dedup merge target — a gloss is a pointer, not a fact. */
+      if (s_cache.note_doc_ids && s_cache.note_doc_ids[i] > 0)
          continue;
       float cosine = memory_embeddings_cosine_with_norms(
           query_vec, s_cache.embeddings + (size_t)i * (size_t)query_dims, query_dims, query_norm,
@@ -973,10 +993,28 @@ int memory_embeddings_find_duplicate_clusters(int user_id,
                  dims);
       return MEMORY_DB_FAILURE;
    }
-   memcpy(ids, s_cache.ids, (size_t)count * sizeof(int64_t));
-   memcpy(norms, s_cache.norms, (size_t)count * sizeof(float));
-   memcpy(embs, s_cache.embeddings, (size_t)count * (size_t)dims * sizeof(float));
+   /* Exclude memory→note bridge glosses (v61) from the snapshot — a gloss must
+    * never be offered to the operator as a duplicate-merge candidate.  The
+    * buffers were sized for the full count, so the compacted copy fits. */
+   int kept = 0;
+   for (int i = 0; i < count; i++) {
+      if (s_cache.note_doc_ids && s_cache.note_doc_ids[i] > 0)
+         continue;
+      ids[kept] = s_cache.ids[i];
+      norms[kept] = s_cache.norms[i];
+      memcpy(embs + (size_t)kept * (size_t)dims, s_cache.embeddings + (size_t)i * (size_t)dims,
+             (size_t)dims * sizeof(float));
+      kept++;
+   }
+   count = kept;
    pthread_mutex_unlock(&s_cache.mutex);
+
+   if (count < 2) {
+      free(ids);
+      free(norms);
+      free(embs);
+      return MEMORY_DB_SUCCESS; /* nothing to cluster after excluding glosses */
+   }
 
    int rc = memory_embeddings_cluster_by_cosine(ids, embs, norms, count, dims, threshold,
                                                 out_clusters, max_clusters, out_count);

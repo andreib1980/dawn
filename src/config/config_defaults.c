@@ -414,6 +414,9 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.paraphrase_dedup_enabled = true;
    config->memory.paraphrase_dedup_threshold = MEMORY_PARAPHRASE_DEDUP_DEFAULT;
 
+   /* Note-extraction guard: keep filed reference text out of semantic facts. */
+   config->memory.note_extraction_guard = true;
+
    /* Extraction recovery: re-extract conversations stuck idle past the threshold. */
    config->memory.recovery_enabled = true;
    config->memory.recovery_idle_threshold_seconds = 3600; /* 1 hour */

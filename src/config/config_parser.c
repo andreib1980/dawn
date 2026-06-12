@@ -1128,6 +1128,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_BOOL(table, "paraphrase_dedup_enabled", config->paraphrase_dedup_enabled);
    PARSE_DOUBLE(table, "paraphrase_dedup_threshold", config->paraphrase_dedup_threshold);
    CONFIG_CLAMP(config->paraphrase_dedup_threshold, 0.5f, 1.0f);
+   PARSE_BOOL(table, "note_extraction_guard", config->note_extraction_guard);
 
    /* Parse pruning settings - support both flat keys and [memory.pruning] sub-table */
    PARSE_BOOL(table, "pruning_enabled", config->pruning_enabled);

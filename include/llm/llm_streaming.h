@@ -107,6 +107,7 @@ typedef struct {
    char tool_name[LLM_TOOLS_NAME_LEN]; /**< Tool name from content_block_start */
    char tool_args[LLM_TOOLS_ARGS_LEN]; /**< Accumulated partial_json */
    size_t tool_args_len;               /**< Length of accumulated args */
+   bool tool_args_overflow;            /**< args exceeded the buffer and were clipped */
 
    /* Visual progress tracking (render_visual tool) */
    int visual_progress_active; /**< Notify frontend when render_visual generation starts */
@@ -126,6 +127,7 @@ typedef struct {
  */
 typedef struct {
    char tool_args_buffer[LLM_TOOLS_MAX_PARALLEL_CALLS][LLM_TOOLS_ARGS_LEN];
+   bool tool_args_overflow[LLM_TOOLS_MAX_PARALLEL_CALLS]; /**< per-call: args clipped at the cap */
 } openai_stream_state_t;
 
 /**

@@ -1203,6 +1203,22 @@ void llm_tools_invalidate_cache(void) {
 static int llm_tools_execute_from_treg(const tool_call_t *call,
                                        const tool_metadata_t *meta,
                                        tool_result_t *result) {
+   /* Refuse to execute on truncated arguments: the provider's tool-call args
+    * exceeded LLM_TOOLS_ARGS_LEN and were clipped, so any field could be cut
+    * mid-value (e.g. a document_manage save_text body).  Acting on partial args
+    * silently stores corrupt data — return a clear, actionable error instead of
+    * the generic "Invalid JSON" the truncation would otherwise produce. */
+   if (call->args_truncated) {
+      snprintf(
+          result->result, LLM_TOOLS_RESULT_LEN,
+          "Error: the arguments to '%s' were too long (over %d bytes) and were cut off, so the "
+          "call was not run. Split the input into smaller pieces (e.g. save a long document in "
+          "sections) and try again.",
+          call->name, LLM_TOOLS_ARGS_LEN - 1);
+      result->success = false;
+      return 1;
+   }
+
    /* Parse arguments JSON */
    struct json_object *args = NULL;
    if (call->arguments[0] != '\0') {
@@ -1846,7 +1862,8 @@ int llm_tools_parse_openai_response(struct json_object *response, tool_call_list
       safe_strncpy(call->name, json_object_get_string(name_obj), LLM_TOOLS_NAME_LEN);
 
       const char *args_str = json_object_get_string(args_obj);
-      if (args_str && strlen(args_str) >= LLM_TOOLS_ARGS_LEN) {
+      call->args_truncated = (args_str && strlen(args_str) >= LLM_TOOLS_ARGS_LEN);
+      if (call->args_truncated) {
          OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
                       strlen(args_str), LLM_TOOLS_ARGS_LEN - 1);
       }
@@ -1908,6 +1925,11 @@ int llm_tools_parse_claude_response(struct json_object *response, tool_call_list
 
       /* Claude sends input as object, we need it as string */
       const char *input_str = json_object_to_json_string(input_obj);
+      call->args_truncated = (input_str && strlen(input_str) >= LLM_TOOLS_ARGS_LEN);
+      if (call->args_truncated) {
+         OLOG_WARNING("Tool '%s' arguments truncated from %zu to %d bytes", call->name,
+                      strlen(input_str), LLM_TOOLS_ARGS_LEN - 1);
+      }
       safe_strncpy(call->arguments, input_str, LLM_TOOLS_ARGS_LEN);
    }
 
@@ -2395,6 +2417,45 @@ static bool is_duplicate_in_claude_history(struct json_object *history,
    return false;
 }
 
+/* Index of the last real user message — the start of the current turn.  A repeat
+ * of a tool call from an EARLIER turn is legitimate (the user asked again, or the
+ * underlying data changed between turns); only a repeat within THIS turn is the
+ * runaway loop the duplicate check guards against.  Claude tool-result messages
+ * are role "user" too (content array with a tool_result block) — they are not a
+ * turn boundary, so they're skipped.  Returns 0 when no real user message found. */
+static int last_real_user_msg_index(struct json_object *history, llm_history_format_t format) {
+   int len = json_object_array_length(history);
+   for (int i = len - 1; i >= 0; i--) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      struct json_object *role_obj;
+      if (!msg || !json_object_object_get_ex(msg, "role", &role_obj))
+         continue;
+      if (strcmp(json_object_get_string(role_obj), "user") != 0)
+         continue;
+      if (format == LLM_HISTORY_CLAUDE) {
+         struct json_object *content;
+         if (json_object_object_get_ex(msg, "content", &content) &&
+             json_object_is_type(content, json_type_array)) {
+            bool is_tool_result = false;
+            int n = json_object_array_length(content);
+            for (int j = 0; j < n; j++) {
+               struct json_object *blk = json_object_array_get_idx(content, j);
+               struct json_object *type_obj;
+               if (blk && json_object_object_get_ex(blk, "type", &type_obj) &&
+                   strcmp(json_object_get_string(type_obj), "tool_result") == 0) {
+                  is_tool_result = true;
+                  break;
+               }
+            }
+            if (is_tool_result)
+               continue; /* Claude tool result, not a turn boundary */
+         }
+      }
+      return i;
+   }
+   return 0;
+}
+
 bool llm_tools_is_duplicate_call(struct json_object *history,
                                  const char *tool_name,
                                  const char *tool_args,
@@ -2429,6 +2490,13 @@ bool llm_tools_is_duplicate_call(struct json_object *history,
    int min_idx = len - DUPLICATE_CHECK_LOOKBACK;
    if (min_idx < 0) {
       min_idx = 0;
+   }
+   /* Confine the scan to the current turn so a user-requested repeat (or a
+    * re-read of data that changed since the last turn) isn't blocked as a dup —
+    * only same-turn loops are caught. */
+   int turn_start = last_real_user_msg_index(history, format);
+   if (turn_start > min_idx) {
+      min_idx = turn_start;
    }
 
    bool is_dup;

@@ -41,8 +41,10 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_admin.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_note_bridge.h"
 #include "memory/memory_recategorize.h"
 #include "memory/memory_summarize_missing.h"
+#include "tools/document_db.h"
 
 int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len) {
    if (payload_len == 0 || payload_len >= AUTH_USERNAME_MAX) {
@@ -508,4 +510,69 @@ int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t 
             st.conversations_done, st.conversations_pending, st.conversations_failed,
             st.cost_tracking_available ? "(unimplemented)" : "not tracked (carried debt)");
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, report);
+}
+
+/* =============================================================================
+ * Memory→note bridge gloss backfill (Phase 9) — one-time remediation that
+ * creates a bridge gloss for every existing note a user filed before the bridge
+ * shipped.  Non-destructive + idempotent: notes that already have a gloss are
+ * skipped, so re-running is safe.  Payload: username (no flags).
+ * ============================================================================= */
+int handle_memory_backfill_note_glosses(int client_fd, const char *payload, uint16_t payload_len) {
+   if (payload_len == 0 || payload_len >= AUTH_USERNAME_MAX) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Invalid username");
+   }
+   char username[AUTH_USERNAME_MAX];
+   memcpy(username, payload, payload_len);
+   username[payload_len] = '\0';
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "User not found");
+   }
+
+   const int batch = 64;
+   document_t *notes = malloc(sizeof(document_t) * (size_t)batch);
+   if (!notes) {
+      return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Out of memory");
+   }
+
+   int created = 0, existing = 0, failed = 0, offset = 0;
+   for (;;) {
+      int count = 0;
+      if (document_db_list_filtered(user.id, DOC_KIND_NOTES, notes, batch, offset, &count) !=
+          SUCCESS) {
+         free(notes);
+         return send_text_response(client_fd, ADMIN_RESP_SERVICE_ERROR, "Note listing failed");
+      }
+      for (int i = 0; i < count; i++) {
+         /* Glosses are per-owner — only backfill the caller's own notes (the
+          * listing also returns global notes that may be owned by others). */
+         if (notes[i].user_id != user.id) {
+            continue;
+         }
+         int64_t gloss_id = 0;
+         memory_db_fact_find_by_note_doc_id(user.id, notes[i].id, &gloss_id);
+         if (gloss_id > 0) {
+            existing++;
+            continue;
+         }
+         if (memory_note_bridge_upsert_gloss(user.id, notes[i].id, notes[i].filename) == SUCCESS) {
+            created++;
+         } else {
+            failed++; /* the bridge logged the reason (e.g. label tripped the filter) */
+         }
+      }
+      if (count < batch) {
+         break;
+      }
+      offset += count;
+   }
+   free(notes);
+
+   char msg[256];
+   snprintf(msg, sizeof(msg),
+            "Backfilled note glosses for user '%s': %d created, %d already present, %d failed.",
+            username, created, existing, failed);
+   return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
 }

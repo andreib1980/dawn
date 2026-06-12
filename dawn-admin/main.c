@@ -91,6 +91,8 @@ static void print_usage(const char *prog) {
    fprintf(stderr, "  music rescan                      Trigger library rescan\n");
    fprintf(stderr, "\nMemory Management:\n");
    fprintf(stderr, "  memory recategorize-all <user>     LLM-classify 'general' facts\n");
+   fprintf(stderr, "  memory backfill-note-glosses <user>  Create memory→note bridge glosses for\n"
+                   "                                       existing notes (Phase 9, idempotent)\n");
    fprintf(stderr,
            "  memory cleanup-meta-facts --user <u> [--dry-run|--confirm-delete]\n"
            "                                     Bulk-delete pre-existing meta-fact rows\n");
@@ -1196,6 +1198,26 @@ static int cmd_memory_recategorize(const char *username) {
    }
 }
 
+static int cmd_memory_backfill_note_glosses(const char *username) {
+   int fd = admin_client_connect();
+   if (fd < 0) {
+      return 1;
+   }
+
+   char response[256];
+   admin_resp_code_t resp = admin_client_memory_backfill_note_glosses(fd, username, response,
+                                                                      sizeof(response));
+   admin_client_disconnect(fd);
+
+   if (resp == ADMIN_RESP_SUCCESS) {
+      printf("%s\n", response);
+      return 0;
+   } else {
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+      return 1;
+   }
+}
+
 static int cmd_memory_reextract(const char *username,
                                 bool confirm,
                                 bool keep_summaries,
@@ -1752,6 +1774,15 @@ int main(int argc, char *argv[]) {
             return 1;
          }
          return cmd_memory_recategorize(argv[3]);
+      }
+
+      if (strcmp(subcmd, "backfill-note-glosses") == 0) {
+         if (argc < 4) {
+            fprintf(stderr, "Error: Missing username\n");
+            fprintf(stderr, "Usage: %s memory backfill-note-glosses <username>\n", argv[0]);
+            return 1;
+         }
+         return cmd_memory_backfill_note_glosses(argv[3]);
       }
 
       if (strcmp(subcmd, "cleanup-meta-facts") == 0) {

@@ -597,6 +597,23 @@ admin_resp_code_t admin_client_memory_recategorize(int fd,
                                                    size_t resp_len);
 
 /**
+ * @brief Backfill memory→note bridge glosses for a user's existing notes.
+ *
+ * One-time Phase 9 remediation; non-destructive and idempotent (skips notes
+ * that already have a gloss).
+ *
+ * @param fd Connected admin socket.
+ * @param username Target user.
+ * @param response Output buffer for the daemon's text response.
+ * @param resp_len Size of response buffer.
+ * @return Response code from daemon.
+ */
+admin_resp_code_t admin_client_memory_backfill_note_glosses(int fd,
+                                                            const char *username,
+                                                            char *response,
+                                                            size_t resp_len);
+
+/**
  * @brief Bulk-delete pre-existing meta-fact rows by LIKE pattern.
  *
  * Targets interaction-event entries (e.g. "User asked about X") that were

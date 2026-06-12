@@ -61,10 +61,22 @@ static const treg_param_t doc_read_params[] = {
        .description = "The document filename, or a saved note's exact label, to read. "
                       "Use the name/label from document_search results. For a saved note this "
                       "returns its VERBATIM text — the deterministic way to pull back exact "
-                      "reference text (a bio, pitch, address) the user filed under that label.",
+                      "reference text (a bio, pitch, address) the user filed under that label. "
+                      "Optional if you instead pass a numeric 'id'.",
        .type = TOOL_PARAM_TYPE_STRING,
-       .required = true,
+       .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
+   },
+   {
+       .name = "id",
+       .description =
+           "Optional numeric document id (from a 'document_manage' list result). Reads "
+           "that EXACT document — use it to target a specific one when two share a name, "
+           "or to compare them. Takes precedence over 'document' when both are given.",
+       .type = TOOL_PARAM_TYPE_INT,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "id",
    },
    {
        .name = "start_chunk",
@@ -92,10 +104,11 @@ static const tool_metadata_t doc_read_metadata = {
                   "Use this when you need an entire document, OR the EXACT verbatim text of a "
                   "note the user filed under a label (a bio, pitch, saved answer) — prefer this "
                   "over document_search or memory recall when the user asks for 'my <label>'. "
-                  "Returns chunks in order with pagination. First call with just the name/label, "
+                  "Returns chunks in order with pagination. First call with just the name/label "
+                  "(or a numeric id from a 'document_manage' list to target one exact document), "
                   "then use start_chunk to read more.",
    .params = doc_read_params,
-   .param_count = 3,
+   .param_count = 4,
    .device_type = TOOL_DEVICE_TYPE_GETTER,
    .capabilities = 0,
    .is_getter = true,
@@ -133,8 +146,11 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    /* Extract custom parameters */
    int start_chunk = 0;
    int count = DOC_READ_DEFAULT_COUNT;
+   int64_t doc_id = 0;
    char tmp[32];
 
+   if (tool_param_extract_custom(value, "id", tmp, sizeof(tmp)))
+      doc_id = (int64_t)strtoll(tmp, NULL, 10);
    if (tool_param_extract_custom(value, "start_chunk", tmp, sizeof(tmp)))
       start_chunk = atoi(tmp);
    if (tool_param_extract_custom(value, "count", tmp, sizeof(tmp))) {
@@ -164,14 +180,26 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       doc_name[--name_len] = '\0';
    }
 
-   if (doc_name[0] == '\0')
-      return strdup("Error: no document name provided.");
+   if (doc_id <= 0 && doc_name[0] == '\0')
+      return strdup("Error: provide a document name/label or a numeric id.");
 
    int user_id = tool_get_current_user_id();
 
-   /* Find the document */
+   /* Resolve the document.  An explicit numeric id targets one EXACT document
+    * (disambiguates same-named copies); otherwise resolve by name/label.  An
+    * id-targeted read is owner-scoped (own docs + global) so a user can't read
+    * another user's document by guessing its id. */
    document_t doc;
-   if (document_db_find_by_name(user_id, doc_name, &doc) != 0) {
+   if (doc_id > 0) {
+      if (document_db_get(doc_id, &doc) != SUCCESS || (doc.user_id != user_id && !doc.is_global)) {
+         char err_buf[128];
+         snprintf(err_buf, sizeof(err_buf),
+                  "Error: no document with id %lld found (or it isn't yours). "
+                  "Use document_manage 'list' to see ids.",
+                  (long long)doc_id);
+         return strdup(err_buf);
+      }
+   } else if (document_db_find_by_name(user_id, doc_name, &doc) != 0) {
       char err_buf[DOC_FILENAME_MAX + 128];
       snprintf(err_buf, sizeof(err_buf),
                "Error: no document matching '%s' found. "

@@ -435,7 +435,10 @@ int memory_db_apply_fact_decay(int user_id,
        "    ELSE MAX(?, confidence * powf(?, "
        "         (CAST(strftime('%s','now') AS REAL) - last_accessed) / 604800.0))"
        "  END "
-       "WHERE user_id = ? AND superseded_by IS NULL AND last_accessed IS NOT NULL",
+       /* note_doc_id IS NULL: bridge glosses (v61) must not decay — a rarely-read
+        * note pointer would otherwise sink to the floor and rank poorly. */
+       "WHERE user_id = ? AND superseded_by IS NULL AND last_accessed IS NOT NULL "
+       "AND note_doc_id IS NULL",
        -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: apply_fact_decay prepare failed: %s", sqlite3_errmsg(s_db.db));
@@ -536,7 +539,10 @@ int memory_db_prune_low_confidence(int user_id, float threshold, int *count_out)
    sqlite3_stmt *stmt = NULL;
    rc = sqlite3_prepare_v2(
        s_db.db,
-       "DELETE FROM memory_facts WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL",
+       /* note_doc_id IS NULL: never prune memory→note bridge glosses (v61) — they
+        * are removed with their note, not by confidence. */
+       "DELETE FROM memory_facts WHERE user_id = ? AND confidence < ? AND superseded_by IS NULL "
+       "AND note_doc_id IS NULL",
        -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: prune_low_confidence prepare failed: %s", sqlite3_errmsg(s_db.db));

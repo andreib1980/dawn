@@ -467,6 +467,15 @@
                                   # Empty = main OpenRouter default.
 # extraction_timeout_ms = 120000  # LLM timeout for fact extraction (2 min)
                                   # Env: DAWN_MEMORY_EXTRACTION_TIMEOUT_MS
+# note_extraction_guard = true    # Keep reference text filed via the document_manage
+                                  # save_note/save_text tool out of semantic memory
+                                  # facts. At extraction time the filed bodies (and
+                                  # their echoes in document_read/document_search tool
+                                  # results) are redacted from the extraction input so
+                                  # the canonical text lives only in the note store, not
+                                  # duplicated — and re-mined — as a fact that then goes
+                                  # stale when the note is edited. Exact-match redaction
+                                  # (zero false positives). Default on.
 # pruning_enabled = true          # Automatically remove old superseded and stale facts
 # prune_superseded_days = 30      # Keep superseded facts for N days before deletion
 # prune_stale_days = 180          # Delete low-confidence facts not accessed in N days

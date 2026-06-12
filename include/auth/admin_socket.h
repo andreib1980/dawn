@@ -192,7 +192,11 @@ typedef enum {
     * full re-extraction. */
    ADMIN_MSG_MEMORY_SUMMARIZE_MISSING = 0x90,
 
-   /* Next free memory opcode: 0x91. */
+   /* Phase 9: backfill memory→note bridge glosses for a user's existing notes
+    * (one-time remediation for notes filed before the bridge shipped). */
+   ADMIN_MSG_MEMORY_BACKFILL_NOTE_GLOSSES = 0x91,
+
+   /* Next free memory opcode: 0x92. */
 
    /* Phase 7: Messaging channels (Phase 4 + Phase 6 operator commands).
     * Opcode range 0xA0..0xAF is reserved for messaging — Phase 6 will

@@ -147,6 +147,8 @@ typedef struct {
    char id[LLM_TOOLS_ID_LEN];          /**< Tool call ID (for response correlation) */
    char name[LLM_TOOLS_NAME_LEN];      /**< Tool name (maps to device type) */
    char arguments[LLM_TOOLS_ARGS_LEN]; /**< JSON arguments string */
+   bool args_truncated;                /**< true if the provider's args exceeded the buffer and
+                                        *   were clipped — the call must NOT execute on partial args */
 } tool_call_t;
 
 /**

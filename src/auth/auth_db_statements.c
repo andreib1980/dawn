@@ -787,10 +787,14 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* note_doc_id IS NULL: exclude memory→note bridge glosses (v61).  This
+    * statement backs extraction's like-match dedup AND the relation-supersede
+    * old-fact lookup; a LIKE hit on a gloss could otherwise supersede it and
+    * silently kill the bridge. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, fact_text, confidence FROM memory_facts "
                            "WHERE user_id = ? AND superseded_by IS NULL "
-                           "AND fact_text LIKE ? ESCAPE '\\' "
+                           "AND fact_text LIKE ? ESCAPE '\\' AND note_doc_id IS NULL "
                            "ORDER BY confidence DESC LIMIT 5",
                            -1, &s_db.stmt_memory_fact_find_similar, NULL);
    if (rc != SQLITE_OK) {
@@ -818,9 +822,11 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* note_doc_id IS NULL: bridge glosses live/die with their note (deleted via
+    * the note-delete path), never by staleness pruning. */
    rc = sqlite3_prepare_v2(s_db.db,
                            "DELETE FROM memory_facts WHERE user_id = ? AND superseded_by IS NULL "
-                           "AND last_accessed < ? AND confidence < ?",
+                           "AND last_accessed < ? AND confidence < ? AND note_doc_id IS NULL",
                            -1, &s_db.stmt_memory_fact_prune_stale, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare memory_fact_prune_stale failed: %s", sqlite3_errmsg(s_db.db));
@@ -1119,12 +1125,16 @@ int auth_db_prepare_statements(void) {
    }
 
    /* fact_get_embeddings: created_at appended last (col 3) for temporal-query
-    * scoring (#3).  Cache loader reads it and stores per-fact for boost computation. */
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, embedding, embedding_norm, created_at FROM memory_facts "
-                           "WHERE user_id = ? AND superseded_by IS NULL AND embedding IS NOT NULL "
-                           "ORDER BY confidence DESC LIMIT ?",
-                           -1, &s_db.stmt_memory_fact_get_embeddings, NULL);
+    * scoring (#3).  Cache loader reads it and stores per-fact for boost computation.
+    * note_doc_id (col 4, v61) flags memory→note bridge glosses: they stay in the
+    * cache so semantic retrieval can still surface them, but the paraphrase-dedup
+    * consumer (nearest_fact) skips them so a gloss never merges with a real fact. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, embedding, embedding_norm, created_at, note_doc_id FROM memory_facts "
+       "WHERE user_id = ? AND superseded_by IS NULL AND embedding IS NOT NULL "
+       "ORDER BY confidence DESC LIMIT ?",
+       -1, &s_db.stmt_memory_fact_get_embeddings, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare fact_get_embeddings failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;

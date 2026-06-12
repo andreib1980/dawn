@@ -581,6 +581,8 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                               memcpy(ctx->provider.openai.tool_args_buffer[tc_index], args_chunk,
                                      add_len);
                               ctx->provider.openai.tool_args_buffer[tc_index][add_len] = '\0';
+                           } else {
+                              ctx->provider.openai.tool_args_overflow[tc_index] = true;
                            }
                         } else if (cur_len + add_len < LLM_TOOLS_ARGS_LEN - 1) {
                            // OpenAI-style: append incremental delta
@@ -588,6 +590,9 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                                   args_chunk, add_len);
                            ctx->provider.openai.tool_args_buffer[tc_index][cur_len + add_len] =
                                '\0';
+                        } else {
+                           // Buffer full — the rest of this (and later) deltas are dropped.
+                           ctx->provider.openai.tool_args_overflow[tc_index] = true;
                         }
                      }
                   }
@@ -665,6 +670,9 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
                for (int i = 0; i < ctx->tool_calls.count; i++) {
                   strncpy(ctx->tool_calls.calls[i].arguments,
                           ctx->provider.openai.tool_args_buffer[i], LLM_TOOLS_ARGS_LEN - 1);
+                  ctx->tool_calls.calls[i].arguments[LLM_TOOLS_ARGS_LEN - 1] = '\0';
+                  ctx->tool_calls.calls[i].args_truncated =
+                      ctx->provider.openai.tool_args_overflow[i];
                }
                OLOG_INFO("Stream completed with %d tool call(s)", ctx->tool_calls.count);
             }
@@ -905,6 +913,7 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                ctx->provider.claude.tool_block_active = 1;
                ctx->provider.claude.tool_args[0] = '\0';
                ctx->provider.claude.tool_args_len = 0;
+               ctx->provider.claude.tool_args_overflow = false;
 
                if (json_object_object_get_ex(event, "index", &index_obj)) {
                   ctx->provider.claude.tool_index = json_object_get_int(index_obj);
@@ -1005,6 +1014,9 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                                partial, partial_len);
                         ctx->provider.claude.tool_args_len += partial_len;
                         ctx->provider.claude.tool_args[ctx->provider.claude.tool_args_len] = '\0';
+                     } else {
+                        /* Buffer full — this and later deltas are dropped. */
+                        ctx->provider.claude.tool_args_overflow = true;
                      }
                   }
                }
@@ -1084,6 +1096,8 @@ static void parse_claude_event(llm_stream_context_t *ctx, const char *event_data
                     LLM_TOOLS_NAME_LEN - 1);
             strncpy(ctx->tool_calls.calls[idx].arguments, ctx->provider.claude.tool_args,
                     LLM_TOOLS_ARGS_LEN - 1);
+            ctx->tool_calls.calls[idx].arguments[LLM_TOOLS_ARGS_LEN - 1] = '\0';
+            ctx->tool_calls.calls[idx].args_truncated = ctx->provider.claude.tool_args_overflow;
             ctx->tool_calls.count++;
             ctx->has_tool_calls = 1;
 
