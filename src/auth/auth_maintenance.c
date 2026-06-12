@@ -30,11 +30,13 @@
 #include <unistd.h>
 
 #include "auth/auth_db.h"
+#include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "image_store.h"
 #include "logging.h"
 #include "memory/memory_maintenance.h"
+#include "tools/document_db.h"
 
 /* Thread state */
 static pthread_t s_maintenance_thread;
@@ -79,6 +81,18 @@ static void *maintenance_thread_func(void *arg) {
          image_store_cleanup(&deleted);
          if (deleted > 0) {
             OLOG_INFO("auth_maintenance: cleaned %d old images", deleted);
+         }
+      }
+
+      /* Prune document/note version history past retention (v62 undo store).
+       * Same retention-sweep shape as the image cleanup above; no-op when
+       * versioning is disabled (version_retention_days <= 0). */
+      {
+         int v_deleted = 0;
+         if (document_db_version_prune_expired(g_config.documents.version_retention_days,
+                                               &v_deleted) == SUCCESS &&
+             v_deleted > 0) {
+            OLOG_INFO("auth_maintenance: pruned %d expired document version(s)", v_deleted);
          }
       }
 

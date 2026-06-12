@@ -28,11 +28,16 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "memory/memory_stem.h"
 #include "memory/memory_types.h" /* MEMORY_FACT_STEMS_MAX */
 #include "tools/document_db.h"
 #include "unity.h"
+
+/* document_db.c reads g_config (v62 versioning); zero-init = versioning off, so
+ * these search/edit tests are unaffected by the archive path. */
+dawn_config_t g_config;
 
 /* Match the production BM25 column-weight defaults (config_defaults.c). */
 #define TEST_BM25_LABEL_WEIGHT 3.0f
@@ -231,6 +236,228 @@ void test_rebuild_fts_scopes_to_live_chunks(void) {
    TEST_ASSERT_GREATER_THAN_INT(0, doc_id_for_label("public bio"));
 }
 
+/* =============================================================================
+ * v62 document versioning (soft-archive / undo / restore)
+ * ============================================================================= */
+
+/* An in-place note edit archives the pre-edit content as a restorable version. */
+void test_version_archive_on_edit(void) {
+   g_config.documents.version_retention_days = 14; /* enable versioning */
+   int64_t doc = seed_note(1, "Versioned", "ORIGINAL body text here", 10);
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_note_update(1, doc, "Versioned", "REVISED body text",
+                                                          emb, 4, 1.0f, "vh2"));
+   document_version_meta_t v[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_list(1, doc, v, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_NOT_NULL(strstr(v[0].preview, "ORIGINAL"));
+}
+
+/* Deleting a note archives its content first — the version SURVIVES the delete,
+ * and its full text is fetchable for restore (owner-scoped). */
+void test_version_survives_delete(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t doc = seed_note(1, "ToDelete", "content worth keeping", 11);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(doc));
+   document_version_meta_t v[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_list(1, doc, v, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   char *full = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[0].id, 1, &full, NULL, 0, NULL));
+   TEST_ASSERT_EQUAL_STRING("content worth keeping", full);
+   free(full);
+}
+
+/* Versions are owner-scoped: another user can neither list nor fetch them. */
+void test_version_owner_scoped(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t doc = seed_note(1, "PrivateV", "secret note body", 12);
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   document_db_note_update(1, doc, "PrivateV", "edited", emb, 4, 1.0f, "vh3");
+   document_version_meta_t v[8];
+   int n = 0;
+   document_db_version_list(1, doc, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   int n2 = -1;
+   document_db_version_list(2, doc, v, 8, &n2); /* user 2 */
+   TEST_ASSERT_EQUAL_INT(0, n2);
+   char *full = NULL;
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_get_text(v[0].id, 2, &full, NULL, 0, NULL));
+   TEST_ASSERT_NULL(full);
+}
+
+/* The per-document cap retains only the N newest versions. */
+void test_version_per_doc_cap(void) {
+   g_config.documents.version_retention_days = 14;
+   g_config.documents.version_keep_per_doc = 10;
+   int64_t doc = seed_note(1, "Churn", "v0", 13);
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   char body[16], hash[16];
+   for (int i = 1; i <= 14; i++) { /* 14 edits → capped to version_keep_per_doc (10) */
+      snprintf(body, sizeof(body), "v%d", i);
+      snprintf(hash, sizeof(hash), "vc%d", i);
+      document_db_note_update(1, doc, "Churn", body, emb, 4, 1.0f, hash);
+   }
+   document_version_meta_t v[DOC_VERSION_MAX_LIST];
+   int n = 0;
+   document_db_version_list(1, doc, v, DOC_VERSION_MAX_LIST, &n);
+   TEST_ASSERT_EQUAL_INT(10, n);
+}
+
+/* Versioning disabled (retention 0) archives nothing. */
+void test_version_disabled_archives_nothing(void) {
+   g_config.documents.version_retention_days = 0; /* off */
+   int64_t doc = seed_note(1, "NoVer", "body", 14);
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   document_db_note_update(1, doc, "NoVer", "edited", emb, 4, 1.0f, "vh9");
+   document_version_meta_t v[8];
+   int n = -1;
+   document_db_version_list(1, doc, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* =============================================================================
+ * v63 multi-chunk document full-text storage + in-place edit (B1b)
+ * ============================================================================= */
+
+/* Full text round-trips and is owner-scoped. */
+void test_full_text_set_get(void) {
+   int64_t id = 0;
+   document_db_create(1, "doc.txt", "doc.txt", "txt", "fthash", 1, false, &id);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_full_text_set(id, "the whole document body"));
+   char *t = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_full_text_get(id, 1, &t));
+   TEST_ASSERT_EQUAL_STRING("the whole document body", t);
+   free(t);
+   char *t2 = NULL;
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_full_text_get(id, 2, &t2)); /* user 2 */
+   TEST_ASSERT_NULL(t2);
+}
+
+/* A document with no stored full text (pre-v63 upload) is not editable in place. */
+void test_doc_read_for_edit_requires_full_text(void) {
+   int64_t id = 0;
+   document_db_create(1, "legacy.txt", "legacy.txt", "txt", "lhash", 1, false, &id);
+   char fn[DOC_FILENAME_MAX];
+   char *full = NULL;
+   int64_t *ids = NULL;
+   char **texts = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_doc_read_for_edit(1, id, fn, sizeof(fn), &full, &ids,
+                                                                &texts, &n));
+   TEST_ASSERT_NULL(full);
+}
+
+/* An in-place multi-chunk replace swaps content + chunks (doc_id stable), updates
+ * full text + num_chunks, archives the old content, and re-indexes FTS. */
+void test_doc_replace_in_place(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t id = 0;
+   document_db_create(1, "Manual", "Manual", "txt", "mh0", 2, false, &id);
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   int64_t c0 = 0, c1 = 0;
+   document_db_chunk_create(id, 0, "alpha chunk", emb, 4, 1.0f, 0, &c0);
+   document_db_chunk_create(id, 1, "bravo chunk", emb, 4, 1.0f, 0, &c1);
+   document_db_full_text_set(id, "alpha chunk bravo chunk");
+   char ls[MEMORY_FACT_STEMS_MAX], bs0[MEMORY_FACT_STEMS_MAX], bs1[MEMORY_FACT_STEMS_MAX];
+   memory_stem_string("Manual", ls, sizeof(ls));
+   memory_stem_string("alpha chunk", bs0, sizeof(bs0));
+   memory_stem_string("bravo chunk", bs1, sizeof(bs1));
+   document_db_chunk_index_fts(c0, ls, bs0);
+   document_db_chunk_index_fts(c1, ls, bs1);
+
+   char ns[MEMORY_FACT_STEMS_MAX];
+   memory_stem_string("charlie content", ns, sizeof(ns));
+   doc_replace_chunk_t nc[1] = { { "charlie content", emb, 1.0f, ns } };
+   int64_t old_ids[2] = { c0, c1 };
+   const char *old_bs[2] = { bs0, bs1 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_doc_replace(1, id, "charlie content", "mh1", "Manual",
+                                                          ls, old_ids, old_bs, 2, nc, 1, 4));
+
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(id, &d));
+   TEST_ASSERT_EQUAL_INT(1, d.num_chunks); /* 2 → 1, same doc id */
+
+   char *ft = NULL;
+   document_db_full_text_get(id, 1, &ft);
+   TEST_ASSERT_EQUAL_STRING("charlie content", ft);
+   free(ft);
+
+   doc_bm25_hit_t hits[10];
+   float sc[10];
+   int hn = 0;
+   document_db_chunk_search_bm25(1, "charlie", TEST_BM25_LABEL_WEIGHT, TEST_BM25_BODY_WEIGHT, hits,
+                                 sc, 10, &hn);
+   TEST_ASSERT_GREATER_THAN_INT(0, hn); /* new content searchable */
+   int hn2 = 0;
+   document_db_chunk_search_bm25(1, "bravo", TEST_BM25_LABEL_WEIGHT, TEST_BM25_BODY_WEIGHT, hits,
+                                 sc, 10, &hn2);
+   TEST_ASSERT_EQUAL_INT(0, hn2); /* old chunk gone from FTS (no orphan) */
+
+   document_version_meta_t v[8];
+   int vn = 0;
+   document_db_version_list(1, id, v, 8, &vn);
+   TEST_ASSERT_EQUAL_INT(1, vn);
+   TEST_ASSERT_NOT_NULL(strstr(v[0].preview, "alpha")); /* old content archived */
+}
+
+/* Recently-deleted list: a deleted item's surviving snapshot is recoverable
+ * (its document is gone, so it shows up), owner-scoped. */
+void test_version_list_deleted(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t doc = seed_note(1, "DeleteMe", "important content", 20);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(doc)); /* archives, then deletes */
+
+   document_version_meta_t v[8];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_list_deleted(1, v, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n); /* only the deleted item, not the still-existing seeds */
+   TEST_ASSERT_EQUAL_STRING("DeleteMe", v[0].filename);
+   TEST_ASSERT_NOT_NULL(strstr(v[0].preview, "important"));
+
+   char *full = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[0].id, 1, &full, NULL, 0, NULL));
+   TEST_ASSERT_EQUAL_STRING("important content", full);
+   free(full);
+
+   int n2 = -1;
+   document_db_version_list_deleted(2, v, 8, &n2); /* user 2 */
+   TEST_ASSERT_EQUAL_INT(0, n2);
+}
+
+/* Undo-last-change mechanic (what 'recover' does for an existing item): restoring
+ * the newest archived version's text brings the item back to its prior state and
+ * archives the just-undone state (so it stays redo-able). */
+void test_version_undo_round_trip(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t doc = seed_note(1, "Undoable", "ORIGINAL", 21);
+   float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   document_db_note_update(1, doc, "Undoable", "CHANGED", emb, 4, 1.0f,
+                           "uh1"); /* archives ORIGINAL */
+
+   document_version_meta_t v[8];
+   int n = 0;
+   document_db_version_list(1, doc, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   char *vtext = NULL;
+   document_db_version_get_text(v[0].id, 1, &vtext, NULL, 0, NULL);
+   TEST_ASSERT_EQUAL_STRING("ORIGINAL", vtext);
+
+   /* Undo: restore the newest version in place. */
+   document_db_note_update(1, doc, "Undoable", vtext, emb, 4, 1.0f, "uh2");
+   free(vtext);
+
+   document_chunk_t chunk;
+   int cc = 0;
+   document_db_chunk_read(doc, &chunk, 1, 0, &cc);
+   TEST_ASSERT_EQUAL_STRING("ORIGINAL", chunk.text); /* back to the prior state */
+   n = 0;
+   document_db_version_list(1, doc, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(2, n); /* ORIGINAL (pre-change) + CHANGED (pre-undo, now redo-able) */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_exact_label_ranks_first);
@@ -241,5 +468,15 @@ int main(void) {
    RUN_TEST(test_find_by_label_exact);
    RUN_TEST(test_rebuild_fts_reindexes_all);
    RUN_TEST(test_rebuild_fts_scopes_to_live_chunks);
+   RUN_TEST(test_version_archive_on_edit);
+   RUN_TEST(test_version_survives_delete);
+   RUN_TEST(test_version_owner_scoped);
+   RUN_TEST(test_version_per_doc_cap);
+   RUN_TEST(test_version_disabled_archives_nothing);
+   RUN_TEST(test_full_text_set_get);
+   RUN_TEST(test_doc_read_for_edit_requires_full_text);
+   RUN_TEST(test_doc_replace_in_place);
+   RUN_TEST(test_version_list_deleted);
+   RUN_TEST(test_version_undo_round_trip);
    return UNITY_END();
 }

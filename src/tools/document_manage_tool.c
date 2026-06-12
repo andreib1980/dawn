@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp */
 #include <time.h>
 
 #include "core/embedding_engine.h"
@@ -180,20 +181,27 @@ static const treg_param_t doc_manage_params[] = {
        .description =
            "Document management action: 'save_note' (file a short piece of authored reference "
            "text — a bio, pitch, address, canned answer — under a LABEL so it can be retrieved "
-           "EXACTLY later; re-saving the same label OVERWRITES it), 'save_text' (store a longer "
-           "piece of text as a normal searchable document under a title), 'edit' (change part of "
-           "an existing note WITHOUT resending the whole thing — supply the exact text to find and "
-           "what to replace it with), 'append' (add text to the end of an existing note), 'list' "
+           "EXACTLY later; re-saving the same label OVERWRITES it; if it's too long for one note, "
+           "use save_text instead), 'save_text' (store a LONGER or multi-paragraph piece of text "
+           "as a normal searchable document under a title — use this for anything that won't fit "
+           "as a single note), 'edit' (change part of "
+           "an existing note OR document WITHOUT resending the whole thing — supply the exact text "
+           "to find and "
+           "what to replace it with), 'append' (add text to the end of an existing note or "
+           "document), 'list' "
            "(show the documents and notes the user has stored), 'delete' (request deletion of a "
            "note or document by its label — this does NOT delete immediately; it asks the user to "
-           "confirm), 'confirm_delete' (carry out the deletion the user just approved). Prefer "
+           "confirm), 'confirm_delete' (carry out the deletion the user just approved), "
+           "'list_deleted' (show recently-deleted notes/documents that can still be recovered), "
+           "'recover' (UNDO — restore the previous version of an existing note/document, or bring "
+           "back a recently-deleted one, by its label). Prefer "
            "'edit'/'append' over re-saving when updating living text the user keeps current.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "save_note", "save_text", "edit", "append", "list", "delete",
-                        "confirm_delete" },
-       .enum_count = 7,
+                        "confirm_delete", "list_deleted", "recover" },
+       .enum_count = 9,
    },
    {
        .name = "label",
@@ -246,12 +254,16 @@ static const tool_metadata_t doc_manage_metadata = {
        "Save, edit, list, and delete the user's stored documents and notes. Use 'save_note' to "
        "file exact reference text (a bio, an elevator pitch, an address, a saved answer) under a "
        "label the user can ask for later by name; 'save_text' for longer documents; 'edit' / "
-       "'append' to update an existing note in place WITHOUT resending the whole thing; 'list' to "
-       "see what's stored; and 'delete' to remove something (which always asks the user to "
-       "confirm first). This is the home for verbatim, living text the user maintains and "
-       "retrieves exactly — when such a value changes, EDIT the note rather than storing the new "
+       "'append' to update an existing note OR document in place WITHOUT resending the whole "
+       "thing; 'list' to see what's stored; and 'delete' to remove something (which always asks "
+       "the user to confirm first). This is the home for verbatim, living text the user maintains "
+       "and retrieves exactly — when such a value changes, EDIT it rather than storing the new "
        "value as a memory (memory is for facts learned in passing, not authored reference text). "
-       "To READ or SEARCH stored content, use document_read / document_search instead.",
+       "Edits, overwrites, and deletes are AUTOMATICALLY version-snapshotted, so changes are safe "
+       "to make: a deleted note/document can be brought back with 'list_deleted' then 'recover', "
+       "and earlier versions are retained for a short window (the user can also restore them from "
+       "the WebUI). To READ or SEARCH stored content, use document_read / document_search "
+       "instead.",
    .params = doc_manage_params,
    .param_count = 5,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
@@ -344,35 +356,49 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
    return strdup(msg);
 }
 
-/* Resolve a single editable note the caller owns, by exact label.  Loads its one
- * chunk's text into *text_out (heap, caller frees).  Returns SUCCESS, or FAILURE
- * with *err set to a user-facing reason. */
-static int load_editable_note(int user_id,
+/* Resolve an editable note OR document the caller owns, by exact label.  Loads
+ * its current text into *text_out (heap, caller frees) and sets *is_note:
+ *   - single-chunk note → in-place note update (filetype "note", num_chunks 1);
+ *   - else a multi-chunk document with stored full text (v63) → in-place replace.
+ * FAILURE with *err for: not found / not owned / global / a multi-chunk doc that
+ * predates full-text storage (must be re-saved). */
+static int load_editable_text(int user_id,
                               const char *label,
                               document_t *doc_out,
                               char **text_out,
+                              bool *is_note,
                               const char **err) {
    *text_out = NULL;
+   *is_note = false;
    if (!label || !label[0]) {
-      *err = "Tell me which note (its label/name).";
+      *err = "Tell me which note or document (its label/name).";
       return FAILURE;
    }
-   /* Owner-scoped: find_by_label_exact also matches GLOBAL notes (not ours to
-    * edit), and the M-5 invariant is single-chunk note owned by the caller. */
-   if (document_db_find_by_label_exact(user_id, label, true, doc_out) != SUCCESS ||
-       doc_out->user_id != user_id || strcmp(doc_out->filetype, "note") != 0 ||
-       doc_out->num_chunks != 1) {
-      *err = "No editable note by that name was found (it may be a multi-part document, global, or "
-             "not yours).";
+   /* Owner-scoped: find_by_label_exact also matches GLOBAL items (not ours). */
+   if (document_db_find_by_label_exact(user_id, label, false, doc_out) != SUCCESS ||
+       doc_out->user_id != user_id) {
+      *err = "No editable note or document by that name was found (it may be global or not yours).";
       return FAILURE;
    }
-   document_chunk_t chunk;
-   int n = 0;
-   if (document_db_chunk_read(doc_out->id, &chunk, 1, 0, &n) != SUCCESS || n < 1) {
-      *err = "Couldn't read the note's current text.";
-      return FAILURE;
+
+   *is_note = (strcmp(doc_out->filetype, "note") == 0 && doc_out->num_chunks == 1);
+   if (*is_note) {
+      document_chunk_t chunk;
+      int n = 0;
+      if (document_db_chunk_read(doc_out->id, &chunk, 1, 0, &n) != SUCCESS || n < 1) {
+         *err = "Couldn't read the note's current text.";
+         return FAILURE;
+      }
+      *text_out = strdup(chunk.text);
+   } else {
+      /* Multi-chunk document — editable only if its canonical full text is stored
+       * (v63).  Pre-v63 uploads have none and must be re-saved first. */
+      if (document_db_full_text_get(doc_out->id, user_id, text_out) != SUCCESS) {
+         *err = "That document predates editable storage — re-save it (save_text) to enable "
+                "editing.";
+         return FAILURE;
+      }
    }
-   *text_out = strdup(chunk.text);
    if (!*text_out) {
       *err = "Out of memory.";
       return FAILURE;
@@ -380,18 +406,21 @@ static int load_editable_note(int user_id,
    return SUCCESS;
 }
 
-/* Commit edited note text via the stable-id note update (re-embed + FTS rebuild,
- * keeps doc_id/is_global/gloss-pointer).  Returns the user-facing message. */
-static char *commit_note_text(int user_id,
-                              int64_t doc_id,
-                              const char *label,
-                              const char *new_text,
-                              const char *ok_msg) {
+/* Commit edited text: a single-chunk note goes through the stable-id note update;
+ * a multi-chunk document is re-chunked + re-embedded in place.  Both keep doc_id
+ * stable and archive the prior content.  Returns the user-facing message. */
+static char *commit_edit(int user_id,
+                         const document_t *doc,
+                         bool is_note,
+                         const char *new_text,
+                         const char *ok_msg) {
    doc_index_result_t res;
-   if (document_note_update(user_id, doc_id, label, new_text, strlen(new_text), &res) !=
-       DOC_INDEX_SUCCESS) {
+   int rc = is_note ? document_note_update(user_id, doc->id, doc->filename, new_text,
+                                           strlen(new_text), &res)
+                    : document_doc_update(user_id, doc->id, new_text, strlen(new_text), &res);
+   if (rc != DOC_INDEX_SUCCESS) {
       char msg[256];
-      snprintf(msg, sizeof(msg), "Couldn't update the note: %s", res.error_msg);
+      snprintf(msg, sizeof(msg), "Couldn't apply the edit: %s", res.error_msg);
       return strdup(msg);
    }
    return strdup(ok_msg);
@@ -428,17 +457,18 @@ static char *do_edit(int user_id, const char *label, const char *change_json) {
 
    document_t doc;
    char *old = NULL;
+   bool is_note = false;
    const char *err = NULL;
-   if (load_editable_note(user_id, label, &doc, &old, &err) != SUCCESS) {
+   if (load_editable_text(user_id, label, &doc, &old, &is_note, &err) != SUCCESS) {
       result = strdup(err);
    } else {
       /* Unique-match contract (mirrors str_replace): 0 / >1 are errors that leave
-       * the note untouched, never a guess. */
+       * the note/document untouched, never a guess. */
       char *new_text = NULL;
       int occ = docmgmt_find_replace_once(old, find, replace, &new_text);
       if (occ == 0) {
-         result = strdup("That exact text isn't in the note — use document_read to get the current "
-                         "text and copy the snippet verbatim.");
+         result = strdup("That exact text isn't there — use document_read to get the current text "
+                         "and copy the snippet verbatim.");
       } else if (occ >= 2) {
          result = strdup("That text appears more than once — include more surrounding text in "
                          "'find' to make it unique.");
@@ -446,10 +476,11 @@ static char *do_edit(int user_id, const char *label, const char *change_json) {
          result = strdup("Out of memory.");
       } else {
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
-         snprintf(ok, sizeof(ok), "Edited note '%s' (replaced 1 occurrence).", doc.filename);
-         result = commit_note_text(user_id, doc.id, doc.filename, new_text, ok);
-         OLOG_INFO("document_manage edit: note id=%lld find_len=%zu", (long long)doc.id,
-                   strlen(find));
+         snprintf(ok, sizeof(ok), "Edited %s '%s' (replaced 1 occurrence).",
+                  is_note ? "note" : "document", doc.filename);
+         result = commit_edit(user_id, &doc, is_note, new_text, ok);
+         OLOG_INFO("document_manage edit: %s id=%lld find_len=%zu", is_note ? "note" : "doc",
+                   (long long)doc.id, strlen(find));
          free(new_text);
       }
    }
@@ -459,7 +490,7 @@ static char *do_edit(int user_id, const char *label, const char *change_json) {
    return result;
 }
 
-/* append: add text to the end of an existing note (newline-joined). */
+/* append: add text to the end of an existing note or document (newline-joined). */
 static char *do_append(int user_id, const char *label, const char *text) {
    if (!text || !text[0])
       return strdup("To append, provide the text to add.");
@@ -469,19 +500,21 @@ static char *do_append(int user_id, const char *label, const char *text) {
 
    document_t doc;
    char *old = NULL;
+   bool is_note = false;
    const char *err = NULL;
-   if (load_editable_note(user_id, label, &doc, &old, &err) != SUCCESS) {
-      result = strdup(err); /* nonexistent note → error, never auto-create */
+   if (load_editable_text(user_id, label, &doc, &old, &is_note, &err) != SUCCESS) {
+      result = strdup(err); /* nonexistent target → error, never auto-create */
    } else {
       char *new_text = docmgmt_append_text(old, text);
       if (!new_text) {
          result = strdup("Out of memory.");
       } else {
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
-         snprintf(ok, sizeof(ok), "Appended to note '%s'.", doc.filename);
-         result = commit_note_text(user_id, doc.id, doc.filename, new_text, ok);
-         OLOG_INFO("document_manage append: note id=%lld add_len=%zu", (long long)doc.id,
-                   strlen(text));
+         snprintf(ok, sizeof(ok), "Appended to %s '%s'.", is_note ? "note" : "document",
+                  doc.filename);
+         result = commit_edit(user_id, &doc, is_note, new_text, ok);
+         OLOG_INFO("document_manage append: %s id=%lld add_len=%zu", is_note ? "note" : "doc",
+                   (long long)doc.id, strlen(text));
          free(new_text);
       }
    }
@@ -514,6 +547,106 @@ static char *do_list(int user_id) {
    return out ? out : strdup("Couldn't list your documents.");
 }
 
+/* list_deleted: show recently-deleted notes/documents still recoverable. */
+static char *do_list_deleted(int user_id) {
+   document_version_meta_t v[DOC_VERSION_MAX_LIST];
+   int n = 0;
+   if (document_db_version_list_deleted(user_id, v, DOC_VERSION_MAX_LIST, &n) != SUCCESS)
+      return strdup("Couldn't check recently deleted items.");
+   if (n == 0)
+      return strdup("Nothing recoverable — no items were deleted within the retention window.");
+
+   strbuf_t sb;
+   strbuf_init(&sb, 512);
+   strbuf_appendf(&sb, "Recently deleted (%d) — recover any by its name:\n", n);
+   for (int i = 0; i < n; i++)
+      strbuf_appendf(&sb, "- '%s'\n", v[i].filename);
+   if (strbuf_oom(&sb)) {
+      strbuf_free(&sb);
+      return strdup("The deleted-items list is too long to show in full.");
+   }
+   char *out = strbuf_steal(&sb);
+   return out ? out : strdup("Couldn't list deleted items.");
+}
+
+/* recover: undo the last change to an item, OR bring a deleted item back.
+ *   - If the item STILL EXISTS, restore its newest saved version in place (undo
+ *     the last edit/overwrite).  The restore is itself snapshotted, so repeating
+ *     'recover' toggles between the two most-recent states (undo / redo).
+ *   - If the item was DELETED, re-create it from its surviving snapshot (as a
+ *     note, or a document if the snapshot is too long for one note). */
+static char *do_recover(int user_id, const char *label) {
+   if (!label || !label[0])
+      return strdup("Which item should I undo or recover? Give its name (use 'list_deleted').");
+
+   /* Existing item → undo its last change by restoring the newest version. */
+   document_t doc;
+   if (document_db_find_by_label_exact(user_id, label, false, &doc) == SUCCESS &&
+       doc.user_id == user_id) {
+      document_version_meta_t ev[DOC_VERSION_MAX_LIST];
+      int en = 0;
+      document_db_version_list(user_id, doc.id, ev, DOC_VERSION_MAX_LIST, &en);
+      if (en == 0)
+         return strdup(
+             "There's no earlier version to undo — it hasn't changed since it was saved.");
+      char *vtext = NULL;
+      if (document_db_version_get_text(ev[0].id, user_id, &vtext, NULL, 0, NULL) != SUCCESS ||
+          !vtext)
+         return strdup("Couldn't read the saved version to undo the change.");
+      bool is_note = (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1);
+      char ok[DOCMGMT_CONFIRM_MSG_MAX];
+      snprintf(ok, sizeof(ok), "Undid the last change to %s '%s' (restored the previous version).",
+               is_note ? "note" : "document", doc.filename);
+      pthread_mutex_lock(&s_edit_mutex);
+      char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
+      pthread_mutex_unlock(&s_edit_mutex);
+      free(vtext);
+      return result;
+   }
+
+   /* Otherwise the item was deleted — re-create it from its surviving snapshot. */
+   document_version_meta_t v[DOC_VERSION_MAX_LIST];
+   int n = 0;
+   document_db_version_list_deleted(user_id, v, DOC_VERSION_MAX_LIST, &n);
+   int64_t version_id = 0;
+   char fname[DOC_FILENAME_MAX] = "";
+   for (int i = 0; i < n; i++) {
+      if (strcasecmp(v[i].filename, label) == 0) {
+         version_id = v[i].id;
+         snprintf(fname, sizeof(fname), "%s", v[i].filename);
+         break;
+      }
+   }
+   if (version_id == 0)
+      return strdup("No recently-deleted item by that name (use 'list_deleted' to see what's "
+                    "recoverable).");
+
+   char *text = NULL;
+   if (document_db_version_get_text(version_id, user_id, &text, fname, sizeof(fname), NULL) !=
+           SUCCESS ||
+       !text)
+      return strdup("Couldn't read the saved version to recover it.");
+
+   doc_index_result_t res;
+   int rc = document_index_note(user_id, fname, text, strlen(text), false, &res);
+   bool as_note = (rc == DOC_INDEX_SUCCESS);
+   if (!as_note) /* too long for a note → it was a document */
+      rc = document_index_text(user_id, fname, "text", text, strlen(text), false, &res);
+   free(text);
+
+   if (rc != DOC_INDEX_SUCCESS) {
+      char msg[DOC_FILENAME_MAX + 160]; /* label + error_msg + prefix */
+      snprintf(msg, sizeof(msg), "Couldn't recover '%s': %s", fname, res.error_msg);
+      return strdup(msg);
+   }
+   if (as_note && res.doc_id > 0)
+      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, fname);
+
+   char msg[DOCMGMT_CONFIRM_MSG_MAX];
+   snprintf(msg, sizeof(msg), "Recovered '%s'.", fname);
+   return strdup(msg);
+}
+
 /* delete: resolve the target and STAGE it — never deletes here.  The user must
  * approve, after which the model calls confirm_delete. */
 static char *do_delete_request(int user_id, const char *label, int64_t id) {
@@ -540,8 +673,9 @@ static char *do_delete_request(int user_id, const char *label, int64_t id) {
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX]; /* base copy + up to DOC_FILENAME_MAX label */
    snprintf(msg, sizeof(msg),
-            "This will PERMANENTLY delete the %s '%s'. This cannot be undone. Ask the user to "
-            "confirm, then call document_manage with action 'confirm_delete' to proceed.",
+            "This will delete the %s '%s' (recoverable with 'recover' for a short window if "
+            "version history is on). Ask the user to confirm, then call document_manage with "
+            "action 'confirm_delete' to proceed.",
             is_note ? "note" : "document", doc.filename);
    return strdup(msg);
 }
@@ -592,10 +726,15 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       return do_list(user_id);
    if (strcmp(act, "confirm_delete") == 0)
       return do_confirm_delete(user_id);
+   if (strcmp(act, "list_deleted") == 0)
+      return do_list_deleted(user_id);
 
    /* The remaining actions read a label (base) and possibly id / text (custom). */
    char label[DOC_FILENAME_MAX] = "";
    tool_param_extract_base(value, label, sizeof(label));
+
+   if (strcmp(act, "recover") == 0)
+      return do_recover(user_id, label);
 
    if (strcmp(act, "delete") == 0) {
       char id_str[24] = "";

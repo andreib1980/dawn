@@ -1039,12 +1039,17 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                             config->documents.hybrid_vector_weight);
       JSON_TO_CONFIG_DOUBLE(section, "phrase_bonus_weight", config->documents.phrase_bonus_weight);
       JSON_TO_CONFIG_DOUBLE(section, "search_min_score", config->documents.search_min_score);
+      JSON_TO_CONFIG_INT(section, "version_retention_days",
+                         config->documents.version_retention_days);
+      JSON_TO_CONFIG_INT(section, "version_keep_per_doc", config->documents.version_keep_per_doc);
       CONFIG_CLAMP(config->documents.fts_label_weight, 0.0f, 100.0f);
       CONFIG_CLAMP(config->documents.fts_body_weight, 0.0f, 100.0f);
       CONFIG_CLAMP(config->documents.hybrid_keyword_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->documents.hybrid_vector_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->documents.phrase_bonus_weight, 0.0f, 1.0f);
       CONFIG_CLAMP(config->documents.search_min_score, 0.0f, 1.0f);
+      CONFIG_CLAMP(config->documents.version_retention_days, 0, 3650);
+      CONFIG_CLAMP(config->documents.version_keep_per_doc, 1, 1000);
    }
 
    /* [vision] — per-upload image size and dimension limits */

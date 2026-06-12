@@ -468,6 +468,11 @@ typedef struct {
    float hybrid_vector_weight;  /* Semantic (cosine) fusion weight (default: 0.7, range: 0-1) */
    float phrase_bonus_weight;   /* Ordered/contiguous phrase-bonus scale (default: 0.25, 0-1) */
    float search_min_score;      /* Post-fusion relevance gate (default: 0.3, range: 0-1) */
+   /* v62 versioning: a snapshot of a note/document's content is archived before
+    * every destructive mutation (overwrite, edit/append, delete).  Retention is
+    * the older of two bounds — age in days, and a per-document keep-last-N cap. */
+   int version_retention_days; /* Drop archived versions older than this (default: 14, 0 = off) */
+   int version_keep_per_doc;   /* Per-document cap on retained versions (default: 10) */
 } documents_config_t;
 
 /* =============================================================================

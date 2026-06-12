@@ -1019,19 +1019,13 @@ static void parse_documents(toml_table_t *table, documents_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "max_file_size_kb",
-                                             "max_documents",
-                                             "max_pages",
-                                             "max_extracted_size_kb",
-                                             "max_index_size_kb",
-                                             "max_indexed_documents",
-                                             "fts_label_weight",
-                                             "fts_body_weight",
-                                             "hybrid_keyword_weight",
-                                             "hybrid_vector_weight",
-                                             "phrase_bonus_weight",
-                                             "search_min_score",
-                                             NULL };
+   static const char *const known_keys[] = {
+      "max_file_size_kb",       "max_documents",        "max_pages",
+      "max_extracted_size_kb",  "max_index_size_kb",    "max_indexed_documents",
+      "fts_label_weight",       "fts_body_weight",      "hybrid_keyword_weight",
+      "hybrid_vector_weight",   "phrase_bonus_weight",  "search_min_score",
+      "version_retention_days", "version_keep_per_doc", NULL
+   };
    warn_unknown_keys(table, "documents", known_keys);
 
    PARSE_INT(table, "max_file_size_kb", config->max_file_size_kb);
@@ -1066,6 +1060,12 @@ static void parse_documents(toml_table_t *table, documents_config_t *config) {
    CONFIG_CLAMP(config->phrase_bonus_weight, 0.0f, 1.0f);
    PARSE_DOUBLE(table, "search_min_score", config->search_min_score);
    CONFIG_CLAMP(config->search_min_score, 0.0f, 1.0f);
+
+   PARSE_INT(table, "version_retention_days", config->version_retention_days);
+   CONFIG_CLAMP(config->version_retention_days, 0, 3650);
+
+   PARSE_INT(table, "version_keep_per_doc", config->version_keep_per_doc);
+   CONFIG_CLAMP(config->version_keep_per_doc, 1, 1000);
 }
 
 static void parse_vision(toml_table_t *table, vision_config_t *config) {

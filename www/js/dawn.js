@@ -698,6 +698,18 @@
                if (typeof DawnDocLibrary !== 'undefined')
                   DawnDocLibrary.handleNoteUpdateResponse(msg.payload);
                break;
+            case 'doc_library_version_list_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleVersionListResponse(msg.payload);
+               break;
+            case 'doc_library_version_restore_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleVersionRestoreResponse(msg.payload);
+               break;
+            case 'doc_library_deleted_list_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleDeletedListResponse(msg.payload);
+               break;
             // Calendar account management
             case 'calendar_list_accounts_response':
                if (typeof DawnCalendarAccounts !== 'undefined')

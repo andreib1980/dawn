@@ -32,10 +32,21 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_bm25.h"
 #include "memory/memory_stem.h"
+
+extern dawn_config_t g_config;
+
+/* v62 versioning: archive the pre-mutation content of a document before an
+ * in-place update or delete.  Defined later (near document_db_note_update) but
+ * also called from document_db_delete_indexed above it. */
+static void version_archive_locked(int64_t doc_id,
+                                   int user_id,
+                                   const char *filename,
+                                   const char *text);
 
 /* Max length of a built FTS5 MATCH expression (OR-of-quoted-stems). */
 #define DOC_CHUNK_MATCH_EXPR_MAX 2048
@@ -561,16 +572,18 @@ int document_db_delete_indexed(int64_t doc_id) {
    /* --- Phase 1 (locked): snapshot chunk ids + text + the filename. --- */
    AUTH_DB_LOCK_OR_FAIL();
    char filename[DOC_FILENAME_MAX] = "";
+   int owner_user_id = 0; /* for the v62 pre-delete version snapshot */
    int64_t *chunk_ids = NULL;
    char **chunk_texts = NULL;
    int n = 0, cap = 0;
    bool oom = false;
    sqlite3_stmt *sel = NULL;
-   int prep = sqlite3_prepare_v2(s_db.db,
-                                 "SELECT c.id, c.text, d.filename FROM document_chunks c "
-                                 "JOIN documents d ON d.id = c.document_id "
-                                 "WHERE c.document_id = ?",
-                                 -1, &sel, NULL);
+   int prep = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.id, c.text, d.filename, d.user_id FROM document_chunks c "
+       "JOIN documents d ON d.id = c.document_id "
+       "WHERE c.document_id = ?",
+       -1, &sel, NULL);
    if (prep == SQLITE_OK) {
       sqlite3_bind_int64(sel, 1, doc_id);
       while (!oom && sqlite3_step(sel) == SQLITE_ROW) {
@@ -601,6 +614,7 @@ int document_db_delete_indexed(int64_t doc_id) {
                strncpy(filename, (const char *)fn, sizeof(filename) - 1);
                filename[sizeof(filename) - 1] = '\0';
             }
+            owner_user_id = sqlite3_column_int(sel, 3);
          }
          n++;
       }
@@ -635,6 +649,29 @@ int document_db_delete_indexed(int64_t doc_id) {
       (void)memory_stem_string(chunk_texts[i], body_stems[i], MEMORY_FACT_STEMS_MAX);
    }
 
+   /* Build the pre-delete content snapshot (concat of chunks, newline-joined).
+    * Single-chunk notes are exact; multi-chunk docs are lossy at overlap
+    * boundaries — acceptable for a recovery aid.  NULL on OOM → snapshot skipped
+    * (the delete still proceeds; versioning is best-effort). */
+   char *snapshot = NULL;
+   if (g_config.documents.version_retention_days > 0) {
+      size_t total = 0;
+      for (int i = 0; i < n; i++)
+         total += strlen(chunk_texts[i]) + 1;
+      snapshot = malloc(total + 1);
+      if (snapshot) {
+         size_t pos = 0;
+         for (int i = 0; i < n; i++) {
+            size_t l = strlen(chunk_texts[i]);
+            memcpy(snapshot + pos, chunk_texts[i], l);
+            pos += l;
+            if (i + 1 < n)
+               snapshot[pos++] = '\n';
+         }
+         snapshot[pos] = '\0';
+      }
+   }
+
    /* --- Phase 3 (locked): FTS deletes + document delete in one transaction.
     * Plain lock (not AUTH_DB_LOCK_OR_FAIL) + an initialized guard so an early
     * return can't leak the heap buffers allocated above. */
@@ -643,6 +680,8 @@ int document_db_delete_indexed(int64_t doc_id) {
       pthread_mutex_lock(&s_db.mutex);
       if (s_db.initialized) {
          (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+         /* Snapshot the pre-delete content so the deletion is undoable. */
+         version_archive_locked(doc_id, owner_user_id, filename, snapshot);
          for (int i = 0; i < n; i++)
             (void)fts5_delete_chunk_stems_locked(chunk_ids[i], label_stems, body_stems[i]);
          sqlite3_stmt *del = s_db.stmt_doc_delete;
@@ -662,6 +701,7 @@ int document_db_delete_indexed(int64_t doc_id) {
       result = document_db_delete(doc_id);
    }
 
+   free(snapshot);
    for (int i = 0; i < n; i++) {
       free(chunk_texts[i]);
       if (body_stems)
@@ -841,6 +881,488 @@ int document_db_chunk_search_bm25(int user_id,
    return SUCCESS;
 }
 
+/* =============================================================================
+ * v62: document_versions — soft-archive of pre-mutation content for undo/restore
+ * ============================================================================= */
+
+/* Archive the pre-mutation content of a document as a restorable version, then
+ * prune that document's history to the keep-last-N cap.  CALLER HOLDS THE LOCK
+ * and is inside a transaction (the snapshot must be atomic with the mutation it
+ * precedes).  Best-effort: versioning is a safety net, so a failure here is
+ * logged and swallowed — it must never abort the mutation.  No-op when
+ * versioning is disabled (version_retention_days <= 0). */
+static void version_archive_locked(int64_t doc_id,
+                                   int user_id,
+                                   const char *filename,
+                                   const char *text) {
+   if (g_config.documents.version_retention_days <= 0)
+      return;
+   if (!text)
+      text = "";
+
+   sqlite3_stmt *ins = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "INSERT INTO document_versions"
+                          "(document_id, user_id, filename, text, archived_at) VALUES(?,?,?,?,?)",
+                          -1, &ins, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(ins, 1, doc_id);
+      sqlite3_bind_int(ins, 2, user_id);
+      sqlite3_bind_text(ins, 3, filename ? filename : "", -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(ins, 4, text, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(ins, 5, (int64_t)time(NULL));
+      if (sqlite3_step(ins) != SQLITE_DONE)
+         OLOG_WARNING("document_db: version archive failed (doc %lld): %s", (long long)doc_id,
+                      sqlite3_errmsg(s_db.db));
+      sqlite3_finalize(ins);
+   }
+
+   /* Keep only the N newest versions for this document. */
+   sqlite3_stmt *pr = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "DELETE FROM document_versions WHERE document_id = ?1 AND id NOT IN "
+                          "(SELECT id FROM document_versions WHERE document_id = ?1 "
+                          " ORDER BY archived_at DESC, id DESC LIMIT ?2)",
+                          -1, &pr, NULL) == SQLITE_OK) {
+      int keep = g_config.documents.version_keep_per_doc;
+      if (keep < 1)
+         keep = 1;
+      sqlite3_bind_int64(pr, 1, doc_id);
+      sqlite3_bind_int(pr, 2, keep);
+      (void)sqlite3_step(pr);
+      sqlite3_finalize(pr);
+   }
+}
+
+/* List a document's archived versions, newest first, owner-scoped.  Returns
+ * metadata + a short text preview (full text fetched on restore via
+ * document_db_version_get_text). */
+int document_db_version_list(int user_id,
+                             int64_t doc_id,
+                             document_version_meta_t *out,
+                             int max,
+                             int *count_out) {
+   if (!out || max <= 0 || !count_out)
+      return FAILURE;
+   *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int count = 0;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id, document_id, filename, substr(text, 1, ?), archived_at "
+                          "FROM document_versions WHERE document_id = ? AND user_id = ? "
+                          "ORDER BY archived_at DESC, id DESC LIMIT ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, DOC_VERSION_PREVIEW_MAX - 1);
+      sqlite3_bind_int64(st, 2, doc_id);
+      sqlite3_bind_int(st, 3, user_id);
+      sqlite3_bind_int(st, 4, max);
+      while (count < max && sqlite3_step(st) == SQLITE_ROW) {
+         out[count].id = sqlite3_column_int64(st, 0);
+         out[count].document_id = sqlite3_column_int64(st, 1);
+         col_text_copy(out[count].filename, sizeof(out[count].filename), st, 2);
+         col_text_copy(out[count].preview, sizeof(out[count].preview), st, 3);
+         out[count].archived_at = sqlite3_column_int64(st, 4);
+         count++;
+      }
+   }
+   if (st)
+      sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count_out = count;
+   return SUCCESS;
+}
+
+/* List RECENTLY-DELETED items: the newest archived version of each document that
+ * no longer exists (the snapshot outlived a delete), owner-scoped, newest first.
+ * The returned `id` is the version id to restore via document_db_version_get_text
+ * (the original document is gone, so restore re-creates it).  SQLite's
+ * bare-column-from-MAX-row rule makes the GROUP BY pick the newest version's row. */
+int document_db_version_list_deleted(int user_id,
+                                     document_version_meta_t *out,
+                                     int max,
+                                     int *count_out) {
+   if (!out || max <= 0 || !count_out)
+      return FAILURE;
+   *count_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int count = 0;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT id, document_id, filename, substr(text, 1, ?), MAX(archived_at) "
+                          "FROM document_versions "
+                          "WHERE user_id = ? AND document_id NOT IN (SELECT id FROM documents) "
+                          "GROUP BY document_id ORDER BY MAX(archived_at) DESC LIMIT ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, DOC_VERSION_PREVIEW_MAX - 1);
+      sqlite3_bind_int(st, 2, user_id);
+      sqlite3_bind_int(st, 3, max);
+      while (count < max && sqlite3_step(st) == SQLITE_ROW) {
+         out[count].id = sqlite3_column_int64(st, 0);
+         out[count].document_id = sqlite3_column_int64(st, 1);
+         col_text_copy(out[count].filename, sizeof(out[count].filename), st, 2);
+         col_text_copy(out[count].preview, sizeof(out[count].preview), st, 3);
+         out[count].archived_at = sqlite3_column_int64(st, 4);
+         count++;
+      }
+   }
+   if (st)
+      sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   *count_out = count;
+   return SUCCESS;
+}
+
+/* Fetch a version's FULL text (for restore), owner-scoped.  *text_out is a heap
+ * string the caller frees; filename_out/doc_id_out are optional. */
+int document_db_version_get_text(int64_t version_id,
+                                 int user_id,
+                                 char **text_out,
+                                 char *filename_out,
+                                 size_t fn_sz,
+                                 int64_t *doc_id_out) {
+   if (!text_out)
+      return FAILURE;
+   *text_out = NULL;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT text, filename, document_id FROM document_versions "
+                          "WHERE id = ? AND user_id = ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, version_id);
+      sqlite3_bind_int(st, 2, user_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         const unsigned char *t = sqlite3_column_text(st, 0);
+         *text_out = strdup(t ? (const char *)t : "");
+         if (filename_out)
+            col_text_copy(filename_out, fn_sz, st, 1);
+         if (doc_id_out)
+            *doc_id_out = sqlite3_column_int64(st, 2);
+         result = *text_out ? SUCCESS : FAILURE;
+      }
+   }
+   if (st)
+      sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+/* =============================================================================
+ * v63: document_full_text — canonical un-chunked text for multi-chunk doc edits
+ * ============================================================================= */
+
+/* UPSERT a document's full text.  Caller holds the lock (use inside the
+ * doc-replace transaction or ingest). */
+static int full_text_set_locked(int64_t doc_id, const char *text) {
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "INSERT INTO document_full_text(document_id, text) VALUES(?,?) "
+                          "ON CONFLICT(document_id) DO UPDATE SET text = excluded.text",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, doc_id);
+      sqlite3_bind_text(st, 2, text ? text : "", -1, SQLITE_TRANSIENT);
+      if (sqlite3_step(st) == SQLITE_DONE)
+         result = SUCCESS;
+      sqlite3_finalize(st);
+   }
+   return result;
+}
+
+/* Store/replace a document's canonical full text (own lock — used by ingest). */
+int document_db_full_text_set(int64_t doc_id, const char *text) {
+   if (!text)
+      return FAILURE;
+   AUTH_DB_LOCK_OR_FAIL();
+   int result = full_text_set_locked(doc_id, text);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+/* Fetch a document's canonical full text, owner-scoped.  *text_out is a heap
+ * string (caller frees); FAILURE if the document has no stored full text (a
+ * pre-v63 upload that must be re-saved before it can be edited). */
+int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out) {
+   if (!text_out)
+      return FAILURE;
+   *text_out = NULL;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT f.text FROM document_full_text f "
+                          "JOIN documents d ON d.id = f.document_id "
+                          "WHERE f.document_id = ? AND d.user_id = ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, doc_id);
+      sqlite3_bind_int(st, 2, user_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         const unsigned char *t = sqlite3_column_text(st, 0);
+         *text_out = strdup(t ? (const char *)t : "");
+         result = *text_out ? SUCCESS : FAILURE;
+      }
+      sqlite3_finalize(st);
+   }
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+/* Read a multi-chunk document for in-place editing (B1b): owner-checked, must
+ * have stored full text.  Returns the filename, full text (heap), and the old
+ * chunk ids + body texts (heap arrays, for the caller to stem outside the lock
+ * before the atomic replace).  Caller frees full_text_out, old_ids_out, and each
+ * old_texts_out[i] + the array. */
+int document_db_doc_read_for_edit(int user_id,
+                                  int64_t doc_id,
+                                  char *filename_out,
+                                  size_t fn_sz,
+                                  char **full_text_out,
+                                  int64_t **old_ids_out,
+                                  char ***old_texts_out,
+                                  int *n_out) {
+   if (!full_text_out || !old_ids_out || !old_texts_out || !n_out)
+      return FAILURE;
+   *full_text_out = NULL;
+   *old_ids_out = NULL;
+   *old_texts_out = NULL;
+   *n_out = 0;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   int result = FAILURE;
+   int64_t *ids = NULL;
+   char **texts = NULL;
+   int n = 0, cap = 0;
+   bool oom = false;
+
+   /* Owner-checked full text — also rejects pre-v63 docs (no row) and other
+    * users' / global docs. */
+   sqlite3_stmt *ft = NULL;
+   char *full = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT f.text, d.filename FROM document_full_text f "
+                          "JOIN documents d ON d.id = f.document_id "
+                          "WHERE f.document_id = ? AND d.user_id = ?",
+                          -1, &ft, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(ft, 1, doc_id);
+      sqlite3_bind_int(ft, 2, user_id);
+      if (sqlite3_step(ft) == SQLITE_ROW) {
+         const unsigned char *t = sqlite3_column_text(ft, 0);
+         full = strdup(t ? (const char *)t : "");
+         if (filename_out)
+            col_text_copy(filename_out, fn_sz, ft, 1);
+      }
+   }
+   if (ft)
+      sqlite3_finalize(ft);
+
+   if (full) {
+      sqlite3_stmt *cs = NULL;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "SELECT id, text FROM document_chunks WHERE document_id = ? "
+                             "ORDER BY chunk_index",
+                             -1, &cs, NULL) == SQLITE_OK) {
+         sqlite3_bind_int64(cs, 1, doc_id);
+         while (!oom && sqlite3_step(cs) == SQLITE_ROW) {
+            if (n == cap) {
+               int ncap = cap ? cap * 2 : 8;
+               int64_t *nids = realloc(ids, (size_t)ncap * sizeof(*nids));
+               char **ntexts = realloc(texts, (size_t)ncap * sizeof(*ntexts));
+               if (nids)
+                  ids = nids;
+               if (ntexts)
+                  texts = ntexts;
+               if (!nids || !ntexts) {
+                  oom = true;
+                  break;
+               }
+               cap = ncap;
+            }
+            ids[n] = sqlite3_column_int64(cs, 0);
+            const unsigned char *t = sqlite3_column_text(cs, 1);
+            texts[n] = strdup(t ? (const char *)t : "");
+            if (!texts[n]) {
+               oom = true;
+               break;
+            }
+            n++;
+         }
+      }
+      if (cs)
+         sqlite3_finalize(cs);
+   }
+   AUTH_DB_UNLOCK();
+
+   if (!full || oom) {
+      for (int i = 0; i < n; i++)
+         free(texts[i]);
+      free(texts);
+      free(ids);
+      free(full);
+      return FAILURE;
+   }
+
+   *full_text_out = full;
+   *old_ids_out = ids;
+   *old_texts_out = texts;
+   *n_out = n;
+   result = SUCCESS;
+   return result;
+}
+
+/* Atomic in-place replace of a multi-chunk document's content (B1b).  In one
+ * transaction: archive the OLD full text as a restorable version, FTS-delete the
+ * old chunks, swap in the new chunks + their FTS rows, update num_chunks +
+ * file_hash, and store the new full text — keeping doc_id / is_global stable.
+ * All stems are computed by the caller (leaf-lock); label_stems is the same for
+ * every chunk (the filename is unchanged). */
+int document_db_doc_replace(int user_id,
+                            int64_t doc_id,
+                            const char *new_full_text,
+                            const char *new_hash,
+                            const char *filename,
+                            const char *label_stems,
+                            const int64_t *old_ids,
+                            const char *const *old_body_stems,
+                            int n_old,
+                            const doc_replace_chunk_t *new_chunks,
+                            int n_new,
+                            int dims) {
+   if (!new_full_text || !new_hash || n_new <= 0 || dims <= 0)
+      return FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   int result = FAILURE;
+   if (!s_db.initialized) {
+      AUTH_DB_UNLOCK();
+      return FAILURE;
+   }
+
+   /* Read the old full text for the version snapshot (best-effort). */
+   char *old_full = NULL;
+   sqlite3_stmt *of = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT text FROM document_full_text WHERE document_id = ?", -1,
+                          &of, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(of, 1, doc_id);
+      if (sqlite3_step(of) == SQLITE_ROW) {
+         const unsigned char *t = sqlite3_column_text(of, 0);
+         old_full = strdup(t ? (const char *)t : "");
+      }
+      sqlite3_finalize(of);
+   }
+
+   (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+   bool ok = true;
+
+   version_archive_locked(doc_id, user_id, filename, old_full ? old_full : "");
+
+   for (int i = 0; i < n_old; i++)
+      (void)fts5_delete_chunk_stems_locked(old_ids[i], label_stems,
+                                           old_body_stems ? old_body_stems[i] : "");
+
+   /* Drop all old chunks. */
+   sqlite3_stmt *dc = NULL;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM document_chunks WHERE document_id = ?", -1, &dc,
+                          NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(dc, 1, doc_id);
+      if (sqlite3_step(dc) != SQLITE_DONE)
+         ok = false;
+      sqlite3_finalize(dc);
+   } else {
+      ok = false;
+   }
+
+   /* Insert the new chunks + FTS rows. */
+   sqlite3_stmt *ic = NULL;
+   if (ok && sqlite3_prepare_v2(s_db.db,
+                                "INSERT INTO document_chunks"
+                                "(document_id, chunk_index, text, embedding, embedding_norm, "
+                                " created_at) VALUES(?,?,?,?,?,?)",
+                                -1, &ic, NULL) == SQLITE_OK) {
+      int64_t ts = (int64_t)time(NULL);
+      for (int i = 0; i < n_new && ok; i++) {
+         sqlite3_reset(ic);
+         sqlite3_bind_int64(ic, 1, doc_id);
+         sqlite3_bind_int(ic, 2, i);
+         sqlite3_bind_text(ic, 3, new_chunks[i].text, -1, SQLITE_TRANSIENT);
+         sqlite3_bind_blob(ic, 4, new_chunks[i].embedding, dims * (int)sizeof(float),
+                           SQLITE_TRANSIENT);
+         sqlite3_bind_double(ic, 5, (double)new_chunks[i].norm);
+         sqlite3_bind_int64(ic, 6, ts);
+         if (sqlite3_step(ic) != SQLITE_DONE) {
+            ok = false;
+            break;
+         }
+         int64_t new_id = sqlite3_last_insert_rowid(s_db.db);
+         (void)fts5_insert_chunk_stems_locked(new_id, label_stems, new_chunks[i].body_stems);
+      }
+      sqlite3_finalize(ic);
+   } else {
+      ok = false;
+   }
+
+   /* Update the document row (num_chunks + hash) — ownership re-checked. */
+   sqlite3_stmt *du = NULL;
+   if (ok && sqlite3_prepare_v2(s_db.db,
+                                "UPDATE documents SET num_chunks = ?, file_hash = ? "
+                                "WHERE id = ? AND user_id = ?",
+                                -1, &du, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(du, 1, n_new);
+      sqlite3_bind_text(du, 2, new_hash, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(du, 3, doc_id);
+      sqlite3_bind_int(du, 4, user_id);
+      if (sqlite3_step(du) != SQLITE_DONE || sqlite3_changes(s_db.db) == 0)
+         ok = false;
+      sqlite3_finalize(du);
+   } else {
+      ok = false;
+   }
+
+   if (ok && full_text_set_locked(doc_id, new_full_text) != SUCCESS)
+      ok = false;
+
+   if (ok) {
+      (void)sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+      result = SUCCESS;
+   } else {
+      (void)sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      OLOG_ERROR("document_db: doc_replace (doc %lld) failed — rolled back", (long long)doc_id);
+   }
+
+   AUTH_DB_UNLOCK();
+   free(old_full);
+   return result;
+}
+
+/* Retention sweep: drop versions older than retention_days (global).  The
+ * per-document keep-last-N cap is enforced at archive time; this is the age
+ * bound.  No-op when retention_days <= 0 (versioning disabled). */
+int document_db_version_prune_expired(int retention_days, int *deleted_out) {
+   if (deleted_out)
+      *deleted_out = 0;
+   if (retention_days <= 0)
+      return SUCCESS;
+
+   int64_t cutoff = (int64_t)time(NULL) - (int64_t)retention_days * 86400;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int deleted = 0;
+   if (sqlite3_prepare_v2(s_db.db, "DELETE FROM document_versions WHERE archived_at < ?", -1, &st,
+                          NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, cutoff);
+      if (sqlite3_step(st) == SQLITE_DONE)
+         deleted = sqlite3_changes(s_db.db);
+      sqlite3_finalize(st);
+   }
+   AUTH_DB_UNLOCK();
+   if (deleted_out)
+      *deleted_out = deleted;
+   return SUCCESS;
+}
+
 /* Stable-id in-place edit of a single-chunk note (v61, M-5).  Gated on
  * filetype == "note" && num_chunks == 1 so a forged request can't rewrite an
  * uploaded multi-chunk document (whose filepath is a real filesystem path).
@@ -914,14 +1436,18 @@ int document_db_note_update(int user_id,
    (void)memory_stem_string(old_text, old_body_stems, sizeof(old_body_stems));
    (void)memory_stem_string(new_label, new_label_stems, sizeof(new_label_stems));
    (void)memory_stem_string(new_text, new_body_stems, sizeof(new_body_stems));
-   free(old_text);
 
-   /* --- Phase 3 (locked): FTS swap + chunk update + document meta update. --- */
+   /* --- Phase 3 (locked): snapshot the OLD note for undo, then FTS swap + chunk
+    * update + document meta update — all atomic in one transaction.  old_text is
+    * kept alive through here for the snapshot and freed after. --- */
    int result = FAILURE;
    pthread_mutex_lock(&s_db.mutex);
    if (s_db.initialized) {
       (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
       bool ok = true;
+
+      /* Snapshot the pre-edit content so this overwrite/edit/append is undoable. */
+      version_archive_locked(doc_id, user_id, old_filename, old_text);
 
       (void)fts5_delete_chunk_stems_locked(chunk_id, old_label_stems, old_body_stems);
 
@@ -970,6 +1496,7 @@ int document_db_note_update(int user_id,
       }
    }
    AUTH_DB_UNLOCK();
+   free(old_text);
    return result;
 }
 

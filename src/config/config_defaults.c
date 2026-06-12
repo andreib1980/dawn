@@ -288,6 +288,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->documents.hybrid_vector_weight = 0.7f;
    config->documents.phrase_bonus_weight = 0.25f;
    config->documents.search_min_score = 0.3f;
+   config->documents.version_retention_days = 14; /* v62 note/doc undo window */
+   config->documents.version_keep_per_doc = 10;
 
    /* Vision - per-upload image size and dimension limits */
    config->vision.max_image_size_kb = 4096;

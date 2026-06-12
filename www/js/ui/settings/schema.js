@@ -1846,6 +1846,22 @@
                advanced: true,
                hint: 'Hybrid search: drop results scoring below this after fusion (default: 0.3). Raise to suppress weak matches.',
             },
+            version_retention_days: {
+               type: 'number',
+               label: 'Version History (days)',
+               min: 0,
+               max: 3650,
+               advanced: true,
+               hint: 'How long to keep the pre-change snapshot of an edited/overwritten/deleted note or document, for undo/restore (default: 14; 0 = disable versioning).',
+            },
+            version_keep_per_doc: {
+               type: 'number',
+               label: 'Versions Kept Per Item',
+               min: 1,
+               max: 1000,
+               advanced: true,
+               hint: 'Maximum saved versions to retain per note/document (the older of this and the day limit wins; default: 10).',
+            },
          },
       },
       music: {

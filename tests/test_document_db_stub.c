@@ -24,9 +24,15 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 #include "auth/auth_db_internal.h"
+#include "config/dawn_config.h"
 
 auth_db_state_t s_db = {
    .db = NULL,
    .mutex = PTHREAD_MUTEX_INITIALIZER,
    .initialized = false,
 };
+
+/* document_db.c reads g_config.documents.version_retention_days (v62 versioning).
+ * Zero-init here = versioning disabled, so non-versioning tests are unaffected;
+ * versioning tests set the field explicitly in setUp(). */
+dawn_config_t g_config;

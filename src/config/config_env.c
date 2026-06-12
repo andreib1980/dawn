@@ -1601,6 +1601,10 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_double(config->documents.phrase_bonus_weight));
    json_object_object_add(documents, "search_min_score",
                           json_object_new_double(config->documents.search_min_score));
+   json_object_object_add(documents, "version_retention_days",
+                          json_object_new_int(config->documents.version_retention_days));
+   json_object_object_add(documents, "version_keep_per_doc",
+                          json_object_new_int(config->documents.version_keep_per_doc));
    json_object_object_add(root, "documents", documents);
 
    /* [vision] - per-upload image size and dimension limits */
@@ -2278,6 +2282,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "hybrid_vector_weight = %.2f\n", config->documents.hybrid_vector_weight);
    fprintf(fp, "phrase_bonus_weight = %.2f\n", config->documents.phrase_bonus_weight);
    fprintf(fp, "search_min_score = %.2f\n", config->documents.search_min_score);
+   fprintf(fp, "version_retention_days = %d\n", config->documents.version_retention_days);
+   fprintf(fp, "version_keep_per_doc = %d\n", config->documents.version_keep_per_doc);
 
    /* [vision] controls per-upload image size and dimension limits */
    fprintf(fp, "\n[vision]\n");
