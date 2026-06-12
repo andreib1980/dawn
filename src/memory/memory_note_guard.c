@@ -269,7 +269,8 @@ static void guard_collect_claude_content(memory_note_guard_t *g, struct json_obj
       if (!json_object_object_get_ex(block, "type", &type_obj)) {
          continue;
       }
-      if (strcmp(json_object_get_string(type_obj), "tool_use") != 0) {
+      const char *type = json_object_get_string(type_obj);
+      if (!type || strcmp(type, "tool_use") != 0) {
          continue;
       }
       struct json_object *id_obj = NULL;
@@ -573,7 +574,9 @@ static bool guard_redact_content_array(const memory_note_guard_t *g,
       if (block && json_object_is_type(block, json_type_object) &&
           json_object_object_get_ex(block, "type", &type_obj)) {
          const char *type = json_object_get_string(type_obj);
-         if (strcmp(type, "text") == 0) {
+         if (!type) {
+            /* Non-string "type" (e.g. JSON null) — leave the block untouched. */
+         } else if (strcmp(type, "text") == 0) {
             struct json_object *txt_obj = NULL;
             if (json_object_object_get_ex(block, "text", &txt_obj)) {
                char *red = guard_redact_bodies_in_text(g, json_object_get_string(txt_obj));
@@ -640,6 +643,13 @@ static bool guard_redact_content_array(const memory_note_guard_t *g,
  * Public API
  * ============================================================================= */
 
+/* NOTE: the guard collects filed bodies only from STRUCTURED tool calls (OpenAI
+ * `tool_calls` + Claude `tool_use` blocks) — the shape produced by native
+ * tool-calling mode (`[llm.tools] mode = "native"`, the default).  In the legacy
+ * `command_tags` mode the LLM emits document_manage as a `<command>` tag inside
+ * plain assistant text, so the body is never collected and therefore never
+ * redacted from extraction.  Acceptable because command_tags is a non-default
+ * legacy path; if it is ever made primary, add a command-tag collector here. */
 memory_note_guard_t *memory_note_guard_create(struct json_object *conversation_history) {
    if (!conversation_history || !g_config.memory.note_extraction_guard) {
       return NULL;

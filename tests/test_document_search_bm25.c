@@ -458,6 +458,60 @@ void test_version_undo_round_trip(void) {
    TEST_ASSERT_EQUAL_INT(2, n); /* ORIGINAL (pre-change) + CHANGED (pre-undo, now redo-able) */
 }
 
+/* Recover re-points a deleted item's snapshots onto the re-created doc: the
+ * version leaves the "Recently deleted" list and attaches to the new live doc.
+ * Owner-scoped — a wrong-user reattach is a no-op. */
+void test_version_reattach_on_recover(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t old_doc = seed_note(1, "Reattach", "snapshot body", 22);
+   /* Bump the rowid counter so the re-created doc below gets a DISTINCT id (else
+    * SQLite reuses old_doc's freed rowid, in which case the snapshots already
+    * point at the now-live id and no reattach is needed — the no-op case). */
+   seed_note(1, "RowidFiller", "x", 99);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(old_doc)); /* archives + deletes */
+
+   document_version_meta_t v[8];
+   int n = 0;
+   document_db_version_list_deleted(1, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(old_doc, v[0].document_id);
+
+   /* Simulate recover re-creating the item under a fresh doc id. */
+   int64_t new_doc = seed_note(1, "Reattach", "snapshot body", 23);
+   TEST_ASSERT_TRUE(new_doc != old_doc);
+
+   /* Wrong-user reattach is a no-op — still listed as deleted. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_reattach(2, old_doc, new_doc));
+   n = -1;
+   document_db_version_list_deleted(1, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+
+   /* Correct owner re-points: no longer deleted, history hangs off the new doc. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_reattach(1, old_doc, new_doc));
+   n = -1;
+   document_db_version_list_deleted(1, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(0, n);
+   n = 0;
+   document_db_version_list(1, new_doc, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("Reattach", v[0].filename);
+}
+
+/* set_num_chunks corrects the stored count (e.g. after partial embed failures). */
+void test_set_num_chunks(void) {
+   int64_t doc = seed_note(1, "Counted", "body", 24); /* created with num_chunks = 1 */
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(doc, &d));
+   TEST_ASSERT_EQUAL_INT(1, d.num_chunks);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_num_chunks(doc, 3));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(doc, &d));
+   TEST_ASSERT_EQUAL_INT(3, d.num_chunks);
+
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_num_chunks(0, 1));    /* invalid id */
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_num_chunks(doc, -1)); /* invalid count */
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_exact_label_ranks_first);
@@ -478,5 +532,7 @@ int main(void) {
    RUN_TEST(test_doc_replace_in_place);
    RUN_TEST(test_version_list_deleted);
    RUN_TEST(test_version_undo_round_trip);
+   RUN_TEST(test_version_reattach_on_recover);
+   RUN_TEST(test_set_num_chunks);
    return UNITY_END();
 }

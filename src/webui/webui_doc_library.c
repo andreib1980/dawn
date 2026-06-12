@@ -576,11 +576,12 @@ void handle_doc_library_deleted_list(ws_connection_t *conn, json_object *payload
    json_object_put(response);
 }
 
-/* v62: restore a note to an archived version, owner-scoped.  Payload:
- * { version_id: <id> }.  If the note still exists it is updated in place (which
- * archives the CURRENT content first, so the restore itself is undoable); if it
- * was deleted, it is re-created from the snapshot.  Notes only — multi-chunk
- * document restore lands with B1b's in-place doc edit. */
+/* v62: restore a note OR document to an archived version, owner-scoped.  Payload:
+ * { version_id: <id> }.  If the item still exists it is updated in place (which
+ * archives the CURRENT content first, so the restore itself is undoable): a
+ * single-chunk note via note_update, a multi-chunk document via doc_update
+ * (v63).  If it was deleted, it is re-created from the snapshot — as a note, or
+ * as a multi-chunk document when the snapshot is too long for one note. */
 void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payload) {
    if (!conn_require_auth(conn))
       return;
@@ -615,6 +616,8 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
    doc_index_result_t result;
    int rc = DOC_INDEX_SUCCESS + 1; /* non-success sentinel */
    const char *label = exists ? doc.filename : fname;
+   int64_t deleted_doc_id = 0; /* dead id whose snapshots we re-point on recover */
+   bool recreated_as_note = false;
 
    if (exists && strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1) {
       rc = document_note_update(conn->auth_user_id, doc_id, doc.filename, text, strlen(text),
@@ -623,10 +626,18 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
       /* Existing multi-chunk document — restore in place (re-chunk + re-embed). */
       rc = document_doc_update(conn->auth_user_id, doc_id, text, strlen(text), &result);
    } else {
-      /* The item was deleted — re-create it from the snapshot under its label. */
+      /* The item was deleted — re-create it from the snapshot under its label.
+       * Try a note first; fall back to a multi-chunk document if the snapshot is
+       * too long for one note (mirrors the tool's recover path). */
       rc = document_index_note(conn->auth_user_id, fname, text, strlen(text), false, &result);
-      if (rc == DOC_INDEX_SUCCESS)
+      recreated_as_note = (rc == DOC_INDEX_SUCCESS);
+      if (rc != DOC_INDEX_SUCCESS)
+         rc = document_index_text(conn->auth_user_id, fname, "text", text, strlen(text), false,
+                                  &result);
+      if (rc == DOC_INDEX_SUCCESS) {
+         deleted_doc_id = doc_id; /* re-point its snapshots onto the new doc */
          doc_id = result.doc_id;
+      }
    }
 
    free(text);
@@ -641,14 +652,19 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
       /* Refresh the memory→note gloss only for notes (an existing single-chunk
        * note, or a deleted item re-created as a note) — a multi-chunk document
        * has no gloss. */
-      bool restored_note = !exists || (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1);
+      bool restored_note = exists ? (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1)
+                                  : recreated_as_note;
       if (restored_note)
          (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
+      /* Re-point the deleted item's surviving snapshots onto the re-created doc
+       * so it leaves "Recently deleted" and a repeat restore can't dup it (#5). */
+      if (deleted_doc_id > 0)
+         (void)document_db_version_reattach(conn->auth_user_id, deleted_doc_id, doc_id);
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
       json_object_object_add(resp_payload, "label", json_object_new_string(label));
       json_object_object_add(resp_payload, "recreated", json_object_new_boolean(!exists));
-      OLOG_INFO("doc_library: user %d restored note %lld ('%s') from version %lld",
+      OLOG_INFO("doc_library: user %d restored item %lld ('%s') from version %lld",
                 conn->auth_user_id, (long long)doc_id, label, (long long)version_id);
    }
 

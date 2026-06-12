@@ -129,6 +129,12 @@ int document_db_create(int user_id,
                        int64_t *id_out);
 
 /**
+ * @brief Correct a document's stored chunk count (e.g. after embed failures).
+ * @return SUCCESS (0) / FAILURE (1 = invalid args / DB error).
+ */
+int document_db_set_num_chunks(int64_t doc_id, int num_chunks);
+
+/**
  * @brief Get a document by ID
  * @return SUCCESS (0) on success, FAILURE (1) on not found/error
  */
@@ -258,6 +264,15 @@ int document_db_version_get_text(int64_t version_id,
                                  char *filename_out,
                                  size_t fn_sz,
                                  int64_t *doc_id_out);
+
+/**
+ * @brief Re-point a deleted doc's version rows onto the doc created on recover.
+ *
+ * Clears the "Recently deleted" ghost (its versions no longer dangle) and
+ * carries history through the delete/recover cycle.  Owner-scoped; best-effort.
+ * @return SUCCESS (0) / FAILURE (1 = invalid ids / DB error).
+ */
+int document_db_version_reattach(int user_id, int64_t old_doc_id, int64_t new_doc_id);
 
 /**
  * @brief Retention sweep — drop versions older than retention_days (global).

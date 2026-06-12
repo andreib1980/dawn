@@ -915,12 +915,12 @@
          : '';
       // The name doubles as the "open read-only viewer" affordance — for notes
       // (text + edit) and documents (summary + version history), both with restore.
-      const nameAttrs = `class="doc-library-item-name note-name-clickable" role="button" tabindex="0" data-view-id="${doc.id}" aria-label="View ${escapeHtml(doc.filename)}"`;
+      const nameAttrs = `class="doc-library-item-name note-name-clickable" role="button" tabindex="0" data-view-id="${doc.id}" aria-label="View ${escapeAttr(doc.filename)}"`;
       return `
       <div class="doc-library-item${isNote ? ' note-item' : ''}" data-id="${doc.id}">
          <div class="doc-library-item-icon ${safeType}">${iconLabel}</div>
          <div class="doc-library-item-info">
-            <div ${nameAttrs} title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
+            <div ${nameAttrs} title="${escapeAttr(doc.filename)}">${escapeHtml(doc.filename)}</div>
             <div class="doc-library-item-meta">${meta}${globalBadge}${ownerBadge}</div>
          </div>
          ${editBtn}
@@ -1079,6 +1079,15 @@
       const div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+   }
+
+   // escapeHtml() relies on textContent->innerHTML, which does NOT encode quotes.
+   // For interpolation into HTML attribute contexts (title=, aria-label=), the
+   // double-quote must also be encoded or a value containing " breaks out of the
+   // attribute. Labels/filenames are settable by the LLM and by other users
+   // (admin show_all), so this is a stored-XSS sink without it.
+   function escapeAttr(str) {
+      return escapeHtml(str).replace(/"/g, '&quot;');
    }
 
    function updateVisibility() {

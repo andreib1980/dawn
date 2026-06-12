@@ -211,6 +211,19 @@ int document_index_text(int user_id,
       return DOC_INDEX_ERROR_ALLOC;
    }
 
+   /* If no chunk embedded, the document row is useless (it would also archive a
+    * junk version row when later deleted) — drop it and report the failure.  If
+    * only some embedded, correct num_chunks so it matches the actual chunk rows
+    * (it gates note-vs-document editing). */
+   if (embedded_count == 0) {
+      document_db_delete(doc_id);
+      chunk_result_free(&chunks);
+      set_error(out, DOC_INDEX_ERROR_NO_EMBEDDING, "No chunks could be embedded");
+      return DOC_INDEX_ERROR_NO_EMBEDDING;
+   }
+   if (embedded_count != chunks.count)
+      (void)document_db_set_num_chunks(doc_id, embedded_count);
+
    chunk_result_free(&chunks);
 
    /* v63: store the canonical un-chunked text so the document can later be edited

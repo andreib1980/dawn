@@ -680,8 +680,11 @@ int document_db_delete_indexed(int64_t doc_id) {
       pthread_mutex_lock(&s_db.mutex);
       if (s_db.initialized) {
          (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-         /* Snapshot the pre-delete content so the deletion is undoable. */
-         version_archive_locked(doc_id, owner_user_id, filename, snapshot);
+         /* Snapshot the pre-delete content so the deletion is undoable.  Skip
+          * when there's nothing meaningful to archive (snapshot OOM, or a
+          * zero-chunk doc) — an empty version row is junk that "recovers" to "". */
+         if (snapshot && n > 0)
+            version_archive_locked(doc_id, owner_user_id, filename, snapshot);
          for (int i = 0; i < n; i++)
             (void)fts5_delete_chunk_stems_locked(chunk_ids[i], label_stems, body_stems[i]);
          sqlite3_stmt *del = s_db.stmt_doc_delete;
@@ -692,7 +695,10 @@ int document_db_delete_indexed(int64_t doc_id) {
          else
             OLOG_ERROR("document_db: delete_indexed delete failed: %s", sqlite3_errmsg(s_db.db));
          sqlite3_reset(del);
-         (void)sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+         /* Commit only if the document delete actually happened; otherwise roll
+          * back so the FTS deletes + the version row don't outlive a no-op
+          * delete (orphaned contentless-FTS postings, spurious version row). */
+         (void)sqlite3_exec(s_db.db, result == SUCCESS ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
       }
       AUTH_DB_UNLOCK();
    } else {
@@ -977,7 +983,16 @@ int document_db_version_list(int user_id,
  * no longer exists (the snapshot outlived a delete), owner-scoped, newest first.
  * The returned `id` is the version id to restore via document_db_version_get_text
  * (the original document is gone, so restore re-creates it).  SQLite's
- * bare-column-from-MAX-row rule makes the GROUP BY pick the newest version's row. */
+ * bare-column-from-MAX-row rule makes the GROUP BY pick the newest version's row.
+ *
+ * Deletion is inferred via `document_id NOT IN documents`.  documents.id is a
+ * plain INTEGER PRIMARY KEY (no AUTOINCREMENT), so SQLite can reuse a freed
+ * rowid for an unrelated new doc; if that happens before retention prunes the
+ * dead snapshots, the deleted item drops off this list and its versions would
+ * be mis-attributed to the new doc.  Accepted as a low-likelihood edge (recover
+ * re-points snapshots off the dead id via document_db_version_reattach, and
+ * retention sweeps the rest); the durable fix would be an explicit deleted_at
+ * marker instead of the NOT IN heuristic — deferred until it bites in practice. */
 int document_db_version_list_deleted(int user_id,
                                      document_version_meta_t *out,
                                      int max,
@@ -1047,6 +1062,55 @@ int document_db_version_get_text(int64_t version_id,
    }
    if (st)
       sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+/* Re-point a deleted document's surviving version rows onto the live document
+ * created when it was recovered.  Without this the snapshots still reference the
+ * dead document_id, so they keep showing in "Recently deleted" (their JOIN to
+ * documents fails) and a second restore would create another duplicate; moving
+ * them to the new id both clears the ghost and carries history through the
+ * delete/recover cycle.  Owner-scoped.  Best-effort (the recover already
+ * succeeded); returns SUCCESS even if no rows matched. */
+int document_db_version_reattach(int user_id, int64_t old_doc_id, int64_t new_doc_id) {
+   if (old_doc_id <= 0 || new_doc_id <= 0 || old_doc_id == new_doc_id)
+      return FAILURE;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE document_versions SET document_id = ? "
+                          "WHERE document_id = ? AND user_id = ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, new_doc_id);
+      sqlite3_bind_int64(st, 2, old_doc_id);
+      sqlite3_bind_int(st, 3, user_id);
+      if (sqlite3_step(st) == SQLITE_DONE)
+         result = SUCCESS;
+      sqlite3_finalize(st);
+   }
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+/* Correct a document's stored chunk count after ingest when embed failures mean
+ * fewer chunk rows were written than the chunker produced.  Keeps num_chunks in
+ * step with the actual chunk rows (it gates note-vs-document editing). */
+int document_db_set_num_chunks(int64_t doc_id, int num_chunks) {
+   if (doc_id <= 0 || num_chunks < 0)
+      return FAILURE;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db, "UPDATE documents SET num_chunks = ? WHERE id = ?", -1, &st,
+                          NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, num_chunks);
+      sqlite3_bind_int64(st, 2, doc_id);
+      if (sqlite3_step(st) == SQLITE_DONE)
+         result = SUCCESS;
+      sqlite3_finalize(st);
+   }
    AUTH_DB_UNLOCK();
    return result;
 }
