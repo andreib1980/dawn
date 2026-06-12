@@ -13,6 +13,16 @@
    const NOTE_MAX_LEN = 4000;
    const NOTE_LABEL_MAX = 80;
    const SEARCH_DEBOUNCE_MS = 250;
+   const SCOPE_STORAGE_KEY = 'dawn_doc_library_scope'; // remember the active tab across opens
+
+   function loadScope() {
+      try {
+         const s = localStorage.getItem(SCOPE_STORAGE_KEY);
+         return s === 'notes' || s === 'documents' ? s : 'documents';
+      } catch (_e) {
+         return 'documents';
+      }
+   }
 
    let state = {
       documents: [],
@@ -22,11 +32,13 @@
       offset: 0,
       hasMore: false,
       showAll: false,
-      scope: 'documents', // 'documents' | 'notes'
+      scope: 'documents', // 'documents' | 'notes' — restored from localStorage on open()
       query: '',
       editingId: null, // null = create; note id = editing
       editorDirty: false,
       editorTrigger: null, // element to restore focus to on editor close
+      viewingId: null, // note id shown in the read-only viewer, else null
+      viewerTrigger: null, // element to restore focus to on viewer close
    };
 
    let searchTimer = null;
@@ -79,6 +91,13 @@
       el.noteError = document.getElementById('doc-library-note-error');
       el.noteLabelHint = document.getElementById('doc-library-note-label-hint');
       el.noteCancel = document.getElementById('doc-library-note-cancel');
+      // v61 follow-up: read-only note viewer
+      el.viewer = document.getElementById('doc-library-note-viewer');
+      el.viewerLabel = document.getElementById('doc-library-note-viewer-label');
+      el.viewerText = document.getElementById('doc-library-note-viewer-text');
+      el.viewerClose = document.getElementById('doc-library-note-viewer-close');
+      el.viewerEdit = document.getElementById('doc-library-note-viewer-edit');
+      el.viewerDelete = document.getElementById('doc-library-note-viewer-delete');
 
       if (!el.btn || !el.popover) return;
 
@@ -120,6 +139,22 @@
          el.noteLabel.addEventListener('input', () => {
             state.editorDirty = true;
          });
+
+      // Read-only note viewer actions
+      if (el.viewerClose) el.viewerClose.addEventListener('click', () => closeViewer(true));
+      if (el.viewerEdit) {
+         el.viewerEdit.addEventListener('click', () => {
+            const doc = state.documents.find((d) => d.id === state.viewingId);
+            closeViewer(false);
+            if (doc) openEditor(doc);
+         });
+      }
+      if (el.viewerDelete) {
+         el.viewerDelete.addEventListener('click', () => {
+            const doc = state.documents.find((d) => d.id === state.viewingId);
+            if (doc) confirmDelete(doc.id);
+         });
+      }
 
       // Load More button
       if (el.loadMoreBtn) {
@@ -167,15 +202,14 @@
          });
       }
 
-      // Close on outside click
-      document.addEventListener('click', (e) => {
-         if (state.isOpen && !el.popover.contains(e.target) && !el.btn.contains(e.target)) {
-            close();
-         }
-      });
+      // Sticky panel: NO outside-click auto-close (mirrors the music panel).  The
+      // panel closes only on the × button, Escape, or a competing header panel
+      // opening over it (memory/scheduler call DawnDocLibrary.close() on open).
+      // This stops the panel vanishing when an in-panel action spawns the confirm
+      // modal (which lives outside the popover and used to read as an outside click).
 
-      // Close on Escape — editor first (nested), then the popover.  Bail if the
-      // confirm modal is open so its OWN Escape handler can close it without us
+      // Close on Escape — viewer/editor first (nested), then the popover.  Bail if
+      // the confirm modal is open so its OWN Escape handler can close it without us
       // re-spawning the discard dialog underneath.
       document.addEventListener('keydown', (e) => {
          if (e.key !== 'Escape' || !state.isOpen) return;
@@ -183,6 +217,8 @@
          if (confirmModal && !confirmModal.classList.contains('hidden')) return;
          if (el.editor && !el.editor.classList.contains('hidden')) {
             requestCloseEditor();
+         } else if (el.viewer && !el.viewer.classList.contains('hidden')) {
+            closeViewer(true);
          } else {
             close();
          }
@@ -208,7 +244,13 @@
 
    function applyScope(scope) {
       state.scope = scope;
+      try {
+         localStorage.setItem(SCOPE_STORAGE_KEY, scope);
+      } catch (_e) {
+         /* private mode / quota — non-fatal, tab just won't persist */
+      }
       closeEditor(false);
+      closeViewer(false);
       // Roving tabindex + aria
       el.tabs.forEach((tab) => {
          const active = tab.dataset.scope === scope;
@@ -272,8 +314,9 @@
    }
 
    function open() {
-      // Close memory popover if open
+      // Close competing header popovers that share this top-right slot
       if (typeof DawnMemory !== 'undefined') DawnMemory.close();
+      if (typeof DawnSchedulerQueue !== 'undefined') DawnSchedulerQueue.close();
 
       triggerElement = document.activeElement;
       el.popover.classList.remove('hidden');
@@ -285,11 +328,12 @@
          focusTrapCleanup = callbacks.trapFocus(el.popover);
       }
 
-      // Reset to a clean state: Documents tab, no search, editor closed
+      // Reset to a clean state: restore the last-used tab, no search, editor/viewer closed
       closeEditor(false);
+      closeViewer(false);
       state.query = '';
       if (el.searchInput) el.searchInput.value = '';
-      setScope('documents');
+      setScope(loadScope());
    }
 
    function close() {
@@ -391,6 +435,8 @@
          }
          return;
       }
+      // If the deleted note was open in the viewer, close it
+      if (state.viewingId === payload.id) closeViewer(false);
       // Remove from local state
       state.documents = state.documents.filter((d) => d.id !== payload.id);
       state.offset = state.documents.length;
@@ -458,6 +504,8 @@
 
    function openEditor(note) {
       if (!el.editor) return;
+      // Editor and viewer are mutually-exclusive inline panels
+      closeViewer(false);
       // Remember what to return focus to when the editor closes (WCAG 2.4.3)
       state.editorTrigger = document.activeElement;
       state.editingId = note ? note.id : null;
@@ -500,6 +548,50 @@
       } else {
          closeEditor(true);
       }
+   }
+
+   /* =============================================================================
+    * Read-only note viewer (opened by clicking a note name)
+    * ============================================================================= */
+
+   function openViewer(note) {
+      if (!el.viewer || !note) return;
+      state.viewerTrigger = document.activeElement;
+      state.viewingId = note.id;
+      el.viewerLabel.textContent = note.filename;
+      el.viewerText.textContent = note.text || '';
+      // Editor and viewer are mutually-exclusive inline panels
+      closeEditor(false);
+      if (el.notesActions) el.notesActions.classList.add('hidden');
+      el.viewer.classList.remove('hidden');
+      // Hand keyboard users a focusable control inside the viewer (WCAG 2.4.3)
+      if (el.viewerClose) el.viewerClose.focus();
+   }
+
+   // Guard an unsaved editor before replacing it with the viewer
+   function requestOpenViewer(note) {
+      if (state.editorDirty && callbacks.showConfirmModal) {
+         callbacks.showConfirmModal('Discard changes to this note?', () => openViewer(note), {
+            title: 'Discard note',
+            okText: 'Discard',
+         });
+         return;
+      }
+      openViewer(note);
+   }
+
+   // restoreFocus: return focus to the opener (close/ESC); NOT on edit/delete handoff.
+   function closeViewer(restoreFocus) {
+      if (!el.viewer) return;
+      const wasOpen = !el.viewer.classList.contains('hidden');
+      el.viewer.classList.add('hidden');
+      state.viewingId = null;
+      // Restore the "+ New note" affordance on the Notes tab
+      if (el.notesActions) el.notesActions.classList.toggle('hidden', state.scope !== 'notes');
+      if (restoreFocus && wasOpen && state.viewerTrigger && state.viewerTrigger.focus) {
+         state.viewerTrigger.focus();
+      }
+      state.viewerTrigger = null;
    }
 
    function updateNoteCount() {
@@ -663,11 +755,15 @@
       const globalToggle = canToggleGlobal()
          ? `<button type="button" class="doc-library-item-global" data-id="${doc.id}" data-global="${doc.is_global ? '1' : '0'}" title="${doc.is_global ? 'Make private' : 'Share globally'}" aria-label="${doc.is_global ? 'Make private' : 'Share globally'}">${globeSvg}</button>`
          : '';
+      // Notes: the name doubles as the "open read-only viewer" affordance
+      const nameAttrs = isNote
+         ? `class="doc-library-item-name note-name-clickable" role="button" tabindex="0" data-view-id="${doc.id}" aria-label="View note ${escapeHtml(doc.filename)}"`
+         : 'class="doc-library-item-name"';
       return `
       <div class="doc-library-item${isNote ? ' note-item' : ''}" data-id="${doc.id}">
          <div class="doc-library-item-icon ${safeType}">${iconLabel}</div>
          <div class="doc-library-item-info">
-            <div class="doc-library-item-name" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
+            <div ${nameAttrs} title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
             <div class="doc-library-item-meta">${meta}${globalBadge}${ownerBadge}</div>
          </div>
          ${editBtn}
@@ -685,21 +781,26 @@
       });
    }
 
+   function confirmDelete(id) {
+      const doc = state.documents.find((d) => d.id === id);
+      const isNote = doc && (doc.is_note || doc.filetype === 'note');
+      const name = doc ? doc.filename : isNote ? 'this note' : 'this document';
+      const noun = isNote ? 'note' : 'document';
+      if (callbacks.showConfirmModal) {
+         callbacks.showConfirmModal(
+            `Delete "${name}"? This will remove all indexed chunks and cannot be undone.`,
+            () => requestDelete(id),
+            { title: `Delete ${noun.charAt(0).toUpperCase() + noun.slice(1)}`, okText: 'Delete' }
+         );
+      } else {
+         requestDelete(id);
+      }
+   }
+
    function handleDeleteClick(btn) {
       btn.addEventListener('click', (e) => {
          e.stopPropagation();
-         const id = parseInt(btn.dataset.id, 10);
-         const doc = state.documents.find((d) => d.id === id);
-         const name = doc ? doc.filename : 'this document';
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal(
-               `Delete "${name}"? This will remove all indexed chunks and cannot be undone.`,
-               () => requestDelete(id),
-               { title: 'Delete Document', okText: 'Delete' }
-            );
-         } else {
-            requestDelete(id);
-         }
+         confirmDelete(parseInt(btn.dataset.id, 10));
       });
    }
 
@@ -712,6 +813,22 @@
       });
    }
 
+   // Clicking (or Enter/Space on) a note name opens the read-only viewer
+   function handleNameClick(nameEl) {
+      const openIt = () => {
+         const id = parseInt(nameEl.dataset.viewId, 10);
+         const doc = state.documents.find((d) => d.id === id);
+         if (doc) requestOpenViewer(doc);
+      };
+      nameEl.addEventListener('click', openIt);
+      nameEl.addEventListener('keydown', (e) => {
+         if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openIt();
+         }
+      });
+   }
+
    function bindItemButtons(container) {
       container.querySelectorAll('.doc-library-item-delete').forEach((btn) => {
          handleDeleteClick(btn);
@@ -721,6 +838,9 @@
       });
       container.querySelectorAll('.doc-library-item-edit').forEach((btn) => {
          handleEditClick(btn);
+      });
+      container.querySelectorAll('.note-name-clickable').forEach((nameEl) => {
+         handleNameClick(nameEl);
       });
    }
 
@@ -760,6 +880,8 @@
          if (globalBtn) handleGlobalClick(globalBtn);
          const editBtn = item.querySelector('.doc-library-item-edit');
          if (editBtn) handleEditClick(editBtn);
+         const nameEl = item.querySelector('.note-name-clickable');
+         if (nameEl) handleNameClick(nameEl);
       });
    }
 
