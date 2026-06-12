@@ -1643,6 +1643,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                }
             }
             commit_rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+            if (commit_rc != SQLITE_OK) {
+               /* COMMIT failed (e.g. SQLITE_BUSY / IO) — roll back so the
+                * connection returns to autocommit instead of leaving an open
+                * transaction that would hold locks and taint later startup SQL.
+                * schema_version stays unbumped below, so the next boot retries. */
+               (void)sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+            }
          }
          if (select_stmt)
             sqlite3_finalize(select_stmt);
@@ -2416,6 +2423,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                }
             }
             commit_rc = sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+            if (commit_rc != SQLITE_OK) {
+               /* COMMIT failed (e.g. SQLITE_BUSY / IO) — roll back so the
+                * connection returns to autocommit instead of leaving an open
+                * transaction that would hold locks and taint later startup SQL.
+                * schema_version stays unbumped below, so the next boot retries. */
+               (void)sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+            }
          }
          if (select_stmt)
             sqlite3_finalize(select_stmt);

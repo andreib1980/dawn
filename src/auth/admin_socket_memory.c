@@ -569,6 +569,7 @@ int handle_memory_backfill_note_glosses(int client_fd, const char *payload, uint
       offset += count;
    }
    free(notes);
+   notes = NULL;
 
    char msg[256];
    snprintf(msg, sizeof(msg),

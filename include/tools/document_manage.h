@@ -27,7 +27,10 @@
 extern "C" {
 #endif
 
-/** Register the document_manage tool with the tool registry. */
+/**
+ * @brief Register the document_manage tool with the tool registry.
+ * @return 0 on success, non-zero on registration failure.
+ */
 int document_manage_tool_register(void);
 
 /* Pure text-edit helpers (no DB / embedding deps) — exposed for unit testing the
@@ -50,6 +53,8 @@ int docmgmt_find_replace_once(const char *src, const char *find, const char *rep
 
 /**
  * @brief Append `text` to `src`, newline-joined if `src` doesn't already end in '\n'.
+ * @param src  Source text (NULL treated as ""); not modified.
+ * @param text Text to append (NULL treated as "").
  * @return Heap result (caller frees), or NULL on allocation failure.
  */
 char *docmgmt_append_text(const char *src, const char *text);

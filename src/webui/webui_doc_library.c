@@ -109,6 +109,12 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
    if (show_all && !conn_check_admin_quiet(conn))
       show_all = false;
 
+   /* The lexical search path is owner-scoped (own + global) and BM25 hits carry
+    * no owner identity, so admin cross-user search isn't supported yet — force
+    * show_all off on a query so the response never emits bogus owner fields. */
+   if (query)
+      show_all = false;
+
    if (limit > DOC_LIBRARY_DEFAULT_LIMIT)
       limit = DOC_LIBRARY_DEFAULT_LIMIT;
 
@@ -141,12 +147,12 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
                }
             if (dup)
                continue;
-            memset(&docs[count], 0, sizeof(docs[count]));
-            docs[count].id = hits[i].document_id;
-            snprintf(docs[count].filename, sizeof(docs[count].filename), "%s", hits[i].filename);
-            snprintf(docs[count].filetype, sizeof(docs[count].filetype), "%s", hits[i].filetype);
-            docs[count].num_chunks = hits[i].num_chunks;
-            docs[count].created_at = hits[i].created_at;
+            /* Pull authoritative metadata (is_global, created_at, owner scoping)
+             * from the document row — the BM25 hit carries only search-facing
+             * fields, so building the row from it would misreport is_global and
+             * take created_at from the chunk rather than the document. */
+            if (document_db_get(hits[i].document_id, &docs[count]) != SUCCESS)
+               continue;
             count++;
          }
       } else {
