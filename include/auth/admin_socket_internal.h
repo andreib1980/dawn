@@ -58,6 +58,7 @@ int handle_memory_entity_link_user_self(int client_fd, const char *payload, uint
 int handle_memory_recategorize(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_cleanup_meta_facts(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_summarize_missing(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_backfill_note_glosses(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
 

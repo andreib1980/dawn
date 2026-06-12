@@ -72,6 +72,9 @@ int memory_db_fact_update_embedding(int user_id,
  * @param out_created_ats Optional output: per-fact creation timestamps; pass NULL
  *                       when not needed (temporal-query scoring is the only
  *                       consumer today)
+ * @param out_note_doc_ids Optional output: per-fact note_doc_id (v61); >0 marks a
+ *                       memory→note bridge gloss.  Pass NULL when gloss-awareness
+ *                       isn't needed.
  * @param max_count Maximum entries to return
  * @param count_out Output: number of embeddings loaded
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
@@ -82,6 +85,7 @@ int memory_db_fact_get_embeddings(int user_id,
                                   float *out_embeddings,
                                   float *out_norms,
                                   int64_t *out_created_ats,
+                                  int64_t *out_note_doc_ids,
                                   int max_count,
                                   int *count_out);
 

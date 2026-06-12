@@ -305,6 +305,31 @@ int memory_db_fact_set_subject_entity(int64_t fact_id, int user_id, int64_t enti
 int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_at);
 
 /**
+ * @brief Link a fact to a saved note (memory→note bridge, v61).
+ *
+ * Sets memory_facts.note_doc_id so the fact becomes a thin "gloss" pointer to a
+ * reference note in the document store.  Glosses stay semantically retrievable
+ * but are exempt from paraphrase-dedup, prune, decay, and pattern-delete.  Set
+ * once at note-save time; not on the hot path.  CWE-639: (id, user_id) scope.
+ *
+ * @param fact_id Fact ID
+ * @param user_id Owner user ID
+ * @param note_doc_id documents.id to point at; <=0 clears the link (NULL)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_set_note_doc_id(int64_t fact_id, int user_id, int64_t note_doc_id);
+
+/**
+ * @brief Find the bridge gloss fact for a note (memory→note bridge, v61).
+ *
+ * @param user_id Owner user ID
+ * @param note_doc_id documents.id the gloss points at
+ * @param fact_id_out Output: gloss fact id, or 0 if none exists
+ * @return MEMORY_DB_SUCCESS (even when none found) or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t *fact_id_out);
+
+/**
  * @brief Mark a fact as superseded by another
  *
  * Used when a fact is corrected or updated.  Both fact IDs must belong to

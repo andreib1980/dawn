@@ -2403,6 +2403,10 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_MEMORY_SUMMARIZE_MISSING:
          return handle_memory_summarize_missing(client_fd, payload, header.payload_len);
 
+      /* Phase 9: memory→note bridge gloss backfill */
+      case ADMIN_MSG_MEMORY_BACKFILL_NOTE_GLOSSES:
+         return handle_memory_backfill_note_glosses(client_fd, payload, header.payload_len);
+
       /* Phase 7: Messaging-channels operator commands */
       case ADMIN_MSG_MESSAGING_GENERATE_LINK_CODE:
          return handle_messaging_generate_link_code(client_fd, payload, header.payload_len);

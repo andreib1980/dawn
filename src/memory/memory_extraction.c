@@ -46,6 +46,7 @@
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
+#include "memory/memory_note_guard.h"
 #include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
 
@@ -1987,6 +1988,12 @@ int memory_trigger_extraction(int user_id,
       ctx->fallback = *fallback;
    }
 
+   /* Note-extraction guard: collect note-filed bodies + document_read echoes
+    * from the FULL history so they can be redacted out of the extraction input
+    * (keeps reference text the user filed as a note out of semantic memory).
+    * NULL when disabled or nothing was filed → redact is a pass-through. */
+   memory_note_guard_t *note_guard = memory_note_guard_create(conversation_history);
+
    /* ID-based filter: include messages where id > last_msg_id.
     * Messages with missing or zero id (system messages, voice-only path,
     * messages added before this feature shipped) are included unconditionally.
@@ -2004,9 +2011,18 @@ int memory_trigger_extraction(int user_id,
       int64_t msg_id = 0;
       if (json_object_object_get_ex(msg, "id", &id_obj))
          msg_id = json_object_get_int64(id_obj);
-      if (msg_id == 0 || msg_id > last_msg_id)
-         json_object_array_add(filtered, extraction_message_strip_images(msg));
+      if (msg_id == 0 || msg_id > last_msg_id) {
+         /* strip_images then guard-redact: both return an owned ref and never
+          * mutate the live history; chaining yields one redacted copy (or a
+          * shared ref when neither stage changes anything). */
+         struct json_object *stripped = extraction_message_strip_images(msg);
+         struct json_object *guarded = memory_note_guard_redact(note_guard, stripped);
+         json_object_put(stripped);
+         json_object_array_add(filtered, guarded);
+      }
    }
+
+   memory_note_guard_free(note_guard);
 
    ctx->conversation_json = strdup(
        json_object_to_json_string_ext(filtered, JSON_C_TO_STRING_PLAIN));

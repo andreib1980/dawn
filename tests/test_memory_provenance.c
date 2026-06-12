@@ -110,6 +110,7 @@ static const char *DDL =
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
    "  expires_at             INTEGER DEFAULT NULL,"  /* v58 */
+   "  note_doc_id            INTEGER DEFAULT NULL,"  /* v61 (memory→note bridge) */
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
    ");"

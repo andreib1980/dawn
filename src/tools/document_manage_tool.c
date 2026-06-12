@@ -36,7 +36,9 @@
 #include "core/embedding_engine.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
+#include "llm/llm_tools.h" /* LLM_TOOLS_ARGS_LEN — the upstream tool-arg cap DOCMGMT_SAVE_TEXT_MAX mirrors */
 #include "logging.h"
+#include "memory/memory_note_bridge.h"
 #include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/document_manage.h"
@@ -73,7 +75,22 @@ static void doc_manage_parse_config(toml_table_t *table, void *config) {
 
 #define DOCMGMT_MAX_PENDING 8
 #define DOCMGMT_PENDING_EXPIRY_SEC 120
-#define DOCMGMT_CONFIRM_MSG_MAX 384 /* prompt text + up to DOC_FILENAME_MAX label */
+/* Upper bound on the save_text overwrite sweep — how many same-named duplicate
+ * documents we'll delete before re-indexing.  A backstop against a delete that
+ * keeps reporting success without removing the row; in practice 1-2. */
+#define DOCMGMT_MAX_OVERWRITE_SWEEP 64
+#define DOCMGMT_CONFIRM_MSG_MAX 512 /* prompt text + up to DOC_FILENAME_MAX label */
+
+/* Max text accepted by save_note/save_text.  save_text stores MULTI-chunk
+ * documents, so the per-chunk DOC_CHUNK_TEXT_MAX (4096) would silently clip
+ * anything bigger than one chunk.  Size this to the upstream tool-arg buffer
+ * (LLM_TOOLS_ARGS_LEN) — the practical ceiling on what can arrive in a tool
+ * call; over-long args are already rejected at the executor (args_truncated) so
+ * the value reaching here never exceeds this.  The _Static_assert below pins the
+ * relationship so a future LLM_TOOLS_ARGS_LEN bump can't silently re-clip. */
+#define DOCMGMT_SAVE_TEXT_MAX 16384
+_Static_assert(DOCMGMT_SAVE_TEXT_MAX >= LLM_TOOLS_ARGS_LEN,
+               "save_text buffer must hold the full tool-arg value or docs clip again");
 
 typedef struct {
    int user_id;
@@ -253,7 +270,11 @@ static char *do_save_note(int user_id, const char *label, const char *text) {
       snprintf(msg, sizeof(msg), "Couldn't save the note: %s", res.error_msg);
       return strdup(msg);
    }
-   char msg[256];
+   /* Memory→note bridge (v61): refresh the gloss pointer so a fuzzy recall of
+    * this note routes to document_read.  Best-effort — never fail the save. */
+   if (res.doc_id > 0)
+      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "%s note '%s'.", overwrite ? "Updated (overwrote existing)" : "Saved",
             label);
    return strdup(msg);
@@ -263,6 +284,23 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
    if (!title || !title[0] || !text || !text[0])
       return strdup("To save a document, provide both a title and the text.");
 
+   /* Overwrite-by-label: re-saving an existing document of the same name replaces
+    * it instead of creating a duplicate (do_save_note does the same for notes).
+    * Delete EVERY same-named non-note document the CALLER owns so repeated saves
+    * converge to one (also self-heals pre-existing duplicates).  Scoped tight: a
+    * same-named note (different kind, owns a gloss) and global/other-user docs
+    * are never touched.  The bound guards against a delete that keeps failing. */
+   document_t existing;
+   bool overwrite = false;
+   for (int guard = 0; guard < DOCMGMT_MAX_OVERWRITE_SWEEP; guard++) {
+      if (document_db_find_by_label_exact(user_id, title, false, &existing) != SUCCESS ||
+          existing.user_id != user_id || strcmp(existing.filetype, "note") == 0)
+         break;
+      if (document_db_delete_indexed(existing.id) != SUCCESS)
+         break;
+      overwrite = true;
+   }
+
    doc_index_result_t res;
    int rc = document_index_text(user_id, title, "text", text, strlen(text), false, &res);
    if (rc != DOC_INDEX_SUCCESS) {
@@ -271,7 +309,8 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
       return strdup(msg);
    }
    char msg[256];
-   snprintf(msg, sizeof(msg), "Saved document '%s' (%d chunk%s).", title, res.num_chunks,
+   snprintf(msg, sizeof(msg), "%s document '%s' (%d chunk%s).",
+            overwrite ? "Updated (overwrote existing)" : "Saved", title, res.num_chunks,
             res.num_chunks == 1 ? "" : "s");
    return strdup(msg);
 }
@@ -348,10 +387,15 @@ static char *do_confirm_delete(int user_id) {
    if (document_db_get(doc_id, &doc) != SUCCESS || doc.user_id != user_id)
       return strdup("That item is no longer available to delete.");
 
+   /* Drop the memory→note bridge gloss BEFORE the note row is deleted (the FK
+    * nulls note_doc_id on delete, after which the gloss can't be found by it).
+    * Best-effort + harmless for non-note docs (no gloss exists). */
+   (void)memory_note_bridge_delete_gloss(user_id, doc_id);
+
    if (document_db_delete_indexed(doc_id) != SUCCESS)
       return strdup("The deletion failed — the item may have already been removed.");
 
-   char msg[256];
+   char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "Deleted the %s '%s'.", is_note ? "note" : "document", label);
    return strdup(msg);
 }
@@ -386,12 +430,14 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
       return do_delete_request(user_id, label, id);
    }
 
-   /* save_note / save_text: text is the terminal (tail) param. */
-   char *text = malloc(DOC_CHUNK_TEXT_MAX);
+   /* save_note / save_text: text is the terminal (tail) param.  Buffer sized to
+    * DOCMGMT_SAVE_TEXT_MAX (the tool-arg ceiling), NOT the per-chunk size, so a
+    * multi-chunk save_text document isn't clipped at 4 KB. */
+   char *text = malloc(DOCMGMT_SAVE_TEXT_MAX);
    if (!text)
       return strdup("Out of memory.");
    text[0] = '\0';
-   tool_param_extract_custom_tail(value, "text", text, DOC_CHUNK_TEXT_MAX);
+   tool_param_extract_custom_tail(value, "text", text, DOCMGMT_SAVE_TEXT_MAX);
 
    char *result;
    if (strcmp(act, "save_note") == 0)

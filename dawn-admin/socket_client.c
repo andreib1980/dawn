@@ -1370,6 +1370,20 @@ admin_resp_code_t admin_client_memory_recategorize(int fd,
    return recv_text_response(fd, response, resp_len);
 }
 
+admin_resp_code_t admin_client_memory_backfill_note_glosses(int fd,
+                                                            const char *username,
+                                                            char *response,
+                                                            size_t resp_len) {
+   if (!username || !username[0]) {
+      return ADMIN_RESP_FAILURE;
+   }
+   uint16_t len = (uint16_t)strlen(username);
+   if (send_message(fd, ADMIN_MSG_MEMORY_BACKFILL_NOTE_GLOSSES, username, len) != 0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 #ifndef ADMIN_MEM_CLEANUP_FLAG_DRY_RUN
 #define ADMIN_MEM_CLEANUP_FLAG_DRY_RUN 0x01
 #endif

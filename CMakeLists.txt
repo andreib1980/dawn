@@ -732,6 +732,8 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_predicate_dedup.c
     src/memory/memory_bm25.c
     src/memory/memory_stem.c
+    src/memory/memory_note_guard.c
+    src/memory/memory_note_bridge.c
     src/memory/memory_context.c
     src/memory/memory_callback.c
     src/memory/memory_extraction.c

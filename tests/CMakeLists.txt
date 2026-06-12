@@ -404,6 +404,15 @@ dawn_add_unit_test(test_claude_format
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Duplicate-tool-call turn-scoping.  Links the real llm_tools.c against a thin
+# stub TU that provides its wide dep surface (the dup-check path reaches almost
+# none of it).
+dawn_add_unit_test(test_llm_dup_check
+   SOURCES test_llm_dup_check.c test_llm_dup_check_stub.c
+           ${SRC_ROOT}/src/llm/llm_tools.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_instruction_loader
    SOURCES test_instruction_loader.c
            ${SRC_ROOT}/src/tools/instruction_loader.c
@@ -620,6 +629,35 @@ dawn_add_unit_test(test_memory_bm25
            ${SRC_ROOT}/src/memory/memory_bm25.c
    # dawn_common supplies log_message (memory_bm25_build_match_expr logs on truncation).
    LIBS    dawn_common unity m
+   LABEL   ci)
+
+# Phase 9 note-extraction guard.  Standalone — json-c + an inline g_config;
+# no DB, no embeddings.  Drives both provider history shapes through
+# collect + redact.
+dawn_add_unit_test(test_memory_note_guard
+   SOURCES test_memory_note_guard.c
+           ${SRC_ROOT}/src/memory/memory_note_guard.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Phase 9 memory→note bridge lifecycle.  Real v61 schema via auth_db_init
+# (:memory:); the embedding engine is stubbed in the test TU so this stays a
+# DB-only fact/note_doc_id lifecycle test (cosine retrieval is covered by the
+# live 809 re-run).
+dawn_add_unit_test(test_memory_note_bridge
+   SOURCES test_memory_note_bridge.c
+           ${SRC_ROOT}/src/memory/memory_note_bridge.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_stem

@@ -35,6 +35,7 @@
 #include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_note_bridge.h"
 #include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
 #include "webui/webui_internal.h"
@@ -233,6 +234,11 @@ void handle_doc_library_delete(ws_connection_t *conn, json_object *payload) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error", json_object_new_string("Permission denied"));
       } else {
+         /* Drop the memory→note bridge gloss (v61) BEFORE the row is deleted (the
+          * FK nulls note_doc_id on delete).  Owner-scoped to the note's owner so
+          * an admin deleting another user's note removes that user's gloss.
+          * Best-effort + harmless for non-note docs (no gloss exists). */
+         (void)memory_note_bridge_delete_gloss(doc.user_id, doc_id);
          /* v61: delete_indexed also removes the contentless FTS rows (no orphan
           * postings); applies to notes AND uploaded docs, all now FTS-indexed. */
          int rc = document_db_delete_indexed(doc_id);
@@ -419,6 +425,9 @@ void handle_doc_library_note_save(ws_connection_t *conn, json_object *payload) {
                                                               ? result.error_msg
                                                               : document_index_error_string(rc)));
          } else {
+            /* Memory→note bridge (v61): gloss pointer for fuzzy recall.  Best-effort. */
+            if (result.doc_id > 0)
+               (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, result.doc_id, label);
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
             json_object_object_add(resp_payload, "id", json_object_new_int64(result.doc_id));
             json_object_object_add(resp_payload, "label", json_object_new_string(label));
@@ -474,6 +483,9 @@ void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload)
                                                               ? result.error_msg
                                                               : document_index_error_string(rc)));
          } else {
+            /* Memory→note bridge (v61): refresh the gloss (label may have changed →
+             * delete+recreate inside the bridge).  Best-effort. */
+            (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
             json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
             json_object_object_add(resp_payload, "label", json_object_new_string(label));

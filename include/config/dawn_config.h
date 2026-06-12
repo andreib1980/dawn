@@ -745,6 +745,19 @@ typedef struct {
    bool paraphrase_dedup_enabled;
    float paraphrase_dedup_threshold;
 
+   /* Note-extraction guard (Phase 9 of the notes/reference-text store).  When a
+    * user files reference text via the `document_manage` save_note/save_text
+    * tool, that text lives canonically in the document store.  This guard keeps
+    * session-end memory extraction from RE-mining the same verbatim text into
+    * semantic facts (double-storage + drift: edit the note → the fact goes
+    * stale).  At extraction time it redacts (on copies, never the live history)
+    * the filed bodies wherever they appear — the tool-call arguments and the
+    * originating user message — plus the echoed bodies in `document_read` /
+    * `document_search` tool RESULTS (which would otherwise re-inject the text in
+    * a later extraction window).  Exact normalized-substring match only, so
+    * zero false positives.  Default on; set false to disable. */
+   bool note_extraction_guard;
+
    /* Extraction recovery — re-runs memory extraction on conversations whose
     * `last_extracted_msg_count` < `message_count` after the configured idle
     * window.  Catches sessions left unconsolidated by daemon crashes or

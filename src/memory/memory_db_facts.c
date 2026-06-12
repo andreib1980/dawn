@@ -653,6 +653,75 @@ int memory_db_fact_set_expires_at(int64_t fact_id, int user_id, int64_t expires_
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }
 
+int memory_db_fact_set_note_doc_id(int64_t fact_id, int user_id, int64_t note_doc_id) {
+   if (fact_id <= 0 || user_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   /* Ad-hoc prepare (mirrors set_expires_at) — the memory→note bridge link (v61)
+    * is set once at note-save time, never on the hot path.  CWE-639: the fact is
+    * (id, user_id)-scoped AND the linked document is ownership-validated via the
+    * EXISTS subquery (mirrors set_subject_entity) — the schema FK references
+    * documents(id) with no user predicate, so a cross-user link must be refused
+    * here.  note_doc_id <= 0 stores NULL (clears the link); the EXISTS guard is
+    * skipped on a NULL clear (?1 is bound NULL → the OR ?1 IS NULL branch). */
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE memory_facts SET note_doc_id = ?1 WHERE id = ?2 AND user_id = ?3 "
+       "AND (?1 IS NULL OR EXISTS (SELECT 1 FROM documents WHERE id = ?1 AND user_id = ?3))",
+       -1, &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare fact_set_note_doc_id failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   if (note_doc_id > 0)
+      sqlite3_bind_int64(stmt, 1, note_doc_id);
+   else
+      sqlite3_bind_null(stmt, 1);
+   sqlite3_bind_int64(stmt, 2, fact_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+   int step_rc = sqlite3_step(stmt);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (step_rc != SQLITE_DONE)
+      return MEMORY_DB_FAILURE;
+   return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_fact_find_by_note_doc_id(int user_id, int64_t note_doc_id, int64_t *fact_id_out) {
+   if (fact_id_out)
+      *fact_id_out = 0;
+   if (user_id <= 0 || note_doc_id <= 0)
+      return MEMORY_DB_FAILURE;
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   /* Ad-hoc prepare — runs once per note save/delete, not on the hot path.
+    * At most one gloss per note (the bridge upserts), so LIMIT 1. */
+   sqlite3_stmt *stmt = NULL;
+   int rc = sqlite3_prepare_v2(
+       s_db.db, "SELECT id FROM memory_facts WHERE user_id = ? AND note_doc_id = ? LIMIT 1", -1,
+       &stmt, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("memory_db: prepare fact_find_by_note_doc_id failed: %s",
+                   sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, user_id);
+   sqlite3_bind_int64(stmt, 2, note_doc_id);
+   int64_t id = 0;
+   if (sqlite3_step(stmt) == SQLITE_ROW)
+      id = sqlite3_column_int64(stmt, 0);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (fact_id_out)
+      *fact_id_out = id;
+   return MEMORY_DB_SUCCESS;
+}
+
 int memory_db_fact_supersede(int64_t old_fact_id, int64_t new_fact_id, int user_id) {
    if (user_id <= 0)
       return MEMORY_DB_FAILURE;
@@ -999,6 +1068,17 @@ int memory_db_facts_delete_by_patterns(int user_id,
    where_buf[off++] = ')';
    where_buf[off] = '\0';
 
+   /* Exempt memory→note bridge glosses (v61) from pattern bulk-delete — a
+    * gloss naming a saved note must not be caught by a fact_text pattern.
+    * Appended to where_buf so the COUNT, victim-select, and DELETE below
+    * (all "WHERE user_id = ? AND %s") share the exclusion. */
+   int ex = snprintf(where_buf + off, sizeof(where_buf) - off, " AND note_doc_id IS NULL");
+   if (ex < 0 || ex >= (int)(sizeof(where_buf) - off)) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   off += ex;
+
    /* COUNT pass — needed for both --dry-run report and post-DELETE
     * confirmation; SQLite's `changes()` after DELETE would give us the
     * same number on the actual-delete path, but running COUNT first lets
@@ -1271,6 +1351,7 @@ int memory_db_fact_get_embeddings(int user_id,
                                   float *out_embeddings,
                                   float *out_norms,
                                   int64_t *out_created_ats,
+                                  int64_t *out_note_doc_ids,
                                   int max_count,
                                   int *count_out) {
    if (count_out)
@@ -1304,6 +1385,11 @@ int memory_db_fact_get_embeddings(int user_id,
        * doesn't need temporal scoring — keeps the function backward-tolerant. */
       if (out_created_ats) {
          out_created_ats[count] = sqlite3_column_int64(s_db.stmt_memory_fact_get_embeddings, 3);
+      }
+      /* note_doc_id (col 4, v61) — NULL reads back as 0.  Caller may pass NULL
+       * when gloss-awareness isn't needed. */
+      if (out_note_doc_ids) {
+         out_note_doc_ids[count] = sqlite3_column_int64(s_db.stmt_memory_fact_get_embeddings, 4);
       }
       count++;
    }
