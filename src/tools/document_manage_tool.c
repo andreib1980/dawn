@@ -325,14 +325,41 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
    if (!title || !title[0] || !text || !text[0])
       return strdup("To save a document, provide both a title and the text.");
 
-   /* Overwrite-by-label: re-saving an existing document of the same name replaces
-    * it instead of creating a duplicate (do_save_note does the same for notes).
-    * Delete EVERY same-named non-note document the CALLER owns so repeated saves
-    * converge to one (also self-heals pre-existing duplicates).  Scoped tight: a
-    * same-named note (different kind, owns a gloss) and global/other-user docs
-    * are never touched.  The bound guards against a delete that keeps failing. */
    document_t existing;
    bool overwrite = false;
+
+   /* In-place overwrite of a previously-saved text document keeps its doc_id
+    * stable, so the version history + undo (recover) survive the overwrite.
+    * Delete+recreate would strand the prior content's version chain under the
+    * dead id and leave a "Recently deleted" ghost that restores to a duplicate
+    * (#3).  Only a "text" doc with stored full text (v63) qualifies; uploaded
+    * files (other filetypes) keep the delete+recreate sweep below. */
+   if (document_db_find_by_label_exact(user_id, title, false, &existing) == SUCCESS &&
+       existing.user_id == user_id && strcmp(existing.filetype, "text") == 0) {
+      char *probe = NULL;
+      if (document_db_full_text_get(existing.id, user_id, &probe) == SUCCESS) {
+         free(probe);
+         doc_index_result_t res;
+         int rc = document_doc_update(user_id, existing.id, text, strlen(text), &res);
+         if (rc != DOC_INDEX_SUCCESS) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Couldn't save the document: %s", res.error_msg);
+            return strdup(msg);
+         }
+         char msg[256];
+         snprintf(msg, sizeof(msg), "Updated (overwrote existing) document '%s' (%d chunk%s).",
+                  title, res.num_chunks, res.num_chunks == 1 ? "" : "s");
+         return strdup(msg);
+      }
+   }
+
+   /* Fallback overwrite-by-label: re-saving an existing document of the same
+    * name replaces it instead of creating a duplicate (do_save_note does the
+    * same for notes).  Delete EVERY same-named non-note document the CALLER owns
+    * so repeated saves converge to one (also self-heals pre-existing
+    * duplicates).  Scoped tight: a same-named note (different kind, owns a gloss)
+    * and global/other-user docs are never touched.  The bound guards against a
+    * delete that keeps failing. */
    for (int guard = 0; guard < DOCMGMT_MAX_OVERWRITE_SWEEP; guard++) {
       if (document_db_find_by_label_exact(user_id, title, false, &existing) != SUCCESS ||
           existing.user_id != user_id || strcmp(existing.filetype, "note") == 0)
@@ -609,10 +636,12 @@ static char *do_recover(int user_id, const char *label) {
    int n = 0;
    document_db_version_list_deleted(user_id, v, DOC_VERSION_MAX_LIST, &n);
    int64_t version_id = 0;
+   int64_t old_doc_id = 0;
    char fname[DOC_FILENAME_MAX] = "";
    for (int i = 0; i < n; i++) {
       if (strcasecmp(v[i].filename, label) == 0) {
          version_id = v[i].id;
+         old_doc_id = v[i].document_id;
          snprintf(fname, sizeof(fname), "%s", v[i].filename);
          break;
       }
@@ -641,6 +670,11 @@ static char *do_recover(int user_id, const char *label) {
    }
    if (as_note && res.doc_id > 0)
       (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, fname);
+
+   /* Move the deleted item's surviving snapshots onto the re-created doc so it
+    * leaves "Recently deleted" and a repeat restore can't duplicate it (#5). */
+   if (res.doc_id > 0)
+      (void)document_db_version_reattach(user_id, old_doc_id, res.doc_id);
 
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "Recovered '%s'.", fname);

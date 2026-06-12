@@ -1374,6 +1374,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_boolean(config->memory.paraphrase_dedup_enabled));
    json_object_object_add(memory, "paraphrase_dedup_threshold",
                           json_object_new_double(config->memory.paraphrase_dedup_threshold));
+   json_object_object_add(memory, "note_extraction_guard",
+                          json_object_new_boolean(config->memory.note_extraction_guard));
    json_object_object_add(memory, "pruning_enabled",
                           json_object_new_boolean(config->memory.pruning_enabled));
    json_object_object_add(memory, "prune_superseded_days",
@@ -2130,6 +2132,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");
    fprintf(fp, "paraphrase_dedup_threshold = %.2f\n", config->memory.paraphrase_dedup_threshold);
+   fprintf(fp, "note_extraction_guard = %s\n",
+           config->memory.note_extraction_guard ? "true" : "false");
    fprintf(fp, "pruning_enabled = %s\n", config->memory.pruning_enabled ? "true" : "false");
    fprintf(fp, "prune_superseded_days = %d\n", config->memory.prune_superseded_days);
    fprintf(fp, "prune_stale_days = %d\n", config->memory.prune_stale_days);

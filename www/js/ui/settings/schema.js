@@ -916,6 +916,12 @@
                advanced: true,
                showWhen: { key: 'llm.cloud.use_openrouter', value: true },
             },
+            note_extraction_guard: {
+               type: 'checkbox',
+               label: 'Guard Filed Notes from Memory',
+               hint: 'Keep reference text filed via save_note/save_text out of extracted memory facts so it lives only in the note store',
+               advanced: true,
+            },
             pruning_enabled: {
                type: 'checkbox',
                label: 'Enable Pruning',

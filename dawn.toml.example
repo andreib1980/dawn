@@ -447,6 +447,15 @@
 # phrase_bonus_weight = 0.25      # Ordered/contiguous phrase-match bonus scale (0-1)
 # search_min_score = 0.3          # Post-fusion relevance gate; below this is dropped (0-1)
 
+# --- Note/document version history (v62): undo edits + recover deletes ---
+# Every edit, overwrite, or delete first archives the prior content as a version
+# so changes are undoable and deletes are recoverable for a window.  Set
+# version_retention_days = 0 to disable versioning entirely.
+# version_retention_days = 14     # Days a version is kept before retention sweeps it (0 = off)
+                                  # Range: 0-365
+# version_keep_per_doc = 10       # Max versions retained per item (newest kept)
+                                  # Range: 1-100
+
 # =============================================================================
 # Persistent Memory System
 # =============================================================================
