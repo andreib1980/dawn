@@ -213,6 +213,14 @@ int document_index_text(int user_id,
 
    chunk_result_free(&chunks);
 
+   /* v63: store the canonical un-chunked text so the document can later be edited
+    * in place (find/replace → re-chunk).  Best-effort — a failure here doesn't
+    * fail the ingest; the doc just won't be editable until re-saved.  Skipped for
+    * GLOBAL docs: the LLM/WebUI edit path only touches owned docs, so full_text on
+    * a global would be pure dead storage (no one can edit it in place). */
+   if (!is_global)
+      (void)document_db_full_text_set(doc_id, text);
+
    OLOG_INFO("document_index_pipeline: indexed '%s' — %d chunks embedded, %d failed%s", filename,
              embedded_count, failed_count, is_global ? " [GLOBAL]" : "");
 
@@ -251,9 +259,9 @@ int document_index_note(int user_id,
 
    chunk_config_t cfg = CHUNK_CONFIG_DEFAULT;
    if (chunk_estimate_tokens(text, (int)text_len) > cfg.max_tokens) {
-      set_error(
-          out, DOC_INDEX_ERROR_TOO_LARGE,
-          "Note is too long to file as a single note — shorten it or upload it as a document");
+      set_error(out, DOC_INDEX_ERROR_TOO_LARGE,
+                "Note is too long to file as a single note — save it as a document instead (use "
+                "action save_text), or shorten it");
       return DOC_INDEX_ERROR_TOO_LARGE;
    }
 
@@ -343,9 +351,9 @@ int document_note_update(int user_id,
    }
    chunk_config_t cfg = CHUNK_CONFIG_DEFAULT;
    if (chunk_estimate_tokens(new_text, (int)new_len) > cfg.max_tokens) {
-      set_error(
-          out, DOC_INDEX_ERROR_TOO_LARGE,
-          "Note is too long to file as a single note — shorten it or upload it as a document");
+      set_error(out, DOC_INDEX_ERROR_TOO_LARGE,
+                "Note is too long to file as a single note — save it as a document instead (use "
+                "action save_text), or shorten it");
       return DOC_INDEX_ERROR_TOO_LARGE;
    }
    if (!embedding_engine_available()) {
@@ -384,4 +392,134 @@ int document_note_update(int user_id,
    out->error_code = DOC_INDEX_SUCCESS;
    out->error_msg[0] = '\0';
    return DOC_INDEX_SUCCESS;
+}
+
+/* v63 (B1b): replace a MULTI-chunk document's content in place — re-chunk +
+ * re-embed the new full text and atomically swap all chunks, keeping doc_id
+ * stable.  Requires stored full text (document_db_doc_read_for_edit rejects
+ * pre-v63 uploads).  Stems run outside the auth_db leaf lock; the swap is one
+ * transaction in document_db_doc_replace, which also archives the old content. */
+int document_doc_update(int user_id,
+                        int64_t doc_id,
+                        const char *new_text,
+                        size_t new_len,
+                        doc_index_result_t *out) {
+   if (!out)
+      return DOC_INDEX_ERROR_ALLOC;
+   memset(out, 0, sizeof(*out));
+   out->doc_id = doc_id;
+
+   if (!new_text || new_len == 0) {
+      set_error(out, DOC_INDEX_ERROR_EMPTY, "Document text is empty");
+      return DOC_INDEX_ERROR_EMPTY;
+   }
+   if (new_len > (size_t)g_config.documents.max_index_size_kb * 1024) {
+      set_error(out, DOC_INDEX_ERROR_TOO_LARGE, "Document text exceeds maximum size");
+      return DOC_INDEX_ERROR_TOO_LARGE;
+   }
+   if (!embedding_engine_available()) {
+      set_error(out, DOC_INDEX_ERROR_NO_EMBEDDING, "Embedding engine not available");
+      return DOC_INDEX_ERROR_NO_EMBEDDING;
+   }
+
+   /* Read old chunks (for FTS delete) + filename; owner-checked, requires full text. */
+   char filename[DOC_FILENAME_MAX] = "";
+   char *old_full = NULL;
+   int64_t *old_ids = NULL;
+   char **old_texts = NULL;
+   int n_old = 0;
+   if (document_db_doc_read_for_edit(user_id, doc_id, filename, sizeof(filename), &old_full,
+                                     &old_ids, &old_texts, &n_old) != SUCCESS) {
+      set_error(out, DOC_INDEX_ERROR_DB_FAIL,
+                "This document can't be edited in place — re-save it to enable editing");
+      return DOC_INDEX_ERROR_DB_FAIL;
+   }
+   free(old_full); /* doc_replace re-reads it for the version snapshot */
+
+   /* Stem the label once + each OLD chunk body (for FTS delete), outside the lock. */
+   char label_stems[MEMORY_FACT_STEMS_MAX];
+   (void)memory_stem_string(filename, label_stems, sizeof(label_stems));
+   char **old_body_stems = (n_old > 0) ? calloc((size_t)n_old, sizeof(char *)) : NULL;
+   bool oom = (n_old > 0 && !old_body_stems);
+   for (int i = 0; i < n_old && !oom; i++) {
+      old_body_stems[i] = malloc(MEMORY_FACT_STEMS_MAX);
+      if (!old_body_stems[i]) {
+         oom = true;
+         break;
+      }
+      (void)memory_stem_string(old_texts[i], old_body_stems[i], MEMORY_FACT_STEMS_MAX);
+   }
+
+   /* Chunk + embed + stem the NEW text. */
+   int dims = embedding_engine_dims();
+   chunk_config_t cfg = CHUNK_CONFIG_DEFAULT;
+   chunk_result_t chunks;
+   bool chunks_inited = (!oom && document_chunk_text(new_text, &cfg, &chunks) == 0);
+   int n_new = chunks_inited ? chunks.count : 0;
+   doc_replace_chunk_t *nc = NULL;
+   float *embs = NULL;
+   char **new_stems = NULL;
+   bool build_ok = false;
+   if (n_new > 0) {
+      nc = calloc((size_t)n_new, sizeof(*nc));
+      embs = malloc((size_t)n_new * (size_t)dims * sizeof(float));
+      new_stems = calloc((size_t)n_new, sizeof(char *));
+      build_ok = (nc && embs && new_stems);
+      for (int i = 0; build_ok && i < n_new; i++) {
+         float *slot = embs + (size_t)i * dims;
+         int od = 0;
+         if (embedding_engine_embed(chunks.chunks[i], slot, dims, &od) != 0 || od != dims) {
+            build_ok = false;
+            break;
+         }
+         new_stems[i] = malloc(MEMORY_FACT_STEMS_MAX);
+         if (!new_stems[i]) {
+            build_ok = false;
+            break;
+         }
+         (void)memory_stem_string(chunks.chunks[i], new_stems[i], MEMORY_FACT_STEMS_MAX);
+         nc[i].text = chunks.chunks[i];
+         nc[i].embedding = slot;
+         nc[i].norm = embedding_engine_l2_norm(slot, dims);
+         nc[i].body_stems = new_stems[i];
+      }
+   }
+
+   int rc = DOC_INDEX_ERROR_CHUNK_FAIL;
+   if (build_ok) {
+      char new_hash[65];
+      sha256_hex(new_text, new_len, new_hash);
+      if (document_db_doc_replace(user_id, doc_id, new_text, new_hash, filename, label_stems,
+                                  old_ids, (const char *const *)old_body_stems, n_old, nc, n_new,
+                                  dims) == SUCCESS) {
+         out->doc_id = doc_id;
+         out->num_chunks = n_new;
+         out->error_code = DOC_INDEX_SUCCESS;
+         rc = DOC_INDEX_SUCCESS;
+      } else {
+         set_error(out, DOC_INDEX_ERROR_DB_FAIL, "Failed to apply the edit");
+         rc = DOC_INDEX_ERROR_DB_FAIL;
+      }
+   } else {
+      set_error(out, DOC_INDEX_ERROR_CHUNK_FAIL, "Failed to chunk/embed the edited text");
+   }
+
+   /* Cleanup. */
+   if (chunks_inited)
+      chunk_result_free(&chunks);
+   if (new_stems)
+      for (int i = 0; i < n_new; i++)
+         free(new_stems[i]);
+   free(new_stems);
+   free(embs);
+   free(nc);
+   if (old_body_stems)
+      for (int i = 0; i < n_old; i++)
+         free(old_body_stems[i]);
+   free(old_body_stems);
+   for (int i = 0; i < n_old; i++)
+      free(old_texts[i]);
+   free(old_texts);
+   free(old_ids);
+   return rc;
 }

@@ -1038,6 +1038,9 @@ Format rules:
                   <button type="button" id="doc-library-note-viewer-close" class="btn-link">
                      Close
                   </button>
+                  <button type="button" id="doc-library-note-viewer-history" class="btn-link">
+                     History
+                  </button>
                   <button type="button" id="doc-library-note-viewer-edit" class="btn-secondary">
                      Edit
                   </button>
@@ -1045,6 +1048,8 @@ Format rules:
                      Delete
                   </button>
                </div>
+               <!-- v62: version history (populated on demand by the History button) -->
+               <div id="doc-library-note-versions" class="note-versions hidden"></div>
             </div>
             <!-- Inline note editor (create / edit) -->
             <div id="doc-library-note-editor" class="note-editor hidden">
@@ -1121,8 +1126,11 @@ Format rules:
             >
                <div class="doc-library-empty">No documents indexed yet</div>
             </div>
+            <!-- v62: recently-deleted items (undo a delete) -->
+            <div id="doc-library-deleted" class="note-versions hidden"></div>
             <div class="doc-library-footer">
                <button id="doc-library-load-more" class="btn-link hidden">Load More</button>
+               <button id="doc-library-deleted-toggle" class="btn-link">Recently deleted</button>
             </div>
             <div id="doc-library-indexing" class="doc-library-indexing hidden"></div>
          </div>

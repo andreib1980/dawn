@@ -96,8 +96,14 @@
       el.viewerLabel = document.getElementById('doc-library-note-viewer-label');
       el.viewerText = document.getElementById('doc-library-note-viewer-text');
       el.viewerClose = document.getElementById('doc-library-note-viewer-close');
+      el.viewerHistory = document.getElementById('doc-library-note-viewer-history');
       el.viewerEdit = document.getElementById('doc-library-note-viewer-edit');
       el.viewerDelete = document.getElementById('doc-library-note-viewer-delete');
+      el.versions = document.getElementById('doc-library-note-versions');
+      el.deleted =
+         document.getElementById('doc-library-note-deleted') ||
+         document.getElementById('doc-library-deleted');
+      el.deletedToggle = document.getElementById('doc-library-deleted-toggle');
 
       if (!el.btn || !el.popover) return;
 
@@ -153,6 +159,21 @@
          el.viewerDelete.addEventListener('click', () => {
             const doc = state.documents.find((d) => d.id === state.viewingId);
             if (doc) confirmDelete(doc.id);
+         });
+      }
+      if (el.viewerHistory) {
+         el.viewerHistory.addEventListener('click', () => {
+            if (state.viewingId) requestVersionList(state.viewingId);
+         });
+      }
+      if (el.deletedToggle) {
+         el.deletedToggle.addEventListener('click', () => {
+            if (el.deleted && !el.deleted.classList.contains('hidden')) {
+               el.deleted.classList.add('hidden');
+               el.deleted.innerHTML = '';
+            } else {
+               requestDeletedList();
+            }
          });
       }
 
@@ -376,6 +397,21 @@
       DawnWS.send({ type: 'doc_library_note_update', payload: { id, label, text } });
    }
 
+   function requestVersionList(docId) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({ type: 'doc_library_version_list', payload: { id: docId } });
+   }
+
+   function requestVersionRestore(versionId) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({ type: 'doc_library_version_restore', payload: { version_id: versionId } });
+   }
+
+   function requestDeletedList() {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+      DawnWS.send({ type: 'doc_library_deleted_list', payload: {} });
+   }
+
    function requestDelete(docId) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
       DawnWS.send({ type: 'doc_library_delete', payload: { id: docId } });
@@ -554,18 +590,139 @@
     * Read-only note viewer (opened by clicking a note name)
     * ============================================================================= */
 
-   function openViewer(note) {
-      if (!el.viewer || !note) return;
+   function openViewer(item) {
+      if (!el.viewer || !item) return;
       state.viewerTrigger = document.activeElement;
-      state.viewingId = note.id;
-      el.viewerLabel.textContent = note.filename;
-      el.viewerText.textContent = note.text || '';
+      state.viewingId = item.id;
+      const isNote = item.is_note || item.filetype === 'note';
+      el.viewerLabel.textContent = item.filename;
+      if (isNote) {
+         el.viewerText.textContent = item.text || '';
+      } else {
+         /* Documents are multi-part; the WebUI doesn't inline-edit them (read or
+          * edit via Friday / document_read).  Show a summary — version history +
+          * delete below still apply. */
+         const n = item.num_chunks || 0;
+         el.viewerText.textContent = `Document · ${n} part${n === 1 ? '' : 's'}. Ask Friday to read or edit its content; version history and delete are below.`;
+      }
+      /* Inline Edit is the single-chunk note editor — hide it for documents. */
+      if (el.viewerEdit) el.viewerEdit.style.display = isNote ? '' : 'none';
       // Editor and viewer are mutually-exclusive inline panels
       closeEditor(false);
+      hideVersions();
       if (el.notesActions) el.notesActions.classList.add('hidden');
       el.viewer.classList.remove('hidden');
       // Hand keyboard users a focusable control inside the viewer (WCAG 2.4.3)
       if (el.viewerClose) el.viewerClose.focus();
+   }
+
+   /* =============================================================================
+    * Version history (v62) — list + restore from the read-only viewer
+    * ============================================================================= */
+
+   function hideVersions() {
+      if (el.versions) {
+         el.versions.classList.add('hidden');
+         el.versions.innerHTML = '';
+      }
+   }
+
+   function handleVersionListResponse(payload) {
+      if (!el.versions) return;
+      if (!payload?.success) {
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show(payload?.error || 'Could not load history', 'error');
+         return;
+      }
+      // Only show history for the note currently open in the viewer.
+      if (payload.id !== state.viewingId) return;
+      renderVersions(payload.versions || []);
+   }
+
+   function renderVersions(versions) {
+      if (!el.versions) return;
+      el.versions.classList.remove('hidden');
+      if (versions.length === 0) {
+         el.versions.innerHTML = '<div class="note-versions-empty">No earlier versions yet.</div>';
+         return;
+      }
+      const rows = versions
+         .map((v) => {
+            const when = new Date(v.archived_at * 1000).toLocaleString();
+            return `
+            <div class="note-version-row">
+               <div class="note-version-info">
+                  <div class="note-version-when">${escapeHtml(when)}</div>
+                  <div class="note-version-preview">${escapeHtml(v.preview || '')}</div>
+               </div>
+               <button type="button" class="btn-link note-version-restore" data-version-id="${v.id}">Restore</button>
+            </div>`;
+         })
+         .join('');
+      el.versions.innerHTML = `<div class="note-versions-title">Version history</div>${rows}`;
+      el.versions.querySelectorAll('.note-version-restore').forEach((btn) => {
+         btn.addEventListener('click', () => {
+            const vid = parseInt(btn.dataset.versionId, 10);
+            if (callbacks.showConfirmModal) {
+               callbacks.showConfirmModal(
+                  'Restore this version? The current text is saved to history first, so you can undo.',
+                  () => requestVersionRestore(vid),
+                  { title: 'Restore version', okText: 'Restore' }
+               );
+            } else {
+               requestVersionRestore(vid);
+            }
+         });
+      });
+   }
+
+   function handleVersionRestoreResponse(payload) {
+      if (!payload?.success) {
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show(payload?.error || 'Restore failed', 'error');
+         return;
+      }
+      if (typeof DawnToast !== 'undefined') DawnToast.show('Version restored', 'success');
+      closeViewer(false);
+      if (el.deleted) {
+         el.deleted.classList.add('hidden');
+         el.deleted.innerHTML = '';
+      }
+      refreshList();
+   }
+
+   function handleDeletedListResponse(payload) {
+      if (!el.deleted) return;
+      if (!payload?.success) {
+         if (typeof DawnToast !== 'undefined')
+            DawnToast.show(payload?.error || 'Could not load deleted items', 'error');
+         return;
+      }
+      const items = payload.deleted || [];
+      el.deleted.classList.remove('hidden');
+      if (items.length === 0) {
+         el.deleted.innerHTML = '<div class="note-versions-empty">No recently deleted items.</div>';
+         return;
+      }
+      const rows = items
+         .map((d) => {
+            const when = new Date(d.archived_at * 1000).toLocaleString();
+            return `
+            <div class="note-version-row">
+               <div class="note-version-info">
+                  <div class="note-version-when">${escapeHtml(d.filename)} · deleted ${escapeHtml(when)}</div>
+                  <div class="note-version-preview">${escapeHtml(d.preview || '')}</div>
+               </div>
+               <button type="button" class="btn-link note-version-restore" data-version-id="${d.version_id}">Restore</button>
+            </div>`;
+         })
+         .join('');
+      el.deleted.innerHTML = `<div class="note-versions-title">Recently deleted</div>${rows}`;
+      el.deleted.querySelectorAll('.note-version-restore').forEach((btn) => {
+         btn.addEventListener('click', () => {
+            requestVersionRestore(parseInt(btn.dataset.versionId, 10));
+         });
+      });
    }
 
    // Guard an unsaved editor before replacing it with the viewer
@@ -585,6 +742,7 @@
       if (!el.viewer) return;
       const wasOpen = !el.viewer.classList.contains('hidden');
       el.viewer.classList.add('hidden');
+      hideVersions();
       state.viewingId = null;
       // Restore the "+ New note" affordance on the Notes tab
       if (el.notesActions) el.notesActions.classList.toggle('hidden', state.scope !== 'notes');
@@ -755,10 +913,9 @@
       const globalToggle = canToggleGlobal()
          ? `<button type="button" class="doc-library-item-global" data-id="${doc.id}" data-global="${doc.is_global ? '1' : '0'}" title="${doc.is_global ? 'Make private' : 'Share globally'}" aria-label="${doc.is_global ? 'Make private' : 'Share globally'}">${globeSvg}</button>`
          : '';
-      // Notes: the name doubles as the "open read-only viewer" affordance
-      const nameAttrs = isNote
-         ? `class="doc-library-item-name note-name-clickable" role="button" tabindex="0" data-view-id="${doc.id}" aria-label="View note ${escapeHtml(doc.filename)}"`
-         : 'class="doc-library-item-name"';
+      // The name doubles as the "open read-only viewer" affordance — for notes
+      // (text + edit) and documents (summary + version history), both with restore.
+      const nameAttrs = `class="doc-library-item-name note-name-clickable" role="button" tabindex="0" data-view-id="${doc.id}" aria-label="View ${escapeHtml(doc.filename)}"`;
       return `
       <div class="doc-library-item${isNote ? ' note-item' : ''}" data-id="${doc.id}">
          <div class="doc-library-item-icon ${safeType}">${iconLabel}</div>
@@ -788,7 +945,7 @@
       const noun = isNote ? 'note' : 'document';
       if (callbacks.showConfirmModal) {
          callbacks.showConfirmModal(
-            `Delete "${name}"? This will remove all indexed chunks and cannot be undone.`,
+            `Delete "${name}"? You can restore it from "Recently deleted" for a short window.`,
             () => requestDelete(id),
             { title: `Delete ${noun.charAt(0).toUpperCase() + noun.slice(1)}`, okText: 'Delete' }
          );
@@ -959,5 +1116,8 @@
       handleToggleGlobalResponse,
       handleNoteSaveResponse,
       handleNoteUpdateResponse,
+      handleVersionListResponse,
+      handleVersionRestoreResponse,
+      handleDeletedListResponse,
    };
 })();

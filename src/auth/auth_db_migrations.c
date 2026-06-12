@@ -2441,6 +2441,61 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       v61_ok = alter_ok && fts_ok;
    }
 
+   /* v62 migration: document_versions — soft-archive of pre-mutation content for
+    * undo/restore.  Plain CREATE (idempotent), no backfill (snapshots accrue
+    * going forward).  Fresh installs get it from SCHEMA_SQL.  No FK to documents
+    * by design (a version must outlive a deleted document). */
+   bool v62_ok = (current_version >= 62) || (current_version == 0);
+   if (current_version >= 1 && current_version < 62) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE TABLE IF NOT EXISTS document_versions ("
+                        "  id INTEGER PRIMARY KEY,"
+                        "  document_id INTEGER NOT NULL,"
+                        "  user_id INTEGER NOT NULL,"
+                        "  filename TEXT NOT NULL,"
+                        "  text TEXT NOT NULL,"
+                        "  archived_at INTEGER NOT NULL,"
+                        "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+                        ")",
+                        NULL, NULL, &errmsg);
+      if (rc == SQLITE_OK) {
+         v62_ok = true;
+         OLOG_INFO("auth_db: created document_versions table (v62)");
+      } else {
+         OLOG_ERROR("auth_db: v62 document_versions migration failed: %s — "
+                    "leaving schema_version at %d so next boot retries",
+                    errmsg ? errmsg : "unknown", current_version);
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v63 migration: document_full_text — canonical un-chunked text for multi-chunk
+    * document editing.  Plain CREATE (idempotent), NO backfill: existing
+    * multi-chunk docs have no stored full text and can't be cleanly reconstructed
+    * from overlapping chunks, so editing them prompts a re-save (which populates
+    * full_text going forward).  Fresh installs get it from SCHEMA_SQL. */
+   bool v63_ok = (current_version >= 63) || (current_version == 0);
+   if (current_version >= 1 && current_version < 63) {
+      rc = sqlite3_exec(s_db.db,
+                        "CREATE TABLE IF NOT EXISTS document_full_text ("
+                        "  document_id INTEGER PRIMARY KEY,"
+                        "  text TEXT NOT NULL,"
+                        "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
+                        ")",
+                        NULL, NULL, &errmsg);
+      if (rc == SQLITE_OK) {
+         v63_ok = true;
+         OLOG_INFO("auth_db: created document_full_text table (v63)");
+      } else {
+         OLOG_ERROR("auth_db: v63 document_full_text migration failed: %s — "
+                    "leaving schema_version at %d so next boot retries",
+                    errmsg ? errmsg : "unknown", current_version);
+      }
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
    /* Create indexes that depend on migration-added columns.
     * Runs for both fresh installs and migrations — must come after all migrations. */
    rc = sqlite3_exec(s_db.db,
@@ -2502,6 +2557,20 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                      NULL, NULL, &errmsg);
    if (rc != SQLITE_OK) {
       OLOG_WARNING("auth_db: could not create retention index: %s", errmsg ? errmsg : "ok");
+      sqlite3_free(errmsg);
+      errmsg = NULL;
+   }
+
+   /* v62 post-migration index: document_versions lookups are always by
+    * document_id, newest-first (list a doc's history, enforce the per-doc cap,
+    * sweep by age).  Created here so upgraded DBs get it (the v62 migration
+    * CREATE TABLE doesn't include it; SCHEMA_SQL does for fresh installs). */
+   rc = sqlite3_exec(s_db.db,
+                     "CREATE INDEX IF NOT EXISTS idx_doc_versions_doc "
+                     "ON document_versions(document_id, archived_at DESC)",
+                     NULL, NULL, &errmsg);
+   if (rc != SQLITE_OK) {
+      OLOG_WARNING("auth_db: could not create document_versions index: %s", errmsg ? errmsg : "ok");
       sqlite3_free(errmsg);
       errmsg = NULL;
    }
@@ -2594,7 +2663,8 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     *
     * Never downgrade — prevents old code from corrupting a newer DB. */
    const bool ready_to_bump = v48_ok && v49_ok && v50_ok && v51_ok && v52_ok && v53_ok && v54_ok &&
-                              v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok;
+                              v55_ok && v56_ok && v57_ok && v58_ok && v59_ok && v60_ok && v61_ok &&
+                              v62_ok && v63_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

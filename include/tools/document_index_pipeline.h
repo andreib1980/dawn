@@ -133,6 +133,22 @@ int document_note_update(int user_id,
                          size_t new_len,
                          doc_index_result_t *out);
 
+/**
+ * @brief Replace a MULTI-chunk document's content in place (v63, B1b).
+ *
+ * Re-chunks + re-embeds new_text and atomically swaps all chunks, keeping doc_id
+ * stable.  Requires the document to have stored full text (pre-v63 uploads are
+ * rejected with a "re-save to enable editing" error).  Archives the old content
+ * as a restorable version.  Single-chunk notes use document_note_update instead.
+ *
+ * @return DOC_INDEX_SUCCESS or a DOC_INDEX_ERROR_* code.
+ */
+int document_doc_update(int user_id,
+                        int64_t doc_id,
+                        const char *new_text,
+                        size_t new_len,
+                        doc_index_result_t *out);
+
 #ifdef __cplusplus
 }
 #endif

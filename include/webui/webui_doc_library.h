@@ -72,4 +72,23 @@ void handle_doc_library_note_save(ws_connection_t *conn, json_object *payload);
  */
 void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload);
 
+/**
+ * @brief List a document/note's archived versions, newest first (v62).
+ * Payload: { "id": <doc_id> }.  Response type: doc_library_version_list_response
+ */
+void handle_doc_library_version_list(ws_connection_t *conn, json_object *payload);
+
+/**
+ * @brief List recently-deleted items for undo (v62).  No payload.
+ * Response type: doc_library_deleted_list_response
+ */
+void handle_doc_library_deleted_list(ws_connection_t *conn, json_object *payload);
+
+/**
+ * @brief Restore a note to an archived version (v62) — in place if it still
+ * exists (archiving the current content first), or re-created if it was deleted.
+ * Payload: { "version_id": <id> }.  Response: doc_library_version_restore_response
+ */
+void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payload);
+
 #endif /* WEBUI_DOC_LIBRARY_H */

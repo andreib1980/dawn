@@ -1080,6 +1080,16 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_doc_library_note_update(conn, payload);
       }
+   } else if (strcmp(type, "doc_library_version_list") == 0) {
+      if (payload) {
+         handle_doc_library_version_list(conn, payload);
+      }
+   } else if (strcmp(type, "doc_library_deleted_list") == 0) {
+      handle_doc_library_deleted_list(conn, payload);
+   } else if (strcmp(type, "doc_library_version_restore") == 0) {
+      if (payload) {
+         handle_doc_library_version_restore(conn, payload);
+      }
    }
    /* OAuth flow (shared by calendar and email) */
 #if defined(DAWN_ENABLE_CALENDAR_TOOL) || defined(DAWN_ENABLE_EMAIL_TOOL)

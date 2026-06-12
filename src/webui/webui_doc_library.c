@@ -499,3 +499,161 @@ void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload)
    send_json_response(conn, response);
    json_object_put(response);
 }
+
+/* v62: list a document/note's archived versions (newest first), owner-scoped.
+ * Payload: { id: <document_id> }. */
+void handle_doc_library_version_list(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("doc_library_version_list_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *id_obj = NULL;
+   int64_t doc_id = 0;
+   if (!payload || !json_object_object_get_ex(payload, "id", &id_obj) ||
+       (doc_id = json_object_get_int64(id_obj)) <= 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("a valid id is required"));
+   } else {
+      document_version_meta_t v[DOC_VERSION_MAX_LIST];
+      int n = 0;
+      document_db_version_list(conn->auth_user_id, doc_id, v, DOC_VERSION_MAX_LIST, &n);
+
+      json_object *arr = json_object_new_array();
+      for (int i = 0; i < n; i++) {
+         json_object *row = json_object_new_object();
+         json_object_object_add(row, "id", json_object_new_int64(v[i].id));
+         json_object_object_add(row, "filename", json_object_new_string(v[i].filename));
+         json_object_object_add(row, "preview", json_object_new_string(v[i].preview));
+         json_object_object_add(row, "archived_at", json_object_new_int64(v[i].archived_at));
+         json_object_array_add(arr, row);
+      }
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
+      json_object_object_add(resp_payload, "versions", arr);
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* v62: list recently-deleted items (their surviving snapshots) for undo, owner-
+ * scoped.  No payload.  Restore one via doc_library_version_restore (the item no
+ * longer exists, so restore re-creates it). */
+void handle_doc_library_deleted_list(ws_connection_t *conn, json_object *payload) {
+   (void)payload;
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("doc_library_deleted_list_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   document_version_meta_t v[DOC_VERSION_MAX_LIST];
+   int n = 0;
+   document_db_version_list_deleted(conn->auth_user_id, v, DOC_VERSION_MAX_LIST, &n);
+
+   json_object *arr = json_object_new_array();
+   for (int i = 0; i < n; i++) {
+      json_object *row = json_object_new_object();
+      json_object_object_add(row, "version_id", json_object_new_int64(v[i].id));
+      json_object_object_add(row, "filename", json_object_new_string(v[i].filename));
+      json_object_object_add(row, "preview", json_object_new_string(v[i].preview));
+      json_object_object_add(row, "archived_at", json_object_new_int64(v[i].archived_at));
+      json_object_array_add(arr, row);
+   }
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+   json_object_object_add(resp_payload, "deleted", arr);
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* v62: restore a note to an archived version, owner-scoped.  Payload:
+ * { version_id: <id> }.  If the note still exists it is updated in place (which
+ * archives the CURRENT content first, so the restore itself is undoable); if it
+ * was deleted, it is re-created from the snapshot.  Notes only — multi-chunk
+ * document restore lands with B1b's in-place doc edit. */
+void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type",
+                          json_object_new_string("doc_library_version_restore_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *vid_obj = NULL;
+   int64_t version_id = 0;
+   if (!payload || !json_object_object_get_ex(payload, "version_id", &vid_obj) ||
+       (version_id = json_object_get_int64(vid_obj)) <= 0) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("a valid version_id is required"));
+      goto send;
+   }
+   char *text = NULL;
+   char fname[DOC_FILENAME_MAX] = "";
+   int64_t doc_id = 0;
+   if (document_db_version_get_text(version_id, conn->auth_user_id, &text, fname, sizeof(fname),
+                                    &doc_id) != SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Version not found (or not yours)"));
+      goto send;
+   }
+
+   document_t doc;
+   bool exists = (document_db_get(doc_id, &doc) == SUCCESS && doc.user_id == conn->auth_user_id);
+   doc_index_result_t result;
+   int rc = DOC_INDEX_SUCCESS + 1; /* non-success sentinel */
+   const char *label = exists ? doc.filename : fname;
+
+   if (exists && strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1) {
+      rc = document_note_update(conn->auth_user_id, doc_id, doc.filename, text, strlen(text),
+                                &result);
+   } else if (exists) {
+      /* Existing multi-chunk document — restore in place (re-chunk + re-embed). */
+      rc = document_doc_update(conn->auth_user_id, doc_id, text, strlen(text), &result);
+   } else {
+      /* The item was deleted — re-create it from the snapshot under its label. */
+      rc = document_index_note(conn->auth_user_id, fname, text, strlen(text), false, &result);
+      if (rc == DOC_INDEX_SUCCESS)
+         doc_id = result.doc_id;
+   }
+
+   free(text);
+
+   if (rc != DOC_INDEX_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string(result.error_msg[0]
+                                                        ? result.error_msg
+                                                        : document_index_error_string(rc)));
+   } else {
+      /* Refresh the memory→note gloss only for notes (an existing single-chunk
+       * note, or a deleted item re-created as a note) — a multi-chunk document
+       * has no gloss. */
+      bool restored_note = !exists || (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1);
+      if (restored_note)
+         (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
+      json_object_object_add(resp_payload, "label", json_object_new_string(label));
+      json_object_object_add(resp_payload, "recreated", json_object_new_boolean(!exists));
+      OLOG_INFO("doc_library: user %d restored note %lld ('%s') from version %lld",
+                conn->auth_user_id, (long long)doc_id, label, (long long)version_id);
+   }
+
+send:
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}

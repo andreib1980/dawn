@@ -627,12 +627,74 @@
    gap: 0.5rem;
 }
 
-/* The note name doubles as the open-viewer affordance — show it's clickable */
-.doc-library-item.note-item .doc-library-item-name {
+/* v62 version history — listed under the read-only viewer on the History button */
+.note-versions {
+   margin-top: 0.5rem;
+   border-top: 1px solid var(--border-color);
+   padding-top: 0.5rem;
+   max-height: 200px;
+   overflow-y: auto;
+}
+
+.note-versions.hidden {
+   display: none;
+}
+
+.note-versions-title {
+   font-size: 0.75rem;
+   font-weight: 600;
+   color: var(--text-secondary);
+   text-transform: uppercase;
+   letter-spacing: 0.03em;
+   margin-bottom: 0.4rem;
+}
+
+.note-versions-empty {
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+   font-style: italic;
+}
+
+.note-version-row {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0.35rem 0;
+   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.note-version-row:last-child {
+   border-bottom: none;
+}
+
+.note-version-info {
+   flex: 1;
+   min-width: 0;
+}
+
+.note-version-when {
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+}
+
+.note-version-preview {
+   font-size: 0.78rem;
+   color: var(--text-primary);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.note-version-restore {
+   flex-shrink: 0;
+}
+
+/* The item name doubles as the open-viewer affordance (notes + documents) */
+.doc-library-item-name.note-name-clickable {
    cursor: pointer;
 }
 
-.doc-library-item.note-item .doc-library-item-name:hover {
+.doc-library-item-name.note-name-clickable:hover {
    color: var(--accent);
 }
 

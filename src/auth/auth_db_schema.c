@@ -642,6 +642,37 @@ static const char *SCHEMA_SQL =
     "   content=''"
     ");"
 
+    /* v62: document_versions — soft-archive of a document/note's content captured
+     * BEFORE every destructive mutation (overwrite, edit/append, delete), so a
+     * change or deletion can be undone within a retention window (mirrors the
+     * email-trash pattern).  Deliberately NO foreign key to documents(id): a
+     * version must OUTLIVE its document so a DELETED note can still be restored —
+     * document_id is the (possibly-dangling) original id.  user_id keeps it
+     * owner-scoped and lets a deleted user's versions cascade away. */
+    "CREATE TABLE IF NOT EXISTS document_versions ("
+    "  id INTEGER PRIMARY KEY,"
+    "  document_id INTEGER NOT NULL,"
+    "  user_id INTEGER NOT NULL,"
+    "  filename TEXT NOT NULL,"
+    "  text TEXT NOT NULL,"
+    "  archived_at INTEGER NOT NULL,"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_doc_versions_doc "
+    "ON document_versions(document_id, archived_at DESC);"
+
+    /* v63: document_full_text — the canonical, un-chunked text of a multi-chunk
+     * document, kept so surgical edits (find/replace) can be applied to the whole
+     * text and the document re-chunked + re-embedded.  Single-chunk notes don't
+     * need it (the one chunk IS the full text).  Side table (not a column on
+     * documents) so the wide documents row stays lean and full_text — which can
+     * be tens of KB — is only JOINed when editing.  Cascades with the document. */
+    "CREATE TABLE IF NOT EXISTS document_full_text ("
+    "  document_id INTEGER PRIMARY KEY,"
+    "  text TEXT NOT NULL,"
+    "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
+    ");"
+
     /* Calendar tables (v23, read_only from v24, oauth from v25) */
     "CREATE TABLE IF NOT EXISTS calendar_accounts ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"

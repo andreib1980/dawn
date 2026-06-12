@@ -38,12 +38,16 @@ extern "C" {
  * Constants
  * ============================================================================= */
 
+#include <stddef.h> /* size_t */
+
 #define DOC_FILENAME_MAX 256
 #define DOC_FILEPATH_MAX 512
 #define DOC_FILETYPE_MAX 16
 #define DOC_HASH_MAX 65 /* SHA-256 hex + null */
 #define DOC_MAX_RESULTS 100
 #define DOC_CHUNK_TEXT_MAX 4096
+#define DOC_VERSION_PREVIEW_MAX 160 /* v62: text preview length in a version-list row */
+#define DOC_VERSION_MAX_LIST 32     /* v62: cap on versions returned by a list call */
 
 /* =============================================================================
  * Types
@@ -73,6 +77,16 @@ typedef struct {
    char doc_filetype[DOC_FILETYPE_MAX];
    int64_t created_at; /* v35 — chunk origin timestamp; 0 = unknown */
 } document_chunk_t;
+
+/* v62: one row of a document/note's version history (metadata + text preview).
+ * Full text for restore is fetched separately via document_db_version_get_text. */
+typedef struct {
+   int64_t id;          /* document_versions.id (restore key) */
+   int64_t document_id; /* the (possibly-deleted) original document id */
+   char filename[DOC_FILENAME_MAX];
+   char preview[DOC_VERSION_PREVIEW_MAX];
+   int64_t archived_at;
+} document_version_meta_t;
 
 /* v61: one lexical (BM25) candidate from document_db_chunk_search_bm25.  Carries
  * enough to fuse with the semantic channel and format a citation — no embedding
@@ -205,6 +219,111 @@ int document_db_chunk_index_fts(int64_t chunk_id, const char *label_stems, const
  * @return SUCCESS (0) on success, FAILURE (1) on error (incl. migration not run).
  */
 int document_db_rebuild_fts(int *count_out);
+
+/* =============================================================================
+ * v62: document versioning (soft-archive / undo / restore)
+ * ============================================================================= */
+
+/**
+ * @brief List a document's archived versions, newest first, owner-scoped.
+ * @param out Caller-allocated array (>= max); fills metadata + text preview.
+ * @return SUCCESS (0) / FAILURE (1).
+ */
+int document_db_version_list(int user_id,
+                             int64_t doc_id,
+                             document_version_meta_t *out,
+                             int max,
+                             int *count_out);
+
+/**
+ * @brief List recently-deleted items (newest surviving version per now-deleted
+ * document), owner-scoped, newest first.  Each `id` restores via re-create.
+ * @return SUCCESS (0) / FAILURE (1).
+ */
+int document_db_version_list_deleted(int user_id,
+                                     document_version_meta_t *out,
+                                     int max,
+                                     int *count_out);
+
+/**
+ * @brief Fetch a version's FULL text for restore, owner-scoped.
+ * @param text_out     Heap string on success (caller frees); NULL otherwise.
+ * @param filename_out Optional out buffer for the archived filename.
+ * @param doc_id_out   Optional out for the original document id.
+ * @return SUCCESS (0) / FAILURE (1 = not found / not owned / OOM).
+ */
+int document_db_version_get_text(int64_t version_id,
+                                 int user_id,
+                                 char **text_out,
+                                 char *filename_out,
+                                 size_t fn_sz,
+                                 int64_t *doc_id_out);
+
+/**
+ * @brief Retention sweep — drop versions older than retention_days (global).
+ * @param deleted_out Optional count of rows removed.
+ * @return SUCCESS (0) / FAILURE (1).  No-op when retention_days <= 0.
+ */
+int document_db_version_prune_expired(int retention_days, int *deleted_out);
+
+/* =============================================================================
+ * v63: multi-chunk document full-text storage + in-place edit (B1b)
+ * ============================================================================= */
+
+/** Store/replace a document's canonical un-chunked full text (own lock). */
+int document_db_full_text_set(int64_t doc_id, const char *text);
+
+/**
+ * @brief Fetch a document's canonical full text, owner-scoped.
+ * @param text_out Heap string on success (caller frees).
+ * @return SUCCESS (0) / FAILURE (1 = no stored full text → must be re-saved).
+ */
+int document_db_full_text_get(int64_t doc_id, int user_id, char **text_out);
+
+/* One prepared chunk for an in-place document replace (all borrowed). */
+typedef struct {
+   const char *text;
+   const float *embedding; /* `dims` floats */
+   float norm;
+   const char *body_stems; /* pre-stemmed chunk body */
+} doc_replace_chunk_t;
+
+/**
+ * @brief Read a multi-chunk document for in-place editing (owner-checked, must
+ * have stored full text).  Returns filename + full text + old chunk ids/texts so
+ * the caller can stem outside the lock before document_db_doc_replace.
+ * Caller frees *full_text_out, *old_ids_out, each (*old_texts_out)[i] + the array.
+ * @return SUCCESS (0) / FAILURE (1 = not owned / no full text / OOM).
+ */
+int document_db_doc_read_for_edit(int user_id,
+                                  int64_t doc_id,
+                                  char *filename_out,
+                                  size_t fn_sz,
+                                  char **full_text_out,
+                                  int64_t **old_ids_out,
+                                  char ***old_texts_out,
+                                  int *n_out);
+
+/**
+ * @brief Atomic in-place replace of a multi-chunk document's content (B1b).
+ * Archives the old full text as a version, swaps all chunks + FTS rows, updates
+ * num_chunks + file_hash, stores the new full text — doc_id / is_global stable.
+ * Stems are computed by the caller (leaf-lock); label_stems is shared by all
+ * chunks (filename unchanged).
+ * @return SUCCESS (0) / FAILURE (1, rolled back).
+ */
+int document_db_doc_replace(int user_id,
+                            int64_t doc_id,
+                            const char *new_full_text,
+                            const char *new_hash,
+                            const char *filename,
+                            const char *label_stems,
+                            const int64_t *old_ids,
+                            const char *const *old_body_stems,
+                            int n_old,
+                            const doc_replace_chunk_t *new_chunks,
+                            int n_new,
+                            int dims);
 
 /**
  * @brief Stable-id in-place edit of a single-chunk note (v61).
