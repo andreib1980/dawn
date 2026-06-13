@@ -62,6 +62,9 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 - **Tier 1 (Raspberry Pi)** — Local ASR/TTS, hands-free with wake word. Sends only text to the server. SDL2 touchscreen UI with KMSDRM backend.
 - **Tier 2 (ESP32-S3)** — Streams raw PCM audio; server handles ASR/TTS. Push-to-talk operation.
 - **Music Streaming** — Stream music to every room through your Tier 1 satellites.
+- **No Double Answers** — When your local microphone and a nearby satellite both hear the same command, DAWN recognizes the duplicate and only one of them responds. Configurable dedup window under `[asr]`.
+- **Over-the-Air Updates** — Push signed firmware and software updates from the daemon to your satellites without touching each device — Tier 1 (Raspberry Pi) and Tier 2 (ESP32-S3) both supported. Releases are signed offline (the daemon never holds the signing key) and verified against a baked-in public key on the device. Roll out to one device or the whole fleet from the WebUI admin panel or the `dawn-admin ota` CLI, with per-device version tracking and anti-rollback protection.
+- **Easy Pairing** — Provision a new satellite by scanning a QR code from the WebUI admin panel — no manual token copying.
 
 <!-- TODO: Screenshot of satellite SDL2 UI on a Raspberry Pi touchscreen -->
 
@@ -105,7 +108,7 @@ DAWN's LLM automatically invokes tools and incorporates results into responses. 
 - **Image Search** — Search and display images from the web. Images are fetched server-side (SSRF-protected with DNS pinning), cached locally, and served via zero-copy file serving. Click-to-enlarge lightbox in WebUI. Results displayed as inline markdown images.
 - **URL Fetcher** — Fetch and read web pages. Optional FlareSolverr (headless browser) or Tavily `/extract` (commercial, LLM-optimized) fallback for JavaScript-heavy sites. SSRF-protected. Untrusted-content framing on tool results.
 - **Weather** — Real-time weather and forecasts via Open-Meteo API (free, no API key required).
-- **Calculator** — Mathematical expression evaluation.
+- **Calculator** — Expression evaluation (`+ - * / ^`, `sqrt`, trig, `factorial`) plus a digit-perfect **exact mode** for arbitrary-precision integer results — every digit of `52!` or `2^256`, no scientific-notation rounding. Also unit conversion, base conversion, and random numbers.
 - **CalDAV Calendar** — CalDAV calendar integration (Google Calendar via OAuth 2.0, iCloud, Nextcloud, Radicale). Query today's events, search by keyword, add/update/delete events across multiple accounts. Filter queries by calendar name.
 - **Email** — Multi-account IMAP/SMTP email (Gmail via OAuth 2.0, iCloud, Outlook, Fastmail, self-hosted). Check inbox, read messages, search, send with two-step confirmation, trash with confirmation, archive. Pagination for large result sets. Per-account read-only flag. Contacts system for recipient resolution.
 - **Scheduler** — Timers, alarms, reminders, and scheduled tool execution.
@@ -122,6 +125,11 @@ DAWN's LLM automatically invokes tools and incorporates results into responses. 
    - Hybrid scoring: vector cosine similarity + keyword boosting
    - Per-user document isolation with admin-controlled global sharing
    - WebUI Document Library panel with drag-and-drop upload and admin document management
+- **Notes & Reference Text** — Ask DAWN to file notes and reference text it can search and recall later ("save this as my public bio", "what's on my packing list?").
+   - Hybrid keyword search tuned for short, named notes (built on the same Document Search store)
+   - Surgical edits: append to or replace part of a note without re-saving the whole thing
+   - Version history with one-step undo — recover the previous version or restore a deleted note
+   - Filed reference text is kept out of semantic memory by default, so the canonical copy lives only in the note store (configurable under `[memory]`)
 
 ### Persistent Memory
 
@@ -147,6 +155,7 @@ DAWN remembers facts, preferences, and relationships about its users across sess
 - **LLM Playlist Builder** — AI can search, add, remove, and clear queue tracks by voice. Genre-aware search.
 - **Resume Playback** — Pause saves position, resume continues where you left off.
 - **Opus Streaming** — Stream music to WebUI and DAP2 satellites via WebSocket.
+- **Media Key Controls** — Hardware media keys and lock-screen/OS media controls play, pause, and skip DAWN's music, with track metadata shown in the OS now-playing UI.
 
 ---
 
@@ -238,6 +247,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/WEBSOCKET_PROTOCOL.md](docs/WEBSOCKET_PROTOCOL.md)** | WebSocket protocol reference (all message types) |
 | **[docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** | Tier 1 satellite (RPi) install, build, config, deployment, troubleshooting |
 | **[dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md)** | Tier 2 satellite (ESP32-S3, Arduino) setup |
+| **[docs/OTA_DESIGN.md](docs/OTA_DESIGN.md)** | Server→satellite over-the-air update system (design + operator guide) |
 | **[docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md)** | Google OAuth 2.0 setup for Calendar and Email |
 | **[docs/TOOL_DEVELOPMENT_GUIDE.md](docs/TOOL_DEVELOPMENT_GUIDE.md)** | Guide for adding new LLM tools |
 | **[atlas archive](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/archive)** | Historical design docs (memory, RAG, user auth, plan executor, scheduler, image search, CalDAV, email, etc.) |

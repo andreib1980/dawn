@@ -206,6 +206,8 @@ cmake --build --preset default
 
 > **Skip AEC**: If WebRTC build fails, you can disable it: `cmake --preset default -DENABLE_AEC=OFF`
 
+> **Build presets**: `default`/`full` build everything; `local` (`ENABLE_WEBUI=OFF`) is a microphone-only build with no network features; `debug` adds symbols; `server` skips local audio (see [server mode](docs/GETTING_STARTED_SERVER.md)). List them with `cmake --list-presets`. Common toggles: `-DENABLE_WEBUI=OFF`, `-DENABLE_AEC=OFF`, `-DDAWN_ENABLE_EMAIL_TOOL=ON`.
+
 The binary will be at `build/dawn`. Build time varies by platform and optimization level.
 
 ## 4. Download Speech Models
@@ -831,6 +833,7 @@ After linking, just talk — no wake word needed. Send `/new` to reset the conve
 - **Feature overview**: See [README.md](README.md)
 - **Local LLM setup**: [llama.cpp](https://github.com/ggerganov/llama.cpp) or [Ollama](https://ollama.ai)
 - **Satellite devices**: See [docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md) for Tier 1 (RPi) and [dawn_satellite_arduino/README.md](dawn_satellite_arduino/README.md) for Tier 2 (ESP32)
+- **Satellite OTA updates**: To push signed firmware updates to satellites, generate an offline signing keypair once with `sudo ./dawn_satellite/ota-release.sh keygen` (writes `/etc/dawn/signing/ota_signing.{key,pub}` — the private key never lives on a device), deploy the `.pub` to each device's `/etc/dawn/ota_pubkey`, and set `[ota] enabled = true` + `release_dir` in `dawn.toml`. See [docs/OTA_DESIGN.md](docs/OTA_DESIGN.md).
 - **Smart home**: See [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) for Home Assistant integration
 - **System architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md)
 

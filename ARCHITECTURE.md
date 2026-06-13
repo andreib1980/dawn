@@ -4,7 +4,7 @@
 
 This document is the **architectural map**: directory layout, the cross-cutting rules every subsystem obeys (layering, threading, lock ordering, error handling, configuration), and a one-paragraph summary of each subsystem with a link to its detail doc. For the internals of any single subsystem — its components, data flow, DB schema, and tuning — open the linked file in [`docs/arch/subsystems/`](docs/arch/subsystems/).
 
-**Last updated**: April 2026.
+**Last updated**: June 2026.
 
 ## Table of Contents
 
@@ -36,8 +36,9 @@ dawn/
 │   ├── memory/             # Persistent memory system
 │   ├── tts/                # Text-to-speech (Piper)
 │   ├── audio/              # Audio capture, playback, music
-│   ├── core/               # Session manager, scheduler, embedding engine, crypto
+│   ├── core/               # Session manager, scheduler, embedding engine, crypto, OTA
 │   ├── auth/               # User auth, per-user settings, satellite mappings
+│   ├── messaging/          # Bidirectional chat channels (Telegram, Discord, Slack, SMS)
 │   ├── tools/              # Modular LLM tools (search, weather, calendar, email, scheduler, etc.)
 │   └── webui/              # Web UI server
 │
@@ -124,16 +125,19 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 |---|---|---|
 | **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`LOG_INFO/WARNING/ERROR`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
-| **LLM** | Unified interface for OpenAI, Claude, Gemini, and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
+| **LLM** | Unified interface for OpenAI, Claude, Gemini, and local (llama.cpp/Ollama), plus an optional **OpenRouter gateway** (`[llm.cloud] use_openrouter`) that fronts all cloud traffic through one OpenAI-compatible endpoint with per-purpose model overrides. Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. System prompts are composed in two segments — a stable prefix + a volatile tail (`src/core/prompt_compose.c`) — so providers can cache the prefix across turns. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
 | **DAP2 Satellite** | WebSocket protocol for all remote clients: WebUI browser (Opus), Tier 1 Raspberry Pi (local ASR/TTS, text-only), and Tier 2 ESP32 (raw PCM). A single server on port 3000 serves all three — adding a new client type means a new registration handler, not a new server. | [satellite.md](docs/arch/subsystems/satellite.md) |
+| **Satellite OTA** | Signed over-the-air updates for Tier 1 Pi (.deb) and Tier 2 ESP32 (device-apply). Releases are libsodium-signed binary manifests (TweetNaCl verify on the ESP32); the signing key lives offline and never on the daemon (`tools/ota_keytool.c`). Fleet rollout does a canary wave then deferred fan-out, driven off the main-loop 1-second heartbeat (no dedicated thread). WebUI fleet panel + `dawn-admin ota` CLI + runtime release rescan. | [OTA_DESIGN.md](docs/OTA_DESIGN.md) |
 | **Audio** | Capture thread + thread-safe ring buffer, multi-format playback (FLAC/MP3/Ogg), and the unified music DB (local files + Plex) with source-aware dedup and background scanner. | [audio.md](docs/arch/subsystems/audio.md) |
 | **WebUI Audio** | Browser-side Opus streaming via WebCodecs + server-side decode/resample/ASR/TTS/encode pipeline. Also hosts **always-on voice mode** (server-side VAD + wake word, no browser AI) and the **visual rendering tool** (inline SVG/HTML/Chart.js diagrams). | [webui-audio.md](docs/arch/subsystems/webui-audio.md) |
 | **Vision & Documents** | Image upload (client compression, server filesystem storage with source/retention policies, zero-copy HTTP serving) and document upload (PDF via MuPDF, DOCX via libzip+libxml2, plain text client-side). | [vision-documents.md](docs/arch/subsystems/vision-documents.md) |
 | **Memory** | Persistent user profile built by a **sleep-consolidation model**: extraction runs at session end, not during conversation, so chat latency is unchanged. Facts, preferences, summaries, entity graph, and contacts; hybrid keyword + semantic search via embeddings; nightly confidence decay. Conversation anchor on extraction (v42) resolves relative phrases ("yesterday", "last month") against the conversation's logical "now." | [memory.md](docs/arch/subsystems/memory.md). Historical design docs under [atlas/dawn/memory/](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory). |
 | **Document Search / RAG** | Upload → chunk → embed → search or paginated read via LLM tools. Shares `embedding_engine.c` with the memory subsystem; supports ONNX (local), Ollama, and OpenAI-compatible embedding providers. | [rag.md](docs/arch/subsystems/rag.md) |
+| **Notes / Reference Text** | First-class **notes** document kind (`DOC_KIND_NOTES`) on the same `document_db`/`embedding_engine` foundation: user- or LLM-authored reference text with hybrid lexical (BM25/FTS5 + Porter2 stemming, `libstemmer`) plus semantic search, surgical edit/append, version history with one-step undo (`document_versions`), and a notes↔memory bridge so fuzzy recall resolves to the right note. Filed note bodies are kept **out** of semantic memory by default (`note_extraction_guard`) so the canonical text lives only in the note store. | shares [rag.md](docs/arch/subsystems/rag.md) + [vision-documents.md](docs/arch/subsystems/vision-documents.md) |
 | **CalDAV Calendar** | Multi-account RFC 4791 client with offline-first SQLite cache, pre-expanded RRULE occurrences, and background sync. Tested with Google, iCloud, Nextcloud, Radicale. | [calendar.md](docs/arch/subsystems/calendar.md) |
 | **Email** | Dual backend — IMAP/SMTP for anything, Gmail REST API for OAuth accounts. Two-step confirmation on send and trash. Recipients resolved against the contacts system. | [email.md](docs/arch/subsystems/email.md) |
+| **Messaging Channels** (`src/messaging/`) | Bidirectional text chat over Telegram, Discord, Slack, and SMS. Each provider is a `messaging_driver_t` with its own background listener thread; inbound messages bind to a per-channel "forever conversation" (`SESSION_TYPE_MESSAGING`, exempt from idle cleanup) with per-conversation LLM settings, and scheduler briefings can deliver to a channel via `deliver_to`. Engine split into core + `_session`/`_channels`/`_link`/`_inbound` behind `messaging_engine_internal.h`. WebUI channel-management panel + `dawn-admin messaging` CLI. | [MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
 | **OAuth 2.0 & Crypto** | Shared OAuth client with PKCE S256 and `crypto_store.c` (libsodium `crypto_secretbox`) for encrypted token and password storage. Used by email and calendar. | [oauth-crypto.md](docs/arch/subsystems/oauth-crypto.md) |
 | **Scheduler** | Timers, alarms, reminders, and scheduled tool execution. Background thread polls every second, fires with chime audio + WebUI banner notifications, supports recurrence and snooze/dismiss. | [scheduler.md](docs/arch/subsystems/scheduler.md) |
 | **Home Assistant** | REST API client with entity cache, fuzzy name matching, and satellite area-awareness (`HomeAssistant_Area=[X]` injected into the LLM system prompt). 16 tool actions spanning lights, climate, locks, covers, media, scenes, scripts, automations. | [homeassistant.md](docs/arch/subsystems/homeassistant.md) |
@@ -164,6 +168,9 @@ Layer 1 (Core Infrastructure)
 ├── src/core/worker_pool.c/h       - Concurrent tool execution (deps: logging)
 ├── src/core/wake_word.c/h         - Wake-word matching (shared daemon + satellites)
 ├── src/core/time_query_parser.c/h - Stateless temporal-expression recognizer (deps: libc, math)
+├── src/core/utterance_dedup.c/h   - Cross-device utterance dedup (leaf lock, deps: logging)
+├── src/core/text_input_dispatch.c - Shared text-input → LLM entry path (deps: session_manager)
+├── src/core/prompt_compose.c      - Two-segment prompt composer (stable prefix + volatile tail)
 └── src/input_queue.c/h            - Thread-safe input queue (deps: logging)
 
 Layer 2 (Services)
@@ -175,6 +182,8 @@ Layer 2 (Services)
 ├── src/core/embedding_engine.c    - Shared embedding infrastructure (deps: Layer 0-1)
 ├── src/core/crypto_store.c        - Shared libsodium encryption (deps: Layer 0)
 ├── src/core/scheduler.c           - Scheduler engine + background thread (deps: Layer 0-1)
+├── src/core/session_manager_llm.c - LLM-call orchestration extracted from session_manager (deps: Layer 0-1, llm)
+├── src/core/ota*.c                - OTA release store, signed manifests, fleet rollout (deps: Layer 0-1, crypto_store; rollout pushes via a registered fn pointer to avoid a Layer-4 dep)
 ├── src/tts/                       - Text-to-speech (deps: Layer 0-1)
 ├── src/asr/                       - Daemon-side ASR interface, Vosk, chunking (deps: Layer 0-1)
 ├── common/src/asr/                - Shared ASR engines (Whisper, VAD) used by daemon + satellite
@@ -196,6 +205,9 @@ Layer 3 (Tools)
 ├── src/tools/oauth_client.c           - OAuth 2.0 + PKCE (deps: Layer 0-1, crypto_store)
 ├── src/tools/homeassistant_service.c  - HA REST API + entity cache (deps: Layer 0-1)
 ├── src/tools/calendar_service.c       - CalDAV business logic (deps: Layer 0-2, oauth_client)
+├── src/messaging/messaging_engine.c   - Channel engine: sessions, binding, dispatch (deps: Layer 0-2, session_manager, auth_db, scheduler)
+├── src/messaging/messaging_{telegram,slack,discord,sms}.c - Provider drivers behind messaging_driver_t (deps: curl/lws)
+├── src/messaging/ws_reconnect.c       - Reconnect/backoff helper (pure data structure, no DAWN deps — Layer-1 leaf candidate)
 └── src/tools/*.c                      - All other tools (deps: Layer 0-2)
 
 Layer 4 (Application)
@@ -254,8 +266,17 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Scheduler       — 1-second polling loop               │
 │  CalDAV sync     — background event pull               │
 │  WebUI audio     — per-connection ASR/TTS pipeline     │
+│  Messaging recv  — per-provider listener (Telegram/    │
+│                    Slack/Discord WS or poll)           │
+│  Messaging work  — inbound dispatch + async outbound   │
 └────────────────────────────────────────────────────────┘
 ```
+
+**Note on the thread budget.** Messaging is the one subsystem that meaningfully grows the
+thread count — each enabled provider runs a persistent listener thread plus a shared worker.
+**OTA fleet rollout deliberately adds no thread**: it advances on the main loop's existing
+1-second heartbeat (`ota_rollout_tick`), so a canary/fan-out is in flight without a dedicated
+thread to reason about.
 
 **Synchronization primitives**:
 
@@ -563,6 +584,7 @@ type = "cloud"                    # "cloud" or "local"
 [llm.cloud]
 provider = "openai"               # "openai", "anthropic", "gemini"
 model = "gpt-4o"
+use_openrouter = false            # route all cloud traffic through the OpenRouter gateway
 
 [llm.local]
 endpoint = "http://localhost:8080"
@@ -571,6 +593,7 @@ model = "qwen3-4b"
 [asr]
 model_path = "models/whisper.cpp/ggml-base.en.bin"
 language = "en"
+dedup_window_sec = 4              # cross-device utterance dedup (0 disables)
 
 [tts]
 model_path = "models/en_GB-alba-medium.onnx"
@@ -579,6 +602,13 @@ sample_rate = 22050
 [webui]
 bind_address = "0.0.0.0"
 port = 3000
+
+[messaging.sms]                   # Telegram/Slack/Discord load from tokens in secrets.toml
+active_window_sec = 300           # bypass wake-word within this window after last message
+
+[ota]
+enabled = false                   # server→satellite over-the-air updates
+release_dir = "/var/lib/dawn/ota"
 ```
 
 **`secrets.toml`** — API keys and sensitive credentials (gitignored):
@@ -599,14 +629,16 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 
 | WebUI Section      | Config Section                        | Notes                                           |
 | ------------------ | ------------------------------------- | ----------------------------------------------- |
-| Language Model     | `[llm]`, `[llm.cloud]`, `[llm.local]` | Provider, model selection                       |
-| Speech Recognition | `[asr]`                               | Model, language                                 |
+| Language Model     | `[llm]`, `[llm.cloud]`, `[llm.local]` | Provider, model selection, OpenRouter gateway toggle |
+| Speech Recognition | `[asr]`                               | Model, language, cross-device dedup window      |
 | Text-to-Speech     | `[tts]`                               | Voice model, rate                               |
 | Audio              | `[audio]`                             | Backend, devices                                |
 | Tool Calling       | `[llm.tools]`                         | Mode, per-tool toggles                          |
 | Network            | `[webui]`, `[dap]`, `[mqtt]`          | Ports, addresses                                |
 | Images & Vision    | `[images]`, `[vision]`                | Storage retention, upload size/dimension limits |
-| Documents          | `[documents]`                         | Upload size, page limits, index limits, chunking |
+| Documents          | `[documents]`                         | Upload size, page/index limits, chunking, hybrid-search weights |
+| Messaging          | `[messaging.sms]` (+ tokens in `secrets.toml`) | Channel link/unlink/rename, per-channel reasoning/effort |
+| OTA / Fleet        | `[ota]`                               | Release dir, download-token TTL, TLS requirement; fleet rollout lives in the OTA panel, not Settings |
 
 When adding new settings to `dawn.toml`, also add corresponding entries to `SETTINGS_SCHEMA` to expose them in the WebUI, unless they fall under the exclusion criteria above.
 
@@ -655,6 +687,8 @@ DAP2 is the unified WebSocket protocol for all remote access to the DAWN daemon.
 | **Tier 2** | ESP32-S3 | Binary PCM audio (16kHz)      | ASR + LLM + TTS | Push-to-talk (server ASR/TTS) |
 
 The session manager, response queue, LLM pipeline, tool system, and conversation history are shared infrastructure. Adding a new client type needs only a registration handler and a routing decision — not a new server.
+
+**OTA control plane.** Fleet rollout pushes signed-update availability to connected Tier 1/Tier 2 satellites over this same WebSocket server; the device downloads via a one-time token and applies (.deb for the Pi, device-apply for the ESP32). See [OTA_DESIGN.md](docs/OTA_DESIGN.md).
 
 **Full details**: message types, connection lifecycle, UI patterns, satellite registration, and music streaming all live in [satellite.md](docs/arch/subsystems/satellite.md). The wire protocol itself is specified in [WEBSOCKET_PROTOCOL.md](docs/WEBSOCKET_PROTOCOL.md).
 
