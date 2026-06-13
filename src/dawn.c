@@ -67,6 +67,7 @@
 #include "core/ota_rollout.h"
 #include "core/path_utils.h"
 #include "core/session_manager.h"
+#include "core/utterance_dedup.h"
 #include "core/wake_word.h"
 #include "core/worker_pool.h"
 #include "dawn.h"
@@ -1827,7 +1828,8 @@ int main(int argc, char *argv[]) {
 
    // Step 7: Initialize wake words from config (must be after config is finalized)
    init_wake_words();
-   wake_word_init(g_config.general.ai_name); /* Shared module for WebUI always-on */
+   wake_word_init(g_config.general.ai_name);            /* Shared module for WebUI always-on */
+   utterance_dedup_init(g_config.asr.dedup_window_sec); /* Cross-device utterance dedup gate */
 
    // Step 8: Initialize preroll buffer size from config
    // Buffer is statically allocated (VAD_PREROLL_MAX_BYTES), we just set the usable portion
@@ -3579,6 +3581,23 @@ mqtt_disabled:
                silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
                recState = DAWN_STATE_SILENCE;
                // Reset all subsystems for new utterance
+               reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
+                                       &speech_duration, &recording_duration, &preroll_write_pos,
+                                       &preroll_valid_bytes);
+               break;
+            }
+
+            /* Cross-device dedup: if a nearby satellite (or another session)
+             * already produced a command event within the window, this local
+             * mic heard the same spoken command — drop it and return to
+             * listening so the user gets exactly one response.  Covers all
+             * processing modes since it runs before the mode branch below. */
+            if (utterance_dedup_check(local_session->session_id)) {
+               OLOG_INFO("Dedup suppressed duplicate local utterance: \"%s\"", command_text);
+               free(command_text);
+               command_text = NULL;
+               silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
+               recState = DAWN_STATE_SILENCE;
                reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
                                        &speech_duration, &recording_duration, &preroll_write_pos,
                                        &preroll_valid_bytes);

@@ -39,6 +39,7 @@
 #include "config/config_env.h"
 #include "config/config_parser.h"
 #include "config/dawn_config.h"
+#include "core/utterance_dedup.h"
 #include "dawn.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
@@ -361,6 +362,12 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
    if (json_object_object_get_ex(payload, "asr", &section)) {
       JSON_TO_CONFIG_STR(section, "model", config->asr.model);
       JSON_TO_CONFIG_STR(section, "models_path", config->asr.models_path);
+      JSON_TO_CONFIG_INT(section, "dedup_window_sec", config->asr.dedup_window_sec);
+      /* handle_set_config does not run config_validate, and an out-of-range
+       * value persisted to dawn.toml would make the daemon fail to boot — clamp
+       * to the validated range here before applying/persisting. */
+      CONFIG_CLAMP(config->asr.dedup_window_sec, 0, ASR_DEDUP_WINDOW_SEC_MAX);
+      utterance_dedup_set_window(config->asr.dedup_window_sec); /* live retune */
    }
 
    /* [tts] */

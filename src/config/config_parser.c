@@ -367,11 +367,12 @@ static void parse_asr(toml_table_t *table, asr_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "model", "models_path", NULL };
+   static const char *const known_keys[] = { "model", "models_path", "dedup_window_sec", NULL };
    warn_unknown_keys(table, "asr", known_keys);
 
    PARSE_STRING(table, "model", config->model);
    PARSE_STRING(table, "models_path", config->models_path);
+   PARSE_INT(table, "dedup_window_sec", config->dedup_window_sec);
 }
 
 static void parse_tts(toml_table_t *table, tts_config_t *config) {

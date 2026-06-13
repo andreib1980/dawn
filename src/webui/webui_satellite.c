@@ -37,6 +37,7 @@
 #include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
+#include "core/utterance_dedup.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
 #include "webui/webui_internal.h"
@@ -257,6 +258,21 @@ static void *satellite_worker_thread(void *arg) {
    /* Check if session is still valid or if this request was superseded */
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("Satellite: Session disconnected or request superseded, aborting");
+      goto cleanup;
+   }
+
+   /* Cross-device dedup: if the local mic or another satellite already produced
+    * a command event within the window, this one is a duplicate of the same
+    * spoken utterance — drop it and return to idle. */
+   if (utterance_dedup_check(session->session_id)) {
+      OLOG_INFO("Satellite: Dedup suppressed duplicate utterance from %s (len=%zu)",
+                session->identity.name, strlen(text));
+      /* The satellite sits in VOICE_STATE_WAITING until a stream_end fires its
+       * response_complete flag; a bare "idle" state only bumps its activity
+       * timer, so it would spin until the 50s response timeout.  Send stream_end
+       * (empty response = nothing spoken) to release it immediately. */
+      satellite_send_stream_end(session, "complete");
+      satellite_send_state(session, "idle");
       goto cleanup;
    }
 

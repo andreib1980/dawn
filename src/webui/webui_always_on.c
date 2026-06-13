@@ -34,6 +34,7 @@
 
 #include "asr/asr_interface.h"
 #include "core/session_manager.h"
+#include "core/utterance_dedup.h"
 #include "core/wake_word.h"
 #include "core/worker_pool.h"
 #include "logging.h"
@@ -704,7 +705,16 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
          send_always_on_state(ctx->wsi, "processing");
 
          if (conn->session && cmd[0] != '\0') {
-            webui_process_text_input(conn->session, cmd);
+            /* Cross-device dedup: another device already handled this spoken
+             * command within the window.  Suppress and return to listening —
+             * always_on_processing_complete resets the state machine (a plain
+             * "idle" send would leave it wedged in PROCESSING). */
+            if (utterance_dedup_check(conn->session->session_id)) {
+               OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", cmd);
+               always_on_processing_complete(ctx);
+            } else {
+               webui_process_text_input(conn->session, cmd);
+            }
          }
          free(cmd);
       } else {
@@ -751,8 +761,16 @@ static void always_on_consume_cmd_result(always_on_ctx_t *ctx, void *conn_ptr) {
    pthread_mutex_unlock(&ctx->mutex);
 
    if (transcript && conn->session) {
-      webui_process_text_input(conn->session, transcript);
-      free(transcript);
+      /* Cross-device dedup: drop a duplicate of a command another device
+       * already handled; reset the state machine like the ASR-fail path. */
+      if (utterance_dedup_check(conn->session->session_id)) {
+         OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", transcript);
+         free(transcript);
+         always_on_processing_complete(ctx);
+      } else {
+         webui_process_text_input(conn->session, transcript);
+         free(transcript);
+      }
    } else {
       free(transcript);
       /* ASR failed or no session — return to listening */

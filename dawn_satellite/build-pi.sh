@@ -74,7 +74,14 @@ docker run --rm --platform linux/arm64 \
     bash -c "cmake -S . -B build-pi $CMAKE_FLAGS && make -C build-pi -j${JOBS}"
 
 BIN="$REPO_ROOT/dawn_satellite/build-pi/dawn_satellite"
+FW_VER="$(sed -n 's/.*DAWN_SATELLITE_FIRMWARE_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' \
+   "$REPO_ROOT/dawn_satellite/include/satellite_version.h" 2>/dev/null)"
 echo "==> Done."
 file "$BIN" 2>/dev/null || true
 echo "    Binary: $BIN"
 echo "    Deploy: scp '$BIN' <user>@<pi>:/tmp/dawn_satellite_test"
+echo
+echo "    OTA release (run on the daemon host): sign + stage this image, then push"
+echo "    it to a device from the WebUI satellite panel."
+echo "    Build-pi already baked version ${FW_VER:-X.Y.Z} into the binary; --version must match it."
+echo "      sudo ./dawn_satellite/ota-release.sh --version ${FW_VER:-X.Y.Z}"

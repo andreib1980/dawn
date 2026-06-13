@@ -179,7 +179,10 @@ struct voice_ctx {
 
    /* User transcription for UI display (protected by response_mutex) */
    char user_text[512];
-   atomic_bool user_text_new; /* True when new user text is available for UI */
+   atomic_bool user_text_new;     /* True when new user text is ready for the UI to show */
+   atomic_bool user_text_pending; /* Captured but withheld until the server confirms (see
+                                     on_state_callback): a deduped/suppressed query never gets
+                                     the "thinking" confirmation, so its line never displays */
 
    /* Sentence buffer for streaming TTS */
 #ifdef HAVE_VAD_SILERO
@@ -286,10 +289,18 @@ static void on_stream_callback(const char *text, bool is_end, void *user_data) {
 }
 
 static void on_state_callback(const char *state_str, void *user_data) {
-   (void)state_str; /* Used by LOG_DEBUG when debug logging is enabled */
    voice_ctx_t *ctx = (voice_ctx_t *)user_data;
    if (ctx) {
       ctx->last_server_activity = time(NULL);
+      /* The server sends "thinking" only after it has accepted the query for
+       * processing — a deduped/superseded query never reaches that point.  Use
+       * it as the confirmation to reveal the user's transcript line, so a
+       * suppressed duplicate utterance is never shown.  atomic_exchange makes
+       * this a one-shot: only the first "thinking" after a capture releases. */
+      if (state_str && strcmp(state_str, "thinking") == 0 &&
+          atomic_exchange(&ctx->user_text_pending, false)) {
+         atomic_store(&ctx->user_text_new, true);
+      }
    }
    OLOG_DEBUG("Server state: %s", state_str);
 }
@@ -1390,11 +1401,13 @@ int voice_processing_loop(voice_ctx_t *ctx,
                                  printf("\n>>> Command: %s\n\n", command_text);
                                  fflush(stdout);
 
-                                 /* Store user text for UI display */
+                                 /* Store user text, but withhold display until the
+                                  * server confirms it's processing (see on_state_callback)
+                                  * so a deduped duplicate never shows on screen. */
                                  pthread_mutex_lock(&ctx->response_mutex);
                                  snprintf(ctx->user_text, sizeof(ctx->user_text), "%s",
                                           command_text);
-                                 atomic_store(&ctx->user_text_new, true);
+                                 atomic_store(&ctx->user_text_pending, true);
 
                                  /* Reset for new response */
                                  ctx->response_buffer[0] = '\0';
@@ -1489,10 +1502,12 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            printf("\n>>> Command: %s\n\n", cmd_result->text);
                            fflush(stdout);
 
-                           /* Store user text for UI display */
+                           /* Store user text, but withhold display until the server
+                            * confirms it's processing (see on_state_callback) so a
+                            * deduped duplicate never shows on screen. */
                            pthread_mutex_lock(&ctx->response_mutex);
                            snprintf(ctx->user_text, sizeof(ctx->user_text), "%s", cmd_result->text);
-                           atomic_store(&ctx->user_text_new, true);
+                           atomic_store(&ctx->user_text_pending, true);
 
                            /* Reset for new response */
                            ctx->response_buffer[0] = '\0';

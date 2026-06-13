@@ -121,6 +121,10 @@ int config_validate(const dawn_config_t *config,
       }
    }
 
+   /* ===== ASR cross-device dedup window (0 disables, ceiling defined in dawn_config.h) ===== */
+   VALIDATE_RANGE_INT("asr.dedup_window_sec", config->asr.dedup_window_sec, 0,
+                      ASR_DEDUP_WINDOW_SEC_MAX);
+
    /* ===== TTS Length Scale (0.5 - 2.0) ===== */
    VALIDATE_RANGE_FLOAT("tts.length_scale", config->tts.length_scale, 0.5f, 2.0f);
 

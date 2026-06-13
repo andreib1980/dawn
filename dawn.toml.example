@@ -103,6 +103,13 @@
                                   # Env: DAWN_ASR_MODEL
 # models_path = "models/whisper.cpp"  # Path to Whisper model files
                                   # Env: DAWN_ASR_MODELS_PATH
+# dedup_window_sec = 4            # Cross-device utterance dedup window (seconds).
+                                  # When the local mic and a nearby satellite both
+                                  # hear one command, only the first proceeds; the
+                                  # rest are suppressed within this window. 0 disables.
+                                  # Default ASR_DEDUP_WINDOW_SEC_DEFAULT, max
+                                  # ASR_DEDUP_WINDOW_SEC_MAX (dawn_config.h).
+                                  # Runtime-tunable. Env: DAWN_ASR_DEDUP_WINDOW_SEC
 
 # =============================================================================
 # Text-to-Speech (TTS)

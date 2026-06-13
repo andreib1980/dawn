@@ -35,6 +35,7 @@
 #include "audio/resampler.h"
 #include "auth/auth_db.h"
 #include "core/session_manager.h"
+#include "core/utterance_dedup.h"
 #include "core/worker_pool.h"
 #include "llm/llm_context.h"
 #include "logging.h"
@@ -1167,6 +1168,18 @@ static void *audio_worker_thread(void *arg) {
 
    /* Check if request was superseded */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
+      session_release(session);
+      free(transcript);
+      free(work);
+      return NULL;
+   }
+
+   /* Cross-device dedup: drop this utterance if the local mic or another device
+    * already produced a command event within the window (same spoken command). */
+   if (utterance_dedup_check(session->session_id)) {
+      OLOG_INFO("WebUI: Dedup suppressed duplicate utterance for session %u: \"%s\"",
+                session->session_id, transcript);
+      webui_send_state(session, "idle");
       session_release(session);
       free(transcript);
       free(work);

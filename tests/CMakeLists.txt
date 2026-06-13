@@ -709,6 +709,12 @@ dawn_add_unit_test(test_rate_limiter
    LIBS    unity pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_utterance_dedup
+   SOURCES test_utterance_dedup.c
+           ${SRC_ROOT}/src/core/utterance_dedup.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_tavily_rate_limit
    SOURCES test_tavily_rate_limit.c
            ${SRC_ROOT}/src/tools/tavily_rate_limit.c

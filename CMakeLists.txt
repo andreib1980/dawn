@@ -486,6 +486,7 @@ set(DAWN_SOURCES
     src/core/path_utils.c
     src/core/strbuf.c
     src/core/wake_word.c
+    src/core/utterance_dedup.c
 
     # ASR subsystem
     src/asr/asr_interface.c

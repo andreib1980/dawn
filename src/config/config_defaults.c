@@ -97,6 +97,7 @@ void config_set_defaults(dawn_config_t *config) {
    /* ASR */
    SAFE_COPY(config->asr.model, "base.en");
    SAFE_COPY(config->asr.models_path, "models/whisper.cpp");
+   config->asr.dedup_window_sec = ASR_DEDUP_WINDOW_SEC_DEFAULT;
 
    /* TTS */
    SAFE_COPY(config->tts.models_path, "models");

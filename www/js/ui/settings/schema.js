@@ -323,6 +323,15 @@
                dynamicKey: 'asr_models',
                allowCustom: true,
             },
+            dedup_window_sec: {
+               type: 'number',
+               label: 'Cross-Device Dedup Window (sec)',
+               // min/max mirror ASR_DEDUP_WINDOW_SEC_* in include/config/dawn_config.h
+               min: 0,
+               max: 60,
+               step: 1,
+               hint: 'Suppress duplicate responses when two devices hear one command within this window (0 disables; default: 4)',
+            },
          },
       },
       tts: {

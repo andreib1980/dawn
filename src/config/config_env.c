@@ -170,6 +170,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    /* [asr] */
    ENV_STRING("DAWN_ASR_MODEL", config->asr.model);
    ENV_STRING("DAWN_ASR_MODELS_PATH", config->asr.models_path);
+   ENV_INT("DAWN_ASR_DEDUP_WINDOW_SEC", config->asr.dedup_window_sec);
 
    /* [tts] */
    ENV_STRING("DAWN_TTS_MODELS_PATH", config->tts.models_path);
@@ -337,6 +338,7 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[asr]\n");
    printf("  model = \"%s\"\n", config->asr.model);
    printf("  models_path = \"%s\"\n", config->asr.models_path);
+   printf("  dedup_window_sec = %d\n", config->asr.dedup_window_sec);
 
    printf("\n[tts]\n");
    printf("  models_path = \"%s\"\n", config->tts.models_path);
@@ -666,6 +668,9 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_STR("models_path", config->asr.models_path, "DAWN_ASR_MODELS_PATH",
                      detect_source_str(config->asr.models_path, defaults.asr.models_path,
                                        "DAWN_ASR_MODELS_PATH"));
+   PRINT_SETTING_INT("dedup_window_sec", config->asr.dedup_window_sec, "DAWN_ASR_DEDUP_WINDOW_SEC",
+                     detect_source_int(config->asr.dedup_window_sec, defaults.asr.dedup_window_sec,
+                                       "DAWN_ASR_DEDUP_WINDOW_SEC"));
 
    /* [tts] */
    printf("[tts]\n");
@@ -948,6 +953,7 @@ void config_dump_toml(const dawn_config_t *config) {
    printf("\n[asr]\n");
    printf("model = \"%s\"\n", config->asr.model);
    printf("models_path = \"%s\"\n", config->asr.models_path);
+   printf("dedup_window_sec = %d\n", config->asr.dedup_window_sec);
 
    printf("\n[tts]\n");
    printf("models_path = \"%s\"\n", config->tts.models_path);
@@ -1100,6 +1106,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object *asr = json_object_new_object();
    json_object_object_add(asr, "model", json_object_new_string(config->asr.model));
    json_object_object_add(asr, "models_path", json_object_new_string(config->asr.models_path));
+   json_object_object_add(asr, "dedup_window_sec",
+                          json_object_new_int(config->asr.dedup_window_sec));
    json_object_object_add(root, "asr", asr);
 
    /* [tts] */
@@ -1886,6 +1894,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[asr]\n");
    fprintf(fp, "model = \"%s\"\n", config->asr.model);
    fprintf(fp, "models_path = \"%s\"\n", config->asr.models_path);
+   fprintf(fp, "dedup_window_sec = %d\n", config->asr.dedup_window_sec);
 
    fprintf(fp, "\n[tts]\n");
    fprintf(fp, "models_path = \"%s\"\n", config->tts.models_path);

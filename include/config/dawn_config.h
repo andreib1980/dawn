@@ -174,9 +174,17 @@ typedef struct {
 /* =============================================================================
  * ASR (Automatic Speech Recognition) Configuration
  * ============================================================================= */
+
+/* Cross-device utterance dedup window (seconds).  Keep in sync with the
+ * `dedup_window_sec` documentation in dawn.toml.example and the min/max in
+ * www/js/ui/settings/schema.js (JS can't include this header). */
+#define ASR_DEDUP_WINDOW_SEC_DEFAULT 4
+#define ASR_DEDUP_WINDOW_SEC_MAX 60
+
 typedef struct {
    char model[CONFIG_NAME_MAX];       /* Whisper: "tiny", "base", "small", "medium" */
    char models_path[CONFIG_PATH_MAX]; /* Path to model files */
+   int dedup_window_sec;              /* Cross-device utterance dedup window (s); 0 disables */
 } asr_config_t;
 
 /* =============================================================================
