@@ -169,6 +169,11 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
 /* core (driver registry) */
 const messaging_driver_t *find_driver(const char *name);
 
+/* core (driver registry) — first registered driver that implements the optional
+ * read-history contract (list_readable_channels + read_history), or NULL.  Lets
+ * the read path stay provider-neutral instead of hardcoding a driver name. */
+const messaging_driver_t *find_read_capable_driver(void);
+
 /* core (outbound delivery): render `canonical_markdown` into drv->out_format,
  * split to the provider cap (measured on converted output), and deliver each
  * part via drv->send_text with a "(N/M) " prefix + 100ms pacing.  The single

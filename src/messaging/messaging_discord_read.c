@@ -65,6 +65,8 @@
 #define DC_CACHE_MIN_REFRESH_SEC 30
 #define DC_REST_RESP_MAX (2 * 1024 * 1024) /* 2 MB cap on a REST response body */
 #define DC_MAX_CHANNELS 500                /* defensive cap on discovered channels */
+#define DC_RATE_BACKOFF_DEFAULT_SEC 5      /* backoff after a 429 with no Retry-After */
+#define DC_RATE_BACKOFF_MAX_SEC 60         /* clamp on a server-supplied Retry-After */
 
 /* =============================================================================
  * Read-path state
@@ -75,6 +77,12 @@
  * latency-sensitive outbound DMs on the send handle. */
 static CURL *s_read_curl = NULL;
 static pthread_mutex_t s_read_curl_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Discord 429 backoff: when the API rate-limits us, fast-fail every read until
+ * this wall-clock time (Unix secs) so we don't keep hammering the route and risk
+ * a token-wide ban — the real danger during a multi-channel sweep.  Guarded by
+ * s_read_curl_mutex (only ever read/written inside dc_rest_get). */
+static int64_t s_rate_backoff_until = 0;
 
 /* Channel-discovery cache.  The driver owns the only TTL; the engine treats
  * each list_readable_channels() result as authoritative and never caches the
@@ -99,6 +107,16 @@ static int dc_rest_get(const char *url, curl_buffer_t *resp) {
 
    int rc = FAILURE;
    pthread_mutex_lock(&s_read_curl_mutex);
+   /* If Discord recently 429'd us, fast-fail without a network call until the
+    * backoff expires — protects the bot token from a route-wide ban when a
+    * sweep would otherwise fire the next channel's request immediately. */
+   int64_t now = (int64_t)time(NULL);
+   if (s_rate_backoff_until > now) {
+      pthread_mutex_unlock(&s_read_curl_mutex);
+      OLOG_WARNING("discord: read skipped — backing off %lld s after a 429",
+                   (long long)(s_rate_backoff_until - now));
+      return FAILURE;
+   }
    if (!s_read_curl) {
       s_read_curl = curl_easy_init();
    }
@@ -124,7 +142,21 @@ static int dc_rest_get(const char *url, curl_buffer_t *resp) {
       if (cc == CURLE_OK && http_status >= 200 && http_status < 300) {
          rc = SUCCESS;
       } else {
-         OLOG_WARNING("discord: GET %s failed (curl=%d http=%ld)", url, cc, http_status);
+         if (http_status == 429) {
+            /* Honor Retry-After when curl exposes it; otherwise a fixed backoff.
+             * Clamp so a hostile/huge value can't wedge reads for too long. */
+            curl_off_t retry_after = 0;
+            curl_easy_getinfo(s_read_curl, CURLINFO_RETRY_AFTER, &retry_after);
+            int64_t backoff = retry_after > 0 ? (int64_t)retry_after : DC_RATE_BACKOFF_DEFAULT_SEC;
+            if (backoff > DC_RATE_BACKOFF_MAX_SEC) {
+               backoff = DC_RATE_BACKOFF_MAX_SEC;
+            }
+            s_rate_backoff_until = now + backoff;
+            OLOG_WARNING("discord: GET %s rate-limited (429) — backing off %lld s", url,
+                         (long long)backoff);
+         } else {
+            OLOG_WARNING("discord: GET %s failed (curl=%d http=%ld)", url, cc, http_status);
+         }
       }
    }
    pthread_mutex_unlock(&s_read_curl_mutex);
@@ -272,7 +304,7 @@ static bool dc_append_message(struct json_object *msg, struct json_object *out_a
       return false;
    }
    json_object_object_add(o, "id", json_object_new_string(id_str));
-   json_object_object_add(o, "author", json_object_new_string(author ? author : "unknown"));
+   json_object_object_add(o, "author", json_object_new_string(author)); /* non-null (see above) */
    json_object_object_add(o, "timestamp", json_object_new_int64(ts));
    json_object_object_add(o, "content", json_object_new_string(content ? content : ""));
    json_object_object_add(o, "type", json_object_new_int(type));
@@ -524,6 +556,12 @@ int dc_list_readable_channels(char **out_json) {
          json_object_object_get_ex(g, "name", &gname);
          dc_collect_guild_channels(json_object_get_string(gid),
                                    gname ? json_object_get_string(gname) : NULL, out_arr);
+         /* Stop fetching further guilds once the channel cap is reached —
+          * dc_collect_guild_channels only gates appends, so without this we'd
+          * keep issuing a REST call per remaining guild for results we'd drop. */
+         if (json_object_array_length(out_arr) >= DC_MAX_CHANNELS) {
+            break;
+         }
       }
    }
    if (guilds) {
