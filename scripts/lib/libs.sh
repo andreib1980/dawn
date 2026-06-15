@@ -302,8 +302,10 @@ install_libvosk() {
 # libgit2 — in-process git client for the coding-harness code-projects feature.
 # Jammy apt ships 1.1; we need >= 1.6, so build from source with the OpenSSL
 # HTTPS backend (matches DAWN's TLS stack) and SSH disabled (Phase 1 is HTTPS
-# public clone only). Opt-in: only built when INSTALL_LIBGIT2=true, since the
-# code-projects feature is OFF by default (DAWN_ENABLE_CODE_PROJECTS).
+# public clone only). Installed by default now that the code-projects feature is
+# compiled into the default/full/debug CMake presets (those builds fail without
+# it). Set INSTALL_LIBGIT2=false to skip when building a preset that omits it
+# (local/server/ci).
 # ─────────────────────────────────────────────────────────────────────────────
 
 install_libgit2() {
@@ -379,8 +381,9 @@ run_libs() {
    install_onnxruntime
    sudo_keepalive
    install_piper_phonemize
-   # Coding-harness code-projects dependency; opt-in (feature OFF by default).
-   if [ "${INSTALL_LIBGIT2:-false}" = "true" ]; then
+   # Coding-harness code-projects dependency; installed by default (the default/full/
+   # debug presets enable code-projects). Set INSTALL_LIBGIT2=false to skip.
+   if [ "${INSTALL_LIBGIT2:-true}" = "true" ]; then
       sudo_keepalive
       install_libgit2
    fi
@@ -398,7 +401,7 @@ run_libs() {
    fi
    has_lib "libonnxruntime.so" || [ -f /usr/local/lib/libonnxruntime.so.1 ] || failed+=("onnxruntime")
    has_lib "libpiper_phonemize.so" || failed+=("piper-phonemize")
-   if [ "${INSTALL_LIBGIT2:-false}" = "true" ]; then
+   if [ "${INSTALL_LIBGIT2:-true}" = "true" ]; then
       has_lib "libgit2.so" || failed+=("libgit2")
    fi
 

@@ -13,7 +13,9 @@
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "ENABLE_WEBUI": "ON"
+        "ENABLE_WEBUI": "ON",
+        "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON",
+        "DAWN_ENABLE_CODE_PROJECTS": "ON"
       }
     },
     {
@@ -29,11 +31,13 @@
     {
       "name": "full",
       "displayName": "Full",
-      "description": "All features enabled: local + WebUI + DAP2 satellites",
+      "description": "All features enabled: local + WebUI + DAP2 satellites + coding harness",
       "binaryDir": "${sourceDir}/build-full",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "ENABLE_WEBUI": "ON"
+        "ENABLE_WEBUI": "ON",
+        "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON",
+        "DAWN_ENABLE_CODE_PROJECTS": "ON"
       }
     },
     {
@@ -43,7 +47,9 @@
       "binaryDir": "${sourceDir}/build-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "ENABLE_WEBUI": "ON"
+        "ENABLE_WEBUI": "ON",
+        "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON",
+        "DAWN_ENABLE_CODE_PROJECTS": "ON"
       }
     },
     {

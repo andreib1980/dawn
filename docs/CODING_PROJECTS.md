@@ -104,7 +104,9 @@ Linking a local repo means **cbm reads its file contents**, and those contents r
 the LLM. So link-local is admin-only, gated to `allowed_local_roots`, and needs two
 things set up:
 
-1. **Config** — list the parent directories you'll link under:
+1. **Config** — list the parent directories you'll link under. Set it in the WebUI
+   (**Settings → Code Projects → Allowed local roots**, one path per line) or in
+   `dawn.toml`:
    ```toml
    [code_projects]
    allowed_local_roots = ["/home/you/code"]
@@ -113,24 +115,23 @@ things set up:
    out of it.
 
 2. **cbm sandbox + read access.** `cbm-mcp` runs sandboxed (`ProtectHome=true`,
-   which hides all of `/home`). To let it read your code, edit
-   `/etc/systemd/system/cbm-mcp.service` (see the "Link-local repos" block in
-   `services/cbm-mcp/cbm-mcp.service`):
-   ```ini
-   ProtectHome=tmpfs
-   BindReadOnlyPaths=/home/you/code:/home/you/code
-   ```
-   then `sudo systemctl daemon-reload && sudo systemctl restart cbm-mcp`.
-
-   The cbm service user (`dawn`) must also be able to **traverse** to your files. On
-   a typical box your home is `0750`, which blocks it — grant traverse-only:
+   which hides all of `/home`), so it can't read your code until the unit is granted
+   a read-only bind per root plus a traverse ACL. The **cbm-mcp installer does this
+   for you** — pass the roots (or answer its prompt):
    ```bash
-   sudo setfacl -m u:dawn:--x /home/you      # traverse only; can't list/read your home
+   sudo services/cbm-mcp/install.sh --local-roots "/home/you/code"
    ```
-   (Single-developer alternative: run `cbm-mcp` as your own user instead of `dawn` —
-   no ACL needed, at the cost of weaker isolation. You'd also chown the cbm cache +
-   log to your user. The `BindReadOnlyPaths`/`ProtectHome=tmpfs` step is still
-   required either way.)
+   That writes a drop-in at `/etc/systemd/system/cbm-mcp.service.d/10-local-roots.conf`
+   (`ProtectHome=tmpfs` + `BindReadOnlyPaths=…` per root), runs the traverse ACLs
+   (`setfacl -u dawn:--x` on the ancestors), and reloads the service. Re-run with new
+   roots to update it. Keep these in sync with `allowed_local_roots` above.
+
+   *Manual fallback* (if you're not using the installer): `sudo systemctl edit cbm-mcp`,
+   add `ProtectHome=tmpfs` + `BindReadOnlyPaths=/home/you/code:/home/you/code` under
+   `[Service]`, then `sudo setfacl -m u:dawn:--x /home/you` (traverse only — can't
+   list/read your home) and restart. (Single-developer alternative: run `cbm-mcp` as
+   your own user instead of `dawn` — no ACL needed, weaker isolation; the bind step is
+   still required.)
 
 If the sandbox/permissions aren't right, a link is accepted but indexing errors —
 check `/var/log/dawn/cbm-mcp.log`.
@@ -142,8 +143,9 @@ points outside the allowed root. The `BindReadOnlyPaths` sandbox is the second b
 (an out-of-bind target isn't reachable at all). Still, keep secret material out of linked
 trees.
 
-> These manual steps are a known rough edge; surfacing `allowed_local_roots` in the
-> WebUI and automating the sandbox grant in the installer are planned.
+> `allowed_local_roots` is editable from the WebUI Settings panel, and the cbm-mcp
+> installer automates the sandbox grant (`--local-roots`). Wiring the grant fully into
+> the top-level DAWN installer (so it's one step end-to-end) is a possible future polish.
 
 ---
 

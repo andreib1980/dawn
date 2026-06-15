@@ -2140,6 +2140,14 @@
                hint: 'Filesystem directory where imported repos are cloned.',
                advanced: true,
             },
+            allowed_local_roots: {
+               type: 'string_list',
+               label: 'Allowed Local Roots',
+               rows: 4,
+               placeholder: '/home/you/code\n/opt/projects',
+               hint: 'Parent directories a "link local" repo may live under (one per line, max 8). Admin-only link-local feature; the cbm service must also be granted read access — see services/cbm-mcp/install.sh --local-roots. Keep secret-bearing trees out.',
+               advanced: true,
+            },
             import_user_required: {
                type: 'select',
                label: 'Who Can Import',

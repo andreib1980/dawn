@@ -450,44 +450,11 @@
    font-variant-numeric: tabular-nums;
 }
 
-/* Tabs */
-.sched-popover-tabs {
-   display: flex;
-   gap: 0;
-   padding: 0 0.5rem;
-   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-   background: rgba(0, 0, 0, 0.15);
-   overflow-x: auto;
-   scrollbar-width: none;
-   scroll-snap-type: x mandatory;
-}
-
-.sched-popover-tabs::-webkit-scrollbar {
-   display: none;
-}
-
+/* Tabs use the shared `.dawn-tabs.compact` / `.dawn-tab` primitive
+ * (www/css/base/components.css). Only the two scheduler-specific deltas below
+ * remain: a snappier all-property transition and the inset-shadow focus ring. */
 .sched-popover-tab {
-   padding: 0.625rem 0.75rem;
-   background: transparent;
-   border: none;
-   border-bottom: 2px solid transparent;
-   color: var(--text-secondary);
-   font-size: 0.8rem;
-   font-weight: 500;
-   cursor: pointer;
-   white-space: nowrap;
-   scroll-snap-align: start;
    transition: all var(--transition-fast);
-}
-
-.sched-popover-tab:hover {
-   color: var(--text-primary);
-   background: rgba(255, 255, 255, 0.03);
-}
-
-.sched-popover-tab.active {
-   color: var(--accent);
-   border-bottom-color: var(--accent);
 }
 
 /* Keyboard-focus indicator — full accent rectangle around the tab,
@@ -501,6 +468,7 @@
 .sched-popover-tab:focus-visible {
    outline: none;
    border-bottom-color: transparent;
+   border-radius: 0; /* reset the primitive's 4px so the square inset ring isn't clipped */
    box-shadow:
       inset 2px 0 0 var(--accent),
       inset -2px 0 0 var(--accent),

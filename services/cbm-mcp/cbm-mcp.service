@@ -50,16 +50,24 @@ ReadWritePaths=/var/lib/dawn/cbm-cache /var/log/dawn
 # `allowed_local_roots` feature, and Claude Code indexing its own repos through
 # the shared SSE endpoint), this sandboxed unit must be granted READ access to
 # those trees. ProtectHome=true above HIDES all of /home and DEFEATS ReadOnlyPaths,
-# so the correct pattern is ProtectHome=tmpfs + a read-only bind PER allowed root:
+# so the correct pattern is ProtectHome=tmpfs + a read-only bind PER allowed root.
 #
-#   ProtectHome=tmpfs
-#   BindReadOnlyPaths=/home/<user>/code:/home/<user>/code
+# PREFERRED: let the installer do it — `install.sh --local-roots "/home/<user>/code"`
+# (or answer the interactive prompt) writes a drop-in at
+# /etc/systemd/system/cbm-mcp.service.d/10-local-roots.conf and the traverse ACLs.
+# Re-run with new roots to update it; do NOT hand-edit this shipped unit.
 #
-# Keep these in sync with [code_projects].allowed_local_roots in dawn.toml, and
+# MANUAL fallback (if you must), as a drop-in so reinstalls don't clobber it:
+#   sudo systemctl edit cbm-mcp    # creates the override.conf
+#     [Service]
+#     ProtectHome=tmpfs
+#     BindReadOnlyPaths=/home/<user>/code:/home/<user>/code
+#   sudo setfacl -m u:dawn:--x /home/<user>     # traverse to the bound root
+#
+# Keep the roots in sync with [code_projects].allowed_local_roots in dawn.toml, and
 # do NOT add trees containing secrets (.env, secrets.toml) — cbm indexes file
-# CONTENTS and they become reachable by the LLM. The cbm service user (dawn) must
-# also have read permission on the files. After editing: `systemctl daemon-reload`
-# then restart this unit.
+# CONTENTS and they become reachable by the LLM. After any change:
+# `systemctl daemon-reload` then restart this unit.
 # ----------------------------------------------------------------------------
 
 [Install]

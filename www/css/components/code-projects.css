@@ -100,17 +100,9 @@
    color: var(--accent);
 }
 
-/* Creation-path tabs (Import URL | Link local). Underline style matched to the
- * doc-library / scheduler popovers for consistency. (A shared `.dawn-tab` is the
- * proper follow-up now that there are 3 consumers — deferred to avoid restyling
- * two shipped panels here.) */
-.code-projects-tabs {
-   display: flex;
-   gap: 0.25rem;
-   padding: 0 1rem;
-   border-bottom: 1px solid var(--border-color);
-}
-
+/* Creation-path tabs (Import URL | Link local) use the shared `.dawn-tabs` /
+ * `.dawn-tab` primitive (www/css/base/components.css); only the deltas below are
+ * component-scoped. */
 .code-projects-tabs.single {
    display: none; /* only one path available → hide the chrome */
 }
@@ -122,35 +114,6 @@
 .code-projects-form.hidden,
 .code-projects-global-toggle.hidden {
    display: none;
-}
-
-.code-projects-tab {
-   background: none;
-   border: none;
-   border-bottom: 2px solid transparent;
-   color: var(--text-secondary);
-   font-size: 0.85rem;
-   font-weight: 500;
-   padding: 0.5rem 0.75rem;
-   cursor: pointer;
-   transition:
-      color 0.15s,
-      border-color 0.15s;
-}
-
-.code-projects-tab:hover {
-   color: var(--text-primary);
-}
-
-.code-projects-tab.active {
-   color: var(--accent);
-   border-bottom-color: var(--accent);
-}
-
-.code-projects-tab:focus-visible {
-   outline: 2px solid var(--accent);
-   outline-offset: -2px;
-   border-radius: 4px;
 }
 
 /* Both creation forms share this geometry (each carries .dawn-form too). */

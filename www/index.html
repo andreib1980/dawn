@@ -617,41 +617,65 @@
                <span>Missed <span id="sched-stat-missed">0</span></span>
             </div>
 
-            <nav class="sched-popover-tabs" role="tablist" aria-label="Scheduler tabs">
+            <nav
+               class="sched-popover-tabs dawn-tabs compact"
+               role="tablist"
+               aria-label="Scheduler tabs"
+            >
                <button
-                  class="sched-popover-tab active"
+                  class="sched-popover-tab dawn-tab active"
                   role="tab"
                   aria-selected="true"
                   data-tab="all"
                >
                   All
                </button>
-               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="timer">
+               <button
+                  class="sched-popover-tab dawn-tab"
+                  role="tab"
+                  aria-selected="false"
+                  data-tab="timer"
+               >
                   Timers
                </button>
-               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="alarm">
+               <button
+                  class="sched-popover-tab dawn-tab"
+                  role="tab"
+                  aria-selected="false"
+                  data-tab="alarm"
+               >
                   Alarms
                </button>
                <button
-                  class="sched-popover-tab"
+                  class="sched-popover-tab dawn-tab"
                   role="tab"
                   aria-selected="false"
                   data-tab="reminder"
                >
                   Reminders
                </button>
-               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="task">
+               <button
+                  class="sched-popover-tab dawn-tab"
+                  role="tab"
+                  aria-selected="false"
+                  data-tab="task"
+               >
                   Tasks
                </button>
                <button
-                  class="sched-popover-tab"
+                  class="sched-popover-tab dawn-tab"
                   role="tab"
                   aria-selected="false"
                   data-tab="briefing"
                >
                   Briefings
                </button>
-               <button class="sched-popover-tab" role="tab" aria-selected="false" data-tab="missed">
+               <button
+                  class="sched-popover-tab dawn-tab"
+                  role="tab"
+                  aria-selected="false"
+                  data-tab="missed"
+               >
                   Missed
                </button>
             </nav>
@@ -1013,10 +1037,10 @@ Format rules:
                   autocomplete="off"
                />
             </div>
-            <div class="doc-library-tabs" role="tablist" aria-label="Document scope">
+            <div class="doc-library-tabs dawn-tabs" role="tablist" aria-label="Document scope">
                <button
                   type="button"
-                  class="doc-library-tab"
+                  class="doc-library-tab dawn-tab"
                   role="tab"
                   id="doc-library-tab-documents"
                   data-scope="documents"
@@ -1028,7 +1052,7 @@ Format rules:
                </button>
                <button
                   type="button"
-                  class="doc-library-tab"
+                  class="doc-library-tab dawn-tab"
                   role="tab"
                   id="doc-library-tab-notes"
                   data-scope="notes"
@@ -1171,11 +1195,11 @@ Format rules:
 
             <!-- Segmented toggle: two creation paths. The Link tab is admin-only
                  (JS hides #code-projects-tab-link alongside the link form). -->
-            <div class="code-projects-tabs" role="tablist" aria-label="Add a project">
+            <div class="code-projects-tabs dawn-tabs" role="tablist" aria-label="Add a project">
                <button
                   type="button"
                   id="code-projects-tab-import"
-                  class="code-projects-tab active"
+                  class="code-projects-tab dawn-tab active"
                   role="tab"
                   data-tab="import"
                   aria-selected="true"
@@ -1186,7 +1210,7 @@ Format rules:
                <button
                   type="button"
                   id="code-projects-tab-link"
-                  class="code-projects-tab hidden"
+                  class="code-projects-tab dawn-tab hidden"
                   role="tab"
                   data-tab="link"
                   aria-selected="false"

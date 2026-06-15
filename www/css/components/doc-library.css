@@ -526,41 +526,8 @@
    padding: 0 1rem 0.5rem;
 }
 
-.doc-library-tabs {
-   display: flex;
-   gap: 0.25rem;
-   padding: 0 1rem;
-   border-bottom: 1px solid var(--border-color);
-}
-
-.doc-library-tab {
-   background: none;
-   border: none;
-   border-bottom: 2px solid transparent;
-   color: var(--text-secondary);
-   font-size: 0.85rem;
-   font-weight: 500;
-   padding: 0.5rem 0.75rem;
-   cursor: pointer;
-   transition:
-      color 0.15s,
-      border-color 0.15s;
-}
-
-.doc-library-tab:hover {
-   color: var(--text-primary);
-}
-
-.doc-library-tab[aria-selected='true'] {
-   color: var(--accent);
-   border-bottom-color: var(--accent);
-}
-
-.doc-library-tab:focus-visible {
-   outline: 2px solid var(--accent);
-   outline-offset: -2px;
-   border-radius: 4px;
-}
+/* Scope tabs (Documents | Notes) use the shared `.dawn-tabs` / `.dawn-tab`
+ * primitive (www/css/base/components.css); active state via aria-selected. */
 
 .doc-library-notes-actions {
    padding: 0.75rem 1rem;

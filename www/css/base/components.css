@@ -488,3 +488,74 @@
 .dawn-secret-field-reveal[aria-pressed='true'] {
    color: var(--accent);
 }
+
+/* =============================================================================
+ * Tab strip (.dawn-tabs / .dawn-tab)
+ * Underline-style tabs for popover panels (code-projects, doc-library, scheduler).
+ * Usage: <div class="dawn-tabs" role="tablist"> with <button class="dawn-tab">.
+ * Active state via either the `.active` class OR aria-selected="true" (the
+ * DawnTablist helper drives both). Add `.compact` to the container for the
+ * dense, horizontally-scrollable variant (scheduler).
+ * ========================================================================== */
+.dawn-tabs {
+   display: flex;
+   gap: 0.25rem;
+   padding: 0 1rem;
+   border-bottom: 1px solid var(--border-color);
+}
+
+.dawn-tab {
+   background: none;
+   border: none;
+   border-bottom: 2px solid transparent;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+   font-weight: 500;
+   padding: 0.5rem 0.75rem;
+   cursor: pointer;
+   transition:
+      color 0.15s,
+      border-color 0.15s;
+}
+
+.dawn-tab:hover {
+   color: var(--text-primary);
+}
+
+.dawn-tab.active,
+.dawn-tab[aria-selected='true'] {
+   color: var(--accent);
+   border-bottom-color: var(--accent);
+}
+
+.dawn-tab:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+   border-radius: 4px;
+}
+
+/* Compact variant: dense, horizontally scrollable, subtle hover fill (scheduler). */
+.dawn-tabs.compact {
+   gap: 0;
+   padding: 0 0.5rem;
+   border-bottom-color: rgba(255, 255, 255, 0.05);
+   background: rgba(0, 0, 0, 0.15);
+   overflow-x: auto;
+   scrollbar-width: none;
+   scroll-snap-type: x mandatory;
+}
+
+.dawn-tabs.compact::-webkit-scrollbar {
+   display: none;
+}
+
+.dawn-tabs.compact .dawn-tab {
+   padding: 0.625rem 0.75rem;
+   font-size: 0.8rem;
+   white-space: nowrap;
+   scroll-snap-align: start;
+}
+
+.dawn-tabs.compact .dawn-tab:hover {
+   background: rgba(255, 255, 255, 0.03);
+}

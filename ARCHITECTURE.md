@@ -639,6 +639,7 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 | Documents          | `[documents]`                         | Upload size, page/index limits, chunking, hybrid-search weights |
 | Messaging          | `[messaging.sms]` (+ tokens in `secrets.toml`) | Channel link/unlink/rename, per-channel reasoning/effort |
 | OTA / Fleet        | `[ota]`                               | Release dir, download-token TTL, TLS requirement; fleet rollout lives in the OTA panel, not Settings |
+| Code Projects      | `[code_projects]`                     | Coding harness: enable, source root, import permissions, clone caps, and `allowed_local_roots` (link-local allowlist). Compiled in only with `DAWN_ENABLE_CODE_PROJECTS`. |
 
 When adding new settings to `dawn.toml`, also add corresponding entries to `SETTINGS_SCHEMA` to expose them in the WebUI, unless they fall under the exclusion criteria above.
 

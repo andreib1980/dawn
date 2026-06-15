@@ -1122,6 +1122,23 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       JSON_TO_CONFIG_STR(section, "allowed_host_pattern",
                          config->code_projects.allowed_host_pattern);
       JSON_TO_CONFIG_STR(section, "default_active", config->code_projects.default_active);
+      /* allowed_local_roots[] — link-local allowlist. Only rewrite the list when the
+       * key is present; an empty array legitimately clears it. */
+      struct json_object *roots_arr;
+      if (json_object_object_get_ex(section, "allowed_local_roots", &roots_arr) &&
+          json_object_is_type(roots_arr, json_type_array)) {
+         int n = json_object_array_length(roots_arr);
+         int kept = 0;
+         for (int i = 0; i < n && kept < CODE_PROJECTS_MAX_LOCAL_ROOTS; i++) {
+            const char *p = json_object_get_string(json_object_array_get_idx(roots_arr, i));
+            if (p && p[0] != '\0') {
+               strncpy(config->code_projects.allowed_local_roots[kept], p, CONFIG_PATH_MAX - 1);
+               config->code_projects.allowed_local_roots[kept][CONFIG_PATH_MAX - 1] = '\0';
+               kept++;
+            }
+         }
+         config->code_projects.allowed_local_roots_count = kept;
+      }
    }
 
    /* [calendar] */

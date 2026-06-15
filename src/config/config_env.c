@@ -1317,6 +1317,12 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_string(config->code_projects.allowed_host_pattern));
    json_object_object_add(code_projects, "default_active",
                           json_object_new_string(config->code_projects.default_active));
+   json_object *allowed_local_roots = json_object_new_array();
+   for (int i = 0; i < config->code_projects.allowed_local_roots_count; i++) {
+      json_object_array_add(allowed_local_roots,
+                            json_object_new_string(config->code_projects.allowed_local_roots[i]));
+   }
+   json_object_object_add(code_projects, "allowed_local_roots", allowed_local_roots);
    json_object_object_add(root, "code_projects", code_projects);
 
    /* [url_fetcher] */
@@ -2461,6 +2467,21 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "clone_depth = %d\n", config->code_projects.clone_depth);
    fprintf(fp, "allowed_host_pattern = '%s'\n", config->code_projects.allowed_host_pattern);
    fprintf(fp, "default_active = \"%s\"\n", config->code_projects.default_active);
+   /* allowed_local_roots[] — link-local allowlist; emit [] when empty so a WebUI clear
+    * round-trips (absent would fall back to the compiled default of none anyway). */
+   if (config->code_projects.allowed_local_roots_count > 0) {
+      fprintf(fp, "allowed_local_roots = [\n");
+      for (int i = 0; i < config->code_projects.allowed_local_roots_count; i++) {
+         char *escaped = toml_escape_string(config->code_projects.allowed_local_roots[i]);
+         fprintf(fp, "    \"%s\"%s\n",
+                 escaped ? escaped : config->code_projects.allowed_local_roots[i],
+                 i < config->code_projects.allowed_local_roots_count - 1 ? "," : "");
+         free(escaped);
+      }
+      fprintf(fp, "]\n");
+   } else {
+      fprintf(fp, "allowed_local_roots = []\n");
+   }
 
    /* Write tool-owned config sections (e.g. [home_assistant], [shutdown]) */
    tool_registry_write_configs(fp);
