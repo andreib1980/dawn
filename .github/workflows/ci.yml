@@ -85,7 +85,13 @@ jobs:
 
   # -------------------------------------------------------------------------
   # Job 3: Docker Build (~10 min)
-  # Builds full image (deps + server compile + runtime) and smoke tests it
+  # Builds full image (deps + server compile + runtime) and smoke tests it.
+  # This is the CI home of the daemon link+start smoke (the `dawn --help` run):
+  # the daemon unconditionally links ONNX Runtime + Piper, which aren't apt
+  # packages, so this image is the only place on stock runners the full binary
+  # links and runs. It replaces the server-config slice of the old pre-push
+  # preset-matrix smoke; the WEBUI-off / +email ML variants stay a developer
+  # release-time check (./tests/smoke_test.sh on hardware).
   # -------------------------------------------------------------------------
   docker-build:
     needs: format-check
@@ -99,7 +105,7 @@ jobs:
       - name: Build Docker image
         run: docker build -t dawn .
 
-      - name: Smoke test
+      - name: Smoke test (daemon links + starts)
         run: docker run --rm dawn --help
 
   # -------------------------------------------------------------------------

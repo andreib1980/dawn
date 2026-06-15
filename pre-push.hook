@@ -7,6 +7,16 @@
 # that compiles but fails at runtime.  This session's `fact_stems` column
 # bug + 4 missing test stubs are the motivating example.
 #
+# SCOPE: fast checks only — build the CI test targets and run the `ci`-labelled
+# ctest suite.  The heavier build-config checks moved to GitHub Actions
+# (.github/workflows/ci.yml) so the hook stays quick:
+#   - Tier-1 satellite build  -> `satellite-build` job (headless, apt-only).
+#   - Server daemon link+start -> `docker-build` job (`dawn --help`).
+# The full ML preset-matrix smoke (local/full/debug/+email) cannot run on stock
+# runners — the daemon unconditionally links ONNX Runtime + Piper, which aren't
+# apt packages — so it stays a developer/release-time manual check:
+#   ./tests/smoke_test.sh
+#
 # Optional local extension: if ./pre-push.local.hook exists and is
 # executable, it runs after the tracked check succeeds.  Use for
 # per-developer checks that shouldn't live in the public repo.
@@ -49,9 +59,7 @@ fi
 
 BUILD_LOG=$(mktemp -t dawn-prepush-build.XXXXXX.log)
 TEST_LOG=$(mktemp -t dawn-prepush-test.XXXXXX.log)
-SAT_LOG=$(mktemp -t dawn-prepush-satellite.XXXXXX.log)
-SMOKE_LOG=$(mktemp -t dawn-prepush-smoke.XXXXXX.log)
-trap 'rm -f "$BUILD_LOG" "$TEST_LOG" "$SAT_LOG" "$SMOKE_LOG"' EXIT
+trap 'rm -f "$BUILD_LOG" "$TEST_LOG"' EXIT
 
 echo -e "${BLUE}Pre-push: building tests-ci in $BUILD_DIR…${NC}"
 if ! make -C "$BUILD_DIR" -j"$(nproc)" tests-ci > "$BUILD_LOG" 2>&1; then
@@ -88,71 +96,10 @@ else
    echo -e "${GREEN}Pre-push: test suite passed.${NC}"
 fi
 
-# Tier 1 satellite build check.  The daemon build above does NOT compile
-# dawn_satellite/, so config-gated satellite breakage (e.g. an include resolved
-# only in the SDL build, or a VAD-off path) slips through unless built here.
-# Builds whichever satellite build dir already exists (prefer the headless
-# build-min — that's what CI runs and where the structural bugs surface — then
-# the developer's full build-ci/build).  Incremental; skip with a hint if the
-# satellite hasn't been bootstrapped.
-SAT_BUILD_DIR=""
-for d in dawn_satellite/build-min dawn_satellite/build-ci dawn_satellite/build; do
-   if [ -f "$d/CMakeCache.txt" ]; then
-      SAT_BUILD_DIR="$d"
-      break
-   fi
-done
-
-if [ -n "$SAT_BUILD_DIR" ]; then
-   echo -e "${BLUE}Pre-push: building dawn_satellite in $SAT_BUILD_DIR…${NC}"
-   if ! make -C "$SAT_BUILD_DIR" -j"$(nproc)" > "$SAT_LOG" 2>&1; then
-      echo -e "${RED}Satellite build FAILED.  Last 30 lines:${NC}"
-      tail -30 "$SAT_LOG"
-      echo
-      echo -e "${YELLOW}Bypass: git push --no-verify${NC}"
-      PRESERVED=$(mktemp -t dawn-prepush-satellite-failed.XXXXXX.log)
-      cp "$SAT_LOG" "$PRESERVED"
-      echo -e "${YELLOW}Full log preserved at: $PRESERVED${NC}"
-      exit 1
-   fi
-   echo -e "${GREEN}Pre-push: dawn_satellite build OK.${NC}"
-else
-   echo -e "${YELLOW}Pre-push: no dawn_satellite build dir; skipping satellite build.${NC}"
-   echo -e "${YELLOW}  Bootstrap the headless check CI runs:${NC}"
-   echo -e "${YELLOW}  cmake -S dawn_satellite -B dawn_satellite/build-min \\${NC}"
-   echo -e "${YELLOW}    -DENABLE_VAD=OFF -DENABLE_VOSK_ASR=OFF -DENABLE_TTS=OFF${NC}"
-fi
-
-# Build-config smoke test: compile + LINK the full dawn binary across the preset
-# matrix (WEBUI on/off, email on/off).  The tests-ci build above links only the
-# test binaries, so a daemon that fails to link in a given config — e.g. without
-# WebUI (the local/ci presets) — slips through.  smoke_test.sh reuses its own
-# per-preset build dirs incrementally and never touches build-debug, so this is a
-# relink of what changed, not a clean rebuild.  Only runs when all four dirs are
-# already bootstrapped, so it never forces a slow cold build inside the hook —
-# bootstrap once with ./tests/smoke_test.sh.
-SMOKE_READY=1
-for d in build-local build-full build-debug build-debug-email; do
-   [ -f "$d/CMakeCache.txt" ] || SMOKE_READY=0
-done
-if [ "$SMOKE_READY" -eq 1 ]; then
-   echo -e "${BLUE}Pre-push: build-config smoke test (preset matrix)…${NC}"
-   if ! ./tests/smoke_test.sh > "$SMOKE_LOG" 2>&1; then
-      echo -e "${RED}Smoke test FAILED.  Summary:${NC}"
-      grep -E "FAIL|Binary not found|Some tests" "$SMOKE_LOG" | tail -12
-      echo
-      echo -e "${YELLOW}Reproduce: ./tests/smoke_test.sh${NC}"
-      echo -e "${YELLOW}Bypass:    git push --no-verify${NC}"
-      PRESERVED=$(mktemp -t dawn-prepush-smoke-failed.XXXXXX.log)
-      cp "$SMOKE_LOG" "$PRESERVED"
-      echo -e "${YELLOW}Full log preserved at: $PRESERVED${NC}"
-      exit 1
-   fi
-   echo -e "${GREEN}Pre-push: build-config smoke test passed (4 presets).${NC}"
-else
-   echo -e "${YELLOW}Pre-push: smoke preset dirs not all bootstrapped; skipping build-config smoke test.${NC}"
-   echo -e "${YELLOW}  Bootstrap once: ./tests/smoke_test.sh${NC}"
-fi
+# NOTE: the Tier-1 satellite build and the build-config (preset-matrix) daemon
+# smoke used to run here.  They moved to GitHub Actions (satellite-build +
+# docker-build jobs) so the hook stays fast; the full ML preset matrix that can't
+# run on stock runners stays a manual `./tests/smoke_test.sh` (see header).
 
 # Optional local-only pre-push extension.  Gitignored (*.local.hook).
 if [ -x "./pre-push.local.hook" ]; then
