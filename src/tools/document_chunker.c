@@ -348,8 +348,16 @@ static int struct_emit(chunk_result_t *out, const char *start, const char *stop,
             break; /* adding this line would overflow — cut here */
          piece_end = (le < stop) ? le + 1 : stop;
       }
-      if (piece_end == p)
-         piece_end = (p + max_chars < stop) ? p + max_chars : stop; /* one giant line */
+      /* A single line longer than max_chars slips through the loop above as one
+       * oversized piece (its `piece_end > p` guard never lets it break on the
+       * first line), and piece_end == p would stall the outer loop. In both cases
+       * hard-split at max_chars, backing off to a UTF-8 lead byte (skip 10xxxxxx
+       * continuation bytes) so no chunk exceeds the cap or is cut mid-character. */
+      if (piece_end == p || (int)(piece_end - p) > max_chars) {
+         piece_end = (p + max_chars < stop) ? p + max_chars : stop;
+         while (piece_end > p + 1 && piece_end < stop && ((unsigned char)*piece_end & 0xC0) == 0x80)
+            piece_end--;
+      }
       if (result_add(out, p, (int)(piece_end - p)) != SUCCESS)
          return FAILURE;
       p = piece_end;
@@ -370,10 +378,25 @@ static bool chunk_structured(const char *text, int text_len, int max_chars, chun
       const char *le = line_end(p, end);
       if (!line_blank(p, le)) {
          nonblank++;
-         if (p[0] == '-' && (p + 1 == le || p[1] == ' '))
+         if (p[0] == '-' && (p + 1 == le || p[1] == ' ')) {
             top_dash++;
-         else if (p[0] == ' ' || p[0] == '\t')
-            indented++;
+         } else if (p[0] == ' ' || p[0] == '\t') {
+            /* Count an indented line as a YAML-structure signal only if it looks
+             * like YAML: a mapping line (has a ':') or a nested sequence item
+             * (first non-space char is "- "). Indented PROSE (no colon, no dash)
+             * is NOT counted, so a prose block with a few stray dashes can't reach
+             * the threshold. Known residual: an indented block-scalar body (no
+             * colon, no dash) won't count either — a YAML doc dominated by block
+             * scalars can fall through to prose. Acceptable: the reference-data
+             * target is flat one-mapping-per-record, and prose-safety is the more
+             * conservative miss. */
+            const char *q = p;
+            while (q < le && (*q == ' ' || *q == '\t'))
+               q++;
+            bool nested_dash = (q < le && *q == '-' && (q + 1 == le || q[1] == ' '));
+            if (nested_dash || memchr(p, ':', (size_t)(le - p)) != NULL)
+               indented++;
+         }
          int commas = count_ch(p, le, ',');
          if (csv_rows == 0)
             csv_commas = commas;
@@ -427,19 +450,41 @@ static bool chunk_structured(const char *text, int text_len, int max_chars, chun
       int hdr_len = (int)(hdr_end - hdr);
 
       p = (hdr_end < end) ? hdr_end + 1 : end;
-      char buf[8192];
+      char stackbuf[8192];
       while (p < end) {
          const char *le = line_end(p, end);
          if (!line_blank(p, le)) {
             int row_len = (int)(le - p);
-            /* chunk = "header\nrow" so each record is self-describing. */
-            int n = snprintf(buf, sizeof(buf), "%.*s\n%.*s", hdr_len, hdr, row_len, p);
-            if (n > 0) {
-               if (result_add(out, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1) !=
-                   SUCCESS) {
+            /* chunk = "header\nrow" so each record is self-describing. Build into
+             * a correctly-sized buffer (heap when the record exceeds the stack
+             * fast-path) so a wide row is never silently truncated. */
+            int needed = hdr_len + 1 + row_len; /* "header" + '\n' + "row", excl NUL */
+            if (needed > max_chars) {
+               /* A single CSV record exceeds the chunk-size ceiling. A CSV row is
+                * atomic (can't be split without losing its header association), and
+                * an oversized chunk is truncated on read-back (the storage struct
+                * caps chunk text), so abandon CSV structure and let prose chunking
+                * handle this document — mirrors struct_emit's max_chars discipline
+                * on the YAML path. */
+               chunk_result_free(out);
+               return false;
+            }
+            char *buf = stackbuf;
+            char *heapbuf = NULL;
+            if (needed + 1 > (int)sizeof(stackbuf)) {
+               heapbuf = malloc((size_t)needed + 1);
+               if (heapbuf == NULL) {
                   chunk_result_free(out);
                   return false;
                }
+               buf = heapbuf;
+            }
+            int n = snprintf(buf, (size_t)needed + 1, "%.*s\n%.*s", hdr_len, hdr, row_len, p);
+            int rc = (n > 0) ? result_add(out, buf, n) : SUCCESS;
+            free(heapbuf);
+            if (rc != SUCCESS) {
+               chunk_result_free(out);
+               return false;
             }
          }
          p = (le < end) ? le + 1 : end;

@@ -299,6 +299,101 @@ static void test_prose_with_bullets_not_mis_split(void) {
    chunk_result_free(&r);
 }
 
+static void test_indented_prose_with_dashes_not_yaml(void) {
+   /* Indented PROSE (no ':' mapping keys) plus 3 top-level dashes must NOT be
+    * classified as a YAML sequence. Only indented lines that look like YAML
+    * mappings (contain ':') count toward the structure signal, so this block
+    * falls through to prose chunking and stays whole instead of being split into
+    * one-record-per-line fragments. */
+   const char *text = "Project status notes for the quarter.\n"
+                      "    We shipped three features and fixed many bugs.\n"
+                      "    The team also improved the build pipeline.\n"
+                      "    Documentation was refreshed across the board.\n"
+                      "- Reviewed the roadmap with stakeholders.\n"
+                      "- Planned the next milestone.\n"
+                      "- Allocated resources for testing.\n";
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(text, NULL, &r));
+   TEST_ASSERT_EQUAL_MESSAGE(1, r.count, "indented prose + dashes stays one prose chunk");
+   TEST_ASSERT_TRUE_MESSAGE(chunk_contains(&r, 0, "shipped three features") &&
+                                chunk_contains(&r, 0, "Reviewed the roadmap"),
+                            "prose and dash lines kept together, not split per record");
+   chunk_result_free(&r);
+}
+
+static void test_csv_oversized_row_falls_through_no_truncation(void) {
+   /* A CSV record wider than max_chars can't be one faithful chunk (read-back
+    * caps chunk text), so the document must fall through to prose chunking rather
+    * than emit a chunk that gets silently truncated. The full row must survive. */
+   char wide[4500];
+   memset(wide, 'x', sizeof(wide) - 1);
+   wide[sizeof(wide) - 1] = '\0';
+   memcpy(wide + sizeof(wide) - 6, "ZZEND", 5); /* unique end marker */
+
+   char *text = malloc(sizeof(wide) + 64);
+   TEST_ASSERT_NOT_NULL(text);
+   sprintf(text, "name,data\nAlice,short\nBob,%s\nCarol,tail\n", wide);
+
+   chunk_config_t cfg = { .target_tokens = 500, .max_tokens = 1000, .overlap_tokens = 0 };
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(text, &cfg, &r));
+   TEST_ASSERT_TRUE_MESSAGE(r.count >= 1, "produced chunks");
+   bool marker = false, head = false, tail = false;
+   for (int i = 0; i < r.count; i++) {
+      if (strstr(r.chunks[i], "ZZEND"))
+         marker = true;
+      if (strstr(r.chunks[i], "Alice"))
+         head = true;
+      if (strstr(r.chunks[i], "Carol"))
+         tail = true;
+   }
+   TEST_ASSERT_TRUE_MESSAGE(marker, "end-of-row marker survives (no silent truncation)");
+   TEST_ASSERT_TRUE_MESSAGE(head && tail, "full document preserved after prose fallback");
+   chunk_result_free(&r);
+   free(text);
+}
+
+/* True if no chunk boundary splits a 2-byte UTF-8 'é' (0xC3 0xA9): no chunk may
+ * end on a lone lead byte 0xC3, and none may start on a continuation byte 0xA9. */
+static bool no_chunk_splits_eacute(const chunk_result_t *r) {
+   for (int i = 0; i < r->count; i++) {
+      size_t n = strlen(r->chunks[i]);
+      if (n == 0)
+         continue;
+      if ((unsigned char)r->chunks[i][0] == 0xA9)
+         return false;
+      if ((unsigned char)r->chunks[i][n - 1] == 0xC3)
+         return false;
+   }
+   return true;
+}
+
+static void test_struct_emit_oversized_line_utf8_safe(void) {
+   /* A YAML record that is a single line longer than max_chars must be hard-split
+    * into <= max_chars pieces WITHOUT cutting a multibyte char. Build a record of
+    * repeated 'é' (0xC3 0xA9) far past the cap. */
+   char big[1024];
+   int pos = 0;
+   pos += sprintf(big + pos, "- short one\n- ");
+   for (int i = 0; i < 300; i++) { /* 300 * 2 bytes = 600 bytes on one line */
+      big[pos++] = (char)0xC3;
+      big[pos++] = (char)0xA9;
+   }
+   pos += sprintf(big + pos, "\n- short three\n");
+   big[pos] = '\0';
+
+   /* max_tokens=20 -> max_chars=80, so the 600-byte line is split many times. */
+   chunk_config_t cfg = { .target_tokens = 10, .max_tokens = 20, .overlap_tokens = 0 };
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(big, &cfg, &r));
+   TEST_ASSERT_TRUE_MESSAGE(r.count > 3, "oversized YAML line is split into multiple pieces");
+   TEST_ASSERT_TRUE_MESSAGE(no_chunk_splits_eacute(&r), "no chunk boundary cuts a multibyte char");
+   /* No chunk exceeds the cap (with a small tolerance for the UTF-8 back-off). */
+   for (int i = 0; i < r.count; i++)
+      TEST_ASSERT_TRUE_MESSAGE((int)strlen(r.chunks[i]) <= 80 + 4, "chunk within max_chars");
+   chunk_result_free(&r);
+}
+
 /* =============================================================================
  * Main
  * ============================================================================= */
@@ -318,5 +413,8 @@ int main(void) {
    RUN_TEST(test_yaml_sequence_one_record_per_chunk);
    RUN_TEST(test_csv_header_plus_row_per_chunk);
    RUN_TEST(test_prose_with_bullets_not_mis_split);
+   RUN_TEST(test_indented_prose_with_dashes_not_yaml);
+   RUN_TEST(test_csv_oversized_row_falls_through_no_truncation);
+   RUN_TEST(test_struct_emit_oversized_line_utf8_safe);
    return UNITY_END();
 }

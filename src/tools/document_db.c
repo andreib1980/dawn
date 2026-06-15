@@ -458,6 +458,13 @@ int document_db_chunk_grep(int user_id,
    char pattern[DOC_CHUNK_TEXT_MAX * 2 + 3];
    if (!case_sensitive) {
       size_t nlen = strlen(needle);
+      /* Backstop (the document_grep tool already rejects an over-long query):
+       * fail closed rather than silently truncating. `escaped` is 2x sized and a
+       * char escapes to at most 2 bytes, so it safely holds up to
+       * DOC_CHUNK_TEXT_MAX-1 input chars; a longer needle would have its tail
+       * dropped by the loop guard and match a prefix instead of the full term. */
+      if (nlen >= DOC_CHUNK_TEXT_MAX)
+         return FAILURE;
       char escaped[DOC_CHUNK_TEXT_MAX * 2];
       size_t esc_len = 0;
       for (size_t i = 0; i < nlen && esc_len + 2 < sizeof(escaped); i++) {

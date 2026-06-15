@@ -240,15 +240,13 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
    /* The query is everything before the first "::" custom-param separator. */
    char needle[DOC_CHUNK_TEXT_MAX];
    const char *sep = strstr(value, "::");
-   if (sep) {
-      size_t len = (size_t)(sep - value);
-      if (len >= sizeof(needle))
-         len = sizeof(needle) - 1;
-      memcpy(needle, value, len);
-      needle[len] = '\0';
-   } else {
-      snprintf(needle, sizeof(needle), "%s", value);
-   }
+   size_t qlen = sep ? (size_t)(sep - value) : strlen(value);
+   /* Fail closed rather than silently truncating to a prefix (which would match
+    * the wrong, shorter term). A real search term is never this long anyway. */
+   if (qlen >= sizeof(needle))
+      return strdup("Error: search term too long.");
+   memcpy(needle, value, qlen);
+   needle[qlen] = '\0';
    if (needle[0] == '\0')
       return strdup("Error: empty grep query.");
 
