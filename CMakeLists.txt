@@ -571,6 +571,8 @@ set(DAWN_SOURCES
     src/tools/html_parser.c
     src/core/time_query_parser.c
     src/core/iso8601.c
+    src/core/str_fuzzy.c
+    src/core/scheduled_context.c
     src/tools/toml.c
 
     # Config subsystem
@@ -651,11 +653,13 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_engine.c
         src/messaging/messaging_engine_session.c
         src/messaging/messaging_engine_channels.c
+        src/messaging/messaging_engine_read.c
         src/messaging/messaging_engine_link.c
         src/messaging/messaging_engine_inbound.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_sms.c
         src/messaging/messaging_discord.c
+        src/messaging/messaging_discord_read.c
         src/messaging/messaging_slack.c
         src/messaging/messaging_split.c
         src/messaging/messaging_format.c

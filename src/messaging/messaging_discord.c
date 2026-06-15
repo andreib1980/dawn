@@ -42,7 +42,6 @@
  */
 #include "messaging/messaging_discord.h"
 
-#include <ctype.h>
 #include <curl/curl.h>
 #include <inttypes.h>
 #include <json-c/json.h>
@@ -59,6 +58,7 @@
 #include "core/iso8601.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "messaging/messaging_discord_internal.h"
 #include "messaging/messaging_driver.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/ws_reconnect.h"
@@ -67,15 +67,11 @@
  * Constants
  * ============================================================================= */
 
-/* Match CONFIG_API_KEY_MAX from include/config/dawn_config.h.  Today's
- * Discord bot tokens are ~70 chars but raising the cap defends against
- * silent mid-token truncation if Discord ever issues longer ones. */
-#define DC_BOT_TOKEN_MAX 256
+/* DC_BOT_TOKEN_MAX, DC_REST_BASE_URL, DC_USER_AGENT are shared with the read
+ * path — defined in messaging_discord_internal.h. */
 #define DC_GATEWAY_HOST "gateway.discord.gg"
 #define DC_GATEWAY_PATH "/?v=10&encoding=json"
 #define DC_GATEWAY_PORT 443
-#define DC_REST_BASE_URL "https://discord.com/api/v10"
-#define DC_USER_AGENT "DAWN-Discord/0.1 (libcurl, libwebsockets)"
 #define DC_LISTENER_STACK (64 * 1024)
 #define DC_RX_BUF_INITIAL 4096
 #define DC_RX_BUF_MAX (1 * 1024 * 1024) /* hard cap — handshake/dispatch payloads */
@@ -89,6 +85,9 @@
  * higher value delays the heartbeat-due check and shutdown response;
  * any lower bloats wake overhead without practical benefit. */
 #define DC_SERVICE_TIMEOUT_MS 50
+
+/* The channel-history READ path (REST discovery + history) lives in
+ * messaging_discord_read.c; its constants/state are file-local there. */
 
 /* Discord intents bitfield.  v1 DM-only: DIRECT_MESSAGES gives DM
  * dispatch events; MESSAGE_CONTENT is required (privileged) to see
@@ -136,7 +135,8 @@ enum dc_pending_op {
  * State
  * ============================================================================= */
 
-static char s_bot_token[DC_BOT_TOKEN_MAX];
+/* Non-static: shared with the read path via messaging_discord_internal.h. */
+char s_bot_token[DC_BOT_TOKEN_MAX];
 
 static atomic_bool s_running = ATOMIC_VAR_INIT(false);
 static atomic_bool s_connected = ATOMIC_VAR_INIT(false);
@@ -165,7 +165,9 @@ static bool s_listener_started = false;
 static messaging_inbound_fn s_inbound_cb = NULL;
 static pthread_mutex_t s_inbound_cb_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* REST handle — used by worker threads for outbound sends. */
+/* REST handle for outbound sends (worker threads).  The read path uses its
+ * own handle in messaging_discord_read.c, so a server sweep never blocks a
+ * send. */
 static CURL *s_send_curl = NULL;
 static pthread_mutex_t s_send_curl_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -874,23 +876,6 @@ static void *dc_listener_thread(void *arg) {
  * Outbound REST send
  * ============================================================================= */
 
-/* Discord channel IDs are snowflakes — decimal digits only (always
- * positive).  Shared between validate_address, build_address_json, and
- * the inline checks in send_text / send_typing so a single canonical
- * shape gates every wire-touching surface.  Matches the Slack driver's
- * defense-in-depth pattern (sk_build_address_json calls
- * is_valid_slack_channel). */
-static bool is_valid_snowflake(const char *s) {
-   if (!s || !s[0]) {
-      return false;
-   }
-   for (size_t i = 0; s[i] != '\0'; i++) {
-      if (!isdigit((unsigned char)s[i])) {
-         return false;
-      }
-   }
-   return true;
-}
 
 static int dc_extract_channel_id(const char *address_json, char *out, size_t out_size) {
    if (!address_json || !out || out_size == 0) {
@@ -946,7 +931,7 @@ static int dc_send_text(int user_id,
     * this at /link time, but if a malformed row ever reached us (manual
     * DB edit, future channel-resolution bug), an attacker-controlled
     * string with `../` or `?` could otherwise land in the REST URL. */
-   if (!is_valid_snowflake(channel_id)) {
+   if (!dc_is_valid_snowflake(channel_id)) {
       OLOG_WARNING("discord: send failed — channel_id not a valid snowflake");
       return FAILURE;
    }
@@ -1029,7 +1014,7 @@ static void dc_send_typing(int user_id, const char *provider_address, const char
       return;
    }
    /* Snowflake validation — same defense as dc_send_text. */
-   if (!is_valid_snowflake(channel_id)) {
+   if (!dc_is_valid_snowflake(channel_id)) {
       return;
    }
 
@@ -1156,6 +1141,7 @@ static void dc_shutdown(void) {
       s_send_curl = NULL;
    }
    pthread_mutex_unlock(&s_send_curl_mutex);
+   dc_read_shutdown(); /* tears down the read handle + discovery cache */
    free(s_rx_buf);
    s_rx_buf = NULL;
    s_rx_buf_cap = 0;
@@ -1186,7 +1172,7 @@ static int dc_validate_address(const char *address_json) {
    int rc = FAILURE;
    if (json_object_object_get_ex(obj, "channel_id", &cid) && cid) {
       const char *s = json_object_get_string(cid);
-      if (is_valid_snowflake(s)) {
+      if (dc_is_valid_snowflake(s)) {
          rc = SUCCESS;
       }
    }
@@ -1206,7 +1192,7 @@ static void dc_build_address_json(const char *provider_address, char *buf, size_
     * in depth on the driver's public surface — a future caller bypassing
     * validate_address would otherwise emit malformed JSON via snprintf
     * below.  is_valid_snowflake rejects '"' and '\\' (digits-only). */
-   if (!provider_address || !is_valid_snowflake(provider_address)) {
+   if (!provider_address || !dc_is_valid_snowflake(provider_address)) {
       snprintf(buf, buf_size, "{}");
       return;
    }
@@ -1241,6 +1227,9 @@ static const messaging_driver_t s_discord_driver = {
    .is_connected = dc_is_connected,
    .reconnect = dc_reconnect,
    .send_typing = dc_send_typing,
+   .list_readable_channels = dc_list_readable_channels,
+   .read_history = dc_read_history,
+   .invalidate_readable_channels_cache = dc_invalidate_channel_cache,
 };
 
 int messaging_discord_register(const char *bot_token) {

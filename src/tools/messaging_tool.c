@@ -16,19 +16,24 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Messaging LLM tool — actions: list_channels / send / link_status.
+ * Messaging LLM tool — actions: list_channels / send / read_channel /
+ * read_server / list_discord_channels / link_status / reset_conversation.
  * Delegates to messaging_engine.  See docs/MESSAGING_CHANNELS_DESIGN.md §3.
  */
 #include "tools/messaging_tool.h"
 
 #include <json-c/json.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/scheduled_context.h"
 #include "core/session_manager.h"
+#include "core/time_query_parser.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_discord.h"
@@ -122,6 +127,183 @@ static char *handle_reset_conversation(struct json_object *details, int user_id)
    }
 }
 
+/* Parse an optional natural-language time phrase from `details[key]` into a
+ * Unix-seconds bound.  `upper` selects the parsed window's END (until/before)
+ * vs its START (since/after).  Returns 0 when the field is absent or
+ * unparseable (the engine treats 0 as "unbounded" on that end). */
+static int64_t read_time_bound(struct json_object *details, const char *key, bool upper) {
+   struct json_object *obj = NULL;
+   if (!details || !json_object_object_get_ex(details, key, &obj)) {
+      return 0;
+   }
+   const char *phrase = json_object_get_string(obj);
+   if (!phrase || !phrase[0]) {
+      return 0;
+   }
+   time_query_t tq;
+   if (time_query_parse(phrase, (int64_t)time(NULL), &tq) != SUCCESS || !tq.found) {
+      return 0;
+   }
+   /* target_ts is the period's reference point and window_seconds its half-width.
+    * For a lower bound use the reference point itself (so "last week" → ~7d ago,
+    * not ~14d); for an upper bound use the far (later) edge so the named day/period
+    * is fully included (e.g. "until 2026-06-07" reaches the end of the 7th). */
+   int64_t bound = upper ? (tq.target_ts + tq.window_seconds) : tq.target_ts;
+   return bound > 0 ? bound : 0;
+}
+
+static char *handle_read_channel(struct json_object *details, int user_id) {
+   if (!details) {
+      return make_response("Error: 'read_channel' requires details with a 'channel' field.");
+   }
+   struct json_object *chan_obj = NULL;
+   if (!json_object_object_get_ex(details, "channel", &chan_obj)) {
+      return make_response("Error: 'read_channel' requires 'channel'.");
+   }
+   const char *channel = json_object_get_string(chan_obj);
+   if (!channel || channel[0] == '\0') {
+      return make_response("Error: 'channel' must be non-empty.");
+   }
+
+   /* Optional time range: 'since' (lower) and 'until' (upper); 0 = unbounded. */
+   int64_t since_ts = read_time_bound(details, "since", false);
+   int64_t until_ts = read_time_bound(details, "until", true);
+
+   int limit = 0; /* engine applies the default + cap */
+   struct json_object *limit_obj = NULL;
+   if (json_object_object_get_ex(details, "limit", &limit_obj)) {
+      limit = json_object_get_int(limit_obj);
+   }
+   const char *server = NULL;
+   struct json_object *srv_obj = NULL;
+   if (json_object_object_get_ex(details, "server", &srv_obj)) {
+      server = json_object_get_string(srv_obj);
+   }
+   /* Optional 'before' older-history cursor: a message id (snowflake).  Accept
+    * only digits so it can't be anything but an id. */
+   const char *before_id = NULL;
+   struct json_object *before_obj = NULL;
+   if (json_object_object_get_ex(details, "before", &before_obj)) {
+      const char *b = json_object_get_string(before_obj);
+      if (b && b[0]) {
+         before_id = b;
+         for (const char *p = b; *p; p++) {
+            if (*p < '0' || *p > '9') {
+               before_id = NULL; /* not a bare id → ignore */
+               break;
+            }
+         }
+      }
+   }
+
+   char *out = NULL;
+   const messaging_read_channel_opts_t opts = {
+      .channel_name = channel,
+      .since_ts = since_ts,
+      .until_ts = until_ts,
+      .before_id = before_id,
+      .limit = limit,
+      .server_hint = server,
+   };
+   int rc = messaging_engine_read_channel(user_id, &opts, &out);
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         return out ? out : make_response("(no content)");
+      case MESSAGING_UNKNOWN_CHANNEL:
+         return make_response(
+             "Error: I can't see a channel by that name. The bot must be invited to the server, "
+             "and I only read text/announcement channels. Try the exact channel name, or include "
+             "the server name (e.g. add a 'server' field) if the name exists in multiple servers.");
+      case MESSAGING_RATE_LIMITED:
+         return make_response("Error: too many channel reads recently. Wait a bit and retry.");
+      case MESSAGING_DRIVER_NOT_REGISTERED:
+         return make_response("Error: channel reading isn't available — it requires a configured "
+                              "Discord bot (reading is Discord-only).");
+      default:
+         return make_response("Error: couldn't read that channel (network or provider error).");
+   }
+}
+
+/* Upper bound on the explicit channel-subset list a single read_server may
+ * carry.  Deliberately >= the engine's per-sweep read cap
+ * (MSG_READ_SERVER_MAX_CHANNELS, 30): this only bounds how many NAMES the
+ * request may list; the engine still reads at most 30 and reports the true
+ * "covered N of M" denominator. */
+#define MSG_TOOL_READ_SERVER_CHANNELS_MAX 40
+
+static char *handle_read_server(struct json_object *details, int user_id) {
+   /* All optional: {server, since, until, channels:["general","announcements"]}. */
+   const char *server = NULL;
+   struct json_object *srv_obj = NULL;
+   if (details && json_object_object_get_ex(details, "server", &srv_obj)) {
+      server = json_object_get_string(srv_obj);
+   }
+   int64_t since_ts = read_time_bound(details, "since", false);
+   int64_t until_ts = read_time_bound(details, "until", true);
+
+   /* Optional explicit channel subset.  Pointers borrow from `details`, which
+    * outlives this call (freed by the dispatcher after we return). */
+   const char *channels[MSG_TOOL_READ_SERVER_CHANNELS_MAX];
+   int channel_count = 0;
+   struct json_object *chans_obj = NULL;
+   if (details && json_object_object_get_ex(details, "channels", &chans_obj) &&
+       json_object_is_type(chans_obj, json_type_array)) {
+      int m = (int)json_object_array_length(chans_obj);
+      for (int i = 0; i < m && channel_count < MSG_TOOL_READ_SERVER_CHANNELS_MAX; i++) {
+         const char *s = json_object_get_string(json_object_array_get_idx(chans_obj, i));
+         if (s && s[0]) {
+            channels[channel_count++] = s;
+         }
+      }
+   }
+
+   char *out = NULL;
+   const messaging_read_server_opts_t opts = {
+      .server_hint = server,
+      .since_ts = since_ts,
+      .until_ts = until_ts,
+      .channels = channel_count ? channels : NULL,
+      .channel_count = channel_count,
+   };
+   int rc = messaging_engine_read_server(user_id, &opts, &out);
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         return out ? out : make_response("(no content)");
+      case MESSAGING_UNKNOWN_CHANNEL:
+         return make_response("Error: I'm not in any Discord server I can read. Invite the bot to "
+                              "the server (with View Channels + Read Message History).");
+      case MESSAGING_RATE_LIMITED:
+         return make_response("Error: too many channel reads recently. Wait a bit and retry.");
+      case MESSAGING_DRIVER_NOT_REGISTERED:
+         return make_response("Error: channel reading isn't available — it requires a configured "
+                              "Discord bot (reading is Discord-only).");
+      default:
+         return make_response("Error: couldn't read the server (network or provider error).");
+   }
+}
+
+static char *handle_list_discord_channels(struct json_object *details, int user_id) {
+   /* Optional {server: 'My Server'} filter. */
+   const char *server = NULL;
+   struct json_object *srv_obj = NULL;
+   if (details && json_object_object_get_ex(details, "server", &srv_obj)) {
+      server = json_object_get_string(srv_obj);
+   }
+   char *out = NULL;
+   int rc = messaging_engine_list_discord_channels(user_id, server, &out);
+   switch (rc) {
+      case MESSAGING_SUCCESS:
+         return out ? out : make_response("(no content)");
+      case MESSAGING_RATE_LIMITED:
+         return make_response("Error: too many channel reads recently. Wait a bit and retry.");
+      case MESSAGING_DRIVER_NOT_REGISTERED:
+         return make_response("Error: channel listing isn't available — it requires a configured "
+                              "Discord bot (Discord-only).");
+      default:
+         return make_response("Error: couldn't list channels (network or provider error).");
+   }
+}
+
 static char *handle_link_status(struct json_object *details) {
    if (!details) {
       return make_response("Error: 'link_status' requires a 'code' field.");
@@ -150,6 +332,35 @@ static char *handle_link_status(struct json_object *details) {
    }
 }
 
+/* Single source of truth for which messaging actions may run unattended (from a
+ * scheduled task or briefing).  Only read-only Discord actions qualify; send and
+ * channel management require a live conversation (a human in the loop).  Used by
+ * BOTH the fire-time gate in messaging_callback and the create-time gate
+ * (messaging_validate_schedulable_action, reached via tool_registry). */
+static bool messaging_action_is_schedulable(const char *action) {
+   return action && (strcmp(action, "read_channel") == 0 || strcmp(action, "read_server") == 0 ||
+                     strcmp(action, "list_discord_channels") == 0);
+}
+
+#define MESSAGING_SCHEDULABLE_ERR                                                         \
+   "only read-only Discord actions (read_channel / read_server / list_discord_channels) " \
+   "may run from a schedule; other messaging actions (send, etc.) require a live conversation."
+
+/* Per-action schedulability gate registered in messaging_metadata.  Rejects
+ * non-read actions at scheduler CREATE time so the LLM is told up front rather
+ * than silently failing at fire time.  Mirrors the fire-time gate below. */
+static int messaging_validate_schedulable_action(const char *action,
+                                                 char *err_buf,
+                                                 size_t err_buf_size) {
+   if (messaging_action_is_schedulable(action)) {
+      return SUCCESS;
+   }
+   if (err_buf && err_buf_size) {
+      snprintf(err_buf, err_buf_size, MESSAGING_SCHEDULABLE_ERR);
+   }
+   return FAILURE;
+}
+
 static char *messaging_callback(const char *action, char *value, int *should_respond) {
    if (should_respond) {
       *should_respond = 1;
@@ -158,11 +369,32 @@ static char *messaging_callback(const char *action, char *value, int *should_res
       return make_response("Error: missing action.");
    }
 
-   /* Resolve user_id from session context (or default to 1). */
+   /* Resolve user_id.  Interactive turns carry a thread-local session
+    * (command context); scheduled briefing steps run on the scheduler thread
+    * with no session, so fall back to the scheduled-origin context the
+    * briefing executor sets — otherwise this would silently bill/audit reads
+    * to user 1.  See include/core/scheduled_context.h. */
    int user_id = 1;
+   int sched_user = 0;
+   bool is_scheduled = scheduled_context_get(&sched_user);
    session_t *ctx = session_get_command_context();
    if (ctx && ctx->metrics.user_id > 0) {
       user_id = ctx->metrics.user_id;
+   } else if (is_scheduled && sched_user > 0) {
+      user_id = sched_user;
+   }
+
+   /* Fire-time action-level schedulability gate: the tool carries
+    * TOOL_CAP_SCHEDULABLE (so the read-digest use case works), but only
+    * read-only actions may run unattended.  Reject everything else when invoked
+    * from a scheduled context — keyed on is_scheduled, NOT "no session", since
+    * the identity fallback above sets a context-equivalent for scheduled runs.
+    * Defense in depth: the same verdict is enforced at scheduler create time via
+    * messaging_validate_schedulable_action(), so a non-read action should never
+    * reach a schedule — but legacy rows created before this gate still fire here.
+    * Shares messaging_action_is_schedulable() as the single allowlist. */
+   if (is_scheduled && !messaging_action_is_schedulable(action)) {
+      return make_response("Error: " MESSAGING_SCHEDULABLE_ERR);
    }
 
    /* Parse details JSON if present. */
@@ -176,6 +408,12 @@ static char *messaging_callback(const char *action, char *value, int *should_res
       result = handle_list_channels(user_id);
    } else if (strcmp(action, "send") == 0) {
       result = handle_send(details, user_id);
+   } else if (strcmp(action, "read_channel") == 0) {
+      result = handle_read_channel(details, user_id);
+   } else if (strcmp(action, "read_server") == 0) {
+      result = handle_read_server(details, user_id);
+   } else if (strcmp(action, "list_discord_channels") == 0) {
+      result = handle_list_discord_channels(details, user_id);
    } else if (strcmp(action, "link_status") == 0) {
       result = handle_link_status(details);
    } else if (strcmp(action, "reset_conversation") == 0) {
@@ -201,20 +439,54 @@ static const treg_param_t messaging_params[] = {
                       "or to message proactively when not in a chat; to answer the channel you "
                       "are already talking on, just reply normally — your reply is delivered "
                       "there automatically, and 'send'-ing to it would duplicate your reply), "
+                      "'read_channel' (Discord only — read recent messages from a server channel "
+                      "the bot can see, e.g. 'catch me up on #general', and summarize them in "
+                      "your reply), "
+                      "'read_server' (Discord only — read EVERY readable channel of one server "
+                      "and summarize each, e.g. 'sum up everything on my server'; bounded to the "
+                      "most recent messages per channel), "
+                      "'list_discord_channels' (Discord only — cheaply list the channels the bot "
+                      "can see WITHOUT reading any messages; use this first to discover the server "
+                      "layout before deciding what to read), "
                       "'link_status' (check whether a pending link code has been claimed), "
                       "'reset_conversation' (close the current forever-thread on a channel and "
                       "start fresh next message; prior history is preserved in the WebUI)",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "list_channels", "send", "link_status", "reset_conversation" },
-       .enum_count = 4,
+       .enum_values = { "list_channels", "send", "read_channel", "read_server",
+                        "list_discord_channels", "link_status", "reset_conversation" },
+       .enum_count = 7,
    },
    {
        .name = "details",
        .description =
            "JSON object with action-specific fields (pass as JSON-encoded string).\n"
            "For 'send': {channel: 'telegram_main', text: 'message body'}.\n"
+           "For 'read_channel': {channel: 'general', since: 'last week', until: 'yesterday', "
+           "limit: 100, server: 'My Server'}. 'channel' is the Discord channel name (with or "
+           "without '#'). 'since'/'until' bound a time range — natural phrases ('today', 'this "
+           "morning', '2 hours ago', 'last week', 'last month', 'yesterday') or ISO dates "
+           "('2026-06-01'). Give 'since' alone for everything from then to now, both for a closed "
+           "range, or neither for the most recent messages. 'limit' is an optional max message "
+           "count (default 100, hard cap 300); 'server' is optional and disambiguates a channel "
+           "name that exists in multiple servers. 'before' is an optional message id to page "
+           "further back in history — the transcript ends with the oldest message id, which you "
+           "pass as 'before' on the next call to read older messages. The bot reads any "
+           "text/announcement channel it has been invited to — NOT restricted to channels you "
+           "linked. Returns a transcript to summarize; if the name is ambiguous it returns the "
+           "matching servers to pick from.\n"
+           "For 'read_server': {server: 'My Server', since: 'last week', until: 'yesterday', "
+           "channels: ['general','announcements']} (all optional). Reads readable channels of one "
+           "Discord server and returns one transcript with a section per channel — summarize each. "
+           "'server' picks which server (omit if the bot is in only one); 'since'/'until' bound a "
+           "time range as for 'read_channel'; 'channels' restricts to a named subset (use it to "
+           "read just a few channels, or to fetch the remaining channels after a truncated sweep — "
+           "pair with 'list_discord_channels' to get the names). Bounded to the most-recent "
+           "messages per channel; quiet channels are marked '(no recent activity)'.\n"
+           "For 'list_discord_channels': {server: 'My Server'} (optional). Lists the channels the "
+           "bot can see grouped by server, WITHOUT reading any messages — cheap discovery so you "
+           "know the layout before choosing what to 'read_channel'.\n"
            "For 'link_status': {code: 'DAWNA7K9PQ'}.\n"
            "For 'reset_conversation': {channel: 'telegram_main'} — equivalent to the user "
            "sending /new in the chat app.\n"
@@ -333,13 +605,20 @@ static const tool_metadata_t messaging_metadata = {
    .aliases = { "message", "send_message", "chat" },
    .alias_count = 3,
 
-   .description = "Send and manage messages across linked chat platforms (Telegram, "
+   .description = "Send, read, and manage messages across linked chat platforms (Telegram, "
                   "Discord, Slack) and SMS. Use 'list_channels' to see what's linked, "
                   "'send' to deliver text to a named channel, 'link_status' to check "
-                  "pending link codes. IMPORTANT: when you are already conversing on a "
-                  "messaging channel, do NOT use 'send' to reply to that same channel — "
+                  "pending link codes. Discord-only reading: 'read_channel' / 'read_server' "
+                  "summarize history from any channel the bot can see (fuzzy-matched by name), "
+                  "'list_discord_channels' lists them. IMPORTANT: when you are already conversing "
+                  "on a messaging channel, do NOT use 'send' to reply to that same channel — "
                   "just answer normally and your reply is delivered there. Reserve 'send' "
                   "for reaching a DIFFERENT channel or for proactive/unprompted messages. "
+                  "Note that 'send' targets only WebUI-LINKED channels (a different set from the "
+                  "bot-visible channels you can read). SCHEDULING: only the read actions "
+                  "(read_channel / read_server / list_discord_channels) may run from the scheduler "
+                  "or a briefing; 'send', 'reset_conversation', and 'link_status' require a live "
+                  "conversation and are rejected if scheduled — do not offer to schedule them. "
                   "Each user manages their own channels via the WebUI Settings panel.",
    .params = messaging_params,
    .param_count = 2,
@@ -349,6 +628,8 @@ static const tool_metadata_t messaging_metadata = {
    .is_getter = false,
    .default_local = true,
    .default_remote = true,
+
+   .validate_schedulable_action = messaging_validate_schedulable_action,
 
    .init = messaging_tool_init,
    .cleanup = messaging_tool_cleanup,

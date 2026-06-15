@@ -39,6 +39,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/missed_notifications_db.h"
+#include "core/scheduled_context.h"
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
@@ -394,8 +395,16 @@ static int scheduler_execute_task(sched_event_t *event) {
    char value_buf[SCHED_TOOL_VALUE_MAX];
    snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
 
+   /* Publish the scheduled-origin context so the callback resolves the real
+    * event owner (not the user-1 fallback) and so action-level schedulability
+    * gates (e.g. messaging's read-only-when-scheduled rule) fire at fire time.
+    * The briefing path does the same around its step loop. */
+   scheduled_context_set(event->user_id);
+
    int should_respond = 0;
    char *result = callback(event->tool_action, value_buf, &should_respond);
+
+   scheduled_context_clear();
 
    if (result) {
       OLOG_INFO("scheduler: task %lld result: %.200s", (long long)event->id, result);
@@ -663,13 +672,22 @@ static void *briefing_thread_func(void *arg) {
    int step_count = 0;
    scheduler_db_briefing_steps_list(event->id, steps, SCHED_BRIEFING_STEPS_MAX, &step_count);
 
+   /* Establish the owning user for the duration of the tool-callback
+    * invocations.  The scheduler thread has no session, so without this a
+    * tool that resolves its user from the session context (e.g. messaging
+    * read_channel) would fall back to user 1 — defeating per-user rate
+    * limits and mis-attributing audit.  Bounded to the tool-exec region;
+    * cleared before LLM summarization and on the fail path. */
+   scheduled_context_set(event->user_id);
+
    if (step_count > 0) {
       strbuf_t combined;
       strbuf_init(&combined, 4096);
       int succeeded = 0;
       for (int i = 0; i < step_count; i++) {
          char err_buf[160];
-         if (tool_registry_validate_schedulable(steps[i].tool_name, steps[i].tool_value, err_buf,
+         if (tool_registry_validate_schedulable(steps[i].tool_name, steps[i].tool_action,
+                                                steps[i].tool_value, err_buf,
                                                 sizeof(err_buf)) != SUCCESS) {
             OLOG_WARNING("scheduler: briefing %lld step %d (%s) failed validation: %s",
                          (long long)event->id, i + 1, steps[i].tool_name, err_buf);
@@ -766,6 +784,10 @@ static void *briefing_thread_func(void *arg) {
 
       OLOG_INFO("scheduler: briefing %lld tool result: %.200s", (long long)event->id, tool_result);
    }
+
+   /* Tool execution done — drop the scheduled-origin marker before the LLM
+    * summarization step (which must not run as a scheduled tool). */
+   scheduled_context_clear();
 
    /* Step 2: Create conversation */
    {
@@ -904,6 +926,9 @@ static void *briefing_thread_func(void *arg) {
    return NULL;
 
 fail:
+   /* A goto from inside the tool-exec region may leave the scheduled-origin
+    * marker set; clear it defensively (idempotent if already cleared). */
+   scheduled_context_clear();
    /* Announce failure — same source gate as the success path so a silent
     * WebUI briefing doesn't get a chatty failure announcement. */
    {

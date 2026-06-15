@@ -63,6 +63,25 @@ typedef int (*messaging_inbound_fn)(const char *provider,
                                     int64_t timestamp);
 
 /**
+ * @brief Time/cursor window for a read_history() fetch.
+ *
+ * Bundles the per-fetch bounds so the contract doesn't grow a flat parameter
+ * list as new bounds are added.  All wall-clock fields are Unix seconds.
+ *   - after_ts  : lower bound (0 = no lower bound).
+ *   - before_ts : upper bound (0 = up to now).
+ *   - before_id : exact older-history cursor (a provider message id); when
+ *                 non-NULL/non-empty it pages strictly older than that message,
+ *                 overriding before_ts.  NULL/"" = use before_ts.
+ *   - limit     : desired max messages; the driver clamps to its own cap.
+ */
+typedef struct {
+   int64_t after_ts;
+   int64_t before_ts;
+   const char *before_id;
+   int limit;
+} messaging_read_window_t;
+
+/**
  * @brief Per-driver function table.
  *
  * Drivers own persistent connections (long-poll loops, Gateway
@@ -205,6 +224,60 @@ typedef struct messaging_driver_s {
     *                          "{}" otherwise.
     */
    void (*send_typing)(int user_id, const char *provider_address, const char *address_json);
+
+   /**
+    * OPTIONAL — enumerate the channels this driver/bot can read history from.
+    *
+    * Used by the read-channel path to fuzzy-match a user-named channel to a
+    * provider channel id.  Writes a heap-allocated, provider-NEUTRAL JSON
+    * array into *out_json (caller frees):
+    *
+    *   [{"container_id":"...","container_name":"...",
+    *     "channel_id":"...","channel_name":"...","type":<int>}, ...]
+    *
+    * "container" abstracts the grouping a provider uses — guild (Discord),
+    * workspace (future Slack).  Drivers MAY cache internally (the engine does
+    * not cache the parsed result).  Note: enumeration reflects channels the
+    * bot *may* be able to read; per-channel read permission is only known on
+    * the actual read_history() call.
+    *
+    * Drivers that cannot read history (telegram/sms/slack-v1) leave NULL.
+    *
+    * @return SUCCESS / FAILURE (never a count).
+    */
+   int (*list_readable_channels)(char **out_json);
+
+   /**
+    * OPTIONAL — fetch the MOST-RECENT up-to-`window->limit` messages in
+    * `channel_id` within `window` (see messaging_read_window_t).  Returns them
+    * newest-first as the provider naturally orders them.  Writes a
+    * heap-allocated JSON array into *out_json (caller frees):
+    *
+    *   [{"id":"...","author":"...","timestamp":<unix_secs>,
+    *     "content":"...","type":<int>,"is_bot":<0|1>}, ...]
+    *
+    * The driver maps the window bounds to whatever cursors its API uses
+    * (Discord: synthetic snowflakes for after/before) so the contract stays
+    * provider-neutral.  The driver clamps `window->limit` to its own provider
+    * cap and bounds pagination.  Missing read permission may surface as an
+    * empty array rather than an error, depending on the provider — callers must
+    * treat empty as "nothing to show, possibly no permission".
+    *
+    * Drivers that cannot read history leave NULL.
+    *
+    * @return SUCCESS / FAILURE (never a count).
+    */
+   int (*read_history)(const char *channel_id,
+                       const messaging_read_window_t *window,
+                       char **out_json);
+
+   /**
+    * OPTIONAL — drop any cached result of list_readable_channels() so the next
+    * call refetches.  Lets the engine recover when a fuzzy name-resolution miss
+    * is caused by a channel created within the discovery cache TTL.  NULL for
+    * drivers without a discovery cache.
+    */
+   void (*invalidate_readable_channels_cache)(void);
 } messaging_driver_t;
 
 #ifdef __cplusplus
