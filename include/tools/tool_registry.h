@@ -320,6 +320,14 @@ typedef struct {
    /** Optional runtime availability check (NULL = always available) */
    bool (*is_available)(void);
 
+   /** Optional per-action schedulability gate.  TOOL_CAP_SCHEDULABLE is a
+    *  tool-level grant; a tool that is schedulable for some actions but not
+    *  others (e.g. messaging: read_* yes, send no) implements this to reject
+    *  the unsafe actions at BOTH create time (scheduler tool) and fire time.
+    *  NULL = every action of a schedulable tool may be scheduled.
+    *  @return SUCCESS if `action` may be scheduled, FAILURE otherwise (writes err_buf). */
+   int (*validate_schedulable_action)(const char *action, char *err_buf, size_t err_buf_size);
+
    /* Config (optional - NULL if tool has no config) */
    void *config;                        /**< Pointer to tool's config struct */
    size_t config_size;                  /**< sizeof() the config struct */
@@ -474,13 +482,21 @@ bool tool_registry_is_enabled(const char *name);
  * scheduler tool, dispatcher) AND at fire time (briefing_thread_func) so a
  * tool that was disabled between schedule and fire fails gracefully.
  *
+ * Also runs the tool's optional per-action schedulability gate
+ * (validate_schedulable_action) so a tool that is schedulable for some actions
+ * but not others (messaging: read_* yes, send no) rejects the unsafe action at
+ * create time as well as fire time.
+ *
  * @param tool_name Tool name to validate (must be NUL-terminated)
+ * @param tool_action Action being scheduled (NULL = unspecified); fed to the
+ *                    tool's per-action gate when one is registered
  * @param tool_value Optional value (NULL or "" treated as absent)
  * @param err_buf Output buffer for error message (untouched on success)
  * @param err_buf_size Size of err_buf
  * @return SUCCESS or FAILURE
  */
 int tool_registry_validate_schedulable(const char *tool_name,
+                                       const char *tool_action,
                                        const char *tool_value,
                                        char *err_buf,
                                        size_t err_buf_size);

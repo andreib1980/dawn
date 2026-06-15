@@ -348,7 +348,8 @@ static char *handle_create(struct json_object *details,
          const char *s_action = jaction ? json_object_get_string(jaction) : NULL;
          const char *s_value = jvalue ? json_object_get_string(jvalue) : NULL;
          char err[160];
-         if (tool_registry_validate_schedulable(s_name, s_value, err, sizeof(err)) != SUCCESS) {
+         if (tool_registry_validate_schedulable(s_name, s_action, s_value, err, sizeof(err)) !=
+             SUCCESS) {
             snprintf(result, sizeof(result), "Error: steps[%d]: %s", i, err);
             return strdup(result);
          }
@@ -378,16 +379,16 @@ static char *handle_create(struct json_object *details,
          return strdup(result);
       }
       const char *tool_value = json_get_string(details, "tool_value");
+      const char *tool_action = json_get_string(details, "tool_action");
       if (tool_name) {
          char err[160];
-         if (tool_registry_validate_schedulable(tool_name, tool_value, err, sizeof(err)) !=
-             SUCCESS) {
+         if (tool_registry_validate_schedulable(tool_name, tool_action, tool_value, err,
+                                                sizeof(err)) != SUCCESS) {
             snprintf(result, sizeof(result), "Error: %s", err);
             return strdup(result);
          }
          strncpy(event.tool_name, tool_name, SCHED_TOOL_NAME_MAX - 1);
       }
-      const char *tool_action = json_get_string(details, "tool_action");
       if (tool_action)
          strncpy(event.tool_action, tool_action, SCHED_TOOL_NAME_MAX - 1);
       if (tool_value) {

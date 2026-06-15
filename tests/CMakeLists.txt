@@ -660,6 +660,18 @@ dawn_add_unit_test(test_iso8601
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_str_fuzzy
+   SOURCES test_str_fuzzy.c
+           ${SRC_ROOT}/src/core/str_fuzzy.c
+   LIBS    unity
+   LABEL   ci)
+
+dawn_add_unit_test(test_scheduled_context
+   SOURCES test_scheduled_context.c
+           ${SRC_ROOT}/src/core/scheduled_context.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_strbuf
    SOURCES test_strbuf.c
            ${SRC_ROOT}/src/core/strbuf.c

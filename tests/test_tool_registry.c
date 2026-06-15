@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "tools/tool_registry.h"
 #include "unity.h"
 
@@ -125,6 +126,32 @@ static const tool_metadata_t mock_schedulable_with_value = {
    .callback = mock_callback,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_SCHEDULABLE | TOOL_CAP_REQUIRES_VALUE,
+   .params = NULL,
+   .param_count = 0,
+   .default_local = true,
+   .default_remote = true,
+};
+
+/* Per-action gate: schedulable at the tool level, but only the "read" action may
+ * actually be scheduled.  Mirrors the messaging tool (read_* yes, send no). */
+static int mock_action_gate(const char *action, char *err_buf, size_t err_buf_size) {
+   if (action && strcmp(action, "read") == 0) {
+      return SUCCESS;
+   }
+   if (err_buf && err_buf_size) {
+      snprintf(err_buf, err_buf_size, "action '%s' is not schedulable", action ? action : "(null)");
+   }
+   return FAILURE;
+}
+
+static const tool_metadata_t mock_schedulable_action_gated = {
+   .name = "sched_gated_tool",
+   .device_string = "sched gated device",
+   .description = "Schedulable tool with a per-action gate",
+   .callback = mock_callback,
+   .device_type = TOOL_DEVICE_TYPE_TRIGGER,
+   .capabilities = TOOL_CAP_SCHEDULABLE,
+   .validate_schedulable_action = mock_action_gate,
    .params = NULL,
    .param_count = 0,
    .default_local = true,
@@ -413,7 +440,7 @@ static void test_cache_invalidation(void) {
 
 static void test_validate_unknown_tool(void) {
    char err[160] = { 0 };
-   int rc = tool_registry_validate_schedulable("not_a_tool", "anything", err, sizeof(err));
+   int rc = tool_registry_validate_schedulable("not_a_tool", NULL, "anything", err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "unknown tool name returns FAILURE");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "unknown tool"),
                                 "error message names the unknown-tool branch");
@@ -421,12 +448,12 @@ static void test_validate_unknown_tool(void) {
 
 static void test_validate_null_tool_name(void) {
    char err[160] = { 0 };
-   int rc = tool_registry_validate_schedulable(NULL, "anything", err, sizeof(err));
+   int rc = tool_registry_validate_schedulable(NULL, NULL, "anything", err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "NULL tool_name returns FAILURE");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "tool_name is required"),
                                 "error names the missing-tool-name branch");
 
-   rc = tool_registry_validate_schedulable("", "anything", err, sizeof(err));
+   rc = tool_registry_validate_schedulable("", NULL, "anything", err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "empty tool_name returns FAILURE");
 }
 
@@ -434,7 +461,7 @@ static void test_validate_not_schedulable(void) {
    tool_registry_register(&mock_tool); /* TOOL_CAP_NONE — not schedulable */
 
    char err[160] = { 0 };
-   int rc = tool_registry_validate_schedulable("test_tool", "anything", err, sizeof(err));
+   int rc = tool_registry_validate_schedulable("test_tool", NULL, "anything", err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "non-schedulable tool returns FAILURE");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "not schedulable"),
                                 "error names the not-schedulable branch");
@@ -445,28 +472,29 @@ static void test_validate_schedulable_no_value_pass(void) {
 
    char err[160] = { 0 };
    /* Empty value OK for tools that don't require one. */
-   int rc = tool_registry_validate_schedulable("sched_tool", "", err, sizeof(err));
+   int rc = tool_registry_validate_schedulable("sched_tool", NULL, "", err, sizeof(err));
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + no-requires-value + empty value passes");
 
    /* NULL value OK too. */
-   rc = tool_registry_validate_schedulable("sched_tool", NULL, err, sizeof(err));
+   rc = tool_registry_validate_schedulable("sched_tool", NULL, NULL, err, sizeof(err));
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + no-requires-value + NULL value passes");
 
-   /* Populated value also passes (no requirement either way). */
-   rc = tool_registry_validate_schedulable("sched_tool", "Atlanta", err, sizeof(err));
-   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + populated value passes");
+   /* Populated value also passes (no requirement either way).  A tool with no
+    * per-action gate ignores tool_action entirely. */
+   rc = tool_registry_validate_schedulable("sched_tool", "any_action", "Atlanta", err, sizeof(err));
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schedulable + populated value passes (action ignored)");
 }
 
 static void test_validate_requires_value_empty_fails(void) {
    tool_registry_register(&mock_schedulable_with_value);
 
    char err[160] = { 0 };
-   int rc = tool_registry_validate_schedulable("sched_val_tool", "", err, sizeof(err));
+   int rc = tool_registry_validate_schedulable("sched_val_tool", NULL, "", err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "requires_value + empty value returns FAILURE");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "requires"),
                                 "error message names the requires-value branch");
 
-   rc = tool_registry_validate_schedulable("sched_val_tool", NULL, err, sizeof(err));
+   rc = tool_registry_validate_schedulable("sched_val_tool", NULL, NULL, err, sizeof(err));
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "requires_value + NULL value returns FAILURE");
 }
 
@@ -474,8 +502,29 @@ static void test_validate_requires_value_populated_passes(void) {
    tool_registry_register(&mock_schedulable_with_value);
 
    char err[160] = { 0 };
-   int rc = tool_registry_validate_schedulable("sched_val_tool", "today's news", err, sizeof(err));
+   int rc = tool_registry_validate_schedulable("sched_val_tool", NULL, "today's news", err,
+                                               sizeof(err));
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "requires_value + populated value passes");
+}
+
+static void test_validate_action_gate(void) {
+   tool_registry_register(&mock_schedulable_action_gated);
+
+   char err[160] = { 0 };
+   /* Allowed action passes the per-action gate. */
+   int rc = tool_registry_validate_schedulable("sched_gated_tool", "read", "", err, sizeof(err));
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "allowed action passes the per-action gate");
+
+   /* Disallowed action is rejected even though the tool is schedulable — this is
+    * the messaging send-from-schedule case. */
+   rc = tool_registry_validate_schedulable("sched_gated_tool", "send", "", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "disallowed action rejected by the per-action gate");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "not schedulable"),
+                                "error names the per-action gate rejection");
+
+   /* NULL action gets no implicit pass through a gate that demands a match. */
+   rc = tool_registry_validate_schedulable("sched_gated_tool", NULL, "", err, sizeof(err));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "NULL action rejected by the per-action gate");
 }
 
 /* Note: the "disabled" branch of validate_schedulable
@@ -491,11 +540,11 @@ static void test_validate_null_err_buf_safe(void) {
    tool_registry_register(&mock_schedulable_no_value);
 
    /* Caller passing NULL err_buf is allowed — function must not deref. */
-   int rc = tool_registry_validate_schedulable("sched_tool", "ok", NULL, 0);
+   int rc = tool_registry_validate_schedulable("sched_tool", NULL, "ok", NULL, 0);
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "NULL err_buf with valid input returns SUCCESS");
 
    /* And on the failure path the NULL err_buf must still be safe. */
-   rc = tool_registry_validate_schedulable("not_real", "ok", NULL, 0);
+   rc = tool_registry_validate_schedulable("not_real", NULL, "ok", NULL, 0);
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "NULL err_buf with unknown tool returns FAILURE");
 }
 
@@ -615,6 +664,7 @@ int main(void) {
    RUN_TEST(test_validate_schedulable_no_value_pass);
    RUN_TEST(test_validate_requires_value_empty_fails);
    RUN_TEST(test_validate_requires_value_populated_passes);
+   RUN_TEST(test_validate_action_gate);
    RUN_TEST(test_validate_null_err_buf_safe);
 
    /* ARRAY param: schema emission + encode/decode contract */

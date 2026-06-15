@@ -114,6 +114,113 @@ int messaging_engine_register_driver(const messaging_driver_t *driver);
 int messaging_engine_send(int user_id, const char *channel_name, const char *text);
 
 /**
+ * @brief Options for messaging_engine_read_channel().
+ *
+ * `channel_name` is required; everything else is optional (zero-init = the
+ * sensible default).  `since_ts`/`until_ts` are Unix-seconds bounds (0 =
+ * unbounded / up to now); `before_id` is an exact older-history cursor (a
+ * provider message id, NULL/"" = none); `limit` <= 0 = default; `server_hint`
+ * disambiguates a name shared across servers (NULL = none).
+ */
+typedef struct {
+   const char *channel_name;
+   int64_t since_ts;
+   int64_t until_ts;
+   const char *before_id;
+   int limit;
+   const char *server_hint;
+} messaging_read_channel_opts_t;
+
+/**
+ * @brief Options for messaging_engine_read_server().
+ *
+ * All optional (zero-init = every readable channel, every recent message).
+ * `server_hint` NULL = auto-select when the bot is in exactly one server.
+ * `channels`/`channel_count` restrict to an explicit fuzzy-matched subset
+ * (NULL/0 = all) — used to target a few channels or fetch "the rest" after a
+ * truncated sweep.  `since_ts`/`until_ts` as above.
+ */
+typedef struct {
+   const char *server_hint;
+   int64_t since_ts;
+   int64_t until_ts;
+   const char *const *channels;
+   int channel_count;
+} messaging_read_server_opts_t;
+
+/**
+ * @brief Read recent messages from a named channel and return a transcript.
+ *
+ * Resolves @p opts->channel_name against the driver's discoverable (bot-visible)
+ * channels via fuzzy match — distinct from messaging_engine_send, which
+ * resolves against the user's *linked* channels.  Runs each message body
+ * through the injection filter and formats a chronological, `[DATA]`-wrapped
+ * transcript for the LLM to summarize; the transcript surfaces the oldest-shown
+ * message id as the next older-history cursor.  Discord-only in v1.  Applies a
+ * per-user read rate limit and an audit log line.
+ *
+ * @param user_id  DAWN user the read is on behalf of (rate-limit + audit key).
+ *                 Must be > 0.
+ * @param opts     Read options (see messaging_read_channel_opts_t).  Must be
+ *                 non-NULL with a non-empty channel_name.
+ * @param out_text On MESSAGING_SUCCESS, set to an allocated transcript (or a
+ *                 disambiguation/empty-result message).  Caller frees.
+ *                 Untouched on failure.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no fuzzy match),
+ *         MESSAGING_RATE_LIMITED, MESSAGING_DRIVER_NOT_REGISTERED (no
+ *         read-capable driver), MESSAGING_FAILURE.
+ */
+int messaging_engine_read_channel(int user_id,
+                                  const messaging_read_channel_opts_t *opts,
+                                  char **out_text);
+
+/**
+ * @brief Read recent messages from the readable channels of one server and
+ *        return a single per-channel-sectioned transcript to summarize.
+ *
+ * Resolves the target server (by @p opts->server_hint, or automatically when
+ * the bot is in only one), then sweeps its text/announcement channels (or the
+ * `channels` subset) — each a `## #channel` section inside one `[DATA]`
+ * envelope, with the same per-message injection filtering as
+ * messaging_engine_read_channel.  Bounded by a channel cap, a per-channel
+ * message cap, and a total transcript budget; quiet channels are shown as
+ * "(no recent activity)".  Discord-only in v1.
+ *
+ * @param user_id  DAWN user the read is on behalf of (rate-limit + audit).
+ * @param opts     Read options (see messaging_read_server_opts_t).  Must be
+ *                 non-NULL.
+ * @param out_text On MESSAGING_SUCCESS, set to an allocated transcript (or a
+ *                 disambiguation message).  Caller frees.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_UNKNOWN_CHANNEL (no servers visible),
+ *         MESSAGING_RATE_LIMITED, MESSAGING_DRIVER_NOT_REGISTERED,
+ *         MESSAGING_FAILURE.
+ */
+int messaging_engine_read_server(int user_id,
+                                 const messaging_read_server_opts_t *opts,
+                                 char **out_text);
+
+/**
+ * @brief List the bot-visible Discord channels (no message fetch) so the LLM
+ *        can discover the server layout cheaply before deciding what to read.
+ *
+ * Returns the text/announcement channels of every server the bot has joined,
+ * grouped by server, using the driver's discovery cache — does NOT fetch any
+ * message history, so it doesn't consume a read budget.  Optional
+ * @p server_hint filters to one server (fuzzy).  Discord-only in v1.
+ *
+ * @param user_id      DAWN user (rate-limit + audit).  Must be > 0.
+ * @param server_hint  Optional server name filter.  May be NULL.
+ * @param out_text     On MESSAGING_SUCCESS, an allocated channel listing (or a
+ *                     "no servers" message).  Caller frees.
+ *
+ * @return MESSAGING_SUCCESS, MESSAGING_RATE_LIMITED,
+ *         MESSAGING_DRIVER_NOT_REGISTERED, MESSAGING_FAILURE.
+ */
+int messaging_engine_list_discord_channels(int user_id, const char *server_hint, char **out_text);
+
+/**
  * @brief List a user's channels as a JSON array.
  *
  * Returns an allocated string like

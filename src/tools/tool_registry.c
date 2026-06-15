@@ -579,6 +579,7 @@ bool tool_registry_is_enabled(const char *name) {
 }
 
 int tool_registry_validate_schedulable(const char *tool_name,
+                                       const char *tool_action,
                                        const char *tool_value,
                                        char *err_buf,
                                        size_t err_buf_size) {
@@ -601,6 +602,13 @@ int tool_registry_validate_schedulable(const char *tool_name,
    if (!tool_registry_is_enabled(tool_name)) {
       if (err_buf && err_buf_size)
          snprintf(err_buf, err_buf_size, "tool '%s' is disabled", tool_name);
+      return FAILURE;
+   }
+   /* Per-action gate: a tool may be schedulable for some actions but not others
+    * (e.g. messaging read_* vs send).  Enforced here so create time and fire
+    * time share one verdict. */
+   if (meta->validate_schedulable_action &&
+       meta->validate_schedulable_action(tool_action, err_buf, err_buf_size) != SUCCESS) {
       return FAILURE;
    }
    if ((meta->capabilities & TOOL_CAP_REQUIRES_VALUE) && (!tool_value || !tool_value[0])) {

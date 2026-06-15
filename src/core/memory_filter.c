@@ -54,12 +54,17 @@ static const char *BLOCKED_PATTERNS[] = {
     * caught by the second-clause patterns below ("ignore your", "forget
     * your", "always respond", "act as if", etc.), so removing the bare
     * imperatives is safe — defense in depth shifts to the verb, not the
-    * subject. */
-   /* "always/never/whenever" + imperative verb */
-   "always respond", "always answer", "always say", "always reply", "always act", "always include",
-   "always add", "always use", "always be ", "never refuse", "never deny", "never reject",
-   "never decline", "never say", "never mention", "never reveal", "never tell", "whenever you",
-   "whenever asked", "whenever i ",
+    * subject.
+    *
+    * Extended 2026-06-14: the "always/never/whenever + verb" cluster and the
+    * "from now on / going forward / henceforth" temporal phrases were removed
+    * for the same reason.  They are everyday English ("always be careful",
+    * "never refuse a customer", "from now on I'll use PETG", "going forward")
+    * and were dropping real messages — observed filtering benign Discord chat
+    * during channel-read summarization.  The dangerous COMBINATIONS remain
+    * covered by the verb/object patterns below ("ignore your", "forget your",
+    * "respond as", "act as if", "override", "disable ...", the jailbreak set)
+    * and the credential/marker patterns. */
    /* Negation/override */
    "ignore your", "ignore previous", "ignore above", "ignore all ", "ignore the ", "forget your",
    "forget previous", "forget above", "forget all ", "forget everything", "disregard", "pretend",
@@ -67,7 +72,6 @@ static const char *BLOCKED_PATTERNS[] = {
    "disable content", "disable check", "skip check", "skip verif", "skip valid", "skip safe",
    /* System manipulation */
    "system prompt", "your instructions", "your guidelines", "your rules", "your constraints",
-   "from now on", "going forward", "henceforth",
    /* Credential patterns */
    "password", "api key", "apikey", "api token", "access token", "auth token", "session token",
    "secret key", "credential", "private key", "bearer",

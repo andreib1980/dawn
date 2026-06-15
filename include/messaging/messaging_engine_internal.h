@@ -147,6 +147,8 @@ extern pthread_mutex_t s_session_slots_mutex;
 extern rate_limiter_t s_inbound_link_limiter;
 extern rate_limiter_t s_inbound_general_limiter;
 extern rate_limiter_t s_outbound_per_user_limiter;
+extern rate_limiter_t s_read_per_user_limiter;
+extern rate_limiter_t s_read_server_limiter;
 
 /* =============================================================================
  * Cross-file helper prototypes (promoted from static when the file split).

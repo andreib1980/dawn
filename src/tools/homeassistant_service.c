@@ -38,6 +38,7 @@
 #include <time.h>
 
 #include "core/curl_buffer.h"
+#include "core/str_fuzzy.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -116,17 +117,6 @@ static void secure_zero(void *ptr, size_t len) {
       *p++ = 0;
    }
 #endif
-}
-
-/* =============================================================================
- * String Helpers
- * ============================================================================= */
-static void str_tolower(char *dst, const char *src, size_t max_len) {
-   size_t i;
-   for (i = 0; i < max_len - 1 && src[i]; i++) {
-      dst[i] = tolower((unsigned char)src[i]);
-   }
-   dst[i] = '\0';
 }
 
 /* =============================================================================
@@ -832,13 +822,13 @@ static ha_error_t fetch_entities(void) {
             const char *fname = json_object_get_string(fname_obj);
             if (fname) {
                strncpy(ent->friendly_name, fname, sizeof(ent->friendly_name) - 1);
-               str_tolower(ent->friendly_name_lower, fname, sizeof(ent->friendly_name_lower));
+               str_fuzzy_tolower(ent->friendly_name_lower, fname, sizeof(ent->friendly_name_lower));
             }
          }
          if (!ent->friendly_name[0]) {
             /* Use entity_id after dot as fallback */
             strncpy(ent->friendly_name, dot + 1, sizeof(ent->friendly_name) - 1);
-            str_tolower(ent->friendly_name_lower, dot + 1, sizeof(ent->friendly_name_lower));
+            str_fuzzy_tolower(ent->friendly_name_lower, dot + 1, sizeof(ent->friendly_name_lower));
          }
 
          parse_entity_attributes(attrs, ent);
@@ -908,35 +898,6 @@ ha_error_t homeassistant_refresh_entities(const ha_entity_list_t **list) {
    return err;
 }
 
-/* =============================================================================
- * Fuzzy Matching (domain-aware)
- * ============================================================================= */
-static int fuzzy_match_score(const char *haystack_lower, const char *needle_lower) {
-   /* Exact match */
-   if (strcmp(haystack_lower, needle_lower) == 0)
-      return 100;
-
-   /* Contains match */
-   if (strstr(haystack_lower, needle_lower))
-      return 80;
-
-   /* Word-by-word match */
-   int score = 0;
-   char needle_copy[256];
-   strncpy(needle_copy, needle_lower, sizeof(needle_copy) - 1);
-   needle_copy[sizeof(needle_copy) - 1] = '\0';
-
-   char *saveptr;
-   char *token = strtok_r(needle_copy, " ", &saveptr);
-   while (token) {
-      if (strstr(haystack_lower, token))
-         score += 20;
-      token = strtok_r(NULL, " ", &saveptr);
-   }
-
-   return score;
-}
-
 ha_error_t homeassistant_find_entity(const char *name,
                                      ha_domain_t domain_hint,
                                      const ha_entity_t **entity) {
@@ -968,7 +929,7 @@ ha_error_t homeassistant_find_entity(const char *name,
       return err;
 
    char needle_lower[256];
-   str_tolower(needle_lower, name, sizeof(needle_lower));
+   str_fuzzy_tolower(needle_lower, name, sizeof(needle_lower));
 
    int best_score = 0;
    const ha_entity_t *best_match = NULL;
@@ -982,11 +943,11 @@ ha_error_t homeassistant_find_entity(const char *name,
          continue;
 
       /* Score against friendly_name (pre-lowered) and entity_id */
-      int score = fuzzy_match_score(ent->friendly_name_lower, needle_lower);
+      int score = str_fuzzy_score(ent->friendly_name_lower, needle_lower);
 
       char eid_lower[HA_MAX_ENTITY_ID];
-      str_tolower(eid_lower, ent->entity_id, sizeof(eid_lower));
-      int eid_score = fuzzy_match_score(eid_lower, needle_lower);
+      str_fuzzy_tolower(eid_lower, ent->entity_id, sizeof(eid_lower));
+      int eid_score = str_fuzzy_score(eid_lower, needle_lower);
       if (eid_score > score)
          score = eid_score;
 

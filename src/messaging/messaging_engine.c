@@ -59,6 +59,16 @@
 #define MESSAGING_RL_LINK_SLOTS 64
 #define MESSAGING_RL_GENERAL_SLOTS 128
 #define MESSAGING_RL_OUTBOUND_SLOTS 64
+#define MESSAGING_RL_OUTBOUND_MAX_COUNT 10 /* outbound sends per window, per channel */
+#define MESSAGING_RL_OUTBOUND_WINDOW_SEC 60
+#define MESSAGING_RL_READ_SLOTS 32
+#define MESSAGING_RL_READ_MAX_COUNT 10 /* single-channel reads per window, per user */
+#define MESSAGING_RL_READ_WINDOW_SEC 60
+/* Whole-server sweeps fan out to ~30 fetches each, so they get a stricter
+ * per-user budget than single-channel reads. */
+#define MESSAGING_RL_READ_SERVER_SLOTS 32
+#define MESSAGING_RL_READ_SERVER_MAX_COUNT 3
+#define MESSAGING_RL_READ_SERVER_WINDOW_SEC 60
 
 /* =============================================================================
  * Module state
@@ -100,10 +110,14 @@ pthread_mutex_t s_session_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
 static rate_limit_entry_t s_inbound_link_entries[MESSAGING_RL_LINK_SLOTS];
 static rate_limit_entry_t s_inbound_general_entries[MESSAGING_RL_GENERAL_SLOTS];
 static rate_limit_entry_t s_outbound_per_user_entries[MESSAGING_RL_OUTBOUND_SLOTS];
+static rate_limit_entry_t s_read_per_user_entries[MESSAGING_RL_READ_SLOTS];
+static rate_limit_entry_t s_read_server_entries[MESSAGING_RL_READ_SERVER_SLOTS];
 
 rate_limiter_t s_inbound_link_limiter;
 rate_limiter_t s_inbound_general_limiter;
 rate_limiter_t s_outbound_per_user_limiter;
+rate_limiter_t s_read_per_user_limiter;
+rate_limiter_t s_read_server_limiter;
 
 /* =============================================================================
  * Weak symbol — WebUI broadcast on conversation append.  Defined here
@@ -199,17 +213,29 @@ int messaging_engine_init(void) {
    rate_limiter_config_t general_cfg = { .max_count = 60,
                                          .window_sec = 600,
                                          .slot_count = MESSAGING_RL_GENERAL_SLOTS };
-   rate_limiter_config_t outbound_cfg = { .max_count = 10,
-                                          .window_sec = 60,
+   rate_limiter_config_t outbound_cfg = { .max_count = MESSAGING_RL_OUTBOUND_MAX_COUNT,
+                                          .window_sec = MESSAGING_RL_OUTBOUND_WINDOW_SEC,
                                           .slot_count = MESSAGING_RL_OUTBOUND_SLOTS };
+   /* Channel reads: bounded per user (REST + LLM summarization is heavier
+    * than a send, so a tighter budget). */
+   rate_limiter_config_t read_cfg = { .max_count = MESSAGING_RL_READ_MAX_COUNT,
+                                      .window_sec = MESSAGING_RL_READ_WINDOW_SEC,
+                                      .slot_count = MESSAGING_RL_READ_SLOTS };
+   rate_limiter_config_t read_server_cfg = { .max_count = MESSAGING_RL_READ_SERVER_MAX_COUNT,
+                                             .window_sec = MESSAGING_RL_READ_SERVER_WINDOW_SEC,
+                                             .slot_count = MESSAGING_RL_READ_SERVER_SLOTS };
 
    memset(s_inbound_link_entries, 0, sizeof(s_inbound_link_entries));
    memset(s_inbound_general_entries, 0, sizeof(s_inbound_general_entries));
    memset(s_outbound_per_user_entries, 0, sizeof(s_outbound_per_user_entries));
+   memset(s_read_per_user_entries, 0, sizeof(s_read_per_user_entries));
+   memset(s_read_server_entries, 0, sizeof(s_read_server_entries));
 
    rate_limiter_init(&s_inbound_link_limiter, s_inbound_link_entries, &link_cfg);
    rate_limiter_init(&s_inbound_general_limiter, s_inbound_general_entries, &general_cfg);
    rate_limiter_init(&s_outbound_per_user_limiter, s_outbound_per_user_entries, &outbound_cfg);
+   rate_limiter_init(&s_read_per_user_limiter, s_read_per_user_entries, &read_cfg);
+   rate_limiter_init(&s_read_server_limiter, s_read_server_entries, &read_server_cfg);
 
    /* Worker thread for the inbound drain. */
    atomic_store(&s_shutdown_requested, false);
