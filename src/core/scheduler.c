@@ -398,7 +398,10 @@ static int scheduler_execute_task(sched_event_t *event) {
    /* Publish the scheduled-origin context so the callback resolves the real
     * event owner (not the user-1 fallback) and so action-level schedulability
     * gates (e.g. messaging's read-only-when-scheduled rule) fire at fire time.
-    * The briefing path does the same around its step loop. */
+    * The briefing path does the same around its step loop.
+    * INVARIANT: no early return between set and clear — keep the callback the
+    * only statement in the bracket so a leaked owner can't cross to another
+    * scheduled fire on this thread. */
    scheduled_context_set(event->user_id);
 
    int should_respond = 0;
@@ -411,7 +414,7 @@ static int scheduler_execute_task(sched_event_t *event) {
       free(result);
    }
 
-   return 0;
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -677,7 +680,10 @@ static void *briefing_thread_func(void *arg) {
     * tool that resolves its user from the session context (e.g. messaging
     * read_channel) would fall back to user 1 — defeating per-user rate
     * limits and mis-attributing audit.  Bounded to the tool-exec region;
-    * cleared before LLM summarization and on the fail path. */
+    * cleared before LLM summarization and on the fail path.
+    * INVARIANT: every exit path between here and that clear MUST clear first —
+    * a new early `return` added mid-pipeline would leak this owner onto the next
+    * briefing that reuses this thread.  When adding steps, route exits to `fail`. */
    scheduled_context_set(event->user_id);
 
    if (step_count > 0) {

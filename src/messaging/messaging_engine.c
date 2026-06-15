@@ -372,6 +372,19 @@ const messaging_driver_t *find_driver(const char *name) {
    return result;
 }
 
+const messaging_driver_t *find_read_capable_driver(void) {
+   const messaging_driver_t *result = NULL;
+   pthread_mutex_lock(&s_drivers_mutex);
+   for (size_t i = 0; i < s_num_drivers; i++) {
+      if (s_drivers[i]->list_readable_channels && s_drivers[i]->read_history) {
+         result = s_drivers[i];
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_drivers_mutex);
+   return result;
+}
+
 /* Engine-cap headroom for the "(NN/NN) " split prefix.  Mirrors the 20-char
  * margin provider_outbound_for leaves below each provider's hard limit. */
 #define MESSAGING_PREFIX_HEADROOM 20
