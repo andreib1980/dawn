@@ -1,7 +1,16 @@
 #!/bin/bash
 #
-# Smoke test script for Dawn build modes
-# Builds all presets and verifies each binary starts successfully
+# Smoke test for Dawn build configurations — the MANUAL build-config check.
+#
+# Builds the full daemon binary for each selected configuration and verifies it
+# starts (reaches "Listening...").  Run this on hardware before a release or
+# after touching CMakeLists / preset source lists / #ifdef-gated code (WEBUI,
+# email, code-projects).  It is NOT in the pre-push hook or stock CI: the daemon
+# unconditionally links ONNX Runtime + Piper, which aren't apt packages, so the
+# full preset matrix can only build on a dev machine.  CI covers the apt-only
+# unit tests + the server-config daemon smoke (docker `dawn --help`) + satellites.
+#
+# Usage:  ./tests/smoke_test.sh [options] [preset ...]   (--help for details)
 #
 
 set -e
@@ -16,16 +25,18 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Build presets to test
+# All build configurations this tool knows about.
 # Format: "preset_name[:extra_cmake_args]"
 #   preset_name    - CMake preset (local, full, debug)
 #   extra_args     - Additional -D flags (optional, colon-separated from preset)
-PRESETS=(
+ALL_PRESETS=(
     "local"
     "full"
     "debug"
     "debug:-DDAWN_ENABLE_EMAIL_TOOL=ON"
 )
+# Populated from CLI args (or ALL_PRESETS when none given) in the Main section.
+PRESETS=()
 
 # Track results
 declare -A BUILD_RESULTS
@@ -74,6 +85,27 @@ get_label() {
     else
         echo "$PRESET_NAME"
     fi
+}
+
+usage() {
+    echo "Usage: ./tests/smoke_test.sh [options] [preset ...]"
+    echo ""
+    echo "Builds the full dawn daemon for each selected configuration and checks it"
+    echo "starts.  With no preset arguments, ALL configurations are checked:"
+    for entry in "${ALL_PRESETS[@]}"; do
+        echo "  - $(get_label "$entry")"
+    done
+    echo ""
+    echo "Options:"
+    echo "  --all          Check every configuration (the default; explicit form)."
+    echo "  --skip-build   Skip the build phase; only run the existing binaries."
+    echo "  -h, --help     Show this help."
+    echo ""
+    echo "Examples:"
+    echo "  ./tests/smoke_test.sh                    # all configs (release/manual check)"
+    echo "  ./tests/smoke_test.sh local              # just the WEBUI-off config"
+    echo "  ./tests/smoke_test.sh debug debug+email  # two configs"
+    echo "  ./tests/smoke_test.sh --skip-build full  # re-run the existing full binary"
 }
 
 # Map preset name to build directory
@@ -164,17 +196,42 @@ test_run() {
     fi
 }
 
-# Main
-log_header "Dawn Smoke Test"
-echo "Testing ${#PRESETS[@]} build presets..."
-echo "Project root: $PROJECT_ROOT"
-
-# Option to skip builds
+# Main — parse args, then resolve the set of configurations to check.
 SKIP_BUILD=0
-if [[ "$1" == "--skip-build" ]]; then
-    SKIP_BUILD=1
-    log_info "Skipping builds (--skip-build)"
+SELECTORS=()
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)    usage; exit 0 ;;
+        --all)        ;;  # default behavior; explicit form is a no-op
+        --skip-build) SKIP_BUILD=1 ;;
+        --*)          log_error "Unknown option: $arg"; echo ""; usage; exit 2 ;;
+        *)            SELECTORS+=("$arg") ;;
+    esac
+done
+
+if [[ ${#SELECTORS[@]} -eq 0 ]]; then
+    PRESETS=("${ALL_PRESETS[@]}")
+else
+    for sel in "${SELECTORS[@]}"; do
+        matched=0
+        for entry in "${ALL_PRESETS[@]}"; do
+            if [[ "$sel" == "$(get_label "$entry")" ]]; then
+                PRESETS+=("$entry")
+                matched=1
+                break
+            fi
+        done
+        if [[ $matched -eq 0 ]]; then
+            log_error "Unknown preset: '$sel' (run with --help to list them)"
+            exit 2
+        fi
+    done
 fi
+
+log_header "Dawn Smoke Test"
+echo "Testing ${#PRESETS[@]} build configuration(s)..."
+echo "Project root: $PROJECT_ROOT"
+[[ $SKIP_BUILD -eq 1 ]] && log_info "Skipping builds (--skip-build)"
 
 # Collect labels for results tracking
 LABELS=()
