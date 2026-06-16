@@ -49,6 +49,16 @@
 #define MCP_DEFAULT_TIMEOUT_MS 30000
 #define MCP_DEFAULT_CONNECT_WAIT_MS 10000
 
+/* Handshake tools/list retry: a proxy (e.g. mcp-proxy fronting a stdio child)
+ * can answer `initialize` before its upstream child is ready to serve
+ * `tools/list`, returning a transient JSON-RPC error (observed: -32602) during
+ * the cold-start window. Retry the read-only tools/list a few times before
+ * failing the handshake, so a server that comes up moments after DAWN connects
+ * still completes on the first attempt rather than being deferred to a lazy
+ * reconnect. */
+#define MCP_TOOLS_LIST_RETRIES 3
+#define MCP_TOOLS_LIST_RETRY_DELAY_MS 300
+
 /** One in-flight request awaiting a response. Address is stable until removed. */
 typedef struct {
    uint64_t id;
@@ -436,6 +446,12 @@ static int do_request(mcp_client_t *c,
       *result_out = result;
       result = NULL;
    }
+   /* Surface the JSON-RPC error body the RPC-error path otherwise discards, so a
+    * failed call shows the server's real message + code instead of a bare error
+    * number. Keeps handshake and tool-call failures diagnosable from the log. */
+   if (status == MCP_ERR_RPC && result != NULL) {
+      OLOG_WARNING("MCP %s: RPC error for '%s': %s", c->name, method, result);
+   }
    free(result);
    pending_destroy(p);
    return status;
@@ -498,8 +514,24 @@ static int client_handshake(mcp_client_t *c) {
 
    send_notification(c, "notifications/initialized", NULL);
 
+   /* Retry tools/list across the proxy cold-start window (see the retry-constant
+    * comment above). Only RPC errors and timeouts are retried — those are the
+    * "server up but not ready yet" signatures; a dropped/disabled transport is
+    * not retryable here and falls through to fail the handshake. */
    char *tools = NULL;
    rc = do_request(c, "tools/list", NULL, c->request_timeout_ms, NULL, NULL, &tools);
+   for (int attempt = 1;
+        attempt <= MCP_TOOLS_LIST_RETRIES && (rc == MCP_ERR_RPC || rc == MCP_ERR_TIMEOUT);
+        attempt++) {
+      OLOG_INFO("MCP %s: tools/list not ready (%d), retry %d/%d", c->name, rc, attempt,
+                MCP_TOOLS_LIST_RETRIES);
+      free(tools);
+      tools = NULL;
+      struct timespec delay = { .tv_sec = MCP_TOOLS_LIST_RETRY_DELAY_MS / 1000,
+                                .tv_nsec = (MCP_TOOLS_LIST_RETRY_DELAY_MS % 1000) * 1000000L };
+      nanosleep(&delay, NULL);
+      rc = do_request(c, "tools/list", NULL, c->request_timeout_ms, NULL, NULL, &tools);
+   }
    if (rc != SUCCESS) {
       OLOG_WARNING("MCP %s: tools/list failed (%d)", c->name, rc);
       free(tools);

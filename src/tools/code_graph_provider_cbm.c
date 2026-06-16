@@ -107,7 +107,12 @@ static int cbm_delete_project(const char *graph_name) {
 }
 
 static int cbm_is_available(void) {
-   return mcp_bridge_server_connected(CBM_ALIAS);
+   /* Active check: if cbm wasn't ready when DAWN started (e.g. mcp-proxy still
+    * spawning its stdio child at boot), reconnect now rather than reporting it
+    * permanently absent. By the time a user imports/indexes a repo, the server
+    * is invariably warm — this turns the boot-race into a transparent reconnect
+    * instead of a "no code server connected" error that needs a daemon restart. */
+   return mcp_bridge_ensure_connected(CBM_ALIAS);
 }
 
 const code_graph_provider_t code_graph_provider_cbm = {
