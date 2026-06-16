@@ -164,6 +164,19 @@ static const model_context_entry_t s_gemini_models[] = {
 /* Re-query local context size every 5 minutes (matches model list TTL) */
 #define LLM_CONTEXT_LOCAL_TTL 300
 
+/* OpenRouter model catalog is stable (vendors rarely change context_length on a
+ * shipped model), so refresh it on a longer cadence than the local /props poll. */
+#define LLM_CONTEXT_OPENROUTER_TTL 3600 /* Re-fetch /api/v1/models hourly */
+#define LLM_CONTEXT_OPENROUTER_MAX_MODELS \
+   256                                      /* Cache capacity (catalog is ~400; we keep first N) */
+#define LLM_CONTEXT_OPENROUTER_SLUG_MAX 128 /* Max "vendor/model" slug length stored */
+
+/* One cached OpenRouter catalog entry: slug -> context_length */
+typedef struct {
+   char slug[LLM_CONTEXT_OPENROUTER_SLUG_MAX];
+   int context_length;
+} openrouter_model_entry_t;
+
 static struct {
    bool initialized;
    int local_context_size;            /* Cached context size */
@@ -174,7 +187,15 @@ static struct {
    uint32_t local_context_generation; /* Incremented on invalidation, detects stale writes */
    int last_prompt_tokens;            /* Last known prompt tokens (for WebUI) */
    int last_context_size;             /* Last known context size (for WebUI) */
-   pthread_mutex_t mutex;             /* Protects state */
+
+   /* OpenRouter /api/v1/models catalog cache (used only under gateway mode) */
+   openrouter_model_entry_t or_models[LLM_CONTEXT_OPENROUTER_MAX_MODELS];
+   int or_model_count;   /* Number of valid entries in or_models */
+   bool or_queried;      /* True once a fetch has populated (or attempted to populate) the cache */
+   bool or_querying;     /* True while a thread is fetching the catalog (single-flight) */
+   time_t or_queried_at; /* When the catalog was last fetched (for TTL) */
+
+   pthread_mutex_t mutex; /* Protects state */
 } s_state = {
    .initialized = false,
    .local_context_size = LLM_CONTEXT_DEFAULT_LOCAL,
@@ -185,6 +206,10 @@ static struct {
    .local_context_generation = 0,
    .last_prompt_tokens = 0,
    .last_context_size = 0,
+   .or_model_count = 0,
+   .or_queried = false,
+   .or_querying = false,
+   .or_queried_at = 0,
 };
 
 /* Per-session token tracking */
@@ -205,6 +230,12 @@ static int s_session_token_count = 0;
  * ============================================================================= */
 
 #define LLM_CONTEXT_MAX_RESPONSE_SIZE (64 * 1024) /* 64KB max response */
+
+/* The OpenRouter /api/v1/models catalog is large (hundreds of KB — ~400 models
+ * with rich metadata), so it needs a much bigger cap than the local /props poll
+ * or the body would be truncated and json-c parse would fail. */
+#define LLM_CONTEXT_OPENROUTER_MAX_RESPONSE_SIZE (2 * 1024 * 1024) /* 2MB max catalog response */
+#define LLM_CONTEXT_OPENROUTER_MODELS_URL "https://openrouter.ai/api/v1/models"
 
 /* =============================================================================
  * Lifecycle Functions
@@ -363,6 +394,151 @@ void llm_context_refresh_local(void) {
    OLOG_INFO("llm_context: Local context cache invalidated, will re-query on next use");
 }
 
+/* =============================================================================
+ * OpenRouter Model Catalog (gateway mode — exact context_length per slug)
+ * ============================================================================= */
+
+/**
+ * @brief Fetch the OpenRouter model catalog and populate the slug->context cache.
+ *
+ * GETs https://openrouter.ai/api/v1/models, parses data[].id + data[].context_length
+ * with json-c, and fills s_state.or_models[]. The Bearer key is optional for this
+ * endpoint, but we include it when configured. Graceful: on no key / curl error /
+ * parse failure, leaves the cache empty and returns FAILURE — callers then fall
+ * back to the offline vendor-strip probe, so there is no regression when offline.
+ *
+ * Must be called WITHOUT s_state.mutex held (does network I/O); it takes the mutex
+ * only at the end to swap in the parsed results.
+ */
+static int llm_context_query_openrouter_models(void) {
+   /* Key is optional for /models, but pass it if we have one. */
+   const char *api_key = g_secrets.openrouter_api_key[0] != '\0' ? g_secrets.openrouter_api_key
+                                                                 : NULL;
+
+   CURL *curl = curl_easy_init();
+   if (!curl) {
+      OLOG_WARNING("llm_context: Failed to init CURL for OpenRouter /models query");
+      return FAILURE;
+   }
+
+   curl_buffer_t response;
+   curl_buffer_init_with_max(&response, LLM_CONTEXT_OPENROUTER_MAX_RESPONSE_SIZE);
+
+   struct curl_slist *headers = NULL;
+   char auth_header[CONFIG_API_KEY_MAX + 32];
+   if (api_key) {
+      snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
+      headers = curl_slist_append(headers, auth_header);
+   }
+
+   curl_easy_setopt(curl, CURLOPT_URL, LLM_CONTEXT_OPENROUTER_MODELS_URL);
+   if (headers) {
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+   }
+   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
+   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+
+   CURLcode res = curl_easy_perform(curl);
+   if (headers) {
+      curl_slist_free_all(headers);
+   }
+   curl_easy_cleanup(curl);
+
+   if (res != CURLE_OK) {
+      OLOG_WARNING("llm_context: Failed to query OpenRouter /models: %s", curl_easy_strerror(res));
+      curl_buffer_free(&response);
+      return FAILURE;
+   }
+
+   if (!response.data) {
+      curl_buffer_free(&response);
+      return FAILURE;
+   }
+
+   struct json_object *root = json_tokener_parse(response.data);
+   curl_buffer_free(&response);
+
+   if (!root) {
+      OLOG_WARNING("llm_context: Failed to parse OpenRouter /models response");
+      return FAILURE;
+   }
+
+   struct json_object *data = NULL;
+   if (!json_object_object_get_ex(root, "data", &data) ||
+       !json_object_is_type(data, json_type_array)) {
+      OLOG_WARNING("llm_context: OpenRouter /models response missing 'data' array");
+      json_object_put(root);
+      return FAILURE;
+   }
+
+   /* Parse into a local table first, then swap in under the mutex. */
+   static openrouter_model_entry_t parsed[LLM_CONTEXT_OPENROUTER_MAX_MODELS];
+   int parsed_count = 0;
+
+   int n = json_object_array_length(data);
+   for (int i = 0; i < n && parsed_count < LLM_CONTEXT_OPENROUTER_MAX_MODELS; i++) {
+      struct json_object *entry = json_object_array_get_idx(data, i);
+      struct json_object *id_obj = NULL;
+      struct json_object *ctx_obj = NULL;
+
+      if (!json_object_object_get_ex(entry, "id", &id_obj)) {
+         continue;
+      }
+      if (!json_object_object_get_ex(entry, "context_length", &ctx_obj)) {
+         continue;
+      }
+
+      const char *id = json_object_get_string(id_obj);
+      int ctx_len = json_object_get_int(ctx_obj);
+      if (!id || id[0] == '\0' || ctx_len <= 0) {
+         continue;
+      }
+
+      safe_strncpy(parsed[parsed_count].slug, id, sizeof(parsed[parsed_count].slug));
+      parsed[parsed_count].context_length = ctx_len;
+      parsed_count++;
+   }
+
+   json_object_put(root);
+
+   if (parsed_count == 0) {
+      OLOG_WARNING("llm_context: OpenRouter /models returned no usable entries");
+      return FAILURE;
+   }
+
+   /* Swap the parsed catalog into the shared cache under the mutex. */
+   pthread_mutex_lock(&s_state.mutex);
+   memcpy(s_state.or_models, parsed, sizeof(openrouter_model_entry_t) * parsed_count);
+   s_state.or_model_count = parsed_count;
+   pthread_mutex_unlock(&s_state.mutex);
+
+   OLOG_INFO("llm_context: Cached %d OpenRouter model context sizes", parsed_count);
+   return SUCCESS;
+}
+
+/**
+ * @brief Look up a model's context_length from the OpenRouter catalog cache.
+ *
+ * Exact, case-insensitive match on the full "vendor/model" slug.
+ *
+ * @param slug OpenRouter model id (e.g. "deepseek/deepseek-chat")
+ * @return context_length in tokens, or 0 on miss / empty cache.
+ *         Caller must hold s_state.mutex.
+ */
+static int openrouter_lookup_context(const char *slug) {
+   if (!slug || slug[0] == '\0') {
+      return 0;
+   }
+   for (int i = 0; i < s_state.or_model_count; i++) {
+      if (strcasecmp(slug, s_state.or_models[i].slug) == 0) {
+         return s_state.or_models[i].context_length;
+      }
+   }
+   return 0;
+}
+
 int llm_context_get_size(llm_type_t type, cloud_provider_t provider, const char *model) {
    if (type == LLM_LOCAL) {
       pthread_mutex_lock(&s_state.mutex);
@@ -441,21 +617,53 @@ int llm_context_get_size(llm_type_t type, cloud_provider_t provider, const char 
          size = LLM_CONTEXT_DEFAULT_GEMINI;
       }
    } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
-      /* OpenRouter IDs are "vendor/model".  Best-effort: strip the vendor prefix
-       * and probe the known tables (many OpenRouter models map to names we know).
-       * Otherwise use a conservative default.  Phase 2 will supply the exact
-       * context_length from the /api/v1/models catalog. */
-      const char *bare = model ? strrchr(model, '/') : NULL;
-      bare = bare ? bare + 1 : model;
-      size = lookup_model_context(s_openai_models, bare);
-      if (size == 0) {
-         size = lookup_model_context(s_claude_models, bare);
+      /* OpenRouter IDs are "vendor/model".  PRIMARY: look the exact slug up in the
+       * fetched /api/v1/models catalog (querying/refreshing it on a TTL).  This is
+       * the only source that's correct for OpenRouter-only vendors (mistralai/
+       * deepseek/qwen/meta-llama) and any slug that doesn't prefix-match our direct
+       * tables. */
+      pthread_mutex_lock(&s_state.mutex);
+
+      time_t now = time(NULL);
+      bool ttl_expired = s_state.or_queried &&
+                         (now - s_state.or_queried_at) >= LLM_CONTEXT_OPENROUTER_TTL;
+      bool need_query = !s_state.or_queried || ttl_expired;
+
+      /* Single-flight guard: only one thread fetches the (large) catalog at a time. */
+      if (need_query && !s_state.or_querying) {
+         s_state.or_querying = true;
+         pthread_mutex_unlock(&s_state.mutex);
+
+         /* Network I/O without the mutex held; the fetch swaps results in under it. */
+         (void)llm_context_query_openrouter_models();
+
+         pthread_mutex_lock(&s_state.mutex);
+         s_state.or_querying = false;
+         /* Mark queried regardless of outcome so a hard failure doesn't stampede
+          * every turn; the TTL gates the next retry. */
+         s_state.or_queried = true;
+         s_state.or_queried_at = now;
       }
+
+      size = openrouter_lookup_context(model);
+      pthread_mutex_unlock(&s_state.mutex);
+
+      /* FALLBACK (offline / cache miss / pre-fetch): strip the vendor prefix and
+       * probe the known direct tables, then a conservative default.  Preserves the
+       * old behavior so there's no regression when the catalog is unavailable. */
       if (size == 0) {
-         size = lookup_model_context(s_gemini_models, bare);
-      }
-      if (size == 0) {
-         size = LLM_CONTEXT_DEFAULT_OPENAI; /* conservative 128K default */
+         const char *bare = model ? strrchr(model, '/') : NULL;
+         bare = bare ? bare + 1 : model;
+         size = lookup_model_context(s_openai_models, bare);
+         if (size == 0) {
+            size = lookup_model_context(s_claude_models, bare);
+         }
+         if (size == 0) {
+            size = lookup_model_context(s_gemini_models, bare);
+         }
+         if (size == 0) {
+            size = LLM_CONTEXT_DEFAULT_OPENAI; /* conservative 128K default */
+         }
       }
    } else {
       size = LLM_CONTEXT_DEFAULT_OPENAI; /* Fallback for unknown providers */
