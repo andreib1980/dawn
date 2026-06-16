@@ -94,7 +94,7 @@ Compaction is non-destructive: the summary embeds a structured `[COMPACTED conv=
 - **`conv_db_get_message_ids()`** — returns ordered array of message IDs for a conversation. Dynamic array with realloc growth.
 - **`conv_db_get_messages_by_range()`** — retrieves messages filtered by ID range with explicit ownership pre-check returning `AUTH_DB_FORBIDDEN` (not silent empty result like the JOIN-only approach).
 - **`context_expand` tool** — new modular tool registered via `cmake/DawnTools.cmake`. All params optional: use `start_id`/`end_id` for raw messages, or `node_id` alone for hierarchical summaries (Phase 4). Token budget hardcoded at 4000. Range cap at 500 messages.
-- **Continuation handling**: `conversation_id` from the `[COMPACTED]` tag points to the parent conversation. If omitted, the tool checks `continued_from` on the current conversation to find the parent.
+- **Continuation handling**: `conversation_id` from the `[COMPACTED]` tag points to the parent conversation. If omitted, the tool checks `continued_from` on the current conversation to find the parent. *(Legacy as of Phase 5: new conversations are no longer forked, so the marker's `conv=N` is the same conversation and the `continued_from` fallback only fires for pre-v67 chains.)*
 - **`note_len` buffer** increased to `strlen(summary) + 256` for the longer COMPACTED prefix.
 
 ### Files modified
@@ -134,7 +134,7 @@ CREATE TABLE summary_nodes (
 
 ### Key implementation details
 
-- **Node creation** in `llm_context_compact()` after message IDs are resolved and summary text is generated. Queries `summary_node_get_latest(conv_id)` for the prior node; if not found in current conversation, traverses `continued_from` chain to find prior nodes from parent conversations.
+- **Node creation** in `llm_context_compact()` after message IDs are resolved and summary text is generated. Queries `summary_node_get_latest(conv_id)` for the prior node; if not found in current conversation, traverses `continued_from` chain to find prior nodes from parent conversations. *(Phase 5: with single continuous conversations the prior node is always in the same conversation, so `summary_node_get_latest(conv_id)` hits directly and the `continued_from` traversal is legacy-only.)*
 - **CRUD functions**: `summary_node_create()`, `summary_node_get()`, `summary_node_get_latest()`, `summary_node_free()` — all ad-hoc queries (not prepared statements) since compaction is infrequent.
 - **`[COMPACTED]` tag** includes `node=Z depth=D` when node creation succeeds. Falls back to node-less format on DB failure (graceful degradation).
 - **`context_expand` node_id path**: when `node_id` is provided (no other params needed), retrieves the node and its prior node's summary. Returns both summaries with metadata (depth, level, message range, conversation ID). Buffer right-sized to `summary_len + prior_len + 512` (not fixed 16KB).
@@ -164,14 +164,46 @@ The model can drill down iteratively: expand node 2 → see both summaries → e
 
 ---
 
+## Phase 5: Compaction Watermark — Single Continuous Conversations (Shipped)
+
+Replaces fork-on-compaction. Previously, compaction archived the conversation (`is_archived=1`, read-only) and created a new continuation row (`continued_from` → parent) seeded with the summary — the fork was what bounded *reload* context. That produced a user-visible read-only hierarchy plus a "both-locked" bug (a duplicate `continue_conversation` archived the continuation child too, with no idempotency anywhere). Now compaction records an in-conversation **watermark** on the same row; the conversation stays single and always writable, and reload is bounded by the watermark instead of by the fork.
+
+### Schema (v67)
+
+- `conversations.context_watermark_msg_id INTEGER NOT NULL DEFAULT 0` — last compacted message id. `0` = never compacted (load all; the zero-risk gate so un-compacted conversations are byte-identical to pre-v67).
+- One-time migration unlocks legacy split-archived conversations (`UPDATE conversations SET is_archived=0 WHERE is_archived=1` — the continuation split was the only writer of that flag).
+
+### Key implementation details
+
+- **Persist** — `conv_db_set_compaction_watermark()`, called from `llm_context_compact()` right after `summary_node_create`. A single atomic UPDATE writes `compaction_summary` + `context_watermark_msg_id` on the same row, guarded `WHERE id=? AND user_id=? AND ? >= context_watermark_msg_id` so a stale async compaction is a harmless no-op (never rewinds). No archive, no continuation row. Skipped (never writes 0) when the message id is unresolved (voice path with no command-context user).
+- **Bounded restore** (gated on `watermark > 0`) — `conv_db_get_messages_after(conv_id, user_id, after_id, ...)` (full tool/reasoning columns, same ownership JOIN as `conv_db_get_messages`) loads only post-watermark messages; the summary is prepended. The WebUI **display** load stays full (the user sees the entire transcript); only the **LLM-context** restore is bounded. The same gate is applied inside the messaging forever-conversation loader (`memory_history_load_from_db`), so every reload path is bounded by one shared check.
+- **Marker re-injection across reloads** — the summary is injected as an **assistant** message carrying a reconstructed `[COMPACTED conv=N msgs=X-Y node=Z depth=D]` marker (built by `conv_db_format_compaction_context()` from the latest `summary_node`), so the LLM keeps a `context_expand` handle to the originals *after a reload*, not just in the live session. Assistant role (not system) is required: `session_update_system_messages` rebuilds the leading context into exactly two system messages every turn and drops any other system message — so a system-role summary was silently lost. This was a latent bug since the prompt-cache two-system-message refactor (reloaded continuation summaries were also being dropped); fixed here by matching the live marker's assistant role.
+- **Continuation machinery is now legacy.** `continued_from` is retained as a breadcrumb but is never written for new conversations; the Phase 3/4 `continued_from` chain-walk fires only for pre-v67 conversations. The old split path (`conv_db_create_continuation`, `handle_continue_conversation`, the `continue_conversation` WS message + the client's split trigger) is left **dormant** and logs a WARNING if invoked, pending removal after a production soak.
+
+### Files modified
+
+`include/auth/auth_db_internal.h`, `include/auth/auth_db.h`, `src/auth/auth_db_schema.c`, `src/auth/auth_db_migrations.c`, `src/auth/auth_db_migrations_v67.c` (new), `src/auth/auth_db_statements.c`, `src/auth/auth_db_conv.c`, `src/llm/llm_context.c`, `src/webui/webui_server.c`, `src/webui/webui_history.c`, `src/memory/memory_history_loader.c`, `www/js/ui/history.js`, `tests/test_auth_db.c`
+
+### Live test results (June 16, 2026)
+
+- conv 845: watermark set and advanced (17874 → 17891) across 8+ compactions, `is_archived=0`, no continuation child — one writable conversation throughout.
+- Bounded reload restored 46 post-watermark messages + the summary; the full 94-message transcript still displayed in the UI.
+- After reload, the `[COMPACTED conv=845 msgs=17834-17891 node=N depth=N]` marker was visible to the LLM (assistant role survived the per-turn rebuild); the model called `context_expand` on its own — `expanding msgs 17834-17891 from conv 845` — and retrieved the verbatim originals (recalled the user's actual first message).
+- All previously-archived conversations unlocked (0 archived post-migration).
+- Build clean, 88/88 CI, +2 unit tests (monotonic guard, bounded fetch); five-agent review applied.
+
+---
+
 ## Implementation Order
 
 ```
 Phase 1 (escalation) ──┐
-                        ├──> Phase 3 (lossless pointers) ──> Phase 4 (DAG)
+                        ├──> Phase 3 (lossless pointers) ──> Phase 4 (DAG) ──> Phase 5 (watermark)
 Phase 2 (async)  ───────┘
-         ✓ shipped       ✓ shipped                    ✓ shipped
+         ✓ shipped       ✓ shipped                    ✓ shipped        ✓ shipped
 ```
+
+Phase 5 (June 2026) retired fork-on-compaction in favor of the in-conversation watermark — conversations stay single and writable; the continuation/`continued_from` model from Phases 3–4 is now legacy (dormant, fires only for pre-v67 conversations).
 
 ---
 
