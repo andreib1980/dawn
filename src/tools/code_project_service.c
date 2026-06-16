@@ -591,6 +591,14 @@ int code_project_import(int64_t requester_user_id,
    if (cfg == NULL || !cfg->code_projects.enabled) {
       return FAILURE;
    }
+   /* An import with no owning user (operator/CLI path, requester 0) must be
+    * global. Otherwise the row is written user_id=NULL/is_global=0 — owned by no
+    * one and shared with no one — and is invisible to every code_project_db_list_visible()
+    * caller (the LLM tool, and every non-admin user); only admins see it via the
+    * WebUI's list_all fallback. "Ownerless" therefore means "shared". */
+   if (requester_user_id <= 0) {
+      global = true;
+   }
    if (!valid_name(desired_name)) {
       OLOG_WARNING("code_project: invalid project name");
       return FAILURE;
