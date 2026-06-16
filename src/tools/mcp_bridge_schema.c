@@ -30,8 +30,11 @@
 #include "logging.h"
 #include "tools/tool_registry.h"
 
-/* Property cap is the registry's documented per-tool parameter limit (12), NOT
- * the design's original 32: TOOL_PARAM_MAX is the binding contract here. */
+/* Property cap = the registry's documented per-tool parameter limit
+ * (TOOL_PARAM_MAX). It's a validation/hardening bound (reject an untrusted
+ * upstream that declares an absurd number of properties), not a storage size —
+ * nothing is arrayed by it. Kept tied to TOOL_PARAM_MAX so the bridge and the
+ * registry agree on one number; raise that define if real MCP tools need more. */
 #define MCP_SCHEMA_MAX_PROPERTIES TOOL_PARAM_MAX
 #define MCP_SCHEMA_MAX_ENUM TOOL_PARAM_ENUM_MAX
 #define MCP_SCHEMA_MAX_ONEOF_DEPTH 2

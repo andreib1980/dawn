@@ -46,11 +46,14 @@ extern "C" {
  * Constants
  * ============================================================================= */
 
-#define TOOL_MAX_REGISTERED 64        /* Max tools in registry */
-#define TOOL_NAME_MAX 64              /* Max length of tool name */
-#define TOOL_DESC_MAX 512             /* Max length of description */
-#define TOOL_TOPIC_MAX 32             /* Max length of MQTT topic */
-#define TOOL_PARAM_MAX 12             /* Max parameters per tool */
+#define TOOL_MAX_REGISTERED 64 /* Max tools in registry */
+#define TOOL_NAME_MAX 64       /* Max length of tool name */
+#define TOOL_DESC_MAX 512      /* Max length of description */
+#define TOOL_TOPIC_MAX 32      /* Max length of MQTT topic */
+/* Max parameters per tool. No array is sized by this — it's a validation/hardening
+ * cap (also the MCP bridge's property limit). 20 admits real MCP tools like cbm's
+ * search_graph (14 params) while still bounding an untrusted upstream schema. */
+#define TOOL_PARAM_MAX 20
 #define TOOL_PARAM_ENUM_MAX 16        /* Max enum values per parameter */
 #define TOOL_ALIAS_MAX 8              /* Max aliases per tool */
 #define TOOL_DEVICE_MAP_MAX 8         /* Max device map entries for meta-tools */
