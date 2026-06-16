@@ -102,6 +102,13 @@ int handle_ota_push_all_cmd(int client_fd, const char *payload, uint16_t payload
 int handle_ota_rollout_status_cmd(int client_fd);
 int handle_ota_rollout_abort_cmd(int client_fd);
 
+/* Music-DB handlers (admin_socket_music.c).  Dispatched from handle_client()
+ * in admin_socket.c against ADMIN_MSG_MUSIC_* opcodes. */
+int admin_handle_music_stats(int client_fd);
+int admin_handle_music_search(int client_fd, const char *payload, uint16_t len);
+int admin_handle_music_list(int client_fd, const char *payload, uint16_t len);
+int admin_handle_music_rescan(int client_fd);
+
 #ifdef __cplusplus
 }
 #endif
