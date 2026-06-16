@@ -167,7 +167,7 @@ Or summarize a **whole server** at once — every readable channel, each summari
 
 If the bot is in more than one server, name it ("…on My Server") or Friday will
 ask which. A whole-server sweep is bounded — the most-recent messages per
-channel, up to ~20 channels — and quiet channels are noted as having no recent
+channel, up to ~30 channels — and quiet channels are noted as having no recent
 activity, so a busy server stays fast and a turn never runs away.
 
 Friday matches the channel name against the channels the bot can see (fuzzy, so
@@ -205,8 +205,9 @@ The scheduler runs the read, the assistant summarizes, and the summary is
 delivered to the channel you named (see [Delivering scheduled
 events](#delivering-scheduled-events-to-a-channel)). Deliver digests to a **DM**
 rather than back into a channel the digest itself reads, so tomorrow's digest
-doesn't summarize today's. (Only `read_channel` is allowed to run from a
-schedule — `send` and other actions require a live conversation.)
+doesn't summarize today's. (Only the read-only actions — `read_channel`,
+`read_server`, and `list_discord_channels` — may run from a schedule; `send` and
+other actions require a live conversation.)
 
 ---
 

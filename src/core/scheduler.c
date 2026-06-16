@@ -366,17 +366,16 @@ static int scheduler_execute_task(sched_event_t *event) {
       return FAILURE;
    }
 
-   /* Validate SCHEDULABLE capability */
-   if (!(meta->capabilities & TOOL_CAP_SCHEDULABLE)) {
-      OLOG_WARNING("scheduler: tool '%s' not schedulable (task %lld)", event->tool_name,
-                   (long long)event->id);
-      return FAILURE;
-   }
-
-   /* Check if tool is enabled at runtime */
-   if (!tool_registry_is_enabled(event->tool_name)) {
-      OLOG_WARNING("scheduler: tool '%s' disabled (task %lld)", event->tool_name,
-                   (long long)event->id);
+   /* Validate at fire time the same way create time and the briefing path do:
+    * SCHEDULABLE cap + enabled + the per-action gate (validate_schedulable_action).
+    * Without this, a disallowed action on a legacy/hand-edited row would run on a
+    * generic tool that relies only on the registry gate (messaging is also
+    * covered by its own is_scheduled check, but tasks shouldn't depend on that). */
+   char sched_err[160];
+   if (tool_registry_validate_schedulable(event->tool_name, event->tool_action, event->tool_value,
+                                          sched_err, sizeof(sched_err)) != SUCCESS) {
+      OLOG_WARNING("scheduler: task %lld (%s) failed schedulability validation: %s",
+                   (long long)event->id, event->tool_name, sched_err);
       return FAILURE;
    }
 

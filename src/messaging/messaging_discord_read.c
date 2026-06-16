@@ -533,14 +533,24 @@ int dc_list_readable_channels(char **out_json) {
    struct json_object *guilds = resp.data ? json_tokener_parse(resp.data) : NULL;
    curl_buffer_free(&resp);
 
-   struct json_object *out_arr = json_object_new_array();
-   if (!out_arr) {
+   /* Fail (don't cache) on an unparseable/non-array body — a truncated or
+    * malformed response must NOT poison discovery with an empty list for the
+    * whole TTL.  A genuinely empty array (bot in 0 guilds) is valid and caches. */
+   if (!guilds || !json_object_is_type(guilds, json_type_array)) {
       if (guilds) {
          json_object_put(guilds);
       }
+      OLOG_WARNING(
+          "discord: /users/@me/guilds returned an unparseable/non-array body — not caching");
       return FAILURE;
    }
-   if (guilds && json_object_is_type(guilds, json_type_array)) {
+
+   struct json_object *out_arr = json_object_new_array();
+   if (!out_arr) {
+      json_object_put(guilds);
+      return FAILURE;
+   }
+   {
       int n = (int)json_object_array_length(guilds);
       if (n > DC_GUILD_SCAN_MAX) {
          OLOG_WARNING("discord: bot in %d guilds; scanning first %d for readable channels", n,
@@ -564,9 +574,7 @@ int dc_list_readable_channels(char **out_json) {
          }
       }
    }
-   if (guilds) {
-      json_object_put(guilds);
-   }
+   json_object_put(guilds);
 
    char *built = strdup(json_object_to_json_string_ext(out_arr, JSON_C_TO_STRING_PLAIN));
    json_object_put(out_arr);

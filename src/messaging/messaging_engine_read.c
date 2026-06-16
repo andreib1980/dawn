@@ -193,6 +193,7 @@ static int resolve_channel(struct json_object *arr,
    int best_idx = -1;
    int best_count = 0; /* how many distinct candidates share best_score */
    int cand_idx[MSG_READ_MAX_CANDIDATES];
+   int cand_score[MSG_READ_MAX_CANDIDATES];
    int cand_n = 0;
 
    int n = (int)json_object_array_length(arr);
@@ -226,6 +227,7 @@ static int resolve_channel(struct json_object *arr,
          continue;
       }
       if (cand_n < MSG_READ_MAX_CANDIDATES) {
+         cand_score[cand_n] = score;
          cand_idx[cand_n++] = i;
       }
       if (score > best_score) {
@@ -252,11 +254,15 @@ static int resolve_channel(struct json_object *arr,
          result = 1;
       }
    } else if (best_count > 1) {
-      /* Ambiguous — list the tied/threshold candidates with their servers. */
+      /* Ambiguous — list only the BEST-score ties (the truly tied set), not every
+       * lower-scoring threshold match, so the disambiguation prompt isn't noisy. */
       strbuf_t sb;
       strbuf_init(&sb, 256);
       strbuf_appendf(&sb, "Multiple channels match \"%s\":", name ? name : "");
       for (int k = 0; k < cand_n; k++) {
+         if (cand_score[k] != best_score) {
+            continue;
+         }
          struct json_object *ch = json_object_array_get_idx(arr, cand_idx[k]);
          struct json_object *cn_obj = NULL, *ct_obj = NULL;
          json_object_object_get_ex(ch, "channel_name", &cn_obj);
@@ -324,7 +330,10 @@ static int parse_messages(const char *hist_json, read_msg_t **out, int *filtered
       } else if (!content || !content[0]) {
          body = strdup("[no text content]");
       } else {
-         body = neutralize_delimiters(content);
+         /* sanitize_inline (not just neutralize_delimiters): collapse CR/LF/TAB
+          * too, so an embedded newline can't forge a fake "[HH:MM] author:" line
+          * inside the [DATA] envelope (the single-line transcript format). */
+         body = sanitize_inline(content);
       }
 
       msgs[count].ts = ts_obj ? json_object_get_int64(ts_obj) : 0;
