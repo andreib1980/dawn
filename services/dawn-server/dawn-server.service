@@ -1,8 +1,15 @@
 [Unit]
 Description=DAWN Voice Assistant Server
 Documentation=https://github.com/The-OASIS-Project/dawn
-After=network-online.target mosquitto.service
+After=network-online.target mosquitto.service cbm-mcp.service
 Wants=network-online.target
+# Weak ordering after the code-graph MCP server (coding-harness builds only).
+# Wants= (not Requires=) keeps DAWN starting when cbm-mcp is absent/disabled; if
+# cbm-mcp.service is not installed these are simply ignored. NOTE: cbm-mcp is
+# Type=simple, so After= only guarantees it has *started*, not that its stdio
+# child is *ready* — it shrinks the boot race window but does not close it. The
+# MCP bridge's lazy reconnect + handshake retry is the actual fix.
+Wants=cbm-mcp.service
 
 [Service]
 Type=simple

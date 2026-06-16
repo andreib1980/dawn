@@ -181,7 +181,10 @@ static void sse_event(const char *event_type, const char *event_data, void *user
       pthread_mutex_unlock(&t->ep_mtx);
 
       if (ep != NULL) {
-         OLOG_INFO("MCP transport: endpoint ready");
+         /* Log the resolved endpoint (incl. session_id): a second endpoint event
+          * with a different session mid-handshake would repoint POSTs at a fresh,
+          * un-initialized session — worth being able to see in the log. */
+         OLOG_INFO("MCP transport: endpoint ready -> %s", ep);
          if (t->on_state != NULL) {
             t->on_state(t->user, MCP_TRANSPORT_CONNECTED);
          }

@@ -125,4 +125,24 @@ int mcp_bridge_call_tool(const char *server_alias,
  */
 int mcp_bridge_server_connected(const char *server_alias);
 
+/**
+ * @brief Ensure an upstream server is connected, reconnecting it if it wasn't
+ *        ready at startup.
+ *
+ * Active counterpart to @ref mcp_bridge_server_connected: callers that gate a
+ * code path on a server being usable (e.g. the code-graph provider's
+ * availability check) should use this so a server that came up after DAWN
+ * connects self-heals on first use instead of staying unavailable until a
+ * daemon restart. Blocks for the connect handshake; call off the main loop.
+ *
+ * Restores the connection only — it does NOT register the server's LLM-facing
+ * tools (those are registered at startup against the still-unlocked registry; a
+ * server first reached after init exposes its tools on the next restart). This
+ * is sufficient for direct programmatic callers such as @ref mcp_bridge_call_tool.
+ *
+ * @return SUCCESS if the alias is connected (already or after reconnect);
+ *         FAILURE if it is not configured or the reconnect failed.
+ */
+int mcp_bridge_ensure_connected(const char *server_alias);
+
 #endif /* MCP_BRIDGE_H */

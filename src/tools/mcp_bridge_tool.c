@@ -86,7 +86,14 @@ static mcp_slot_t s_slots[MCP_BRIDGE_MAX_SLOTS];
 static int s_slot_count;
 static pthread_mutex_t s_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* One connected upstream server; owns the client for the bridge's lifetime. */
+/* One configured upstream server; owns the client for the bridge's lifetime.
+ * The slot is kept even when the startup connect fails so the server can be
+ * reconnected lazily on first use (e.g. a proxy still spawning its child at
+ * boot). NOTE: a server's LLM-facing tools are registered only at startup, while
+ * the tool registry is still unlocked (it locks after tools_register_all). A
+ * lazy reconnect therefore restores the *connection* — enough for direct callers
+ * like the code-graph provider — but cannot add tools to the locked registry;
+ * those appear on the next daemon restart. */
 typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX];
    mcp_client_t *client;
@@ -309,7 +316,13 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    snprintf(slot->upstream_tool_name, sizeof(slot->upstream_tool_name), "%s", upstream_tool_name);
    snprintf(slot->dawn_tool_name, sizeof(slot->dawn_tool_name), "%s", dawn_tool_name);
    slot->description = mcp_schema_wrap_description(server_alias, description);
-   slot->params = *params; /* move ownership */
+   /* Move ownership: null the source set immediately (not just on success) so the
+    * failure path below frees it exactly once. Otherwise both the slot and the
+    * caller free the same array -> double free (only reachable when the registry
+    * rejects the insert, e.g. locked/full/duplicate). */
+   slot->params = *params;
+   params->params = NULL;
+   params->param_count = 0;
 
    tool_metadata_t meta;
    memset(&meta, 0, sizeof(meta));
@@ -342,10 +355,6 @@ int mcp_bridge_register_tool(mcp_client_t *client,
    slot->in_use = true;
    s_slot_count++;
    pthread_mutex_unlock(&s_slots_mutex);
-
-   /* Caller's set was moved into the slot; clear it so their free is a no-op. */
-   params->params = NULL;
-   params->param_count = 0;
 
    OLOG_INFO("MCP bridge: registered tool '%s' (server '%s'%s)", dawn_tool_name, server_alias,
              dangerous ? ", dangerous" : "");
@@ -485,27 +494,40 @@ int mcp_bridge_init(void) {
          OLOG_WARNING("MCP bridge: failed to create client for server '%s'", srv->alias);
          continue;
       }
-      if (mcp_client_connect(client) != SUCCESS) {
-         OLOG_WARNING("MCP bridge: could not connect to server '%s' (%s); skipping", srv->alias,
-                      srv->url);
-         mcp_client_destroy(client);
-         continue;
-      }
 
-      snprintf(s_servers[s_server_count].alias, sizeof(s_servers[s_server_count].alias), "%s",
-               srv->alias);
-      s_servers[s_server_count].client = client;
-      s_servers[s_server_count].in_use = true;
+      /* Register the slot up front, regardless of the connect outcome: a server
+       * that isn't ready at startup (e.g. mcp-proxy still spawning its stdio
+       * child) must remain reconnectable. Destroying it here would lose it until
+       * a full daemon restart and make `dawn-admin mcp reset` a no-op for it. */
+      int idx = s_server_count;
+      snprintf(s_servers[idx].alias, sizeof(s_servers[idx].alias), "%s", srv->alias);
+      s_servers[idx].client = client;
+      s_servers[idx].in_use = true;
       s_server_count++;
 
-      register_server_tools(srv->alias, client);
+      /* Register tools only here, at startup, while the registry is still
+       * unlocked. A later lazy reconnect cannot add tools (see mcp_server_entry_t
+       * note), so this is the one chance to expose this server's LLM tools. */
+      if (mcp_client_connect(client) == SUCCESS) {
+         register_server_tools(srv->alias, client);
+      } else {
+         OLOG_WARNING("MCP bridge: server '%s' (%s) not ready at startup; will connect on "
+                      "first use",
+                      srv->alias, srv->url);
+      }
       /* Admin access bootstrap (auth_db_mcp_grant_all_admins) intentionally does
        * NOT run here: mcp_bridge_init() executes during tools_register_all(),
        * before auth_db_init(), so the grant would hit a closed DB. dawn.c runs it
        * after auth_db_init() for every configured server instead. */
    }
 
-   OLOG_INFO("MCP bridge: initialized with %d connected server(s)", s_server_count);
+   int connected = 0;
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && mcp_client_state(s_servers[i].client) == MCP_STATE_CONNECTED) {
+         connected++;
+      }
+   }
+   OLOG_INFO("MCP bridge: %d configured server(s), %d connected", s_server_count, connected);
 
 #ifdef DAWN_ENABLE_CODE_PROJECTS
    /* Capture cbm's path-derived graph-name prefix now that the client is
@@ -593,7 +615,9 @@ int mcp_bridge_status_text(char *out, size_t out_len, int *bytes_written_out) {
 int mcp_bridge_reconnect(int *connected_out) {
    /* Snapshot the client pointers under the lock so a concurrent shutdown or
     * call_tool can't tear the table out from under us (sec-S4), then run the
-    * blocking reset/connect without holding the lock. */
+    * blocking reset/connect without holding the lock. Restores connectivity for
+    * servers that were down at startup; it does not (re)register tools — the
+    * registry is locked post-init (see mcp_server_entry_t note). */
    mcp_client_t *clients[MCP_SERVERS_MAX];
    int n = 0;
    pthread_mutex_lock(&s_slots_mutex);
@@ -615,6 +639,35 @@ int mcp_bridge_reconnect(int *connected_out) {
       *connected_out = connected;
    }
    return SUCCESS;
+}
+
+int mcp_bridge_ensure_connected(const char *server_alias) {
+   if (server_alias == NULL) {
+      return FAILURE;
+   }
+   if (mcp_bridge_server_connected(server_alias) == SUCCESS) {
+      return SUCCESS; /* fast path: already connected, no blocking work */
+   }
+
+   /* Disconnected (or never connected at startup). Find the slot, then run the
+    * blocking connect without holding the slot lock. mcp_client_connect() is
+    * internally serialized, so a concurrent caller racing the same server is
+    * safe — the loser observes CONNECTED and returns immediately. Connectivity
+    * is all that's restored here; tool registration happened (or didn't) at
+    * startup and cannot be redone against the locked registry. */
+   mcp_client_t *client = NULL;
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+         client = s_servers[i].client;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+   if (client == NULL) {
+      return FAILURE; /* not a configured server */
+   }
+   return mcp_client_connect(client);
 }
 
 int mcp_bridge_server_connected(const char *server_alias) {
@@ -646,6 +699,12 @@ int mcp_bridge_call_tool(const char *server_alias,
    if (server_alias == NULL || tool_name == NULL) {
       return FAILURE;
    }
+
+   /* Self-heal: reconnect a server that wasn't ready at startup before the call.
+    * (mcp_client_call also lazily reconnects, but doing it here also registers
+    * the server's tools on first success — and gives a clean failure if the
+    * server is genuinely down.) */
+   mcp_bridge_ensure_connected(server_alias);
 
    mcp_client_t *client = NULL;
    pthread_mutex_lock(&s_slots_mutex);
