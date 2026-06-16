@@ -95,6 +95,7 @@
 #include "tools/mcp_bridge.h"
 #endif
 #ifdef DAWN_ENABLE_CODE_PROJECTS
+#include "tools/code_project_namemap.h"
 #include "tools/code_project_service.h"
 #endif
 #include "tts/text_to_speech.h"
@@ -2398,6 +2399,19 @@ mqtt_disabled:
          auth_db_mcp_grant_all_admins(g_config.mcp.servers[i].alias);
       }
    }
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   /* Build the cbm name-translation map (clean project name <-> cbm path slug)
+    * now that the DB is open AND cbm is connected (it came up during
+    * tools_register_all). This is the REAL startup capture: the call inside
+    * mcp_bridge_init() runs before auth_db_init(), so code_project_db can't be
+    * read there and the map would stay empty until the first index — leaving the
+    * LLM to use raw cbm slugs after a plain restart. Harmless no-op if cbm wasn't
+    * up at boot; mcp_bridge_ensure_connected() rebuilds it on lazy reconnect. */
+   if (auth_db_ready) {
+      code_project_namemap_capture();
+   }
+#endif
 #endif
 
    /* OTA subsystem (after the DB is ready — it reconciles device state).

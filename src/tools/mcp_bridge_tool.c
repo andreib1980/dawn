@@ -529,13 +529,11 @@ int mcp_bridge_init(void) {
    }
    OLOG_INFO("MCP bridge: %d configured server(s), %d connected", s_server_count, connected);
 
-#ifdef DAWN_ENABLE_CODE_PROJECTS
-   /* Capture cbm's path-derived graph-name prefix now that the client is
-    * connected, so the name-translation boundary works on the first cbm tool
-    * call after a restart (projects already indexed). Refreshed post-index. */
-   code_project_namemap_capture();
-#endif
-
+   /* The cbm name-translation map is NOT captured here: mcp_bridge_init() runs
+    * during tools_register_all(), before auth_db_init(), so code_project_db is
+    * not open yet and the capture would silently fail. dawn.c captures it after
+    * auth_db_init() instead; a later lazy reconnect refreshes it (see
+    * mcp_bridge_ensure_connected). */
    return SUCCESS;
 }
 
@@ -667,7 +665,23 @@ int mcp_bridge_ensure_connected(const char *server_alias) {
    if (client == NULL) {
       return FAILURE; /* not a configured server */
    }
-   return mcp_client_connect(client);
+   if (mcp_client_connect(client) != SUCCESS) {
+      return FAILURE;
+   }
+
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   /* A cbm that comes up via lazy reconnect (down at boot) needs its
+    * name-translation map rebuilt — the dawn.c startup capture only fired once,
+    * when cbm wasn't up. Without this the map stays empty and the LLM must use
+    * raw cbm graph slugs. Only the slow path reaches here (the fast path above
+    * returns on an already-connected server), so this runs once per reconnect,
+    * not per call; the nested call_tool inside capture hits the fast path, so no
+    * recursion. */
+   if (strcmp(server_alias, "cbm") == 0) {
+      code_project_namemap_capture();
+   }
+#endif
+   return SUCCESS;
 }
 
 int mcp_bridge_server_connected(const char *server_alias) {
