@@ -54,11 +54,16 @@ static inline bool dc_is_valid_snowflake(const char *s) {
    }
    size_t i;
    for (i = 0; s[i] != '\0'; i++) {
+      /* Fail fast on over-length input — don't walk an arbitrarily long
+       * attacker-controlled string just to reject it. */
+      if (i >= DC_SNOWFLAKE_MAX_DIGITS) {
+         return false;
+      }
       if (s[i] < '0' || s[i] > '9') {
          return false;
       }
    }
-   return i <= DC_SNOWFLAKE_MAX_DIGITS;
+   return true;
 }
 
 /* Read path — defined in messaging_discord_read.c, wired into the driver

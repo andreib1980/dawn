@@ -43,6 +43,11 @@
 #include "messaging/messaging_telegram.h"
 #include "tools/tool_registry.h"
 
+/* Mirror of DC_SNOWFLAKE_MAX_DIGITS (messaging_discord_internal.h, private to the
+ * Discord translation units) — the tool layer can't include that header, so keep
+ * the two in sync. */
+#define MSG_TOOL_SNOWFLAKE_MAX_DIGITS 20
+
 static char *make_response(const char *msg) {
    return msg ? strdup(msg) : NULL;
 }
@@ -179,20 +184,26 @@ static char *handle_read_channel(struct json_object *details, int user_id) {
    if (json_object_object_get_ex(details, "server", &srv_obj)) {
       server = json_object_get_string(srv_obj);
    }
-   /* Optional 'before' older-history cursor: a message id (snowflake).  Accept
-    * only digits so it can't be anything but an id. */
+   /* Optional 'before' older-history cursor: a message id (snowflake).  Validate
+    * digits-only AND length here so a malformed cursor returns a clear error
+    * instead of being silently rejected by the driver as a generic read failure. */
    const char *before_id = NULL;
    struct json_object *before_obj = NULL;
    if (json_object_object_get_ex(details, "before", &before_obj)) {
       const char *b = json_object_get_string(before_obj);
       if (b && b[0]) {
-         before_id = b;
-         for (const char *p = b; *p; p++) {
+         size_t blen = 0;
+         for (const char *p = b; *p; p++, blen++) {
             if (*p < '0' || *p > '9') {
-               before_id = NULL; /* not a bare id → ignore */
-               break;
+               return make_response(
+                   "Error: 'before' must be a numeric Discord message id (digits only).");
             }
          }
+         if (blen > MSG_TOOL_SNOWFLAKE_MAX_DIGITS) {
+            return make_response("Error: 'before' is too long to be a Discord message id (max "
+                                 "20 digits).");
+         }
+         before_id = b;
       }
    }
 

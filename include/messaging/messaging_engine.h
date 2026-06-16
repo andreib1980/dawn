@@ -207,8 +207,9 @@ int messaging_engine_read_server(int user_id,
  *
  * Returns the text/announcement channels of every server the bot has joined,
  * grouped by server, using the driver's discovery cache — does NOT fetch any
- * message history, so it doesn't consume a read budget.  Optional
- * @p server_hint filters to one server (fuzzy).  Discord-only in v1.
+ * message history (so it's cheap), though it is still counted against the
+ * per-user read rate limit.  Optional @p server_hint filters to one server
+ * (fuzzy).  Discord-only in v1.
  *
  * @param user_id      DAWN user (rate-limit + audit).  Must be > 0.
  * @param server_hint  Optional server name filter.  May be NULL.
