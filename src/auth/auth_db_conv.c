@@ -350,6 +350,9 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
       conv_out->reasoning_effort[sizeof(conv_out->reasoning_effort) - 1] = '\0';
    }
 
+   /* Compaction watermark (schema v67+) */
+   conv_out->context_watermark_msg_id = sqlite3_column_int64(s_db.stmt_conv_get, 19);
+
    sqlite3_reset(s_db.stmt_conv_get);
    AUTH_DB_UNLOCK();
 
@@ -1161,6 +1164,75 @@ int conv_db_update_context(int64_t conv_id, int user_id, int context_tokens, int
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_set_compaction_watermark(int64_t conv_id,
+                                     int user_id,
+                                     const char *summary,
+                                     int64_t watermark_msg_id) {
+   if (conv_id <= 0 || watermark_msg_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Single atomic monotonic UPDATE on the same conversation row — no archive,
+    * no continuation.  The WHERE guard `? >= context_watermark_msg_id` makes a
+    * stale async compaction a harmless no-op rather than a watermark rewind. */
+   sqlite3_reset(s_db.stmt_conv_set_watermark);
+   if (summary) {
+      sqlite3_bind_text(s_db.stmt_conv_set_watermark, 1, summary, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(s_db.stmt_conv_set_watermark, 1);
+   }
+   sqlite3_bind_int64(s_db.stmt_conv_set_watermark, 2, watermark_msg_id);
+   sqlite3_bind_int64(s_db.stmt_conv_set_watermark, 3, conv_id);
+   sqlite3_bind_int(s_db.stmt_conv_set_watermark, 4, user_id);
+   sqlite3_bind_int64(s_db.stmt_conv_set_watermark, 5, watermark_msg_id);
+
+   int rc = sqlite3_step(s_db.stmt_conv_set_watermark);
+   sqlite3_reset(s_db.stmt_conv_set_watermark);
+
+   if (rc != SQLITE_DONE) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+
+   /* 0 changes = not found / wrong owner / stale (guard rejected the rewind).
+    * Stale is benign, so treat 0 changes as success for the caller's purposes. */
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+void conv_db_format_compaction_context(int64_t conv_id,
+                                       const char *summary,
+                                       char *out,
+                                       size_t out_len) {
+   if (!out || out_len == 0) {
+      return;
+   }
+   out[0] = '\0';
+   if (!summary || !summary[0]) {
+      return;
+   }
+
+   /* Reconstruct a [COMPACTED conv=N msgs=X-Y node=Z depth=D] marker from the
+    * latest summary node so a RELOADED session keeps a context_expand handle to
+    * the compacted originals (the live in-memory marker is built in
+    * llm_context.c; keep the two formats recognizable to the same tool/parser).
+    * Falls back to a plain summary line when no node metadata exists. */
+   summary_node_t node = { 0 };
+   if (summary_node_get_latest(conv_id, &node) == AUTH_DB_SUCCESS && node.msg_id_start > 0 &&
+       node.msg_id_end > 0) {
+      snprintf(out, out_len,
+               "[COMPACTED conv=%lld msgs=%lld-%lld node=%lld depth=%d] "
+               "Previous conversation context (summarized): %s",
+               (long long)conv_id, (long long)node.msg_id_start, (long long)node.msg_id_end,
+               (long long)node.id, node.depth, summary);
+   } else {
+      snprintf(out, out_len, "Previous conversation context (summarized): %s", summary);
+   }
+   summary_node_free(&node);
+}
+
 int conv_db_lock_llm_settings(int64_t conv_id,
                               int user_id,
                               const char *llm_type,
@@ -1422,6 +1494,50 @@ int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callba
    }
 
    sqlite3_reset(s_db.stmt_msg_get);
+   AUTH_DB_UNLOCK();
+
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_get_messages_after(int64_t conv_id,
+                               int user_id,
+                               int64_t after_id,
+                               message_callback_t callback,
+                               void *ctx) {
+   if (conv_id <= 0 || !callback) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   /* Ownership check via JOIN; bounded to messages after the compaction watermark. */
+   sqlite3_reset(s_db.stmt_msg_get_after);
+   sqlite3_bind_int64(s_db.stmt_msg_get_after, 1, conv_id);
+   sqlite3_bind_int(s_db.stmt_msg_get_after, 2, user_id);
+   sqlite3_bind_int64(s_db.stmt_msg_get_after, 3, after_id);
+
+   int rc;
+   while ((rc = sqlite3_step(s_db.stmt_msg_get_after)) == SQLITE_ROW) {
+      conversation_message_t msg = { 0 };
+
+      msg.id = sqlite3_column_int64(s_db.stmt_msg_get_after, 0);
+      msg.conversation_id = sqlite3_column_int64(s_db.stmt_msg_get_after, 1);
+
+      const char *role = (const char *)sqlite3_column_text(s_db.stmt_msg_get_after, 2);
+      if (role) {
+         strncpy(msg.role, role, CONV_ROLE_MAX - 1);
+         msg.role[CONV_ROLE_MAX - 1] = '\0';
+      }
+
+      /* Column pointers are only valid during the callback */
+      msg_read_columns(&msg, s_db.stmt_msg_get_after);
+
+      if (callback(&msg, ctx) != 0) {
+         break;
+      }
+   }
+
+   sqlite3_reset(s_db.stmt_msg_get_after);
    AUTH_DB_UNLOCK();
 
    return AUTH_DB_SUCCESS;

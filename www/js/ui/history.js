@@ -735,26 +735,22 @@
    function handleContextCompacted(payload) {
       console.log('Context compacted:', payload);
 
-      if (!historyState.activeConversationId) {
-         console.log('No active conversation to continue');
-         return;
-      }
-
-      const summary = payload.summary || '';
       const tokensBefore = payload.tokens_before || 0;
       const tokensAfter = payload.tokens_after || 0;
-
       console.log(`Compaction: ${tokensBefore} -> ${tokensAfter} tokens`);
-      // Existing per-turn context blocks reference message IDs that may have
-      // been folded into the new snapshot.  Reset the trust-tier surfaces so
-      // stale provenance and turn dedup don't carry across the boundary.
+
+      // v67: compaction no longer splits the conversation. The server records an
+      // in-conversation watermark + summary and bounds context on reload, so the
+      // conversation stays single and writable — no continuation, no archive/lock.
+      // We only reset the per-turn trust-tier surfaces so stale provenance and turn
+      // dedup don't carry across the compaction boundary. (requestContinueConversation
+      // / handleContinueConversationResponse remain for legacy already-split convs.)
       if (typeof DawnContextInjection !== 'undefined') {
          DawnContextInjection.reset();
       }
       if (typeof DawnSilentObserve !== 'undefined') {
          DawnSilentObserve.reset();
       }
-      requestContinueConversation(historyState.activeConversationId, summary);
    }
 
    function handleContinueConversationResponse(payload) {

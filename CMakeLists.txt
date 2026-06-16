@@ -722,6 +722,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v64.c
     src/auth/auth_db_migrations_v65.c
     src/auth/auth_db_migrations_v66.c
+    src/auth/auth_db_migrations_v67.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
     # subsystems (extraction, summaries, history, satellite OTA, image tools), so

@@ -1615,6 +1615,27 @@ int llm_context_compact(uint32_t session_id,
       summary_node_create(&node, &node_id);
    }
 
+   /* Persist the compaction watermark on the same conversation (v67 — replaces
+    * fork-on-compaction).  Reload bounds context to messages after the watermark
+    * + the summary, so no archive / no continuation row is needed.  Skip when
+    * last_msg_id is unresolved (e.g. voice path with no command-context user) —
+    * never write 0; the monotonic guard would reject it anyway. */
+   if (conv_id > 0 && last_msg_id > 0) {
+      int wm_user_id = 0;
+      session_t *wm_session = session_get_command_context();
+      if (wm_session) {
+         wm_user_id = wm_session->metrics.user_id;
+      }
+      if (wm_user_id > 0) {
+         if (conv_db_set_compaction_watermark(conv_id, wm_user_id, summary, last_msg_id) !=
+             AUTH_DB_SUCCESS) {
+            OLOG_WARNING("llm_context: failed to persist compaction watermark for conv %lld; "
+                         "next reload will load full history",
+                         (long long)conv_id);
+         }
+      }
+   }
+
    /* Add summary as assistant message with dynamic buffer */
    struct json_object *summary_msg = json_object_new_object();
    json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));

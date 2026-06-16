@@ -506,6 +506,15 @@ void handle_continue_conversation(ws_connection_t *conn, struct json_object *pay
       return;
    }
 
+   /* DORMANT as of v67: compaction now records an in-conversation watermark instead
+    * of forking (see llm_context_compact + conv_db_set_compaction_watermark). The
+    * WebUI client no longer sends `continue_conversation` on compaction. This handler
+    * is retained only for backward-compat; if it ever fires, the (archiving) split
+    * path is still live — log it so we can confirm the client is the only caller
+    * before removing this code. */
+   OLOG_WARNING("WebUI: dormant continue_conversation handler invoked (v67 uses watermarks; "
+                "this still archives — investigate the caller)");
+
    json_object *response = json_object_new_object();
    json_object_object_add(response, "type",
                           json_object_new_string("continue_conversation_response"));
@@ -721,7 +730,13 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
              * previous conversation's history for the LLM while the UI displayed
              * the newly-loaded one — messages then went to the wrong thread. */
             if (existing_count <= 1 || conn->active_conversation_id != conv_id) {
-               int restored = webui_restore_conversation_context(conn, &conv, conv_id, all_msgs);
+               /* v67: when a compaction watermark is set, the display array (all_msgs)
+                * is the FULL transcript, but the LLM context must be bounded to
+                * post-watermark messages.  Pass NULL so restore does its own bounded
+                * fetch (conv_db_get_messages_after); display stays full. */
+               json_object *restore_msgs = (conv.context_watermark_msg_id > 0) ? NULL : all_msgs;
+               int restored = webui_restore_conversation_context(conn, &conv, conv_id,
+                                                                 restore_msgs);
                if (restored >= 0) {
                   OLOG_INFO("WebUI: Restored %d messages to session %u context (conv %lld)",
                             restored, conn->session->session_id, (long long)conv_id);

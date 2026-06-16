@@ -484,6 +484,86 @@ static void test_get_messages_by_range_returns_private_when_opted_in(void) {
 }
 
 /* ============================================================================
+ * Compaction watermark (v67) Tests
+ * ============================================================================ */
+
+static int wm_count_cb(const conversation_message_t *msg, void *ctx) {
+   (void)msg;
+   (*(int *)ctx)++;
+   return 0;
+}
+
+/* conv_db_set_compaction_watermark: advances forward, rejects a stale rewind
+ * (watermark AND summary), and rejects an invalid (<=0) watermark. */
+static void test_compaction_watermark_monotonic(void) {
+   int user_id = create_and_get_id("wm_mono", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "Watermark mono", &conv_id);
+
+   conversation_t conv;
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_set_compaction_watermark(conv_id, user_id, "summary v1", 100));
+   memset(&conv, 0, sizeof(conv));
+   conv_db_get(conv_id, user_id, &conv);
+   TEST_ASSERT_EQUAL_INT64(100, conv.context_watermark_msg_id);
+   TEST_ASSERT_EQUAL_STRING("summary v1", conv.compaction_summary);
+   conv_free(&conv);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_set_compaction_watermark(conv_id, user_id, "summary v2", 200));
+   memset(&conv, 0, sizeof(conv));
+   conv_db_get(conv_id, user_id, &conv);
+   TEST_ASSERT_EQUAL_INT64(200, conv.context_watermark_msg_id);
+   conv_free(&conv);
+
+   /* Stale rewind: 150 < 200 -> benign no-op (success), watermark + summary unchanged. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_set_compaction_watermark(conv_id, user_id, "summary STALE", 150));
+   memset(&conv, 0, sizeof(conv));
+   conv_db_get(conv_id, user_id, &conv);
+   TEST_ASSERT_EQUAL_INT64(200, conv.context_watermark_msg_id);
+   TEST_ASSERT_EQUAL_STRING("summary v2", conv.compaction_summary);
+   conv_free(&conv);
+
+   /* Invalid watermark (<= 0). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID,
+                         conv_db_set_compaction_watermark(conv_id, user_id, "x", 0));
+}
+
+/* conv_db_get_messages_after: after_id=0 returns all; bounding excludes <= after_id. */
+static void test_get_messages_after_bounds(void) {
+   int user_id = create_and_get_id("wm_after", "hash", false);
+   int64_t conv_id = 0;
+   conv_db_create(user_id, "Watermark after", &conv_id);
+   conv_db_add_message(conv_id, user_id, "user", "m1");
+   conv_db_add_message(conv_id, user_id, "assistant", "m2");
+   conv_db_add_message(conv_id, user_id, "user", "m3");
+
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_after(conv_id, user_id, 0, wm_count_cb, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+
+   int64_t *ids = NULL;
+   int idc = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_message_ids(conv_id, user_id, &ids, &idc));
+   TEST_ASSERT_EQUAL_INT(3, idc);
+
+   n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_after(conv_id, user_id, ids[0], wm_count_cb, &n));
+   TEST_ASSERT_EQUAL_INT(2, n); /* only m2, m3 (id > ids[0]) */
+
+   n = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_after(conv_id, user_id, ids[2], wm_count_cb, &n));
+   TEST_ASSERT_EQUAL_INT(0, n); /* nothing after the last message */
+
+   free(ids);
+}
+
+/* ============================================================================
  * User Settings Tests
  * ============================================================================ */
 
@@ -843,6 +923,8 @@ int main(void) {
    RUN_TEST(test_message_reasoning_null);
    RUN_TEST(test_get_messages_by_range_filters_private_by_default);
    RUN_TEST(test_get_messages_by_range_returns_private_when_opted_in);
+   RUN_TEST(test_compaction_watermark_monotonic);
+   RUN_TEST(test_get_messages_after_bounds);
 
    /* User Settings */
    RUN_TEST(test_user_settings_defaults);

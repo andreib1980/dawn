@@ -106,7 +106,37 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
       return NULL;
    }
 
-   int rc = conv_db_get_messages(conv_id, user_id, append_message_to_history, &ctx);
+   /* v67: if the conversation carries a compaction watermark, bound the reload to
+    * post-watermark messages and prepend the summary — mirrors the WebUI restore
+    * funnel (webui_restore_conversation_context) so any loader, including the
+    * messaging forever-conversation path, stays context-bounded.  watermark == 0
+    * (never compacted) keeps the original full-history behavior. */
+   int64_t watermark = 0;
+   conversation_t conv = { 0 };
+   if (conv_db_get(conv_id, user_id, &conv) == AUTH_DB_SUCCESS) {
+      watermark = conv.context_watermark_msg_id;
+      if (watermark > 0 && conv.compaction_summary && conv.compaction_summary[0]) {
+         struct json_object *summary_msg = json_object_new_object();
+         if (summary_msg) {
+            char note[CONV_SUMMARY_MAX];
+            /* Same reconstructed [COMPACTED ...] marker as the WebUI restore path, so a
+             * reloaded messaging session also keeps a context_expand handle.  ASSISTANT
+             * role (not system): the per-turn two-system-message rebuild drops extra
+             * system messages — matches the live compaction marker so it survives. */
+            conv_db_format_compaction_context(conv_id, conv.compaction_summary, note, sizeof(note));
+            json_object_object_add(summary_msg, "role", json_object_new_string("assistant"));
+            json_object_object_add(summary_msg, "content", json_object_new_string(note));
+            json_object_array_add(ctx.array, summary_msg);
+            ctx.total_text_len += strlen(note);
+         }
+      }
+   }
+   conv_free(&conv);
+
+   int rc = (watermark > 0)
+                ? conv_db_get_messages_after(conv_id, user_id, watermark, append_message_to_history,
+                                             &ctx)
+                : conv_db_get_messages(conv_id, user_id, append_message_to_history, &ctx);
    if (rc != AUTH_DB_SUCCESS) {
       json_object_put(ctx.array);
       return NULL;

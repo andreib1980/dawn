@@ -1036,10 +1036,11 @@ typedef struct {
    time_t updated_at;
    int message_count;
    bool is_archived;
-   int context_tokens;       /**< Last known context token count */
-   int context_max;          /**< Context window size */
-   int64_t continued_from;   /**< Parent conversation ID (0 = none) */
-   char *compaction_summary; /**< Summary from parent (NULL if not a continuation) */
+   int context_tokens;               /**< Last known context token count */
+   int context_max;                  /**< Context window size */
+   int64_t continued_from;           /**< Parent conversation ID (0 = none) */
+   char *compaction_summary;         /**< Summary from parent (NULL if not a continuation) */
+   int64_t context_watermark_msg_id; /**< v67: last compacted msg id; 0 = none (load all) */
    /* Per-conversation LLM settings (v11) - empty string means use defaults */
    char llm_type[16];         /**< "local" or "cloud" */
    char cloud_provider[16];   /**< "openai" or "claude" */
@@ -1352,6 +1353,44 @@ int conv_db_set_title_locked(int64_t conv_id, int user_id, int locked);
 int conv_db_update_context(int64_t conv_id, int user_id, int context_tokens, int context_max);
 
 /**
+ * @brief Persist a compaction watermark + summary on a conversation (v67).
+ *
+ * Replaces fork-on-compaction: records @watermark_msg_id (the last compacted
+ * message id) and @summary on the SAME conversation row. Reload then bounds
+ * context to messages with id > watermark + the summary. Single atomic UPDATE
+ * with a monotonic guard (a stale watermark <= the stored one is a no-op).
+ *
+ * @param conv_id Conversation id (> 0).
+ * @param user_id Owner id (ownership-checked in the UPDATE).
+ * @param summary Latest compaction summary (may be NULL).
+ * @param watermark_msg_id Last compacted message id (> 0; <= 0 returns AUTH_DB_INVALID).
+ * @return AUTH_DB_SUCCESS (incl. benign no-op), AUTH_DB_INVALID, or AUTH_DB_FAILURE.
+ */
+int conv_db_set_compaction_watermark(int64_t conv_id,
+                                     int user_id,
+                                     const char *summary,
+                                     int64_t watermark_msg_id);
+
+/**
+ * @brief Format the reload context line for a (watermarked) conversation.
+ *
+ * Writes a `[COMPACTED conv=N msgs=X-Y node=Z depth=D] Previous conversation
+ * context (summarized): <summary>` marker into @out when a summary node exists
+ * (so a reloaded LLM keeps a context_expand handle to the compacted originals),
+ * else a plain summary line. @out is always NUL-terminated. Empty @summary
+ * yields an empty string.
+ *
+ * @param conv_id Conversation id (for summary-node lookup + the marker).
+ * @param summary The conversation's compaction_summary text (may be NULL).
+ * @param out Output buffer.
+ * @param out_len Size of @out.
+ */
+void conv_db_format_compaction_context(int64_t conv_id,
+                                       const char *summary,
+                                       char *out,
+                                       size_t out_len);
+
+/**
  * @brief Lock LLM settings for a conversation
  *
  * Updates LLM settings only if message_count is 0 (first message lock).
@@ -1504,6 +1543,26 @@ int conv_db_add_message_with_tools(int64_t conv_id,
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
  */
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx);
+
+/**
+ * @brief Like conv_db_get_messages but only messages with id > @after_id.
+ *
+ * The compaction-watermark restore path (v67): load only post-watermark messages
+ * into the LLM context. Same full column set / ownership check / chronological
+ * order as conv_db_get_messages. @after_id = 0 returns all messages.
+ *
+ * @param conv_id Conversation ID
+ * @param user_id User ID (for authorization check)
+ * @param after_id Exclusive lower bound on message id (0 = all)
+ * @param callback Function called for each message
+ * @param ctx User-provided context passed to callback
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, or AUTH_DB_FAILURE
+ */
+int conv_db_get_messages_after(int64_t conv_id,
+                               int user_id,
+                               int64_t after_id,
+                               message_callback_t callback,
+                               void *ctx);
 
 /**
  * @brief Get messages for a conversation (admin only, no ownership check)

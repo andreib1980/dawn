@@ -153,6 +153,10 @@ static const char *SCHEMA_SQL =
     "   context_max INTEGER DEFAULT 0,"
     "   continued_from INTEGER DEFAULT NULL,"
     "   compaction_summary TEXT DEFAULT NULL,"
+    /* context_watermark_msg_id (v67): last compacted message id.  0 = never
+     * compacted -> reload loads all messages (pre-watermark behavior).  When > 0,
+     * context restore is bounded to messages with id > watermark + the summary. */
+    "   context_watermark_msg_id INTEGER NOT NULL DEFAULT 0,"
     "   llm_type TEXT DEFAULT NULL,"
     "   cloud_provider TEXT DEFAULT NULL,"
     "   model TEXT DEFAULT NULL,"

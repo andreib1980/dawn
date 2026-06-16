@@ -233,7 +233,7 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
        "context_tokens, context_max, continued_from, compaction_summary, "
        "llm_type, cloud_provider, model, tools_mode, thinking_mode, is_private, origin, "
-       "reasoning_effort "
+       "reasoning_effort, context_watermark_msg_id "
        "FROM conversations WHERE id = ?",
        -1, &s_db.stmt_conv_get, NULL);
    if (rc != SQLITE_OK) {
@@ -348,6 +348,21 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* v67: same as stmt_msg_get but bounded to id > ? — the compaction-watermark
+    * restore path (load only post-watermark messages). Full column set so tool /
+    * reasoning rehydration works identically to the unbounded load. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT m.id, m.conversation_id, m.role, m.content, m.tool_calls, m.tool_call_id, "
+       "m.reasoning, m.created_at FROM messages m "
+       "INNER JOIN conversations c ON m.conversation_id = c.id "
+       "WHERE m.conversation_id = ? AND c.user_id = ? AND m.id > ? ORDER BY m.id ASC",
+       -1, &s_db.stmt_msg_get_after, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare msg_get_after failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* Admin-only: get messages without user ownership check */
    rc = sqlite3_prepare_v2(
        s_db.db,
@@ -374,6 +389,19 @@ int auth_db_prepare_statements(void) {
                            -1, &s_db.stmt_conv_update_context, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_update_context failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* v67: compaction watermark + summary, on the same conversation row (no fork).
+    * The trailing `? >= context_watermark_msg_id` is a monotonic guard so a stale
+    * async compaction can't rewind a watermark already advanced by a later pass. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE conversations SET compaction_summary = ?, context_watermark_msg_id = ? "
+       "WHERE id = ? AND user_id = ? AND ? >= context_watermark_msg_id",
+       -1, &s_db.stmt_conv_set_watermark, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare conv_set_watermark failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2295,12 +2323,16 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_msg_add);
    if (s_db.stmt_msg_get)
       sqlite3_finalize(s_db.stmt_msg_get);
+   if (s_db.stmt_msg_get_after)
+      sqlite3_finalize(s_db.stmt_msg_get_after);
    if (s_db.stmt_msg_get_admin)
       sqlite3_finalize(s_db.stmt_msg_get_admin);
    if (s_db.stmt_conv_update_meta)
       sqlite3_finalize(s_db.stmt_conv_update_meta);
    if (s_db.stmt_conv_update_context)
       sqlite3_finalize(s_db.stmt_conv_update_context);
+   if (s_db.stmt_conv_set_watermark)
+      sqlite3_finalize(s_db.stmt_conv_set_watermark);
    if (s_db.stmt_conv_create_origin)
       sqlite3_finalize(s_db.stmt_conv_create_origin);
    if (s_db.stmt_conv_reassign)

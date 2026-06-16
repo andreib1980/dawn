@@ -56,7 +56,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 66
+#define AUTH_DB_SCHEMA_VERSION 67
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -129,9 +129,11 @@ typedef struct {
    sqlite3_stmt *stmt_conv_count;
    sqlite3_stmt *stmt_msg_add;
    sqlite3_stmt *stmt_msg_get;
+   sqlite3_stmt *stmt_msg_get_after;
    sqlite3_stmt *stmt_msg_get_admin;
    sqlite3_stmt *stmt_conv_update_meta;
    sqlite3_stmt *stmt_conv_update_context;
+   sqlite3_stmt *stmt_conv_set_watermark;
    sqlite3_stmt *stmt_conv_create_origin;
    sqlite3_stmt *stmt_conv_reassign;
 
@@ -503,6 +505,14 @@ int auth_db_migrations_v65(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v66(sqlite3 *db);
+
+/**
+ * @brief v67 migration: add conversations.context_watermark_msg_id (compaction
+ *        watermark, replacing fork-on-compaction) and one-time unlock of legacy
+ *        split-archived conversations. Idempotent (probes PRAGMA table_info).
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v67(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.
