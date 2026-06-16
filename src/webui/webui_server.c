@@ -2861,8 +2861,18 @@ int webui_restore_conversation_context(ws_connection_t *conn,
    } else {
       all_msgs = json_object_new_array();
       owns_msgs = true;
-      int rc = conv_db_get_messages(conv_id, conn->auth_user_id, webui_session_restore_msg_cb,
-                                    all_msgs);
+      int rc;
+      if (conv->context_watermark_msg_id > 0) {
+         /* v67: bound restored context to messages after the compaction watermark;
+          * the injected summary (below) stands in for the compacted prefix. The
+          * full transcript is still shown in the UI (display load is unbounded). */
+         rc = conv_db_get_messages_after(conv_id, conn->auth_user_id,
+                                         conv->context_watermark_msg_id,
+                                         webui_session_restore_msg_cb, all_msgs);
+      } else {
+         rc = conv_db_get_messages(conv_id, conn->auth_user_id, webui_session_restore_msg_cb,
+                                   all_msgs);
+      }
       if (rc != AUTH_DB_SUCCESS) {
          json_object_put(all_msgs);
          return LWS_CLOSE_CONNECTION;
@@ -2895,10 +2905,20 @@ int webui_restore_conversation_context(ws_connection_t *conn,
    }
 
    if (conv->compaction_summary && strlen(conv->compaction_summary) > 0) {
-      char summary[4096];
-      snprintf(summary, sizeof(summary), "Previous conversation context (summarized): %s",
-               conv->compaction_summary);
-      session_add_message(conn->session, "system", summary);
+      /* v67: prepend a reconstructed [COMPACTED ...] marker (when a summary node
+       * exists) so the reloaded LLM keeps a context_expand handle to the
+       * compacted originals — not just the summary text.
+       *
+       * ASSISTANT role, NOT system: session_update_system_messages rebuilds the
+       * leading context into exactly two system messages (stable prefix + volatile
+       * focus block) every turn and DROPS any other system message — so a
+       * system-role summary never reaches the LLM. The live compaction marker
+       * (llm_context.c) is an assistant message for the same reason; matching it
+       * here makes the summary survive the per-turn rebuild. */
+      char summary[CONV_SUMMARY_MAX];
+      conv_db_format_compaction_context(conv_id, conv->compaction_summary, summary,
+                                        sizeof(summary));
+      session_add_message(conn->session, "assistant", summary);
    }
 
    for (int i = 0; i < count; i++) {

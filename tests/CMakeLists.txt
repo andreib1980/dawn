@@ -96,6 +96,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v64.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v65.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v66.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v67.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
