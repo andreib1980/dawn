@@ -139,6 +139,19 @@
                               DawnState.streamingState.content = '';
                               DawnState.streamingState.textElement = newTextEl;
                            }
+                        } else {
+                           /* No active streaming entry: the visual arrived during a tool
+                            * phase before the answer streamed (a diagram-only turn). Render
+                            * it as its own assistant entry so it shows live — otherwise it
+                            * would only appear on reload, since finalizeStream() drains
+                            * pending visuals into the save payload, not the live view.
+                            * Mirrors addNormalEntry's visual-segment entry structure. */
+                           var vEntry = document.createElement('div');
+                           vEntry.className = 'transcript-entry assistant';
+                           vEntry.innerHTML =
+                              '<div class="role">assistant</div><div class="text"></div>';
+                           DawnElements.transcript.appendChild(vEntry);
+                           DawnVisualRender.renderVisuals(vEntry, extracted.visuals);
                         }
                         DawnElements.transcript.scrollTop = DawnElements.transcript.scrollHeight;
                      }
