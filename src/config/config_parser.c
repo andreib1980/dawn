@@ -1145,6 +1145,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "extraction_timeout_ms",
                                              "paraphrase_dedup_enabled",
                                              "paraphrase_dedup_threshold",
+                                             "note_extraction_guard",
                                              "pruning_enabled",
                                              "prune_superseded_days",
                                              "prune_stale_days",

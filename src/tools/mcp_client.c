@@ -483,7 +483,10 @@ static int client_handshake(mcp_client_t *c) {
    char *init_res = NULL;
    int rc = do_request(c, "initialize", init_params, c->request_timeout_ms, NULL, NULL, &init_res);
    if (rc != SUCCESS) {
-      OLOG_ERROR("MCP %s: initialize failed (%d)", c->name, rc);
+      /* WARNING not ERROR: the bridge treats a failed handshake as skip-and-continue
+       * (an optional MCP server may simply not be up yet), and re-reports the
+       * user-facing outcome at WARN.  Don't throw red for an expected-absent server. */
+      OLOG_WARNING("MCP %s: initialize failed (%d)", c->name, rc);
       free(init_res);
       return FAILURE;
    }
@@ -498,7 +501,7 @@ static int client_handshake(mcp_client_t *c) {
    char *tools = NULL;
    rc = do_request(c, "tools/list", NULL, c->request_timeout_ms, NULL, NULL, &tools);
    if (rc != SUCCESS) {
-      OLOG_ERROR("MCP %s: tools/list failed (%d)", c->name, rc);
+      OLOG_WARNING("MCP %s: tools/list failed (%d)", c->name, rc);
       free(tools);
       return FAILURE;
    }
