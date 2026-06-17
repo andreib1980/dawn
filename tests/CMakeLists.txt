@@ -531,6 +531,7 @@ dawn_add_unit_test(test_focus_source
    SOURCES test_focus_source.c
            ${SRC_ROOT}/src/core/focus/focus_source.c
            ${SRC_ROOT}/src/core/focus/focus_dominant_token.c
+           ${SRC_ROOT}/src/core/focus/focus_candidate_helpers.c
            ${SRC_ROOT}/src/core/memory_filter.c
    LIBS    dawn_common unity pthread
    LABEL   ci)

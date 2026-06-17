@@ -639,7 +639,11 @@ static const char *capped_text_view(const char *text, char **owned, bool *out_ow
    const size_t n = strlen(text);
    if (n <= FOCUS_TEXT_MAX_BYTES)
       return text;
-   *owned = malloc(FOCUS_TEXT_MAX_BYTES + 1);
+   /* UTF-8-safe cut: a raw truncation at FOCUS_TEXT_MAX_BYTES can split a
+    * multi-byte character, making this payload's text frame invalid UTF-8
+    * (the browser then drops the WebSocket). Back the cut up to a char boundary. */
+   const size_t cap = focus_utf8_safe_cap(text, FOCUS_TEXT_MAX_BYTES);
+   *owned = malloc(cap + 1);
    if (*owned == NULL) {
       /* OOM — drop text content rather than fail the broadcast.  Log
        * the failure (security audit LOW): under sustained memory
@@ -650,8 +654,8 @@ static const char *capped_text_view(const char *text, char **owned, bool *out_ow
                    n);
       return "";
    }
-   memcpy(*owned, text, FOCUS_TEXT_MAX_BYTES);
-   (*owned)[FOCUS_TEXT_MAX_BYTES] = '\0';
+   memcpy(*owned, text, cap);
+   (*owned)[cap] = '\0';
    *out_owned = true;
    return *owned;
 }
