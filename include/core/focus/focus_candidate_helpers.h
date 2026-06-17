@@ -75,6 +75,20 @@ extern "C" {
 #define FOCUS_ITEM_ID_BUFLEN 64
 
 /**
+ * @brief Largest byte length <= @p max_bytes that does not split a UTF-8
+ *        character in @p text.
+ *
+ * Truncating multi-byte UTF-8 text at a raw byte offset can leave a partial
+ * character at the end, which is invalid UTF-8 and breaks any consumer that
+ * requires valid UTF-8 (notably WebSocket text frames — the browser rejects the
+ * frame and drops the connection). This returns a cut length that lands on a
+ * character boundary: `strlen(text)` when it already fits, otherwise @p
+ * max_bytes backed up past any trailing UTF-8 continuation bytes. Returns 0 on
+ * NULL @p text.
+ */
+size_t focus_utf8_safe_cap(const char *text, size_t max_bytes);
+
+/**
  * @brief Free `text` and `item_id` on a single candidate (failure path).
  *
  * NOT used on the SUCCESS path — `focus_result_free()` handles that.

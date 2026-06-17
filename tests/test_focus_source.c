@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
 #include "dawn_error.h"
@@ -555,6 +556,21 @@ static void test_byte_budget_truncation(void) {
    focus_result_free(&result);
 }
 
+/* 8b. UTF-8-safe truncation — focus_utf8_safe_cap must never cut inside a
+ *     multi-byte character, or the truncated text is invalid UTF-8 and breaks
+ *     the context_injection WebSocket text frame (browser drops the socket). */
+static void test_utf8_safe_cap(void) {
+   /* "AAA" + em-dash U+2014 (bytes E2 80 94) + "XYZ" — em-dash at offsets 3-5. */
+   const char *t = "AAA\xE2\x80\x94XYZ";
+   TEST_ASSERT_EQUAL_INT(3, (int)focus_utf8_safe_cap(t, 3));          /* boundary before em-dash */
+   TEST_ASSERT_EQUAL_INT(3, (int)focus_utf8_safe_cap(t, 4));          /* mid em-dash -> back to 3 */
+   TEST_ASSERT_EQUAL_INT(3, (int)focus_utf8_safe_cap(t, 5));          /* mid em-dash -> back to 3 */
+   TEST_ASSERT_EQUAL_INT(6, (int)focus_utf8_safe_cap(t, 6));          /* full em-dash kept */
+   TEST_ASSERT_EQUAL_INT(9, (int)focus_utf8_safe_cap(t, 99));         /* whole string fits */
+   TEST_ASSERT_EQUAL_INT(5, (int)focus_utf8_safe_cap("abcdefgh", 5)); /* ASCII: exact cut ok */
+   TEST_ASSERT_EQUAL_INT(0, (int)focus_utf8_safe_cap(NULL, 10));      /* NULL guard */
+}
+
 /* 9. memory ownership — register/compose/free cycle 1000× and confirm the
  *    counter-based proxy returns to zero each iteration.  Smoke-test;
  *    valgrind locally is the real audit. */
@@ -770,6 +786,7 @@ int main(void) {
    RUN_TEST(test_filter_on_retrieval_skips_external);
    RUN_TEST(test_requires_embedding_skipped_without_query);
    RUN_TEST(test_byte_budget_truncation);
+   RUN_TEST(test_utf8_safe_cap);
    RUN_TEST(test_memory_ownership_cycle);
    RUN_TEST(test_double_register_same_source_id_fails);
    RUN_TEST(test_na_score_contributes_zero);

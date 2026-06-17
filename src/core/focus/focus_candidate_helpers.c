@@ -28,6 +28,23 @@
 #include "dawn_error.h"
 #include "logging.h"
 
+size_t focus_utf8_safe_cap(const char *text, size_t max_bytes) {
+   if (text == NULL)
+      return 0;
+   const size_t n = strlen(text);
+   if (n <= max_bytes)
+      return n;
+   /* Cutting at byte `max_bytes` would split a character if that byte is a
+    * UTF-8 continuation byte (0b10xxxxxx). Back up to the start of that
+    * character so the returned prefix never ends mid-sequence — otherwise the
+    * truncated text is invalid UTF-8 and breaks a WebSocket text frame. Bounded
+    * by the max UTF-8 sequence length, so at most 3 steps. */
+   size_t cut = max_bytes;
+   while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80)
+      cut--;
+   return cut;
+}
+
 void focus_candidate_cleanup_on_failure(focus_candidate_t *c) {
    if (c == NULL)
       return;
@@ -74,7 +91,11 @@ int focus_candidate_init(focus_candidate_t *c,
    c->item_timestamp = item_timestamp;
 
    const size_t text_len = strlen(text);
-   const size_t copy_len = (text_len > FOCUS_TEXT_MAX_BYTES) ? FOCUS_TEXT_MAX_BYTES : text_len;
+   /* UTF-8-safe truncation: a raw byte cut at FOCUS_TEXT_MAX_BYTES could split a
+    * multi-byte character, yielding invalid UTF-8 that later breaks the
+    * context_injection WebSocket text frame (browser rejects it, drops the
+    * connection). Back the cut up to a character boundary. */
+   const size_t copy_len = focus_utf8_safe_cap(text, FOCUS_TEXT_MAX_BYTES);
    c->text = malloc(copy_len + 1);
    if (c->text == NULL) {
       focus_candidate_cleanup_on_failure(c);
