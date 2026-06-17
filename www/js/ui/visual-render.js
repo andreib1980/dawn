@@ -342,13 +342,96 @@
             iframe.style.height = '400px';
          }
       } else {
+         var hasCanvas = code.indexOf('<canvas') !== -1;
+
+         /* --- Chart.js responsive sizing in an opaque-origin srcdoc iframe ---
+          *
+          * Chart.js sizes a `responsive:true` chart to its canvas's PARENT box.
+          * Generated charts put a bare <canvas> directly in <body> (often with
+          * only `max-height`), and `maintainAspectRatio:true` locks the chart's
+          * aspect ratio to the canvas's DEFAULT 300x150 (ratio 2.0) at
+          * construction — the cached `_aspectRatio`. From then on every
+          * getMaximumSize() derives height = width / 2 instead of measuring the
+          * real container, so the canvas stays 300x150. A manual resize() can't
+          * rescue it: a freshly-built chart is mid entrance-animation, and
+          * `resize()` while `Chart.animator.running(chart)` is true only stashes
+          * `_resizeBeforeDraw` and returns (a true no-op — matches the measured
+          * "resize(663,400) does nothing").
+          *
+          * Canonical Chart.js responsive pattern: wrap the canvas in a
+          * position:relative element with a DEFINITE size and let the chart fill
+          * it. We do exactly that — inject a `.dawn-chart-box` wrapper (regex,
+          * since we can't change the stored markup), and at runtime flip every
+          * chart to `maintainAspectRatio:false` then resize() so it adopts the
+          * wrapper's real height on its own ResizeObserver. The wrapper's fixed
+          * pixel height (clamped by the canvas's own max-height when present) is
+          * the source of truth — no reliance on body-box measurement or on
+          * resize() timing relative to the entrance animation. */
+         var canvasCSS = '';
+         var chartFix = '';
+         if (hasCanvas) {
+            /* Resolve a definite wrapper height: honor a stored canvas
+             * max-height (cap it to the frame) else use the default frame box. */
+            var FRAME_H = 380; /* px; matches the 400px iframe minus container chrome */
+            var maxH = code.match(/max-height\s*:\s*(\d+)px/i);
+            var boxH = maxH ? Math.min(parseInt(maxH[1], 10), FRAME_H) : FRAME_H;
+
+            canvasCSS =
+               'html, body { height: 100%; }\n' +
+               'body { margin: 0; padding: 0; overflow: hidden; }\n' +
+               /* The wrapper IS the container Chart.js measures: definite size,
+                * position:relative so the canvas can absolutely fill it. */
+               '.dawn-chart-box { position: relative; width: 100%; height: ' +
+               boxH +
+               'px; }\n' +
+               /* Override the stored inline max-height/margin so the canvas
+                * fills the wrapper instead of fighting it. */
+               '.dawn-chart-box > canvas { display: block !important;' +
+               ' width: 100% !important; height: 100% !important;' +
+               ' max-width: none !important; max-height: none !important;' +
+               ' margin: 0 !important; }\n';
+
+            /* Wrap each <canvas ...></canvas> in the sizing box. Self-closing
+             * <canvas .../> is invalid HTML (canvas needs a closing tag), so
+             * matching the open+close pair covers the generated markup. */
+            code = code.replace(
+               /(<canvas\b[^>]*>\s*<\/canvas>)/gi,
+               '<div class="dawn-chart-box">$1</div>'
+            );
+
+            /* Runtime: disable maintainAspectRatio (kills the cached 2.0 ratio)
+             * and resize so each chart fills its wrapper. maintainAspectRatio
+             * false makes getMaximumSize() use the container height directly.
+             * Run after the entrance animation settles so resize() isn't
+             * swallowed by the `running()` guard; also re-run on the chart's own
+             * 'resize' is unnecessary — Chart.js keeps it filled once the ratio
+             * lock is removed and the wrapper has a definite size. */
+            chartFix =
+               '<script>\n' +
+               'function _dawnFillCharts(){\n' +
+               '  if(!window.Chart)return;var m=Chart.instances||{};\n' +
+               '  Object.keys(m).forEach(function(k){var c=m[k];try{\n' +
+               '    c.options.maintainAspectRatio=false;\n' +
+               '    c.options.responsive=true;\n' +
+               '    c.resize();\n' +
+               '  }catch(e){}});\n' +
+               '}\n' +
+               /* First pass after layout; second after the default ~1s entrance
+                * animation so any resize stashed by the running()-guard applies. */
+               'requestAnimationFrame(function(){requestAnimationFrame(_dawnFillCharts)});\n' +
+               'setTimeout(_dawnFillCharts,1100);\n' +
+               '</' +
+               'script>\n';
+         }
          content =
             '<!DOCTYPE html><html><head><style>' +
             themeCSS +
             visualClasses +
+            canvasCSS +
             '</style></head><body>\n' +
             bridgeScript +
             code +
+            chartFix +
             '</body></html>';
          iframe.style.height = '400px';
       }

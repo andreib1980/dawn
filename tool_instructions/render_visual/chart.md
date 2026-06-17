@@ -6,7 +6,7 @@ Use Chart.js for data visualization. Load from the local server inside HTML type
 ```html
 <script src="/js/vendor/chart.umd.js"></script>
 
-<canvas id="myChart" style="max-height:400px"></canvas>
+<canvas id="myChart"></canvas>
 <script>
 const ctx = document.getElementById('myChart');
 new Chart(ctx, {
@@ -14,11 +14,20 @@ new Chart(ctx, {
    data: { ... },
    options: {
       responsive: true,
+      maintainAspectRatio: false,
       plugins: { legend: { position: 'top' } }
    }
 });
 </script>
 ```
+
+## Sizing (IMPORTANT)
+The visual is rendered in a frame with a fixed height. Always set
+`maintainAspectRatio: false` and do NOT put a `height` or `max-height` on the
+`<canvas>`. With `maintainAspectRatio: true` (the Chart.js default) plus a
+`max-height`-only canvas, the chart resolves its height from a content-sized
+container, collapses to 0×0, and renders as a black box. `responsive: true` +
+`maintainAspectRatio: false` lets the chart fill the frame correctly.
 
 ## Theming
 Read CSS variables and apply to Chart.js:
