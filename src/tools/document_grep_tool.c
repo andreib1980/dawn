@@ -113,10 +113,12 @@ static const tool_metadata_t doc_grep_metadata = {
    .name = "document_grep",
    .device_string = "document grep",
    .description = "Find an EXACT string in the user's saved documents and notes and return each "
-                  "match with its neighboring chunks. Use this instead of document_search when "
-                  "you need literal/exact matches — IDs, codes, exact field values, or a specific "
-                  "phrase — especially in structured data (YAML/CSV/logs) where a record spans "
-                  "chunks. Deterministic: no ranking, no embeddings. Paginated via offset.",
+                  "match with its neighboring chunks. A TARGETED follow-up: use it when you "
+                  "already know you need a literal/exact match in a document — IDs, codes, exact "
+                  "field values, or a specific phrase — especially in structured data "
+                  "(YAML/CSV/logs) where a record spans chunks. For a BROAD 'what do we know "
+                  "about X' question, call 'recall' FIRST; use grep to drill in for an exact "
+                  "string. Deterministic: no ranking, no embeddings. Paginated via offset.",
    .params = doc_grep_params,
    .param_count = 4,
    .device_type = TOOL_DEVICE_TYPE_GETTER,

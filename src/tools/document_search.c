@@ -80,13 +80,15 @@ static const treg_param_t doc_search_params[] = {
 static const tool_metadata_t doc_search_metadata = {
    .name = "document_search",
    .device_string = "document search",
-   .description = "Search the user's saved documents and notes (hybrid keyword + semantic). "
-                  "Use this for content they've uploaded (PDFs, manuals) OR authored reference "
-                  "text they filed under a label — a bio, an elevator pitch, an address, a saved "
-                  "note. Results rank EXACT label matches first, so to pull back a specific saved "
-                  "item ask for its label (e.g. 'public bio'). For the verbatim full text of a "
-                  "known note, prefer document_read with its exact label. Returns excerpts with "
-                  "source citations. Do NOT use this for general web searches.",
+   .description = "Search ONLY the user's saved documents and notes (hybrid keyword + semantic). "
+                  "This is a TARGETED follow-up: use it when you already know the answer lives in "
+                  "an uploaded file or filed note. For a BROAD 'what do we know about X' question "
+                  "that could also touch memory or the calendar, call 'recall' FIRST (it spans all "
+                  "sources) and use this only to drill into documents specifically. "
+                  "Results rank EXACT label matches first, so to pull back a specific saved item "
+                  "ask for its label (e.g. 'public bio'). For the verbatim full text of a known "
+                  "note, prefer document_read with its exact label. Returns excerpts with source "
+                  "citations. Do NOT use this for general web searches.",
    .params = doc_search_params,
    .param_count = 1,
    .device_type = TOOL_DEVICE_TYPE_GETTER,

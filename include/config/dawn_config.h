@@ -572,6 +572,22 @@ typedef struct {
    } dominant_token_heuristic;
 } focus_injection_config_t;
 
+/* Unified cross-source `recall` tool (docs/CROSS_TOOL_RECALL_DESIGN.md).
+ * Deep on-demand gather across all focus sources at a budget LARGER than the
+ * per-turn injection, kept in a SEPARATE block so tuning the deep path never
+ * disturbs the tuned per-turn `focus_injection` values.  recall_tool copies
+ * top_k/min_score/budget_bytes into a focus_limits_t via DESIGNATED initializers
+ * (mapping is by-name, not positional — field order here need not match
+ * focus_limits_t); per_source_max rides focus_compose_ex's existing param. */
+typedef struct {
+   int top_k;          /* Max candidates retained after ranking (deep gather) */
+   int budget_bytes;   /* Byte cap on the assembled recall result text         */
+   float min_score;    /* Floor — lower than per-turn so weaker hits surface    */
+   int per_source_max; /* Per-adapter fan-out cap before ranking.
+                        * INVARIANT: per_source_max * MAX_FOCUS_SOURCES <= 256
+                        * or the dominant-token heuristic self-disables. */
+} recall_config_t;
+
 typedef struct {
    bool enabled;                         /* Enable memory system */
    int context_budget_tokens;            /* Max tokens for memory context (~800) */
@@ -801,6 +817,10 @@ typedef struct {
     * and the prompt-builder integration ships in 1e.  See
     * `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md` §"Phase 1 — Per-Turn Focus". */
    focus_injection_config_t focus_injection;
+
+   /* Unified cross-source `recall` tool — deep gather at a larger budget than
+    * the per-turn focus injection above.  See recall_config_t. */
+   recall_config_t recall;
 
    /* Phase 2 entity-merge auto-merge gate.  Fires after each extraction
     * completes, evaluates was_created entities against existing canonicals

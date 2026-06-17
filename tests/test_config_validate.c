@@ -96,6 +96,12 @@ static void set_valid_defaults(void) {
     * comment about silent-no-op-at-zero. */
    s_config.memory.focus_injection.dominant_token_heuristic.threshold = 0.6f;
    s_config.memory.focus_injection.dominant_token_heuristic.base_penalty = 0.5f;
+   /* memory.recall.* added with the unified recall tool — needs valid defaults
+    * so the baseline config validates clean (mirrors focus_injection above). */
+   s_config.memory.recall.top_k = 40;
+   s_config.memory.recall.budget_bytes = 24576;
+   s_config.memory.recall.min_score = 0.25f;
+   s_config.memory.recall.per_source_max = 16;
    s_config.mqtt.port = 1883;
    s_config.network.workers = 4;
    s_config.network.session_timeout_sec = 3600;

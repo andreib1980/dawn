@@ -247,8 +247,11 @@ static const tool_metadata_t memory_metadata = {
    .name = "memory",
    .device_string = "memory",
    .topic = "dawn",
-   .aliases = { "remember", "recall" },
-   .alias_count = 2,
+   /* 'recall' was an alias here; it is now the dedicated unified cross-source
+    * recall tool (recall_tool.c).  Registry rejects duplicate names/aliases,
+    * so the alias was removed.  'remember' stays. */
+   .aliases = { "remember" },
+   .alias_count = 1,
 
    .description = "Store and retrieve persistent memories about the user. "
                   "Use 'remember' to store facts (preferences, information shared by user). "
@@ -271,8 +274,11 @@ static const tool_metadata_t memory_metadata = {
                   "address, a saved answer — use document_manage (save_note / edit) instead, NOT "
                   "remember. "
                   "Call 'remember' directly; it cannot be used inside execute_plan. "
-                  "Use 'search' to find relevant stored memories (optionally filtered by "
-                  "time_range like '24h', '7d', '2w'). "
+                  "Use 'search' for a TARGETED lookup of stored memory facts (optionally filtered "
+                  "by time_range like '24h', '7d', '2w'). For a BROAD 'what do we know about X' / "
+                  "'how do things stand' question, call the 'recall' tool FIRST instead — it spans "
+                  "memory, notes, documents, and the calendar in one pass; reach for memory "
+                  "'search' when you specifically need memory facts and recall isn't warranted. "
                   "Use 'forget' to remove memories by numeric ID (you MUST use 'search', 'recent', "
                   "or 'find_duplicates' first to find the ID); pass a comma-separated list for "
                   "several. 'forget' has TWO modes — pick deliberately: (1) DELETE (default, "

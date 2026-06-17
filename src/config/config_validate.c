@@ -187,6 +187,14 @@ int config_validate(const dawn_config_t *config,
    VALIDATE_RANGE_INT("memory.focus_injection.top_k", config->memory.focus_injection.top_k, 1, 64);
    VALIDATE_RANGE_INT("memory.focus_injection.summary_max_scan",
                       config->memory.focus_injection.summary_max_scan, 256, 16384);
+   /* Unified recall tool deep-gather limits.  per_source_max upper bound 16 keeps
+    * 16 * MAX_FOCUS_SOURCES(16) = 256 — the dominant-token heuristic pool ceiling
+    * — even in the worst case of a full adapter registry. */
+   VALIDATE_RANGE_INT("memory.recall.top_k", config->memory.recall.top_k, 1, 64);
+   VALIDATE_RANGE_INT("memory.recall.budget_bytes", config->memory.recall.budget_bytes, 1024,
+                      65536);
+   VALIDATE_RANGE_INT("memory.recall.per_source_max", config->memory.recall.per_source_max, 1, 16);
+   VALIDATE_RANGE_FLOAT("memory.recall.min_score", config->memory.recall.min_score, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.min_score",
                         config->memory.focus_injection.min_score, 0.0f, 1.0f);
    VALIDATE_RANGE_FLOAT("memory.focus_injection.weight_semantic",

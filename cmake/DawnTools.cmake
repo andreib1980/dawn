@@ -156,6 +156,14 @@ else()
     message(STATUS "DAWN: Memory tool DISABLED")
 endif()
 
+# Unified cross-source recall tool — aggregates the focus adapters
+# (memory/notes/documents/calendar) via focus_compose_ex.  Always compiled;
+# recall_is_available() gates at runtime on the embedding engine.
+list(APPEND TOOL_SOURCES
+    src/tools/recall_tool.c
+    src/tools/recall_format.c)
+message(STATUS "DAWN: Recall tool ENABLED")
+
 # DateTime Tools (date and time)
 if(DAWN_ENABLE_DATETIME_TOOL)
     add_definitions(-DDAWN_ENABLE_DATETIME_TOOL)

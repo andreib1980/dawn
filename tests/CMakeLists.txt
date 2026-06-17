@@ -547,6 +547,15 @@ dawn_add_unit_test(test_focus_dominant_token
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+# Recall result formatter — pure rendering of a focus_compose result into the
+# grouped, source-tagged "here's what we know" block.  No DB / no engine.
+dawn_add_unit_test(test_recall_format
+   SOURCES test_recall_format.c
+           ${SRC_ROOT}/src/tools/recall_format.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Phase 1c: extracted fact-search helper.  Links the production helper
 # against programmable memory_db_*/memory_embeddings_* stubs so the
 # pipeline's tokenize → multi-token-keyword → hybrid re-rank flow can

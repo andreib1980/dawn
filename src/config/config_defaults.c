@@ -495,6 +495,19 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.dominant_token_heuristic.threshold = 0.60f;
    config->memory.focus_injection.dominant_token_heuristic.base_penalty = 0.40f;
 
+   /* Unified cross-source `recall` tool (docs/CROSS_TOOL_RECALL_DESIGN.md §4.5).
+    * Deep gather: bigger than per-turn (top_k 12 / 10240 / 0.4) but bounded —
+    * 24 KB ≈ 6 K tokens fed back, deliberately NOT the 64 KB cap (no reranker to
+    * defend a long tail).  min_score lower so weaker-but-relevant hits surface.
+    * per_source_max 16 keeps any one source from crowding out the rest; at the
+    * current 6 live adapters that is a 96-candidate pool, and 16*MAX_FOCUS_SOURCES
+    * (16) = 256 keeps the dominant-token heuristic alive even at a full registry
+    * (see the validation cap in config_validate.c). */
+   config->memory.recall.top_k = 40;
+   config->memory.recall.budget_bytes = 24576;
+   config->memory.recall.min_score = 0.25f;
+   config->memory.recall.per_source_max = 16;
+
    /* Phase 2 entity-merge auto-merge gate.  auto_threshold=0.90 stays
     * conservative because auto-merges land with no human approval.
     * review_threshold=0.50 is permissive — proposals go through the
