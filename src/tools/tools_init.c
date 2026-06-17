@@ -123,6 +123,7 @@
 #endif
 
 #include "tools/plan_executor.h"
+#include "tools/recall_tool.h"
 
 /* ========== Registration ========== */
 
@@ -177,6 +178,13 @@ int tools_register_all(void) {
       OLOG_WARNING("Failed to register memory tool");
    }
 #endif
+
+   /* Unified cross-source recall — aggregates whatever focus adapters are
+    * registered (memory/notes/documents/calendar).  Registered unconditionally;
+    * recall_is_available() gates at runtime on the embedding engine. */
+   if (recall_tool_register() != 0) {
+      OLOG_WARNING("Failed to register recall tool");
+   }
 
 #ifdef DAWN_ENABLE_DATETIME_TOOL
    if (date_tool_register() != 0) {

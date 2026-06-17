@@ -227,14 +227,15 @@ static int candidate_byte_cost(const char *text) {
  * focus_compose — pipeline
  * ============================================================================= */
 
-int focus_compose(int user_id,
-                  bool include_private,
-                  const char *query_text,
-                  const float *query_embedding,
-                  size_t embed_dim,
-                  time_t now,
-                  int per_source_max_candidates,
-                  focus_compose_result_t *out_result) {
+int focus_compose_ex(int user_id,
+                     bool include_private,
+                     const char *query_text,
+                     const float *query_embedding,
+                     size_t embed_dim,
+                     time_t now,
+                     int per_source_max_candidates,
+                     const focus_limits_t *limits,
+                     focus_compose_result_t *out_result) {
    if (out_result == NULL)
       return FAILURE;
 
@@ -459,9 +460,18 @@ int focus_compose(int user_id,
     * Trim — min_score, top_k, token-budget
     * ===================================================================== */
    const focus_injection_config_t *fi = &g_config.memory.focus_injection;
+   /* Per-call overrides (recall tool) take precedence over config; a NULL
+    * limits or zero/negative field falls back to the per-turn config value.
+    * Only the THREE trim values are overridable — ranking weights stay
+    * config-sourced and shared with the per-turn path. */
+   const int cfg_budget = (limits && limits->budget_bytes > 0) ? limits->budget_bytes
+                                                               : fi->focus_budget_bytes;
+   const int cfg_top_k = (limits && limits->top_k > 0) ? limits->top_k : fi->top_k;
+   const float min_score = (limits && limits->min_score >= 0.0f) ? limits->min_score
+                                                                 : fi->min_score;
    int kept = 0;
-   int budget_left = fi->focus_budget_bytes;
-   const int top_k = (fi->top_k > 0) ? fi->top_k : pool_count;
+   int budget_left = cfg_budget;
+   const int top_k = (cfg_top_k > 0) ? cfg_top_k : pool_count;
 
    /* `keep[]` marks pool indices that survive trimming. */
    bool *keep = calloc((size_t)pool_count, sizeof(*keep));
@@ -478,7 +488,7 @@ int focus_compose(int user_id,
 
    for (int rank = 0; rank < pool_count && kept < top_k; rank++) {
       const ranker_entry_t *e = &order[rank];
-      if (e->score < fi->min_score)
+      if (e->score < min_score)
          break; /* Sorted desc — once below, all rest are below. */
 
       const int cost = candidate_byte_cost(pool[e->idx].text);
@@ -584,6 +594,19 @@ int focus_compose(int user_id,
               pool_count);
 
    return SUCCESS;
+}
+
+int focus_compose(int user_id,
+                  bool include_private,
+                  const char *query_text,
+                  const float *query_embedding,
+                  size_t embed_dim,
+                  time_t now,
+                  int per_source_max_candidates,
+                  focus_compose_result_t *out_result) {
+   /* Thin wrapper: the per-turn path uses all config-driven trim limits. */
+   return focus_compose_ex(user_id, include_private, query_text, query_embedding, embed_dim, now,
+                           per_source_max_candidates, NULL, out_result);
 }
 
 void focus_result_free(focus_compose_result_t *result) {

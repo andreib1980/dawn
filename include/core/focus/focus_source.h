@@ -272,6 +272,23 @@ typedef struct focus_compose_result_s {
 } focus_compose_result_t;
 
 /* =============================================================================
+ * Per-call trim-limit overrides (focus_compose_ex)
+ *
+ * The per-turn focus path (build_focus_block) uses the config-driven trim limits
+ * in `g_config.memory.focus_injection`.  The unified `recall` tool needs a
+ * larger, separate budget for a deep cross-source gather.  `focus_limits_t`
+ * overrides ONLY the three trim values; a NULL pointer or a zero/negative field
+ * falls back to the config value for that field.  Ranking WEIGHTS are NOT
+ * overridable here — they stay config-sourced and shared, so recall changes how
+ * MUCH is kept, not HOW it is ranked.
+ * ============================================================================= */
+typedef struct {
+   int top_k;        /* > 0 overrides focus_injection.top_k              */
+   float min_score;  /* >= 0 overrides focus_injection.min_score         */
+   int budget_bytes; /* > 0 overrides focus_injection.focus_budget_bytes */
+} focus_limits_t;
+
+/* =============================================================================
  * Public API
  * ============================================================================= */
 
@@ -347,6 +364,31 @@ int focus_compose(int user_id,
                   time_t now,
                   int per_source_max_candidates,
                   focus_compose_result_t *out_result);
+
+/**
+ * @brief Like focus_compose(), but with per-call trim-limit overrides.
+ *
+ * Identical pipeline to focus_compose(); the only difference is steps 3-5 (the
+ * min_score / top_k / byte-budget trim) consult `limits` first, falling back to
+ * `g_config.memory.focus_injection` per field when `limits` is NULL or a field
+ * is zero/negative.  Ranking (step 2) is unchanged — weights are always config.
+ *
+ * The unified `recall` tool uses this for a deep cross-source gather at a budget
+ * larger than the per-turn injection.  focus_compose() is a thin wrapper passing
+ * `limits = NULL`.
+ *
+ * @param limits Per-call trim overrides, or NULL to use config for all three.
+ * @see focus_compose for all other parameter semantics.
+ */
+int focus_compose_ex(int user_id,
+                     bool include_private,
+                     const char *query_text,
+                     const float *query_embedding,
+                     size_t embed_dim,
+                     time_t now,
+                     int per_source_max_candidates,
+                     const focus_limits_t *limits,
+                     focus_compose_result_t *out_result);
 
 /**
  * @brief Release everything `focus_compose()` allocated into `result`.

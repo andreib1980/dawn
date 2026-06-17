@@ -287,6 +287,22 @@ static const char k_tool_call_discipline_footer[] =
     "is the worst failure mode here — the user trusts the confirmation and finds out later "
     "that nothing happened.\n";
 
+/* Context-gathering routing nudge.  Lives in the stable prefix (cached, always
+ * emitted) per docs/CROSS_TOOL_RECALL_DESIGN.md §4.6.  Phase-0 baseline showed
+ * the model answers broad "what do we know / where do things stand" questions
+ * from a single (often wrong) source instead of fanning out; Phase-1 live test
+ * confirmed the tool-description demotion alone didn't lift `recall` invocation.
+ * This one-line steer is the reserved system-prompt lever that does. */
+static const char k_recall_routing_footer[] =
+    "\n\nCONTEXT GATHERING:\n"
+    "- When the user asks what is known / stored / remembered about a topic, person, project, or "
+    "situation, how something stands, or for a summary of context, call the 'recall' tool FIRST. "
+    "It gathers across memory, notes, documents, and the calendar in one pass and points you to "
+    "where the exact text lives.\n"
+    "- Go straight to a single per-source tool (document_read, document_search, document_grep, "
+    "memory search/get) only when you already know exactly which source and item holds the "
+    "answer.\n";
+
 /* Strip the TOOL DEFAULTS section from @p src into a fresh allocation.
  * `get_remote_command_prompt()` always emits TOOL DEFAULTS (location /
  * room / units / timezone fallback for unauthenticated callers).  For
@@ -384,13 +400,15 @@ static char *append_tool_discipline_footer(char *base) {
    if (base == NULL)
       return NULL;
    const size_t base_len = strlen(base);
-   const size_t footer_len = sizeof(k_tool_call_discipline_footer) - 1;
-   char *combined = malloc(base_len + footer_len + 1);
+   const size_t disc_len = sizeof(k_tool_call_discipline_footer) - 1;
+   const size_t recall_len = sizeof(k_recall_routing_footer) - 1;
+   char *combined = malloc(base_len + disc_len + recall_len + 1);
    if (combined == NULL)
       return base;
    memcpy(combined, base, base_len);
-   memcpy(combined + base_len, k_tool_call_discipline_footer, footer_len);
-   combined[base_len + footer_len] = '\0';
+   memcpy(combined + base_len, k_tool_call_discipline_footer, disc_len);
+   memcpy(combined + base_len + disc_len, k_recall_routing_footer, recall_len);
+   combined[base_len + disc_len + recall_len] = '\0';
    free(base);
    return combined;
 }

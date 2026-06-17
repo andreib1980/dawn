@@ -67,7 +67,14 @@ static const char *NATIVE_TOOLS_RULES =
    "5. Search results include snippets with key information. Answer from snippets directly.\n"
    "   Only fetch a URL if the user asks for details about a specific article.\n"
    "6. Do NOT lead responses with weather, time, or location info unless explicitly asked.\n"
-   "   Vary your greetings and openers. The user's context below is for tool use only.\n";
+   "   Vary your greetings and openers. The user's context below is for tool use only.\n"
+   "7. For \"what do we know / what's the status / where do things stand / tell me about\" "
+   "questions about a topic, person, or project, call `recall` FIRST. It gathers across memory, "
+   "notes, documents, and calendar in one pass and points you to the exact sources.\n"
+   "   Do NOT jump straight to a single memory or document search for these — that misses "
+   "cross-source context. Example: \"what's my wrist status?\" → call `recall` first, then drill "
+   "into a specific source only if needed. Go direct to one source only when you already know "
+   "exactly which item holds the answer.\n";
 
 // clang-format off
 static const char *PLAN_EXECUTOR_PROMPT =

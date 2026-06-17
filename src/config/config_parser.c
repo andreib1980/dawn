@@ -1516,6 +1516,22 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
       }
    }
 
+   /* Parse [memory.recall] sub-table — unified cross-source recall tool
+    * (docs/CROSS_TOOL_RECALL_DESIGN.md).  Deep-gather trim limits, separate
+    * from the per-turn focus_injection block above. */
+   toml_table_t *recall = toml_table_in(table, "recall");
+   if (recall) {
+      static const char *const recall_keys[] = { "top_k", "budget_bytes", "min_score",
+                                                 "per_source_max", NULL };
+      warn_unknown_keys(recall, "memory.recall", recall_keys);
+
+      recall_config_t *rc = &config->recall;
+      PARSE_INT(recall, "top_k", rc->top_k);
+      PARSE_INT(recall, "budget_bytes", rc->budget_bytes);
+      PARSE_DOUBLE(recall, "min_score", rc->min_score);
+      PARSE_INT(recall, "per_source_max", rc->per_source_max);
+   }
+
    /* Parse [memory.entity_merge] sub-table — Phase 2 auto-merge gate. */
    toml_table_t *emerge = toml_table_in(table, "entity_merge");
    if (emerge) {
