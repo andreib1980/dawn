@@ -379,6 +379,7 @@ int focus_compose(int user_id,
  *
  * @param limits Per-call trim overrides, or NULL to use config for all three.
  * @see focus_compose for all other parameter semantics.
+ * @return SUCCESS on success, FAILURE on error (same contract as focus_compose).
  */
 int focus_compose_ex(int user_id,
                      bool include_private,
