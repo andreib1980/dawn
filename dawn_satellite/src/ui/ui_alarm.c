@@ -270,6 +270,55 @@ bool ui_alarm_is_active(const ui_alarm_t *a) {
  * Render — simple solid card, no animation
  * ============================================================================= */
 
+/**
+ * @brief Shorten a label in place so it fits within @p max_w pixels on one line.
+ *
+ * Scheduler messages (timers, reminders, tasks) can be a full sentence, but the
+ * overlay card only has one line of room. Rather than let the texture clip
+ * mid-glyph, trim the text to fit and append an ellipsis. Trimming steps back
+ * one UTF-8 character at a time so multibyte sequences are never split.
+ */
+static void truncate_label_to_width(TTF_Font *font, char *text, size_t text_sz, int max_w) {
+   int w = 0, h = 0;
+
+   if (!font || !text || max_w <= 0)
+      return;
+   if (TTF_SizeUTF8(font, text, &w, &h) == 0 && w <= max_w)
+      return; /* already fits */
+
+   /* Walk backwards, replacing the tail with an ellipsis in place until the
+    * "<prefix>..." form fits. Shrinking monotonically means each shorter
+    * candidate overwrites only bytes past its own prefix, so earlier content is
+    * never corrupted and no scratch buffer is needed. */
+   size_t len = strlen(text);
+   while (len > 0) {
+      len--;
+      /* back up to a UTF-8 character boundary (skip continuation bytes) */
+      while (len > 0 && ((unsigned char)text[len] & 0xC0) == 0x80)
+         len--;
+
+      /* drop trailing spaces so the ellipsis hugs the last word */
+      size_t trimmed = len;
+      while (trimmed > 0 && text[trimmed - 1] == ' ')
+         trimmed--;
+
+      /* need room for "...\0" at this position */
+      if (trimmed + 4 > text_sz)
+         continue;
+
+      text[trimmed] = '.';
+      text[trimmed + 1] = '.';
+      text[trimmed + 2] = '.';
+      text[trimmed + 3] = '\0';
+
+      if (TTF_SizeUTF8(font, text, &w, &h) == 0 && w <= max_w)
+         return;
+   }
+
+   /* Nothing fit (max_w smaller than the ellipsis itself) — show just the dots. */
+   snprintf(text, text_sz, "...");
+}
+
 void ui_alarm_render(ui_alarm_t *a, SDL_Renderer *r, double time_sec) {
    (void)time_sec;
 
@@ -310,6 +359,19 @@ void ui_alarm_render(ui_alarm_t *a, SDL_Renderer *r, double time_sec) {
       title_text = "TIMER";
    }
 
+   /* Calculate card width first — the label is trimmed to fit inside it. */
+   bool can_snooze = (strcmp(type, "alarm") == 0);
+   int btn_row_w = can_snooze ? (BTN_WIDTH * 2 + BTN_GAP) : BTN_WIDTH;
+
+   int card_w = CARD_WIDTH;
+   if (card_w < btn_row_w + CARD_PADDING * 2)
+      card_w = btn_row_w + CARD_PADDING * 2;
+
+   int max_w = card_w - CARD_PADDING * 2;
+
+   /* Shorten long messages so they fit on the card's single line. */
+   truncate_label_to_width(a->label_font, label, sizeof(label), max_w);
+
    /* Rebuild cached textures if type/label changed */
    if (strcmp(a->cached_type, type) != 0) {
       if (a->title_tex)
@@ -323,14 +385,6 @@ void ui_alarm_render(ui_alarm_t *a, SDL_Renderer *r, double time_sec) {
       a->label_tex = ui_build_white_tex(r, a->label_font, label, &a->label_w, &a->label_h);
       snprintf(a->cached_label, sizeof(a->cached_label), "%s", label);
    }
-
-   /* Calculate card dimensions based on content */
-   bool can_snooze = (strcmp(type, "alarm") == 0);
-   int btn_row_w = can_snooze ? (BTN_WIDTH * 2 + BTN_GAP) : BTN_WIDTH;
-
-   int card_w = CARD_WIDTH;
-   if (card_w < btn_row_w + CARD_PADDING * 2)
-      card_w = btn_row_w + CARD_PADDING * 2;
 
    /* Card height: padding + title + gap + label + gap + button + padding */
    int card_h = CARD_PADDING + a->title_h + 16 + a->label_h + 24 + BTN_HEIGHT + CARD_PADDING;
@@ -359,8 +413,7 @@ void ui_alarm_render(ui_alarm_t *a, SDL_Renderer *r, double time_sec) {
    if (a->label_tex) {
       SDL_SetTextureColorMod(a->label_tex, 0xEE, 0xEE, 0xEE);
       SDL_SetTextureAlphaMod(a->label_tex, 255);
-      int max_w = card_w - CARD_PADDING * 2;
-      int draw_w = a->label_w > max_w ? max_w : a->label_w;
+      int draw_w = a->label_w > max_w ? max_w : a->label_w; /* safety clamp */
       SDL_Rect dst = { card_x + (card_w - draw_w) / 2, content_y, draw_w, a->label_h };
       SDL_RenderCopy(r, a->label_tex, NULL, &dst);
    }

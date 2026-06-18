@@ -2005,11 +2005,24 @@ static void alarm_snooze_cb(int64_t event_id, int snooze_minutes, void *userdata
 
 static void volume_set_cb(int level, void *user_data) {
    sdl_ui_t *ui = (sdl_ui_t *)user_data;
+
+   if (level < 0)
+      level = 0;
+   else if (level > 100)
+      level = 100;
+
    set_master_volume(ui, level);
 
    /* Update slider to reflect new volume (rendered on next frame) */
    if (ui->sliders_initialized) {
       ui->volume_slider.value = (float)level / 100.0f;
+   }
+
+   /* Persist so a daemon/WebUI volume change survives a restart. The touch path
+    * saves on finger-up; this callback has no equivalent hook, so save here. */
+   if (ui->sat_config && ui->sat_config->sdl_ui.volume_pct != level) {
+      ui->sat_config->sdl_ui.volume_pct = level;
+      satellite_config_save_ui_prefs(ui->sat_config);
    }
 }
 
