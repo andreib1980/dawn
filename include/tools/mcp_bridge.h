@@ -140,6 +140,7 @@ int mcp_bridge_server_connected(const char *server_alias);
  * server first reached after init exposes its tools on the next restart). This
  * is sufficient for direct programmatic callers such as @ref mcp_bridge_call_tool.
  *
+ * @param server_alias Configured alias of the upstream server to connect.
  * @return SUCCESS if the alias is connected (already or after reconnect);
  *         FAILURE if it is not configured or the reconnect failed.
  */

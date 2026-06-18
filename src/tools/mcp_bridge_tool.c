@@ -714,10 +714,13 @@ int mcp_bridge_call_tool(const char *server_alias,
       return FAILURE;
    }
 
-   /* Self-heal: reconnect a server that wasn't ready at startup before the call.
-    * (mcp_client_call also lazily reconnects, but doing it here also registers
-    * the server's tools on first success — and gives a clean failure if the
-    * server is genuinely down.) */
+   /* Self-heal: reconnect a server that wasn't ready at startup before the call
+    * (mcp_client_call also lazily reconnects; doing it here surfaces a genuinely
+    * down server as the clean "no connected server" failure below). The return
+    * is intentionally not checked — a failed reconnect leaves the slot's client
+    * NULL, which the lookup below catches and reports. Note: this restores the
+    * connection only; it does NOT register the server's tools (the registry is
+    * locked post-init — see mcp_bridge_ensure_connected). */
    mcp_bridge_ensure_connected(server_alias);
 
    mcp_client_t *client = NULL;

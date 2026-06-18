@@ -44,10 +44,18 @@
     * refresh path). */
    let ctx = null;
 
-   /* Local escapeHtml shim — uses the parent's if provided, else a safe
-    * fallback (matches the pattern in memory_aliases.js). */
+   /* Local escapeHtml shim — uses the parent's escaper if init() injected one,
+    * else a real HTML-entity escaper. The output feeds innerHTML, so the
+    * fallback must never return the raw string (that would be an XSS sink if
+    * ctx is missing/failed to init). */
    function escapeHtml(s) {
-      return ctx && ctx.escapeHtml ? ctx.escapeHtml(s) : s;
+      if (ctx && ctx.escapeHtml) return ctx.escapeHtml(s);
+      return String(s == null ? '' : s)
+         .replace(/&/g, '&amp;')
+         .replace(/</g, '&lt;')
+         .replace(/>/g, '&gt;')
+         .replace(/"/g, '&quot;')
+         .replace(/'/g, '&#39;');
    }
 
    /* =============================================================================
@@ -167,6 +175,13 @@
        * intended initial focus target. */
       const M = window.DawnSettingsModals;
       if (M && typeof M.trapFocus === 'function') {
+         /* Release a prior trap first — a double-open (button clicked while the
+          * modal is already up) would otherwise leak the old cleanup handle and
+          * leave two competing traps installed. */
+         if (importFocusTrapCleanup) {
+            importFocusTrapCleanup();
+            importFocusTrapCleanup = null;
+         }
          importFocusTrapCleanup = M.trapFocus(modal, { skipInitialFocus: true });
       }
    }

@@ -342,7 +342,11 @@
             iframe.style.height = '400px';
          }
       } else {
-         var hasCanvas = code.indexOf('<canvas') !== -1;
+         /* Gate the Chart.js sizing fix on an actual Chart.js construction, not
+          * a bare <canvas>: a non-chart canvas visual (custom 2D drawing) must
+          * not get the wrapper + overflow:hidden + forced fill, which would
+          * distort it. `new Chart(` is present in every generated chart. */
+         var isChartJs = code.indexOf('<canvas') !== -1 && /\bnew\s+Chart\s*\(/.test(code);
 
          /* --- Chart.js responsive sizing in an opaque-origin srcdoc iframe ---
           *
@@ -369,7 +373,7 @@
           * resize() timing relative to the entrance animation. */
          var canvasCSS = '';
          var chartFix = '';
-         if (hasCanvas) {
+         if (isChartJs) {
             /* Resolve a definite wrapper height: honor a stored canvas
              * max-height (cap it to the frame) else use the default frame box. */
             var FRAME_H = 380; /* px; matches the 400px iframe minus container chrome */
