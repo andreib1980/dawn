@@ -2280,15 +2280,11 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "bm25_enabled = %s\n", config->memory.bm25_enabled ? "true" : "false");
    fprintf(fp, "category_threshold = %.2f\n", config->memory.category_threshold);
    fprintf(fp, "search_score_floor = %.2f\n", config->memory.search_score_floor);
-
-   fprintf(fp, "\n[memory.graph_retrieval]\n");
-   fprintf(fp, "enabled = %s\n", config->memory.graph_retrieval.enabled ? "true" : "false");
-   fprintf(fp, "entity_grounding_bonus = %.2f\n",
-           config->memory.graph_retrieval.entity_grounding_bonus);
-   fprintf(fp, "max_facts_per_query = %d\n", config->memory.graph_retrieval.max_facts_per_query);
-   fprintf(fp, "use_query_scoring = %s\n",
-           config->memory.graph_retrieval.use_query_scoring ? "true" : "false");
-   fprintf(fp, "entity_bonus = %.2f\n", config->memory.graph_retrieval.entity_bonus);
+   /* backfill_on_startup / model_id / recompute_* belong to the embeddings
+    * sub-table: the parser reads them from [memory.embeddings] (config_parser.c),
+    * NOT graph_retrieval.  Writing them here keeps writer + parser in the same
+    * section so a saved config round-trips instead of emitting "unknown key"
+    * warnings and silently falling back to defaults. */
    fprintf(fp, "backfill_on_startup = %s\n",
            config->memory.embedding_backfill_on_startup ? "true" : "false");
    if (config->memory.model_id[0]) {
@@ -2300,6 +2296,15 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
            config->memory.recompute_on_model_change ? "true" : "false");
    fprintf(fp, "recompute_batch_size = %d\n", config->memory.recompute_batch_size);
    fprintf(fp, "recompute_batch_sleep_ms = %d\n", config->memory.recompute_batch_sleep_ms);
+
+   fprintf(fp, "\n[memory.graph_retrieval]\n");
+   fprintf(fp, "enabled = %s\n", config->memory.graph_retrieval.enabled ? "true" : "false");
+   fprintf(fp, "entity_grounding_bonus = %.2f\n",
+           config->memory.graph_retrieval.entity_grounding_bonus);
+   fprintf(fp, "max_facts_per_query = %d\n", config->memory.graph_retrieval.max_facts_per_query);
+   fprintf(fp, "use_query_scoring = %s\n",
+           config->memory.graph_retrieval.use_query_scoring ? "true" : "false");
+   fprintf(fp, "entity_bonus = %.2f\n", config->memory.graph_retrieval.entity_bonus);
 
    fprintf(fp, "\n[memory.recovery]\n");
    fprintf(fp, "enabled = %s\n", config->memory.recovery_enabled ? "true" : "false");
