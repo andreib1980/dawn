@@ -837,6 +837,16 @@ add_custom_target(no_process_mgmt_check
     COMMENT "Checking coding-harness invariant: no process-management calls")
 add_dependencies(dawn no_process_mgmt_check)
 
+# WebUI send-path CI invariant: forbid direct lws_write() of WS data frames
+# outside the sanctioned response-queue drain (webui_send.c) and the separate
+# music-streaming context.  A direct write interleaves with large queued frames
+# and corrupts the WebSocket framing, looping the client.  See webui_send.c.
+add_custom_target(no_ws_direct_write_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_no_ws_direct_write.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking WebUI invariant: no direct WS-frame lws_write()")
+add_dependencies(dawn no_ws_direct_write_check)
+
 # libgit2 link for the code-projects subsystem (detected above).
 if(DAWN_ENABLE_CODE_PROJECTS)
     target_link_libraries(dawn ${LIBGIT2_LIBRARIES})

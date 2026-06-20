@@ -129,7 +129,14 @@ static int callback_music_websocket(struct lws *wsi,
 
                      OLOG_INFO("Music server: Authenticated session %u", session->session_id);
 
-                     /* Send auth success */
+                     /* Direct lws_write() is safe here (and allowlisted in
+                      * scripts/check_no_ws_direct_write.sh) — unlike the main
+                      * WebUI connection, this is a SEPARATE lws context with no
+                      * shared response queue, the frame is a single fixed 18-byte
+                      * handshake written exactly once, and it lands BEFORE any
+                      * streaming begins, so it can never interleave with or be
+                      * choked behind another frame.  Music audio frames use the
+                      * proper WRITEABLE-callback path (webui_music_write_pending). */
                      const char *response = "{\"type\":\"auth_ok\"}";
                      unsigned char buf[LWS_PRE + 64];
                      size_t response_len = strlen(response);

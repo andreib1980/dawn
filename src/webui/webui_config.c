@@ -24,6 +24,13 @@
  * - get_config, set_config, set_secrets (configuration management)
  * - get_audio_devices (audio device enumeration)
  * - list_models, list_interfaces (discovery)
+ *
+ * WebSocket-send funnel rule (CI-enforced by scripts/check_no_ws_direct_write.sh):
+ * every server->client WS frame on the main connection goes through
+ * send_json_response() / queue_response(); NEVER call lws_write() directly from
+ * a handler.  libwebsockets allows only one write per writeable callback and a
+ * direct write can interleave with a large queued frame mid-drain, corrupting
+ * the framing and looping the client.  See webui_send.c.
  */
 
 #include <dirent.h>
@@ -242,16 +249,12 @@ void handle_get_config(ws_connection_t *conn) {
 
    json_object_object_add(response, "payload", payload);
 
-   /* Send response */
-   const char *json_str = json_object_to_json_string(response);
-   size_t json_len = strlen(json_str);
-   unsigned char *buf = malloc(LWS_PRE + json_len);
-   if (buf) {
-      memcpy(buf + LWS_PRE, json_str, json_len);
-      lws_write(conn->wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
-      free(buf);
-   }
-
+   /* Send via the response queue — NEVER lws_write() directly. A direct write
+    * here can interleave with a large queued frame still draining on the same
+    * connection (e.g. a 100 KB+ load_conversation_response), corrupting the
+    * WebSocket framing and triggering a client reconnect loop. See the funnel
+    * rule at the top of this file and webui_send.c. */
+   send_json_response(conn, response);
    json_object_put(response);
    OLOG_INFO("WebUI: Sent configuration to client");
 }
@@ -1840,15 +1843,9 @@ void handle_get_audio_devices(ws_connection_t *conn, struct json_object *payload
    json_object_object_add(resp_payload, "playback_devices", playback_devices);
    json_object_object_add(response, "payload", resp_payload);
 
-   const char *json_str = json_object_to_json_string(response);
-   size_t json_len = strlen(json_str);
-   unsigned char *buf = malloc(LWS_PRE + json_len);
-   if (buf) {
-      memcpy(buf + LWS_PRE, json_str, json_len);
-      lws_write(conn->wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
-      free(buf);
-   }
-
+   /* Send via the response queue — NEVER lws_write() directly (see funnel rule
+    * at the top of this file and webui_send.c). */
+   send_json_response(conn, response);
    json_object_put(response);
    OLOG_INFO("WebUI: Sent audio devices for backend '%s'", backend);
 }
