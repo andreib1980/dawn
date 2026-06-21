@@ -756,6 +756,7 @@ int email_service_search(int user_id,
    if (acct_count <= 0)
       return EMAIL_RC_NO_ACCOUNTS;
    int enabled_seen = 0;
+   int any_error = 0;
    int total = 0;
    for (int i = 0; i < acct_count && total < max; i++) {
       if (!accounts[i].enabled)
@@ -766,17 +767,27 @@ int email_service_search(int user_id,
       int remaining = max - total;
       int rc = search_single_account(&accounts[i], params, out + total, remaining, &this_count,
                                      NULL, 0);
-      if (rc == 0)
+      if (rc == 0) {
          total += this_count;
+      } else {
+         /* Per-account transport/upstream failure.  Logged (not silent) so a
+          * genuine backend problem is diagnosable from the log; the search still
+          * continues across the remaining accounts. */
+         any_error = 1;
+         OLOG_WARNING("email: search failed for account '%s' (rc=%d)", accounts[i].name, rc);
+      }
    }
 
    *out_count = total;
    if (total > 0)
       return EMAIL_RC_OK;
-   /* Zero results across all enabled accounts could mean genuine no-match OR
-    * a transport failure on every attempt — keep as generic FAILURE here.
-    * "All accounts disabled" returns NO_ACCOUNTS so the LLM can guide the user. */
-   return enabled_seen ? EMAIL_RC_FAILURE : EMAIL_RC_NO_ACCOUNTS;
+   if (!enabled_seen)
+      return EMAIL_RC_NO_ACCOUNTS;
+   /* Zero results across all enabled accounts: distinguish a genuine no-match
+    * (every account searched OK, just nothing matched) from a real failure (at
+    * least one account errored).  Reporting no-match as FAILURE makes the LLM
+    * believe email is down and abandon the search instead of broadening it. */
+   return any_error ? EMAIL_RC_FAILURE : EMAIL_RC_OK;
 }
 
 /* =============================================================================

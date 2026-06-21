@@ -745,8 +745,10 @@ static int fetch_message_ids(CURL *curl,
 
    struct json_object *root = json_tokener_parse(resp.data);
    curl_buffer_free(&resp);
-   if (!root)
+   if (!root) {
+      OLOG_ERROR("gmail: failed to parse message-list JSON response");
       return 1;
+   }
 
    struct json_object *messages = NULL;
    if (!json_object_object_get_ex(root, "messages", &messages) ||
@@ -1179,8 +1181,10 @@ int gmail_search(const char *token,
       max_results = max_out;
 
    CURL *curl = gmail_create_curl();
-   if (!curl)
+   if (!curl) {
+      OLOG_ERROR("gmail: failed to init curl handle for search");
       return 1;
+   }
 
    /* Build Gmail search query — folder query comes from params->folder via service layer */
    const char *folder_lq = (params->folder[0]) ? params->folder : NULL;
