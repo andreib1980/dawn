@@ -253,6 +253,28 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);"
 
+    /* Generic blob store — original-file storage (v68).  Filesystem-backed:
+     * metadata only here.  Per-user content-hash dedup; `kind` tags the consumer
+     * (document_original=0; future audio/video).  Referenced by
+     * documents.original_blob_id (defined below). */
+    "CREATE TABLE IF NOT EXISTS blobs ("
+    "   id TEXT PRIMARY KEY,"
+    "   user_id INTEGER NOT NULL,"
+    "   kind INTEGER NOT NULL DEFAULT 0,"
+    "   retention_policy INTEGER NOT NULL DEFAULT 0,"
+    "   content_hash TEXT NOT NULL,"
+    "   mime_type TEXT NOT NULL,"
+    "   size INTEGER NOT NULL,"
+    "   filename TEXT NOT NULL,"
+    "   filename_original TEXT,"
+    "   created_at INTEGER NOT NULL,"
+    "   last_accessed INTEGER,"
+    "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_blobs_user ON blobs(user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_blobs_created ON blobs(created_at);"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_blobs_user_hash ON blobs(user_id, content_hash);"
+
     /* Satellite mappings table (added in schema v20) */
     "CREATE TABLE IF NOT EXISTS satellite_mappings ("
     "   uuid TEXT PRIMARY KEY,"
@@ -608,7 +630,13 @@ static const char *SCHEMA_SQL =
     "  num_chunks INTEGER NOT NULL,"
     "  is_global INTEGER DEFAULT 0,"
     "  created_at INTEGER NOT NULL,"
-    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+    /* original_blob_id (v68): the stored source file in `blobs`.  ON DELETE SET
+     * NULL so deleting a blob clears the link; deleting a document leaves the
+     * blob to the orphan sweep.  Migrated DBs get a plain TEXT column (SQLite
+     * can't ALTER-add an FK) with the link enforced in C. */
+    "  original_blob_id TEXT DEFAULT NULL,"
+    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+    "  FOREIGN KEY(original_blob_id) REFERENCES blobs(id) ON DELETE SET NULL"
     ");"
     /* document_chunks.created_at added in v35 — used by temporal-query scoring to
      * boost chunks whose origin date is near the user's referenced point in time
@@ -626,6 +654,7 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash);"
+    "CREATE INDEX IF NOT EXISTS idx_documents_original_blob ON documents(original_blob_id);"
 
     /* v61: FTS5 BM25 keyword index over document chunks — the lexical retrieval
      * channel that runs as its OWN candidate set (fused with semantic in

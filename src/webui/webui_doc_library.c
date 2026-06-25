@@ -298,6 +298,14 @@ void handle_doc_library_index(ws_connection_t *conn, json_object *payload) {
    bool is_global = json_object_object_get_ex(payload, "is_global", &global_obj) &&
                     json_object_get_boolean(global_obj);
 
+   /* Optional original-file blob id, echoed back by the browser from the upload
+    * response so the indexed document links to its stored source file (v68). */
+   json_object *blob_obj = NULL;
+   const char *original_blob_id = NULL;
+   if (json_object_object_get_ex(payload, "original_blob_id", &blob_obj)) {
+      original_blob_id = json_object_get_string(blob_obj);
+   }
+
    /* Only admins can mark documents as global */
    if (is_global && !conn_check_admin_quiet(conn))
       is_global = false;
@@ -306,7 +314,7 @@ void handle_doc_library_index(ws_connection_t *conn, json_object *payload) {
       size_t text_len = text ? strlen(text) : 0;
       doc_index_result_t result;
       int rc = document_index_text(conn->auth_user_id, filename, filetype, text, text_len,
-                                   is_global, &result);
+                                   is_global, original_blob_id, &result);
 
       if (rc != DOC_INDEX_SUCCESS) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -639,7 +647,7 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
       recreated_as_note = (rc == DOC_INDEX_SUCCESS);
       if (rc != DOC_INDEX_SUCCESS)
          rc = document_index_text(conn->auth_user_id, fname, "text", text, strlen(text), false,
-                                  &result);
+                                  NULL, &result);
       if (rc == DOC_INDEX_SUCCESS) {
          deleted_doc_id = doc_id; /* re-point its snapshots onto the new doc */
          doc_id = result.doc_id;

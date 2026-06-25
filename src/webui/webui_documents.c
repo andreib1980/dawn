@@ -37,6 +37,8 @@
 #include <strings.h>
 
 #include "config/dawn_config.h"
+#include "core/hash_util.h"
+#include "document_original_store.h"
 #include "logging.h"
 #include "tools/document_extract.h"
 #include "tools/tfidf_summarizer.h"
@@ -59,6 +61,8 @@ struct document_upload_session {
    size_t max_file_size;      /* bytes */
    size_t max_extracted_size; /* bytes */
    int max_pages;
+   int user_id;                        /* authenticated uploader (for original storage) */
+   char original_blob_id[BLOB_ID_LEN]; /* set when the original was stored (else "") */
 };
 
 /* =============================================================================
@@ -247,6 +251,36 @@ static bool parse_doc_multipart(document_upload_session_t *session) {
  * Uses json-c for safe JSON construction (handles escaping).
  * Includes estimated_tokens for client-side token budget checks.
  */
+/** @brief Map a document extension to a storage MIME (for the blob filename +
+ *  download Content-Type).  Leading dot tolerated; unknown -> octet-stream. */
+static const char *doc_ext_to_mime(const char *ext) {
+   if (!ext) {
+      return "application/octet-stream";
+   }
+   if (ext[0] == '.') {
+      ext++;
+   }
+   if (strcasecmp(ext, "pdf") == 0) {
+      return "application/pdf";
+   }
+   if (strcasecmp(ext, "docx") == 0) {
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+   }
+   if (strcasecmp(ext, "doc") == 0) {
+      return "application/msword";
+   }
+   if (strcasecmp(ext, "txt") == 0) {
+      return "text/plain";
+   }
+   if (strcasecmp(ext, "md") == 0 || strcasecmp(ext, "markdown") == 0) {
+      return "text/markdown";
+   }
+   if (strcasecmp(ext, "rtf") == 0) {
+      return "application/rtf";
+   }
+   return "application/octet-stream";
+}
+
 static int send_doc_success(struct lws *wsi, document_upload_session_t *session, const char *ext) {
    /* Build JSON response using json-c */
    json_object *resp = json_object_new_object();
@@ -274,6 +308,13 @@ static int send_doc_success(struct lws *wsi, document_upload_session_t *session,
    json_object_object_add(resp, "size", json_object_new_int64((int64_t)content_size));
    json_object_object_add(resp, "type", json_object_new_string(ext ? ext : ""));
    json_object_object_add(resp, "estimated_tokens", json_object_new_int(estimated_tokens));
+
+   /* Original-file blob id (v68) — the browser echoes it into the index message
+    * so the stored conversation can offer the real file (Phase 6). */
+   if (session->original_blob_id[0]) {
+      json_object_object_add(resp, "original_blob_id",
+                             json_object_new_string(session->original_blob_id));
+   }
 
    /* Include page count for PDF files */
    if (session->page_count > 0) {
@@ -394,7 +435,9 @@ void webui_documents_session_free(document_upload_session_t *session) {
    free(session);
 }
 
-int webui_documents_handle_upload_start(struct lws *wsi, document_upload_session_t **session_out) {
+int webui_documents_handle_upload_start(struct lws *wsi,
+                                        document_upload_session_t **session_out,
+                                        int user_id) {
    if (!session_out)
       return LWS_CLOSE_CONNECTION;
 
@@ -442,6 +485,7 @@ int webui_documents_handle_upload_start(struct lws *wsi, document_upload_session
    session->max_file_size = max_file_size;
    session->max_extracted_size = (size_t)g_config.documents.max_extracted_size_kb * 1024;
    session->max_pages = g_config.documents.max_pages;
+   session->user_id = user_id;
 
    /* Extract boundary */
    if (!extract_doc_boundary(content_type, session->boundary, sizeof(session->boundary))) {
@@ -542,6 +586,33 @@ int webui_documents_handle_upload_complete(struct lws *wsi, document_upload_sess
       OLOG_WARNING("webui_documents: extraction failed for %s: %s", session->filename, err_msg);
       webui_documents_session_free(session);
       return send_doc_error(wsi, 422, err_msg);
+   }
+
+   /* Store the ORIGINAL upload bytes here — they're valid only until the free
+    * below.  Only on the post-extraction-success path (so we never store an
+    * unvalidated blob).  Best-effort: a storage failure must not fail the upload,
+    * since the extracted text is the primary product. */
+   session->original_blob_id[0] = '\0';
+   if (g_config.documents.originals_enabled && document_originals_ready() && session->user_id > 0 &&
+       session->content_len > 0) {
+      size_t max_orig = (size_t)g_config.documents.max_original_size_mb * 1024 * 1024;
+      if (session->content_len <= max_orig) {
+         char content_hash[DAWN_SHA256_HEX_LEN];
+         dawn_sha256_hex(session->content_buf, session->content_len, content_hash);
+         char blob_id[BLOB_ID_LEN];
+         int srv = document_original_save(session->user_id, session->content_buf,
+                                          session->content_len, doc_ext_to_mime(ext), content_hash,
+                                          session->filename, blob_id);
+         if (srv == BLOB_STORE_SUCCESS) {
+            snprintf(session->original_blob_id, sizeof(session->original_blob_id), "%s", blob_id);
+         } else {
+            OLOG_WARNING("webui_documents: original not stored for %s (rc=%d)", session->filename,
+                         srv);
+         }
+      } else {
+         OLOG_INFO("webui_documents: original for %s exceeds max_original_size_mb; not stored",
+                   session->filename);
+      }
    }
 
    /* Replace raw content with extracted text */
@@ -647,4 +718,69 @@ int webui_documents_handle_summarize(struct lws *wsi, const char *body, size_t b
 
    free(summary);
    return send_doc_json_response(wsi, HTTP_STATUS_OK, resp);
+}
+
+/* =============================================================================
+ * Original-file download (v68)
+ * ============================================================================= */
+
+/** @brief Sanitize an original filename for a Content-Disposition header value:
+ *  keep only [A-Za-z0-9._-] (defeats CR/LF/quote header injection). */
+static void sanitize_disposition_filename(const char *in, char *out, size_t out_size) {
+   size_t j = 0;
+   for (size_t i = 0; in && in[i] && j + 1 < out_size; i++) {
+      char c = in[i];
+      if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+          c == '_' || c == '-') {
+         out[j++] = c;
+      }
+   }
+   if (j == 0) {
+      snprintf(out, out_size, "download");
+      return;
+   }
+   out[j] = '\0';
+}
+
+int webui_documents_handle_original_download(struct lws *wsi, const char *blob_id, int user_id) {
+   if (!document_original_validate_id(blob_id)) {
+      return send_doc_error(wsi, HTTP_STATUS_BAD_REQUEST, "Invalid document ID");
+   }
+
+   char filepath[BLOB_PATH_MAX];
+   char mime_type[BLOB_MIME_MAX];
+   int result = document_original_get_path(blob_id, user_id, filepath, mime_type);
+   switch (result) {
+      case BLOB_STORE_SUCCESS:
+         break;
+      case BLOB_STORE_NOT_FOUND:
+         return send_doc_error(wsi, HTTP_STATUS_NOT_FOUND, "Document not found");
+      case BLOB_STORE_FORBIDDEN:
+         return send_doc_error(wsi, HTTP_STATUS_FORBIDDEN, "Access denied");
+      default:
+         return send_doc_error(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Failed to load document");
+   }
+
+   char orig_name[BLOB_FILENAME_ORIGINAL_MAX];
+   if (document_original_get_filename(blob_id, user_id, orig_name, sizeof(orig_name)) !=
+           BLOB_STORE_SUCCESS ||
+       orig_name[0] == '\0') {
+      snprintf(orig_name, sizeof(orig_name), "document");
+   }
+   char safe_name[BLOB_FILENAME_ORIGINAL_MAX];
+   sanitize_disposition_filename(orig_name, safe_name, sizeof(safe_name));
+
+   /* Always an attachment + nosniff — original docs are never rendered inline. */
+   char extra_headers[512];
+   int hdr_len = snprintf(extra_headers, sizeof(extra_headers),
+                          "Cache-Control: private, max-age=31536000\r\n"
+                          "X-Content-Type-Options: nosniff\r\n"
+                          "Content-Disposition: attachment; filename=\"%s\"\r\n",
+                          safe_name);
+
+   int n = lws_serve_http_file(wsi, filepath, mime_type, extra_headers, hdr_len);
+   if (n < 0) {
+      return send_doc_error(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Failed to serve document");
+   }
+   return 0; /* async serve completes via LWS callback */
 }

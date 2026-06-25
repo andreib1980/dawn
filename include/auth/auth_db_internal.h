@@ -56,7 +56,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 67
+#define AUTH_DB_SCHEMA_VERSION 68
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -336,6 +336,26 @@ typedef struct {
    sqlite3_stmt *stmt_email_acct_set_read_only;
    sqlite3_stmt *stmt_email_acct_set_enabled;
 
+   /* === Generic blob store statements (blob_store.c via document_original_store.c) ===
+    * Inserted before the OAuth group so stmt_oauth_list_accounts stays the last
+    * field (the _Static_assert + finalize memset bound depend on it). */
+   sqlite3_stmt *stmt_blob_create;
+   sqlite3_stmt *stmt_blob_get;
+   sqlite3_stmt *stmt_blob_get_file;
+   sqlite3_stmt *stmt_blob_delete;
+   sqlite3_stmt *stmt_blob_update_access;
+   sqlite3_stmt *stmt_blob_update_retention;
+   sqlite3_stmt *stmt_blob_count_user;
+   sqlite3_stmt *stmt_blob_sum_bytes_user;
+   sqlite3_stmt *stmt_blob_find_by_hash;
+   sqlite3_stmt *stmt_blob_delete_old;
+   sqlite3_stmt *stmt_blob_cache_total_size;
+   sqlite3_stmt *stmt_blob_delete_by_id;
+   sqlite3_stmt *stmt_blob_get_expired_ids;
+   sqlite3_stmt *stmt_blob_get_cache_lru_ids;
+   sqlite3_stmt *stmt_blob_get_orphan_ids;
+   sqlite3_stmt *stmt_blob_stats;
+
    /* === OAuth module statements (oauth_client.c) === */
    sqlite3_stmt *stmt_oauth_store;
    sqlite3_stmt *stmt_oauth_load;
@@ -513,6 +533,12 @@ int auth_db_migrations_v66(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v67(sqlite3 *db);
+
+/**
+ * @brief v68 migration: generic blobs table + documents.original_blob_id.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v68(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.

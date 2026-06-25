@@ -121,6 +121,7 @@
 #include "auth/admin_socket.h"
 #include "auth/auth_crypto.h"
 #include "auth/auth_maintenance.h"
+#include "document_original_store.h"
 #include "image_store.h"
 #include "memory/memory_embed_recompute.h"
 #include "memory/memory_recovery.h"
@@ -2462,6 +2463,12 @@ mqtt_disabled:
          OLOG_WARNING("Failed to initialize image store - vision uploads disabled");
       }
 
+      /* Initialize document-original storage (shares the blob store with images). */
+      if (g_config.documents.originals_enabled &&
+          document_originals_init(&g_config.documents, expanded_data_dir) != 0) {
+         OLOG_WARNING("Failed to initialize document original store - originals not retained");
+      }
+
       /* Initialize admin socket for dawn-admin CLI communication */
       if (admin_socket_init() != 0) {
          OLOG_WARNING("Failed to initialize admin socket - CLI management disabled");
@@ -3949,8 +3956,12 @@ server_shutdown:
    auth_maintenance_stop();
    OLOG_INFO("Shutdown: admin_socket_shutdown");
    admin_socket_shutdown();
+   document_originals_shutdown();
    OLOG_INFO("Shutdown: image_store_shutdown");
    image_store_shutdown();
+   /* Tear down the shared blob store once, after all consumers have dropped
+    * their readiness (statements themselves are owned + finalized by auth_db). */
+   blob_store_shutdown();
    OLOG_INFO("Shutdown: auth_crypto_shutdown");
    auth_crypto_shutdown();
 #endif

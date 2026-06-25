@@ -204,6 +204,8 @@
             estimated_tokens: result.estimated_tokens || 0,
             page_count: result.page_count || null,
             summarized: false,
+            // v68: server-stored original file id (absent if storage disabled).
+            original_blob_id: result.original_blob_id || null,
          };
 
          DawnState.documentState.pendingDocuments.push(docEntry);
@@ -528,23 +530,26 @@
    // --- Transcript Document Parsing ---
 
    /**
-    * Regex to match [ATTACHED DOCUMENT: filename (N bytes)]...content...[END DOCUMENT] markers
+    * Regex to match [ATTACHED DOCUMENT: filename (N bytes)]...content...[END DOCUMENT].
+    * The optional " blob:blb_xxxxxxxxxxxx" suffix (v68) links the stored original
+    * file; older messages without it still match (the group is optional).
     */
    const DOC_MARKER_RE =
-      /\[ATTACHED DOCUMENT: (.+?) \((\d+) bytes\)\]\n([\s\S]*?)\n+\[END DOCUMENT\]/g;
+      /\[ATTACHED DOCUMENT: (.+?) \((\d+) bytes\)(?: blob:(blb_[A-Za-z0-9]{12}))?\]\n([\s\S]*?)\n+\[END DOCUMENT\]/g;
 
    /**
     * Parse document markers from message text.
-    * Returns { cleanText, documents: [{filename, size, content}] }
+    * Returns { cleanText, documents: [{filename, size, content, blobId}] }
     */
    function parseDocumentMarkers(text) {
       const documents = [];
       const cleanText = text
-         .replace(DOC_MARKER_RE, (_, filename, sizeBytes, content) => {
+         .replace(DOC_MARKER_RE, (_, filename, sizeBytes, blobId, content) => {
             documents.push({
                filename,
                size: formatSize(parseInt(sizeBytes, 10)),
                content,
+               blobId: blobId || null,
             });
             return '';
          })
@@ -667,5 +672,8 @@
       isAllowedExtension,
       parseDocumentMarkers,
       openDocumentViewer,
+      // Shared with transcript chips so reloaded documents match the upload UI.
+      getFormatCategory,
+      formatExtension,
    };
 })(window);

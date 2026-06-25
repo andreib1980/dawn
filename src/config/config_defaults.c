@@ -275,7 +275,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->images.cache_size_mb = 200; /* 200MB LRU cache cap */
 
    /* Documents - upload and extraction limits */
-   config->documents.max_file_size_kb = 512;
+   config->documents.max_file_size_kb =
+       10240; /* 10 MB — allow real PDFs (and their stored originals) */
    config->documents.max_documents = 5;
    config->documents.max_pages = 100;
    config->documents.max_extracted_size_kb = 1024;
@@ -291,6 +292,13 @@ void config_set_defaults(dawn_config_t *config) {
    config->documents.search_min_score = 0.3f;
    config->documents.version_retention_days = 14; /* v62 note/doc undo window */
    config->documents.version_keep_per_doc = 10;
+   /* v68 original-file storage — keep-forever by default, orphan sweep only. */
+   config->documents.originals_enabled = true;
+   config->documents.original_retention_days = 0; /* 0 = keep forever */
+   config->documents.max_original_size_mb = 10;
+   config->documents.max_originals_per_user = 200;
+   config->documents.max_originals_total_mb_per_user = 2048;
+   config->documents.original_grace_minutes = 45;
 
    /* Vision - per-upload image size and dimension limits */
    config->vision.max_image_size_kb = 4096;

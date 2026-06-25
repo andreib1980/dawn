@@ -69,6 +69,8 @@ typedef struct {
  * @param text Extracted text to index
  * @param text_len Length of text in bytes
  * @param is_global Whether document should be visible to all users
+ * @param original_blob_id Stored original-file blob id (NULL if none, e.g. notes
+ *                         and the LLM tool path)
  * @param out Result struct (always populated)
  * @return DOC_INDEX_SUCCESS or error code
  */
@@ -78,6 +80,7 @@ int document_index_text(int user_id,
                         const char *text,
                         size_t text_len,
                         bool is_global,
+                        const char *original_blob_id,
                         doc_index_result_t *out);
 
 /**

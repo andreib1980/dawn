@@ -98,6 +98,19 @@ int document_db_create(int user_id,
                        int num_chunks,
                        bool is_global,
                        int64_t *id_out) {
+   return document_db_create_ex(user_id, filename, filepath, filetype, file_hash, num_chunks,
+                                is_global, NULL, id_out);
+}
+
+int document_db_create_ex(int user_id,
+                          const char *filename,
+                          const char *filepath,
+                          const char *filetype,
+                          const char *file_hash,
+                          int num_chunks,
+                          bool is_global,
+                          const char *original_blob_id,
+                          int64_t *id_out) {
    if (!filename || !filepath || !filetype || !file_hash || !id_out)
       return FAILURE;
 
@@ -118,6 +131,11 @@ int document_db_create(int user_id,
    sqlite3_bind_int(stmt, 6, num_chunks);
    sqlite3_bind_int(stmt, 7, is_global ? 1 : 0);
    sqlite3_bind_int64(stmt, 8, (int64_t)time(NULL));
+   if (original_blob_id && original_blob_id[0]) {
+      sqlite3_bind_text(stmt, 9, original_blob_id, -1, SQLITE_TRANSIENT);
+   } else {
+      sqlite3_bind_null(stmt, 9);
+   }
 
    int rc = sqlite3_step(stmt);
    int result = FAILURE;

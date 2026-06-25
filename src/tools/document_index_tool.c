@@ -583,7 +583,7 @@ index_document:
    /* Index (is_global intentionally false — LLM cannot make documents globally visible) */
    doc_index_result_t idx_result;
    int idx_rc = document_index_text(user_id, filename, ext, extract.text, extract.text_len, false,
-                                    &idx_result);
+                                    NULL, &idx_result);
 
    free(extract.text);
 

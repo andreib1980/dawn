@@ -97,17 +97,20 @@
    color: var(--error);
 }
 
-/* Format-category color coding for type badges */
+/* Format-category color coding for type badges (tokenized in variables.css). */
 .doc-chip-type[data-category='document'] {
-   background: #e16b3a;
+   background: var(--doc-category-document);
+   color: var(--doc-category-document-fg);
 }
 
 .doc-chip-type[data-category='code'] {
-   background: var(--accent);
+   background: var(--doc-category-code);
+   color: var(--doc-category-code-fg);
 }
 
 .doc-chip-type[data-category='text'] {
-   background: var(--text-secondary);
+   background: var(--doc-category-text-bg);
+   color: var(--doc-category-text-fg);
 }
 
 /* Summarized indicator */
@@ -201,6 +204,53 @@
    color: var(--text-secondary);
    font-size: 0.75rem;
    white-space: nowrap;
+}
+
+/* Colored file-type badge (mirrors the composer upload chip) so reloaded
+ * documents read as files, not text blobs. */
+.transcript-doc-type {
+   font-family: var(--font-mono, monospace);
+   font-size: 0.7rem;
+   font-weight: 600;
+   text-transform: uppercase;
+   padding: 0.05rem 0.3rem;
+   border-radius: 3px;
+   background: var(--doc-category-code);
+   color: var(--doc-category-code-fg);
+   flex-shrink: 0;
+}
+
+.transcript-doc-type[data-category='document'] {
+   background: var(--doc-category-document);
+   color: var(--doc-category-document-fg);
+}
+
+.transcript-doc-type[data-category='code'] {
+   background: var(--doc-category-code);
+   color: var(--doc-category-code-fg);
+}
+
+.transcript-doc-type[data-category='text'] {
+   background: var(--doc-category-text-bg);
+   color: var(--doc-category-text-fg);
+}
+
+/* Download glyph + downloadable-chip hint on chips backed by a stored original. */
+.transcript-doc-download {
+   display: inline-flex;
+   flex-shrink: 0;
+   color: var(--text-secondary);
+}
+
+.transcript-doc-chip.has-original:hover .transcript-doc-download,
+.transcript-doc-chip.has-original:focus-visible .transcript-doc-download {
+   color: var(--accent);
+}
+
+.transcript-doc-chip.has-original:hover,
+.transcript-doc-chip.has-original:focus-visible {
+   border-color: var(--accent);
+   background: var(--bg-secondary);
 }
 
 /* =============================================================================

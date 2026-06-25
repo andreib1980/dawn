@@ -437,7 +437,7 @@
 # =============================================================================
 
 [documents]
-# max_file_size_kb = 512          # Maximum upload file size in KB
+# max_file_size_kb = 10240        # Maximum upload file size in KB (default 10 MB)
                                   # Range: 64-10240
                                   # Env: DAWN_DOCUMENTS_MAX_FILE_SIZE_KB
 # max_documents = 5               # Maximum documents per upload batch
@@ -477,6 +477,23 @@
                                   # Range: 0-365
 # version_keep_per_doc = 10       # Max versions retained per item (newest kept)
                                   # Range: 1-100
+
+# --- Original-file storage (v68): keep the raw uploaded PDF/DOCX ---
+# Stores the original upload alongside the extracted text so it can be downloaded
+# later and re-processed if extraction improves (OCR, charts, media gallery).
+# Kept forever by default; an orphan sweep reclaims only uploads that were never
+# saved into a conversation/library and files left after a document is deleted.
+# originals_enabled = true              # Store original uploads (default: on)
+# original_retention_days = 0           # Age-delete originals after N days (0 = keep forever)
+                                        # Range: 0-3650
+# max_original_size_mb = 10             # Largest original to store (<= upload limit)
+                                        # Range: 1-512
+# max_originals_per_user = 200          # Per-user count cap
+                                        # Range: 1-100000
+# max_originals_total_mb_per_user = 2048  # Per-user aggregate cap in MB (0 = unlimited)
+                                        # Range: 0-1048576
+# original_grace_minutes = 45           # Orphan grace before the sweep reclaims an
+                                        # uploaded-but-unsaved original (Range: 0-1440)
 
 # =============================================================================
 # Persistent Memory System

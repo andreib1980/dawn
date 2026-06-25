@@ -315,24 +315,89 @@
       '<polyline points="10 9 9 9 8 9"/>' +
       '</svg>';
 
+   /** Small download-arrow glyph shown on chips backed by a stored original. */
+   const DOWNLOAD_ICON_SVG =
+      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+      '<polyline points="7 10 12 15 17 10"/>' +
+      '<line x1="12" y1="15" x2="12" y2="3"/>' +
+      '</svg>';
+
    /**
-    * Create a container of document chips for a transcript entry
-    * @param {Array<{filename: string, size: string, content: string}>} documents
+    * Download a stored original file.  Fetches first so a non-2xx (403/404/410
+    * after retention/orphan-sweep) surfaces a toast instead of a silent no-op.
+    * @returns {Promise<boolean>} true if the download started, false on failure.
+    */
+   async function downloadOriginal(blobId, filename) {
+      try {
+         const resp = await fetch('/api/documents/original/' + encodeURIComponent(blobId));
+         if (!resp.ok) {
+            const gone = resp.status === 404 || resp.status === 410;
+            if (typeof DawnToast !== 'undefined') {
+               DawnToast.show(
+                  gone
+                     ? 'Original file is no longer stored — showing extracted text instead.'
+                     : 'Could not download the original file.',
+                  'warning'
+               );
+            }
+            return false;
+         }
+         const blob = await resp.blob();
+         const url = URL.createObjectURL(blob);
+         const a = document.createElement('a');
+         a.href = url;
+         a.download = filename || '';
+         document.body.appendChild(a);
+         a.click();
+         a.remove();
+         URL.revokeObjectURL(url);
+         return true;
+      } catch (e) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show('Could not download the original file.', 'error');
+         }
+         return false;
+      }
+   }
+
+   /**
+    * Create a container of document chips for a transcript entry.  Reloaded
+    * documents render as a file-type chip (matching the upload UI); when the
+    * original file was stored (v68 blobId) the chip downloads the real PDF/DOCX,
+    * otherwise it falls back to the extracted-text viewer.
+    * @param {Array<{filename: string, size: string, content: string, blobId?: string}>} documents
     * @returns {HTMLElement}
     */
    function createDocumentChips(documents) {
       const container = document.createElement('div');
       container.className = 'transcript-doc-container';
 
+      const docs = typeof DawnDocuments !== 'undefined' ? DawnDocuments : null;
+
       documents.forEach((doc) => {
+         const ext = (doc.filename.split('.').pop() || '').toLowerCase();
+         const hasOriginal = !!doc.blobId;
+
          const chip = document.createElement('button');
          chip.className = 'transcript-doc-chip';
-         chip.title = `${doc.filename} \u2014 click to view`;
-         chip.setAttribute('aria-label', `View document: ${doc.filename}, ${doc.size}`);
+         if (hasOriginal) chip.classList.add('has-original');
+         chip.title = `${doc.filename} \u2014 click to ${hasOriginal ? 'download original' : 'view text'}`;
+         chip.setAttribute(
+            'aria-label',
+            `${hasOriginal ? 'Download original file' : 'View extracted text'}: ${doc.filename}, ${doc.size}`
+         );
 
          const icon = document.createElement('span');
          icon.className = 'transcript-doc-icon';
          icon.innerHTML = DOC_ICON_SVG;
+
+         // Colored type badge (e.g. PDF / DOCX), matching the composer upload chip.
+         const typeBadge = document.createElement('span');
+         typeBadge.className = 'transcript-doc-type';
+         typeBadge.textContent = docs ? docs.formatExtension(ext) : ext.toUpperCase();
+         if (docs) typeBadge.dataset.category = docs.getFormatCategory(ext);
 
          const name = document.createElement('span');
          name.className = 'transcript-doc-name';
@@ -343,11 +408,25 @@
          size.textContent = doc.size;
 
          chip.appendChild(icon);
+         chip.appendChild(typeBadge);
          chip.appendChild(name);
          chip.appendChild(size);
-         chip.addEventListener('click', () =>
-            DawnDocuments.openDocumentViewer(doc.filename, doc.content)
-         );
+         // Visible download affordance distinguishes a downloadable chip from a
+         // text-viewer chip (the two are otherwise pixel-identical).
+         if (hasOriginal) {
+            const dl = document.createElement('span');
+            dl.className = 'transcript-doc-download';
+            dl.innerHTML = DOWNLOAD_ICON_SVG;
+            dl.setAttribute('aria-hidden', 'true');
+            chip.appendChild(dl);
+         }
+         chip.addEventListener('click', async () => {
+            // On a failed/expired original, fall back to the extracted-text viewer.
+            if (hasOriginal && (await downloadOriginal(doc.blobId, doc.filename))) {
+               return;
+            }
+            DawnDocuments.openDocumentViewer(doc.filename, doc.content);
+         });
          container.appendChild(chip);
       });
 

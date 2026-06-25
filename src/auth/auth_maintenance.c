@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "document_original_store.h"
 #include "image_store.h"
 #include "logging.h"
 #include "memory/memory_maintenance.h"
@@ -93,6 +94,18 @@ static void *maintenance_thread_func(void *arg) {
                                                &v_deleted) == SUCCESS &&
              v_deleted > 0) {
             OLOG_INFO("auth_maintenance: pruned %d expired document version(s)", v_deleted);
+         }
+      }
+
+      /* Document originals (v68): age-delete (off by default, retention_days=0)
+       * plus orphan reclamation (uploaded-but-never-indexed + post-delete). */
+      if (document_originals_ready() && g_config.documents.originals_enabled) {
+         int aged = 0, orphans = 0;
+         document_original_cleanup(&aged);
+         document_original_cleanup_orphans(g_config.documents.original_grace_minutes * 60,
+                                           &orphans);
+         if (aged > 0 || orphans > 0) {
+            OLOG_INFO("auth_maintenance: document originals — %d aged, %d orphan", aged, orphans);
          }
       }
 

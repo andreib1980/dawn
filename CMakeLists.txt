@@ -495,6 +495,7 @@ set(DAWN_SOURCES
     src/core/command_executor.c
     src/core/component_status.c
     src/core/device_types.c
+    src/core/hash_util.c
     src/core/ocp_helpers.c
     src/core/path_utils.c
     src/core/strbuf.c
@@ -723,6 +724,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v65.c
     src/auth/auth_db_migrations_v66.c
     src/auth/auth_db_migrations_v67.c
+    src/auth/auth_db_migrations_v68.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
     # subsystems (extraction, summaries, history, satellite OTA, image tools), so
@@ -732,6 +734,9 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_user.c
     src/auth/auth_db_settings.c
     src/auth/auth_db_satellite.c
+    src/blob_store.c
+    src/blob_store_util.c
+    src/document_original_store.c
     src/image_store.c
     src/memory/memory_db.c
     src/memory/memory_db_facts.c

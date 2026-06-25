@@ -56,9 +56,12 @@ typedef struct document_upload_session document_upload_session_t;
  *
  * @param wsi WebSocket/HTTP connection
  * @param session_out Output: allocated document session (caller must free)
+ * @param user_id Authenticated uploader (threaded through for original storage)
  * @return 0 on success, LWS_CLOSE_CONNECTION on error
  */
-int webui_documents_handle_upload_start(struct lws *wsi, document_upload_session_t **session_out);
+int webui_documents_handle_upload_start(struct lws *wsi,
+                                        document_upload_session_t **session_out,
+                                        int user_id);
 
 /**
  * @brief Handle document upload body data
@@ -100,6 +103,18 @@ int webui_documents_handle_upload_complete(struct lws *wsi, document_upload_sess
  * @return LWS_CLOSE_CONNECTION to close connection (response sent)
  */
 int webui_documents_handle_summarize(struct lws *wsi, const char *body, size_t body_len);
+
+/**
+ * @brief Handle GET /api/documents/original/:blob_id
+ *
+ * Serves a stored original upload as an attachment (owner-only).
+ *
+ * @param wsi WebSocket/HTTP connection
+ * @param blob_id Blob id from the path
+ * @param user_id Authenticated user (owner check)
+ * @return 0 on async serve, LWS_CLOSE_CONNECTION on error
+ */
+int webui_documents_handle_original_download(struct lws *wsi, const char *blob_id, int user_id);
 
 /**
  * @brief Free document session resources

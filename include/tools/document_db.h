@@ -139,6 +139,22 @@ int document_db_create(int user_id,
                        int64_t *id_out);
 
 /**
+ * @brief Create a document record, linking a stored original-file blob (v68).
+ *
+ * Same as document_db_create() but sets documents.original_blob_id.
+ * @param original_blob_id Stored original-file blob id (NULL if none).
+ */
+int document_db_create_ex(int user_id,
+                          const char *filename,
+                          const char *filepath,
+                          const char *filetype,
+                          const char *file_hash,
+                          int num_chunks,
+                          bool is_global,
+                          const char *original_blob_id,
+                          int64_t *id_out);
+
+/**
  * @brief Correct a document's stored chunk count (e.g. after embed failures).
  * @param doc_id     Document id to update.
  * @param num_chunks New chunk count (must be >= 0).

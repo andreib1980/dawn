@@ -590,6 +590,158 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
+   /* Generic blob store statements (v68).  Column/bind orders mirror the image
+    * statements so blob_store.c's engine drives both: get->(id,user,mime,size,
+    * filename,source,retention,created_at,last_accessed); get_file->(filename,
+    * user,source,mime,last_accessed); create binds 1-8 shared + 9 content_hash
+    * + 10 filename_original.  `kind` is the blob analogue of images.source. */
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "INSERT INTO blobs (id, user_id, kind, retention_policy, mime_type, size, filename, "
+       "created_at, content_hash, filename_original) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+       -1, &s_db.stmt_blob_create, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_create failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, user_id, mime_type, size, filename, kind, retention_policy, "
+                           "created_at, last_accessed, filename_original FROM blobs WHERE id = ?",
+                           -1, &s_db.stmt_blob_get, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_get failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db, "SELECT filename, user_id, kind, mime_type, last_accessed FROM blobs WHERE id = ?",
+       -1, &s_db.stmt_blob_get_file, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_get_file failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM blobs WHERE id = ? AND user_id = ?", -1,
+                           &s_db.stmt_blob_delete, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_delete failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "UPDATE blobs SET last_accessed = ? WHERE id = ?", -1,
+                           &s_db.stmt_blob_update_access, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_update_access failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE blobs SET retention_policy = ? "
+                           "WHERE id = ? AND (? = 0 OR user_id = ?)",
+                           -1, &s_db.stmt_blob_update_retention, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_update_retention failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*) FROM blobs WHERE user_id = ?", -1,
+                           &s_db.stmt_blob_count_user, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_count_user failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT COALESCE(SUM(size), 0) FROM blobs WHERE user_id = ?",
+                           -1, &s_db.stmt_blob_sum_bytes_user, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_sum_bytes_user failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT id FROM blobs WHERE user_id = ? AND content_hash = ?",
+                           -1, &s_db.stmt_blob_find_by_hash, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_find_by_hash failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "DELETE FROM blobs WHERE retention_policy = 0 AND created_at < ? "
+       "AND id IN (SELECT id FROM blobs WHERE retention_policy = 0 AND created_at < ? "
+       "ORDER BY created_at ASC LIMIT 100)",
+       -1, &s_db.stmt_blob_delete_old, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_delete_old failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT COALESCE(SUM(size), 0) FROM blobs WHERE retention_policy = 2",
+                           -1, &s_db.stmt_blob_cache_total_size, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_cache_total_size failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM blobs WHERE id = ?", -1,
+                           &s_db.stmt_blob_delete_by_id, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_delete_by_id failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, filename FROM blobs WHERE retention_policy = 0 AND created_at < ? "
+       "ORDER BY created_at ASC LIMIT 100",
+       -1, &s_db.stmt_blob_get_expired_ids, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_get_expired_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT id, filename, size FROM blobs WHERE retention_policy = 2 "
+                           "ORDER BY COALESCE(last_accessed, created_at) ASC",
+                           -1, &s_db.stmt_blob_get_cache_lru_ids, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_get_cache_lru_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       /* An original is an orphan only if NOTHING references it: neither a
+        * library/indexed document (documents.original_blob_id) NOR a conversation
+        * message that embedded it as a chat attachment ("blob:<id>" marker in the
+        * message text).  Without the messages check, the sweep would reclaim a
+        * still-attached chat document after the grace window. */
+       /* The messages predicate is an unindexable substring scan, but it runs
+        * only for candidates (past grace, no documents ref) which is near-always
+        * empty under keep-forever; revisit if messages crosses ~100k rows.  The
+        * marker is "...bytes) blob:<id>]", so anchor the match with the trailing
+        * ']' — blob ids are fixed-length validated tokens, so this can't match a
+        * different blob, and the anchor avoids pinning a blob on stray prose. */
+       "SELECT b.id, b.filename FROM blobs b "
+       "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ? "
+       "AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.original_blob_id = b.id) "
+       "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.content LIKE '%blob:' || b.id || ']%') "
+       "LIMIT 100",
+       -1, &s_db.stmt_blob_get_orphan_ids, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_get_orphan_ids failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   rc = sqlite3_prepare_v2(s_db.db, "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM blobs", -1,
+                           &s_db.stmt_blob_stats, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare blob_stats failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
    /* Memory fact statements.  category column appended last in all SELECTs (column 9)
     * to preserve existing column indices in populate_fact_from_row.
     * source_* columns (v40) are always bound last — NULL when no provenance. */
@@ -1568,7 +1720,8 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO documents (user_id, filename, filepath, filetype, file_hash, "
-       "num_chunks, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       "num_chunks, is_global, created_at, original_blob_id) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_doc_create, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare doc_create failed: %s", sqlite3_errmsg(s_db.db));
@@ -2377,6 +2530,38 @@ void auth_db_finalize_statements(void) {
       sqlite3_finalize(s_db.stmt_image_get_cache_lru_ids);
    if (s_db.stmt_image_stats)
       sqlite3_finalize(s_db.stmt_image_stats);
+   if (s_db.stmt_blob_create)
+      sqlite3_finalize(s_db.stmt_blob_create);
+   if (s_db.stmt_blob_get)
+      sqlite3_finalize(s_db.stmt_blob_get);
+   if (s_db.stmt_blob_get_file)
+      sqlite3_finalize(s_db.stmt_blob_get_file);
+   if (s_db.stmt_blob_delete)
+      sqlite3_finalize(s_db.stmt_blob_delete);
+   if (s_db.stmt_blob_update_access)
+      sqlite3_finalize(s_db.stmt_blob_update_access);
+   if (s_db.stmt_blob_update_retention)
+      sqlite3_finalize(s_db.stmt_blob_update_retention);
+   if (s_db.stmt_blob_count_user)
+      sqlite3_finalize(s_db.stmt_blob_count_user);
+   if (s_db.stmt_blob_sum_bytes_user)
+      sqlite3_finalize(s_db.stmt_blob_sum_bytes_user);
+   if (s_db.stmt_blob_find_by_hash)
+      sqlite3_finalize(s_db.stmt_blob_find_by_hash);
+   if (s_db.stmt_blob_delete_old)
+      sqlite3_finalize(s_db.stmt_blob_delete_old);
+   if (s_db.stmt_blob_cache_total_size)
+      sqlite3_finalize(s_db.stmt_blob_cache_total_size);
+   if (s_db.stmt_blob_delete_by_id)
+      sqlite3_finalize(s_db.stmt_blob_delete_by_id);
+   if (s_db.stmt_blob_get_expired_ids)
+      sqlite3_finalize(s_db.stmt_blob_get_expired_ids);
+   if (s_db.stmt_blob_get_cache_lru_ids)
+      sqlite3_finalize(s_db.stmt_blob_get_cache_lru_ids);
+   if (s_db.stmt_blob_get_orphan_ids)
+      sqlite3_finalize(s_db.stmt_blob_get_orphan_ids);
+   if (s_db.stmt_blob_stats)
+      sqlite3_finalize(s_db.stmt_blob_stats);
 
    /* Memory statements */
    if (s_db.stmt_memory_fact_create)

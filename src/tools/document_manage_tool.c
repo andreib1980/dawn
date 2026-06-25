@@ -370,7 +370,7 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
    }
 
    doc_index_result_t res;
-   int rc = document_index_text(user_id, title, "text", text, strlen(text), false, &res);
+   int rc = document_index_text(user_id, title, "text", text, strlen(text), false, NULL, &res);
    if (rc != DOC_INDEX_SUCCESS) {
       char msg[256];
       snprintf(msg, sizeof(msg), "Couldn't save the document: %s", res.error_msg);
@@ -660,7 +660,7 @@ static char *do_recover(int user_id, const char *label) {
    int rc = document_index_note(user_id, fname, text, strlen(text), false, &res);
    bool as_note = (rc == DOC_INDEX_SUCCESS);
    if (!as_note) /* too long for a note → it was a document */
-      rc = document_index_text(user_id, fname, "text", text, strlen(text), false, &res);
+      rc = document_index_text(user_id, fname, "text", text, strlen(text), false, NULL, &res);
    free(text);
 
    if (rc != DOC_INDEX_SUCCESS) {

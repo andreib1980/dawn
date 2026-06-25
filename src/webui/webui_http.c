@@ -1363,6 +1363,18 @@ int callback_http(struct lws *wsi,
             /* Fall through to auth redirect */
          }
 
+         /* GET /api/documents/original/:id - download a stored original file.
+          * Session-cookie only (no Bearer/service-token branch): originals are
+          * private, and the store's owner-only access also denies user_id 0. */
+         if (strncmp(path, "/api/documents/original/", 24) == 0 && pss && !pss->is_post) {
+            const char *blob_id = path + 24;
+            auth_session_t session;
+            if (is_request_authenticated(wsi, &session)) {
+               return webui_documents_handle_original_download(wsi, blob_id, session.user_id);
+            }
+            /* Fall through to auth redirect */
+         }
+
          /* POST /api/images - upload image (defer to body completion) */
          if (strcmp(path, "/api/images") == 0 && pss && pss->is_post) {
             auth_session_t session;
@@ -1399,9 +1411,11 @@ int callback_http(struct lws *wsi,
 
          /* POST /api/documents - upload document (defer to body completion) */
          if (strcmp(path, "/api/documents") == 0 && pss && pss->is_post) {
-            if (is_request_authenticated(wsi, NULL)) {
+            auth_session_t session;
+            if (is_request_authenticated(wsi, &session)) {
                pss->document_session = NULL;
-               int result = webui_documents_handle_upload_start(wsi, &pss->document_session);
+               int result = webui_documents_handle_upload_start(wsi, &pss->document_session,
+                                                                session.user_id);
                if (result == 0) {
                   return 0;
                }

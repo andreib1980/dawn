@@ -51,6 +51,7 @@
 #include "auth/auth_db.h"
 #include "core/path_utils.h"
 #include "dawn_error.h"
+#include "document_original_store.h"
 #include "image_store.h"
 #include "logging.h"
 #ifdef ENABLE_WEBUI
@@ -1034,6 +1035,12 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
           * for a deletion guarantee.  The FK cascade still removes rows on user delete. */
          OLOG_WARNING("DELETE_USER: image purge for user %d incomplete (rows/files may remain)",
                       del_user.id);
+      }
+      /* Same rationale for stored document originals (blobs FK cascades rows but
+       * leaks files) — purge before the user delete. */
+      if (document_originals_ready() &&
+          document_original_delete_user(del_user.id) != BLOB_STORE_SUCCESS) {
+         OLOG_WARNING("DELETE_USER: document-original purge for user %d incomplete", del_user.id);
       }
    }
 

@@ -1065,13 +1065,27 @@ static void parse_documents(toml_table_t *table, documents_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = {
-      "max_file_size_kb",       "max_documents",        "max_pages",
-      "max_extracted_size_kb",  "max_index_size_kb",    "max_indexed_documents",
-      "fts_label_weight",       "fts_body_weight",      "hybrid_keyword_weight",
-      "hybrid_vector_weight",   "phrase_bonus_weight",  "search_min_score",
-      "version_retention_days", "version_keep_per_doc", NULL
-   };
+   static const char *const known_keys[] = { "max_file_size_kb",
+                                             "max_documents",
+                                             "max_pages",
+                                             "max_extracted_size_kb",
+                                             "max_index_size_kb",
+                                             "max_indexed_documents",
+                                             "fts_label_weight",
+                                             "fts_body_weight",
+                                             "hybrid_keyword_weight",
+                                             "hybrid_vector_weight",
+                                             "phrase_bonus_weight",
+                                             "search_min_score",
+                                             "version_retention_days",
+                                             "version_keep_per_doc",
+                                             "originals_enabled",
+                                             "original_retention_days",
+                                             "max_original_size_mb",
+                                             "max_originals_per_user",
+                                             "max_originals_total_mb_per_user",
+                                             "original_grace_minutes",
+                                             NULL };
    warn_unknown_keys(table, "documents", known_keys);
 
    PARSE_INT(table, "max_file_size_kb", config->max_file_size_kb);
@@ -1112,6 +1126,19 @@ static void parse_documents(toml_table_t *table, documents_config_t *config) {
 
    PARSE_INT(table, "version_keep_per_doc", config->version_keep_per_doc);
    CONFIG_CLAMP(config->version_keep_per_doc, 1, 1000);
+
+   /* v68 original-file storage. */
+   PARSE_BOOL(table, "originals_enabled", config->originals_enabled);
+   PARSE_INT(table, "original_retention_days", config->original_retention_days);
+   CONFIG_CLAMP(config->original_retention_days, 0, 3650);
+   PARSE_INT(table, "max_original_size_mb", config->max_original_size_mb);
+   CONFIG_CLAMP(config->max_original_size_mb, 1, 512);
+   PARSE_INT(table, "max_originals_per_user", config->max_originals_per_user);
+   CONFIG_CLAMP(config->max_originals_per_user, 1, 100000);
+   PARSE_INT(table, "max_originals_total_mb_per_user", config->max_originals_total_mb_per_user);
+   CONFIG_CLAMP(config->max_originals_total_mb_per_user, 0, 1048576);
+   PARSE_INT(table, "original_grace_minutes", config->original_grace_minutes);
+   CONFIG_CLAMP(config->original_grace_minutes, 0, 1440);
 }
 
 static void parse_vision(toml_table_t *table, vision_config_t *config) {

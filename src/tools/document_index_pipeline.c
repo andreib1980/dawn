@@ -26,7 +26,6 @@
 
 #include "tools/document_index_pipeline.h"
 
-#include <openssl/sha.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +34,7 @@
 
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
+#include "core/hash_util.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_stem.h"
@@ -55,13 +55,10 @@
  * Helpers
  * ============================================================================= */
 
+/* Local alias for the shared helper — the pipeline hashes extracted TEXT to form
+ * the document file_hash (distinct from the blob store's hash over raw bytes). */
 static void sha256_hex(const char *data, size_t len, char *out_hex) {
-   unsigned char hash[SHA256_DIGEST_LENGTH];
-   SHA256((const unsigned char *)data, len, hash);
-   for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-      snprintf(out_hex + (i * 2), 3, "%02x", hash[i]);
-   }
-   out_hex[SHA256_DIGEST_LENGTH * 2] = '\0';
+   dawn_sha256_hex(data, len, out_hex);
 }
 
 static void set_error(doc_index_result_t *out, int code, const char *msg) {
@@ -105,6 +102,7 @@ int document_index_text(int user_id,
                         const char *text,
                         size_t text_len,
                         bool is_global,
+                        const char *original_blob_id,
                         doc_index_result_t *out) {
    if (!out)
       return DOC_INDEX_ERROR_ALLOC;
@@ -166,8 +164,8 @@ int document_index_text(int user_id,
 
    /* Create document record */
    int64_t doc_id = 0;
-   if (document_db_create(user_id, filename, filename, filetype, file_hash, chunks.count, is_global,
-                          &doc_id) != SUCCESS) {
+   if (document_db_create_ex(user_id, filename, filename, filetype, file_hash, chunks.count,
+                             is_global, original_blob_id, &doc_id) != SUCCESS) {
       set_error(out, DOC_INDEX_ERROR_DB_FAIL, "Failed to create document record");
       chunk_result_free(&chunks);
       return DOC_INDEX_ERROR_DB_FAIL;

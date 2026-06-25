@@ -494,6 +494,15 @@ typedef struct {
     * the older of two bounds — age in days, and a per-document keep-last-N cap. */
    int version_retention_days; /* Drop archived versions older than this (default: 14, 0 = off) */
    int version_keep_per_doc;   /* Per-document cap on retained versions (default: 10) */
+   /* v68 original-file storage: keep the raw uploaded PDF/DOCX in the blob store
+    * (re-extraction, OCR, media gallery).  Keep-forever by default; the orphan
+    * sweep reclaims only never-indexed uploads + post-delete orphans. */
+   bool originals_enabled;      /* Store original uploads (default: true) */
+   int original_retention_days; /* Age-delete originals after N days (default: 0 = forever) */
+   int max_original_size_mb;    /* Per-original byte cap in MB (default: 10) */
+   int max_originals_per_user;  /* Per-user original count cap (default: 200) */
+   int max_originals_total_mb_per_user; /* Per-user aggregate cap in MB (default: 2048) */
+   int original_grace_minutes;          /* Orphan grace before sweep reclaims (default: 45) */
 } documents_config_t;
 
 /* =============================================================================

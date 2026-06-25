@@ -97,6 +97,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v65.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v66.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v67.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v68.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -219,6 +220,34 @@ dawn_add_unit_test(test_sentence_buffer
 dawn_add_unit_test(test_session_commands
    SOURCES test_session_commands.c
    LIBS    unity pthread
+   LABEL   ci)
+
+# Blob store pure helpers (id gen, validation, mime->ext) — no DB, CI-safe.
+dawn_add_unit_test(test_blob_store
+   SOURCES test_blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+   LIBS    unity
+   LABEL   ci)
+
+# Image store as a thin wrapper over the generic blob engine — full delegation
+# against real SQLite + temp file dir (Phase 2 live-path regression gate).
+dawn_add_unit_test(test_image_store
+   SOURCES test_image_store.c
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+# Document-original store + blob engine dedup/orphan/caps + v68 stmt_blob_*.
+dawn_add_unit_test(test_document_original_store
+   SOURCES test_document_original_store.c
+           ${AUTH_DB_SOURCES}
+           ${SRC_ROOT}/src/document_original_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
 dawn_add_unit_test(test_ota_manifest

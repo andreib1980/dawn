@@ -51,6 +51,16 @@
    --surface-elevated: var(--bg-tertiary);
    --border-color: var(--ring-inactive);
 
+   /* Document file-type badge colors (composer + transcript chips). The "text"
+    * category uses a theme-stable surface+text pair so the small bold badge
+    * stays >= WCAG AA across themes. */
+   --doc-category-document: #e16b3a;
+   --doc-category-document-fg: var(--bg-primary);
+   --doc-category-code: var(--accent);
+   --doc-category-code-fg: var(--bg-primary);
+   --doc-category-text-bg: var(--bg-tertiary);
+   --doc-category-text-fg: var(--text-primary);
+
    /* Layout */
    --border-radius: 8px;
    --border-radius-sm: 4px;
