@@ -52,6 +52,7 @@
 #include "core/scheduler.h"
 #include "logging.h"
 #include "memory/memory_db_aliases.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
 
@@ -80,6 +81,14 @@ void deliver_missed_notifications(ws_connection_t *conn) {
       return;
 
    for (int i = 0; i < count; i++) {
+      /* Defensively scrub stored free-text before it goes into a WebSocket text
+       * frame. Rows persisted before the boundary-safe truncation fix (or any
+       * future surprise) may hold invalid UTF-8; an invalid frame fails the
+       * connection (RFC 6455 §5.6) and, because missed notifications replay on
+       * every reconnect, would wedge the web client in an endless loop. */
+      sanitize_utf8_for_json(missed[i].name);
+      sanitize_utf8_for_json(missed[i].message);
+
       json_object *root = json_object_new_object();
       json_object_object_add(root, "type", json_object_new_string("scheduler_notification"));
 
@@ -220,14 +229,18 @@ void scheduler_broadcast_briefing_notification(const sched_event_t *event,
                           json_object_new_string(sched_status_to_str(event->status)));
    json_object_object_add(payload, "name", json_object_new_string(event->name));
 
-   /* Truncate preview to ~80 chars */
+   /* Truncate preview to ~80 chars, backing up to a UTF-8 character boundary.
+    * A blind byte-cut can split a multibyte sequence, leaving an invalid-UTF-8
+    * string that fails the WebSocket text frame (RFC 6455 §5.6) when broadcast
+    * or replayed — the whole web client then loops on reconnect. */
    char preview[84];
    size_t text_len = strlen(text);
-   if (text_len > 80) {
-      memcpy(preview, text, 80);
-      memcpy(preview + 80, "...", 4);
+   size_t copy_len = focus_utf8_safe_cap(text, 80);
+   memcpy(preview, text, copy_len);
+   if (copy_len < text_len) {
+      memcpy(preview + copy_len, "...", 4);
    } else {
-      memcpy(preview, text, text_len + 1);
+      preview[copy_len] = '\0';
    }
    json_object_object_add(payload, "message", json_object_new_string(preview));
    json_object_object_add(payload, "fire_at", json_object_new_int64((int64_t)event->fire_at));
