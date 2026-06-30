@@ -520,6 +520,13 @@ dawn_add_unit_test(test_claude_format
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# OpenRouter→Anthropic prompt-cache injector — copy-on-write invariant guard.
+dawn_add_unit_test(test_openrouter_cache
+   SOURCES test_openrouter_cache.c
+           ${SRC_ROOT}/src/llm/llm_openai_cache.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Duplicate-tool-call turn-scoping.  Links the real llm_tools.c against a thin
 # stub TU that provides its wide dep surface (the dup-check path reaches almost
 # none of it).
@@ -698,6 +705,13 @@ dawn_add_unit_test(test_iso8601
    SOURCES test_iso8601.c
            ${SRC_ROOT}/src/core/iso8601.c
    LIBS    unity
+   LABEL   ci)
+
+# sanitize_utf8_for_json — the guard that keeps invalid UTF-8 out of WebSocket
+# text frames (string_utils.c lives in dawn_common).
+dawn_add_unit_test(test_string_utils
+   SOURCES test_string_utils.c
+   LIBS    dawn_common unity
    LABEL   ci)
 
 dawn_add_unit_test(test_str_fuzzy
@@ -1039,6 +1053,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -1047,6 +1062,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_claude.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
            ${SRC_ROOT}/src/llm/llm_openai.c
+           ${SRC_ROOT}/src/llm/llm_openai_cache.c
            ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
            ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SRC_ROOT}/src/llm/llm_streaming.c
