@@ -691,11 +691,16 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
                if (existing) {
                   /* Found existing session - switch to it */
                   if (conn->session && conn->session != existing) {
-                     /* Destroy the abandoned session (just created on connect) */
+                     /* Destroy the abandoned session (just auto-created on
+                      * connect). session_destroy() -> webui_detach_session()
+                      * already releases the connection's single ref_count for
+                      * us (it finds this conn still attached and calls
+                      * session_release). Do NOT release it here too, or the
+                      * ref_count double-decrements (1 -> 0 -> -1), defeating the
+                      * destroy wait and freeing the session early — a
+                      * use-after-free that crashes the reconnect path. */
                      uint32_t abandoned_id = conn->session->session_id;
                      conn->session->client_data = NULL;
-                     /* Release ref_count (was 1 from creation) before destroy */
-                     session_release(conn->session);
                      session_destroy(abandoned_id);
                      unregister_tokens_for_session(abandoned_id);
                      OLOG_INFO("WebUI: Destroyed abandoned session %u", abandoned_id);
