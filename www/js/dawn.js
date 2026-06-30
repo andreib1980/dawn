@@ -1981,6 +1981,15 @@
       // Fetch and display version info in footer
       fetchVersionInfo();
 
+      // Claim document focus on load so the first click lands on a control
+      // rather than just "activating" the page (after a browser-chrome reload
+      // the document has no focus until clicked). Cursor-ready in the composer
+      // is also nicer UX. Skip on touch (pointer: coarse) so we don't force the
+      // on-screen keyboard up; preventScroll avoids a jump if it's below the fold.
+      if (DawnElements.textInput && window.matchMedia('(pointer: fine)').matches) {
+         DawnElements.textInput.focus({ preventScroll: true });
+      }
+
       console.log(
          'DAWN WebUI initialized (audio:',
          audioResult.supported ? 'enabled' : 'disabled',

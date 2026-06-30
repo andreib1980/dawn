@@ -193,14 +193,17 @@
    margin-right: 2rem;
 }
 
-/* Constrain images in chat messages (search results, vision uploads, etc.) */
+/* Constrain images in chat messages (search results, vision uploads, etc.).
+ * All transcript images open the shared lightbox on click, so use the zoom-in
+ * affordance. This rule outranks .transcript-image (input.css), so the cursor
+ * must be set here to take effect. */
 .transcript-entry img {
    max-width: 100%;
    max-height: 300px;
    object-fit: contain;
    border-radius: var(--border-radius);
    margin: 0.25rem 0.125rem;
-   cursor: pointer;
+   cursor: zoom-in;
    transition: opacity 0.15s;
 }
 
@@ -220,11 +223,16 @@
    z-index: 1200;
    cursor: pointer;
    opacity: 0;
+   /* While closed the overlay still covers the viewport at z-index 1200; without
+    * this it silently swallows every hover/click underneath (invisible catcher).
+    * pointer-events is re-enabled only in the .visible state below. */
+   pointer-events: none;
    transition: opacity 0.2s ease;
 }
 
 .image-lightbox.visible {
    opacity: 1;
+   pointer-events: auto;
 }
 
 .image-lightbox img {

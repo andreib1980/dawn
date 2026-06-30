@@ -227,10 +227,8 @@
       img.alt = 'Uploaded image';
       img.src = dataUrl;
 
-      // Add click to expand (optional enhancement)
-      img.addEventListener('click', () => {
-         img.classList.toggle('expanded');
-      });
+      /* Click-to-enlarge is handled by the shared image lightbox (delegated
+       * click in setupImageLightbox), same as every other transcript image. */
 
       wrapper.appendChild(img);
       return wrapper;
@@ -807,6 +805,10 @@
       lightbox.innerHTML =
          '<button class="image-lightbox-close" aria-label="Close">&times;</button>' +
          '<img alt="Enlarged view">';
+      /* Start hidden — it's only made visible (display:flex) on open. Without
+       * this it sits in the DOM as display:flex/opacity:0 from page load until
+       * the first close, covering the viewport. */
+      lightbox.style.display = 'none';
       document.body.appendChild(lightbox);
 
       var lightboxImg = lightbox.querySelector('img');
@@ -828,9 +830,6 @@
       document.addEventListener('click', function (e) {
          var img = e.target.closest('.transcript-entry img');
          if (!img || !img.src) return;
-
-         /* Skip vision upload thumbnails (tiny preview images) */
-         if (img.classList.contains('transcript-image')) return;
 
          previousFocus = document.activeElement;
          lightboxImg.src = img.src;

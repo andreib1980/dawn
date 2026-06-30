@@ -680,24 +680,17 @@
    max-width: 200px;
    max-height: 200px;
    border-radius: var(--border-radius);
-   cursor: pointer;
+   /* cursor comes from the higher-specificity `.transcript-entry img` rule
+    * (transcript.css) — setting it here would be dead (overridden). */
    transition:
       transform var(--transition-fast),
-      box-shadow var(--transition-fast),
-      max-width var(--transition-fast),
-      max-height var(--transition-fast);
+      box-shadow var(--transition-fast);
    display: block;
 }
 
 .transcript-image:hover {
    transform: scale(1.02);
    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-}
-
-.transcript-image.expanded {
-   max-width: 100%;
-   max-height: none;
-   cursor: zoom-out;
 }
 
 /* =============================================================================
