@@ -1672,6 +1672,18 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->documents.version_retention_days));
    json_object_object_add(documents, "version_keep_per_doc",
                           json_object_new_int(config->documents.version_keep_per_doc));
+   json_object_object_add(documents, "originals_enabled",
+                          json_object_new_boolean(config->documents.originals_enabled));
+   json_object_object_add(documents, "original_retention_days",
+                          json_object_new_int(config->documents.original_retention_days));
+   json_object_object_add(documents, "max_original_size_mb",
+                          json_object_new_int(config->documents.max_original_size_mb));
+   json_object_object_add(documents, "max_originals_per_user",
+                          json_object_new_int(config->documents.max_originals_per_user));
+   json_object_object_add(documents, "max_originals_total_mb_per_user",
+                          json_object_new_int(config->documents.max_originals_total_mb_per_user));
+   json_object_object_add(documents, "original_grace_minutes",
+                          json_object_new_int(config->documents.original_grace_minutes));
    json_object_object_add(root, "documents", documents);
 
    /* [vision] - per-upload image size and dimension limits */
@@ -2389,6 +2401,13 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "search_min_score = %.2f\n", config->documents.search_min_score);
    fprintf(fp, "version_retention_days = %d\n", config->documents.version_retention_days);
    fprintf(fp, "version_keep_per_doc = %d\n", config->documents.version_keep_per_doc);
+   fprintf(fp, "originals_enabled = %s\n", config->documents.originals_enabled ? "true" : "false");
+   fprintf(fp, "original_retention_days = %d\n", config->documents.original_retention_days);
+   fprintf(fp, "max_original_size_mb = %d\n", config->documents.max_original_size_mb);
+   fprintf(fp, "max_originals_per_user = %d\n", config->documents.max_originals_per_user);
+   fprintf(fp, "max_originals_total_mb_per_user = %d\n",
+           config->documents.max_originals_total_mb_per_user);
+   fprintf(fp, "original_grace_minutes = %d\n", config->documents.original_grace_minutes);
 
    /* [vision] controls per-upload image size and dimension limits */
    fprintf(fp, "\n[vision]\n");
