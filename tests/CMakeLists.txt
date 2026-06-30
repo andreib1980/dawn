@@ -92,6 +92,7 @@ endfunction()
 set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
     ${SRC_ROOT}/src/auth/auth_db_schema.c
+    ${SRC_ROOT}/src/auth/auth_db_backup.c
     ${SRC_ROOT}/src/auth/auth_db_migrations.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v64.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v65.c
@@ -247,6 +248,14 @@ dawn_add_unit_test(test_document_original_store
            ${SRC_ROOT}/src/document_original_store.c
            ${SRC_ROOT}/src/blob_store.c
            ${SRC_ROOT}/src/blob_store_util.c
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+# v68 migration applied to an EXISTING pre-v68 DB (base-schema-before-migration
+# ordering regression — the field failure "no such column: original_blob_id").
+dawn_add_unit_test(test_blob_migration
+   SOURCES test_blob_migration.c
+           ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 

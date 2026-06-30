@@ -717,6 +717,7 @@ list(APPEND DAWN_SOURCES
     src/core/embedding_engine.c
     src/auth/auth_db_core.c
     src/auth/auth_db_schema.c
+    src/auth/auth_db_backup.c
     src/auth/auth_db_migrations.c
     # v64/v65/v66 migration helpers: unconditional (schema versioning is global,
     # not gated on the coding-harness feature flags). Called by

@@ -654,7 +654,10 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc ON document_chunks(document_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);"
     "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash);"
-    "CREATE INDEX IF NOT EXISTS idx_documents_original_blob ON documents(original_blob_id);"
+    /* idx_documents_original_blob is created by the v68 migration (auth_db_migrations_v68.c),
+     * NOT here: this base SCHEMA_SQL runs before migrations, so on an existing pre-v68 DB the
+     * documents.original_blob_id column doesn't exist yet and indexing it would fail.  The v68
+     * migration adds the column first, then the index, and also runs on fresh installs. */
 
     /* v61: FTS5 BM25 keyword index over document chunks — the lexical retrieval
      * channel that runs as its OWN candidate set (fused with semantic in
@@ -963,6 +966,17 @@ int auth_db_create_schema(const char *db_path) {
 
    /* Check current schema version (0 if fresh install) */
    int current_version = get_current_schema_version();
+
+   /* Back up the database before any upgrade touches it.  Only for a real
+    * version bump on an existing DB (fresh installs have nothing to lose).  A
+    * failed backup ABORTS the upgrade — we never migrate unprotected. */
+   if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
+      if (auth_db_backup_before_upgrade(db_path, current_version) != AUTH_DB_SUCCESS) {
+         OLOG_ERROR("auth_db: aborting upgrade v%d->v%d — pre-upgrade backup failed",
+                    current_version, AUTH_DB_SCHEMA_VERSION);
+         return AUTH_DB_FAILURE;
+      }
+   }
 
    /* Execute schema SQL - all tables use IF NOT EXISTS for idempotency */
    int rc = sqlite3_exec(s_db.db, SCHEMA_SQL, NULL, NULL, &errmsg);

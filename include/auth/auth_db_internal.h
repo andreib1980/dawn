@@ -496,6 +496,19 @@ int auth_db_internal_create_parent_dir(const char *path);
 int auth_db_create_schema(const char *db_path);
 
 /**
+ * @brief Snapshot the database before a schema upgrade (VACUUM INTO).
+ *
+ * The backup directory + base filename are derived from @p db_path (no fixed
+ * name assumed).  Writes "<dir>/backups/<basename>.v<from>-<timestamp>.bak" and
+ * prunes to the newest few.  Defined in auth_db_backup.c.
+ *
+ * @param db_path      Live database file path.
+ * @param from_version Current (pre-upgrade) schema version, for the filename.
+ * @return AUTH_DB_SUCCESS, or AUTH_DB_FAILURE if the snapshot could not be made.
+ */
+int auth_db_backup_before_upgrade(const char *db_path, int from_version);
+
+/**
  * @brief v64 migration: create the mcp_user_access table (coding-harness MCP
  *        bridge per-user allowlist).
  *
