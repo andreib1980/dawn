@@ -357,6 +357,24 @@ static void inject_local_context(const char *message) {
 }
 
 /**
+ * @brief Fan a call-wide phone event out to every interactive session.
+ *
+ * inject_local_context() reaches only the local mic session, which is why a
+ * WebUI or satellite user's LLM never knew the phone was ringing and refused
+ * to answer.  Call-wide transitions — ringing, answered, ended — are facts
+ * every surface should see: so any of them can answer, and the ones that
+ * didn't learn the call was handled elsewhere (rather than discovering it by
+ * a failed answer attempt).
+ */
+static void broadcast_call_context(const char *message) {
+#ifdef ENABLE_WEBUI
+   session_broadcast_system_message(message);
+#else
+   (void)message;
+#endif
+}
+
+/**
  * @brief Read an entity's photo and return a json-c object with base64-encoded data.
  *
  * @param user_id  User ID for ownership check
@@ -549,14 +567,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       }
       tts_announce(announce);
 
-      /* Inject into local LLM context for follow-up voice commands */
+      /* Fan the ring out to every interactive surface so any of them (WebUI,
+       * satellite, local mic) can answer — not just the local session. */
       char ctx[256];
       snprintf(ctx, sizeof(ctx),
                "[Phone ringing: %s%s%s. Use phone tool 'answer' to pick up or 'hang_up' to "
                "reject.]",
                contact_name[0] ? contact_name : "unknown", contact_name[0] ? " at " : "",
                number[0] ? number : "");
-      inject_local_context(ctx);
+      broadcast_call_context(ctx);
 
       /* HUD — json-c for proper escaping */
       struct json_object *hud = json_object_new_object();
@@ -579,16 +598,26 @@ void phone_service_handle_event(const char *payload, int payload_len) {
 
    /* --- ring (subsequent rings while ringing) --- */
    else if (strcmp(event, "ring") == 0) {
-      /* Play ringtone (skips if already playing) */
-      play_ringtone();
-
-      /* Republish to HUD so MIRAGE resets its notification timeout */
-      struct json_object *hud = json_object_new_object();
+      /* Only re-ring while still genuinely ringing.  Once a surface has claimed
+       * the answer (RINGING_IN -> ANSWERING) a late ring URC must not restart
+       * the ringtone on a call the user already committed to picking up. */
       pthread_mutex_lock(&s_state_mutex);
-      json_object_object_add(hud, "number", json_object_new_string(s_active_number));
-      json_object_object_add(hud, "name", json_object_new_string(s_active_contact));
+      bool still_ringing = (s_state == PHONE_STATE_RINGING_IN);
+      char num_copy[24], name_copy[64];
+      snprintf(num_copy, sizeof(num_copy), "%s", s_active_number);
+      snprintf(name_copy, sizeof(name_copy), "%s", s_active_contact);
       pthread_mutex_unlock(&s_state_mutex);
-      publish_hud("ring", hud);
+
+      if (still_ringing) {
+         /* Play ringtone (skips if already playing) */
+         play_ringtone();
+
+         /* Republish to HUD so MIRAGE resets its notification timeout */
+         struct json_object *hud = json_object_new_object();
+         json_object_object_add(hud, "number", json_object_new_string(num_copy));
+         json_object_object_add(hud, "name", json_object_new_string(name_copy));
+         publish_hud("ring", hud);
+      }
    }
 
    /* --- call_connected --- */
@@ -619,10 +648,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       publish_hud("call_active", hud);
 
       {
+         /* Broadcast the resolution: the surface that answered learns the call
+          * is active; any other surface that saw the ring learns it was
+          * answered elsewhere and stops trying. */
          char ctx[256];
-         snprintf(ctx, sizeof(ctx), "[Call active with %s. Use phone tool 'hang_up' to end.]",
+         snprintf(ctx, sizeof(ctx),
+                  "[The call with %s was answered and is now active. Use phone tool 'hang_up' "
+                  "to end it.]",
                   name_copy[0] ? name_copy : num_copy);
-         inject_local_context(ctx);
+         broadcast_call_context(ctx);
       }
 
       OLOG_INFO("phone_service: call connected");
@@ -674,7 +708,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          char ctx[128];
          snprintf(ctx, sizeof(ctx), "[Call with %s ended (%s).]",
                   name_copy[0] ? name_copy : num_copy, reason);
-         inject_local_context(ctx);
+         broadcast_call_context(ctx);
       }
 
       OLOG_INFO("phone_service: call ended (duration=%ds, reason=%s)", duration, reason);
@@ -834,8 +868,15 @@ void phone_service_handle_event(const char *payload, int payload_len) {
    else if (strcmp(event, "modem_lost") == 0) {
       pthread_mutex_lock(&s_state_mutex);
       s_echo_online = false;
-      if (s_state == PHONE_STATE_ACTIVE) {
-         if (s_active_call_log_id >= 0) {
+      /* Tear down ANY in-progress call when the modem drops — otherwise DAWN
+       * keeps believing a call is live (DIALING / RINGING_IN / ANSWERING /
+       * ACTIVE) and phone_service_call() refuses every new call.  Previously
+       * only ACTIVE was cleared, leaving the other in-progress states wedged. */
+      bool had_call = (s_state != PHONE_STATE_IDLE);
+      if (had_call) {
+         /* A call that was dialing, being answered, or active counts as failed;
+          * an unanswered inbound ring keeps its existing MISSED log row. */
+         if (s_active_call_log_id >= 0 && s_state != PHONE_STATE_RINGING_IN) {
             phone_db_call_log_update(s_active_call_log_id, 0, PHONE_CALL_FAILED);
          }
          s_state = PHONE_STATE_IDLE;
@@ -846,6 +887,11 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          s_active_contact[0] = '\0';
       }
       pthread_mutex_unlock(&s_state_mutex);
+      /* Resolve the call on every surface that saw it (outside the mutex — the
+       * broadcast takes per-session locks). */
+      if (had_call) {
+         broadcast_call_context("[The phone call ended: the modem disconnected.]");
+      }
       OLOG_WARNING("phone_service: modem lost");
    }
 
@@ -971,22 +1017,54 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
    return 0;
 }
 
+/* Release an answer claim, but only if we still hold it — a concurrent
+ * call_connected/call_ended event may have advanced the state meanwhile, and
+ * we must not clobber that. */
+static void unclaim_answer(void) {
+   pthread_mutex_lock(&s_state_mutex);
+   if (s_state == PHONE_STATE_ANSWERING) {
+      s_state = PHONE_STATE_RINGING_IN;
+   }
+   pthread_mutex_unlock(&s_state_mutex);
+}
+
 int phone_service_answer(int user_id, char *result_buf, size_t buf_size) {
    (void)user_id;
 
-   if (get_state() != PHONE_STATE_RINGING_IN) {
-      snprintf(result_buf, buf_size, "Error: no incoming call to answer");
+   /* Atomically CLAIM the ring: only the first caller flips RINGING_IN ->
+    * ANSWERING and proceeds to ECHO.  A concurrent second surface (another
+    * satellite, the WebUI, the local mic — all now see the ring via the
+    * broadcast) finds a non-RINGING_IN state and backs off with a clear
+    * message, instead of firing a duplicate 'answer' that ECHO rejects and
+    * that surfaced to the user as a phantom "the call dropped". */
+   pthread_mutex_lock(&s_state_mutex);
+   phone_state_t prev = s_state;
+   if (prev == PHONE_STATE_RINGING_IN) {
+      s_state = PHONE_STATE_ANSWERING;
+   }
+   pthread_mutex_unlock(&s_state_mutex);
+
+   if (prev != PHONE_STATE_RINGING_IN) {
+      if (prev == PHONE_STATE_ANSWERING) {
+         snprintf(result_buf, buf_size, "That call is already being answered on another device.");
+      } else if (prev == PHONE_STATE_ACTIVE) {
+         snprintf(result_buf, buf_size, "That call has already been answered.");
+      } else {
+         snprintf(result_buf, buf_size, "Error: no incoming call to answer");
+      }
       return 1;
    }
 
    pending_request_t *req = command_router_register(0);
    if (!req) {
+      unclaim_answer();
       snprintf(result_buf, buf_size, "Error: command router full");
       return 1;
    }
 
    if (publish_echo_cmd("answer", NULL, command_router_get_id(req), NULL) != 0) {
       command_router_cancel(req);
+      unclaim_answer();
       snprintf(result_buf, buf_size, "Error: failed to send answer command");
       return 1;
    }
@@ -1007,12 +1085,24 @@ int phone_service_answer(int user_id, char *result_buf, size_t buf_size) {
             }
             snprintf(result_buf, buf_size, "Error: %s", err_msg);
             json_object_put(resp);
+            /* ECHO refused — release the claim so a legitimate retry (or another
+             * surface) can still answer while the phone is still ringing. */
+            unclaim_answer();
             return 1;
          }
          json_object_put(resp);
       }
    }
 
+   /* ECHO accepted (or the ack timed out but the command is in flight).  Leave
+    * the state as ANSWERING; the asynchronous call_connected event advances it
+    * to ACTIVE (and broadcasts the active context to every surface).  This
+    * relies on ECHO always emitting a terminal event for an answered call:
+    * call_connected on success, call_ended on failure, or modem_lost if the
+    * modem drops — all three clear ANSWERING.  If ECHO acks the answer but then
+    * emits none of those, the state wedges until the modem-lost/reconnect cycle
+    * or a daemon restart (same terminal-event dependency as the pre-existing
+    * ACTIVE state).  A bounded ANSWERING watchdog is the follow-up hardening. */
    snprintf(result_buf, buf_size, "Call answered");
    return 0;
 }

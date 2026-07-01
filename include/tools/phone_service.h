@@ -29,13 +29,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Phone states */
+/* Phone states.
+ *
+ * PHONE_STATE_ANSWERING is appended (not inserted after RINGING_IN) so the
+ * existing numeric values stay stable for the ordered state-name table in
+ * phone_tool.c's status handler.  It is the interim "a surface has claimed the
+ * ring and is answering it" state: phone_service_answer() flips RINGING_IN ->
+ * ANSWERING atomically so a second surface can't race the same answer, and the
+ * ECHO call_connected event then advances ANSWERING -> ACTIVE. */
 typedef enum {
    PHONE_STATE_IDLE = 0,
    PHONE_STATE_DIALING,
    PHONE_STATE_RINGING_IN,
    PHONE_STATE_ACTIVE,
    PHONE_STATE_HANGING_UP,
+   PHONE_STATE_ANSWERING,
 } phone_state_t;
 
 /* Phone service configuration */

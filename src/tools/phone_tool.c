@@ -919,9 +919,9 @@ static char *handle_sms_log(struct json_object *details, int user_id) {
 
 static char *handle_status(void) {
    phone_state_t state = phone_service_get_state();
-   const char *state_str[] = { "idle", "dialing", "ringing (incoming)", "active call",
-                               "hanging up" };
-   const char *st = (state >= 0 && state <= 4) ? state_str[state] : "unknown";
+   const char *state_str[] = { "idle",        "dialing",    "ringing (incoming)",
+                               "active call", "hanging up", "answering" };
+   const char *st = (state >= 0 && state <= 5) ? state_str[state] : "unknown";
 
    char buf[256];
    snprintf(buf, sizeof(buf), "Phone status: %s. Modem: %s.", st,

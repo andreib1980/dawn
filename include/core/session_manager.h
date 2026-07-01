@@ -866,6 +866,32 @@ void session_check_idle_conversations(void);
 void session_add_message(session_t *session, const char *role, const char *content);
 
 /**
+ * @brief Inject a "system" message into every live interactive session.
+ *
+ * Interactive = local mic (SESSION_TYPE_LOCAL), satellites (DAP/DAP2), and
+ * WebUI — the surfaces from which a user can issue a real-time command.
+ * Messaging-channel sessions (SESSION_TYPE_MESSAGING) are intentionally
+ * excluded: injecting a transient device event into an unrelated ongoing chat
+ * thread is noise.
+ *
+ * Used to fan out device-wide events that any interactive surface should be
+ * able to act on (e.g. an incoming phone call ringing, or a call that was just
+ * answered/ended elsewhere) instead of only the local session seeing them.
+ *
+ * Follows the standard snapshot-then-retain iteration: session IDs are
+ * snapshotted under the module read lock, then each session is retained via
+ * session_get() and written under its own history_mutex, so no per-session
+ * lock is ever held while the module lock is held.
+ *
+ * @param content Message content (NULL/empty is a no-op).
+ * @return Number of sessions the message was written into.
+ *
+ * @locks session_manager_rwlock (read) for snapshot, then per-session
+ *        ref_mutex + history_mutex during apply.
+ */
+int session_broadcast_system_message(const char *content);
+
+/**
  * @brief Stamp a DB row ID onto the most recent unstamped history entry for role.
  *
  * Scans backward through conversation_history for the last entry with matching

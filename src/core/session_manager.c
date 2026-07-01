@@ -1160,6 +1160,48 @@ void session_add_message(session_t *session, const char *role, const char *conte
    pthread_mutex_unlock(&session->history_mutex);
 }
 
+int session_broadcast_system_message(const char *content) {
+   if (!initialized || !content || content[0] == '\0') {
+      return 0;
+   }
+
+   /* Snapshot session IDs under the read lock, then apply after releasing it —
+    * same discipline as session_manager_refresh_all_prompts(): never hold a
+    * per-session lock while the module lock is held. */
+   uint32_t snapshot_ids[MAX_SESSIONS];
+   int count = 0;
+
+   pthread_rwlock_rdlock(&session_manager_rwlock);
+   for (int i = 0; i < MAX_SESSIONS; i++) {
+      session_t *s = sessions[i];
+      if (!s) {
+         continue;
+      }
+      snapshot_ids[count++] = s->session_id;
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+
+   int delivered = 0;
+   for (int i = 0; i < count; i++) {
+      session_t *s = session_get(snapshot_ids[i]); /* Retains */
+      if (!s) {
+         continue;
+      }
+
+      /* Interactive surfaces only.  Messaging-channel forever-conversations are
+       * excluded so a device event doesn't leak into an unrelated chat. */
+      if (s->type == SESSION_TYPE_LOCAL || s->type == SESSION_TYPE_DAP ||
+          s->type == SESSION_TYPE_DAP2 || s->type == SESSION_TYPE_WEBUI) {
+         session_add_message(s, "system", content);
+         delivered++;
+      }
+
+      session_release(s);
+   }
+
+   return delivered;
+}
+
 void session_stamp_last_message_id(session_t *session, const char *role, int64_t msg_id) {
    if (!session || !role || msg_id <= 0)
       return;
