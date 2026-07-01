@@ -91,9 +91,8 @@ static const treg_param_t hud_control_params[] = {
  * the `element` enum.  Otherwise the LLM sees a tool with an empty
  * enum array, infers no valid input exists, and either skips silently
  * or fabricates element names ("hud", "main", etc.).  Discovery
- * normally completes within seconds of MQTT connection; if it times
- * out, hud_discovery_apply_defaults() seeds a baseline so the tool
- * still surfaces. */
+ * normally completes within seconds of MQTT connection; until it does,
+ * the tool stays hidden (there are no valid elements to control). */
 static bool hud_control_is_available(void) {
    return hud_discovery_get_element_count() > 0;
 }

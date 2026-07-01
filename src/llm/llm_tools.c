@@ -655,6 +655,19 @@ void llm_tools_refresh(void) {
       /* Armor/HUD tools require successful discovery (helmet must be connected) */
       if (t->armor_feature) {
          t->enabled = hud_available;
+
+         /* Also honor the tool's own availability gate (hud_control requires
+          * discovered elements; hud_mode requires >1 mode).  hud_available
+          * flips true when the HUD keepalive comes online, but discovery
+          * responses land a beat later — without this the native schema could
+          * ship hud_control with an empty `element` enum (emitted as an
+          * unconstrained string) in that window and the LLM fabricates element
+          * names.  Discovery re-runs llm_tools_refresh() once the enum is
+          * populated, so this re-enables the tool automatically. */
+         const tool_metadata_t *meta = tool_registry_find(t->name);
+         if (meta != NULL && meta->is_available != NULL && !meta->is_available()) {
+            t->enabled = false;
+         }
       }
 
       /* Search requires configured endpoint */
