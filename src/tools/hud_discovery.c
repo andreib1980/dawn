@@ -127,8 +127,11 @@ static int parse_string_array(struct json_object *array,
  * @brief Update hud_control tool with discovered elements
  */
 /* Returns true on success; caller is responsible for running the post-update
- * cache-invalidate + session-refresh sequence AFTER releasing s_discovery_mutex
- * so DB I/O and per-session history_mutex aren't held under the discovery mutex. */
+ * tool-refresh + cache-invalidate + session-refresh sequence
+ * (hud_capability_changed_unlocked) AFTER releasing s_discovery_mutex.  The
+ * refresh in particular MUST run outside the mutex: llm_tools_refresh()
+ * consults hud_control_is_available(), which re-locks s_discovery_mutex —
+ * doing it here would self-deadlock the discovery (MQTT loop) thread. */
 static bool update_hud_control_elements(void) {
    if (s_element_count <= 0) {
       return false;
@@ -138,9 +141,6 @@ static bool update_hud_control_elements(void) {
                                             s_element_count);
    if (rc == 0) {
       OLOG_INFO("HUD discovery: Updated hud_control with %d elements", s_element_count);
-      /* Refresh tool availability (enables armor tools now that HUD is valid).
-       * This is a registry flag flip — cheap, holds only s_tools_mutex briefly. */
-      llm_tools_refresh();
       return true;
    }
    OLOG_WARNING("HUD discovery: Failed to update hud_control elements (rc=%d)", rc);
@@ -160,7 +160,6 @@ static bool update_hud_mode_modes(void) {
    int rc = tool_registry_update_param_enum("hud_mode", "mode", s_mode_ptrs, s_mode_count);
    if (rc == 0) {
       OLOG_INFO("HUD discovery: Updated hud_mode with %d modes", s_mode_count);
-      llm_tools_refresh();
       return true;
    }
    OLOG_WARNING("HUD discovery: Failed to update hud_mode modes (rc=%d)", rc);
@@ -170,6 +169,13 @@ static bool update_hud_mode_modes(void) {
 /* Cache-invalidate + session-refresh sequence run AFTER s_discovery_mutex is
  * released. Kept in one helper so elements / modes paths don't diverge. */
 static void hud_capability_changed_unlocked(void) {
+   /* Refresh tool availability first — enables/disables armor tools now that the
+    * discovered enum changed.  MUST run outside s_discovery_mutex:
+    * llm_tools_refresh() consults each armor tool's is_available() callback, and
+    * hud_control_is_available()/hud_mode_is_available() re-lock s_discovery_mutex
+    * (via the element/mode count getters).  Calling it while the discovery mutex
+    * is held self-deadlocks the MQTT loop thread that drives discovery. */
+   llm_tools_refresh();
    /* Schema cache is regenerated with the new enum values on next tool call */
    llm_tools_invalidate_cache();
    /* Rebuild system-prompt hint so it reflects the new availability */
@@ -453,9 +459,12 @@ void hud_discovery_apply_defaults(void) {
 
    pthread_mutex_unlock(&s_discovery_mutex);
 
-   /* Update tool registry with defaults */
+   /* Update tool registry with defaults (mutex already released above) */
    update_hud_control_elements();
    update_hud_mode_modes();
+
+   /* Refresh availability + rebuild schema/prompts — runs outside the mutex. */
+   hud_capability_changed_unlocked();
 
    OLOG_INFO("HUD discovery: Applied default values");
 }
