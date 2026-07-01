@@ -40,6 +40,10 @@
 #include <stdint.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* sqlite3_stmt is forward-declared so this header is includable without
  * pulling in sqlite3.h.  Only consumers that build a descriptor (themselves
  * Layer-2 store modules) reference these pointers. */
@@ -282,5 +286,9 @@ void blob_build_filename(const char *id,
 
 /** @brief Reject a DB-sourced filename containing path traversal. */
 bool blob_validate_db_filename(const char *filename);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BLOB_STORE_H */

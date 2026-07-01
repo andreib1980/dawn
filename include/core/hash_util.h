@@ -27,6 +27,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** @brief Length of a SHA-256 hex string including the NUL (64 hex + 1). */
 #define DAWN_SHA256_HEX_LEN 65
 
@@ -39,5 +43,9 @@
  *                a NUL-terminated 64-char lowercase hex string.
  */
 void dawn_sha256_hex(const void *data, size_t len, char *out_hex);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* CORE_HASH_UTIL_H */

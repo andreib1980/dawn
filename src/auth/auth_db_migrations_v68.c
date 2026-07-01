@@ -39,6 +39,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#undef AUTH_DB_INTERNAL_ALLOWED
 #include "logging.h"
 
 /* True if @col exists on @table. @table is a fixed literal (not user input). */

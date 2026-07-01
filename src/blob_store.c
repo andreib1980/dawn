@@ -42,6 +42,22 @@
 #include "blob_store.h"
 #include "logging.h"
 
+/* Skip a last_accessed write unless the stored value is at least this stale,
+ * to limit flash wear from read-driven metadata churn. */
+#define BLOB_ACCESS_UPDATE_INTERVAL_SEC 900 /* 15 min */
+
+/* Per-pass row cap for the cleanup/orphan sweeps.  Bounds the stack scratch
+ * arrays; the orphan sweep loops until a partial batch drains the queue.  Keep
+ * in lockstep with the `LIMIT` in the get_expired/get_cache_lru/get_orphan
+ * statements (auth_db_statements.c). */
+#define BLOB_CLEANUP_BATCH_SIZE 100
+
+/* Bind params on the create statement: 8 fixed (id, user_id, source/kind,
+ * retention, mime, size, filename, created_at) plus one each for the optional
+ * content_hash / filename_original columns (see blob_store_save).  Validated
+ * against the descriptor flags at registration. */
+#define BLOB_CREATE_BASE_PARAMS 8
+
 /* =============================================================================
  * Static State — registry of consumer tables
  * ============================================================================= */
@@ -153,6 +169,25 @@ int blob_store_register(const blob_store_table_t *desc, blob_store_handle_t *han
    }
    if (s_blob.n_tables >= BLOB_STORE_MAX_TABLES) {
       OLOG_ERROR("Blob store: too many tables registered (max %d)", BLOB_STORE_MAX_TABLES);
+      return BLOB_STORE_FAILURE;
+   }
+
+   /* Fail loudly if the externally-owned create statement's bind-parameter count
+    * disagrees with the descriptor's column-shape flags.  Otherwise a mismatch
+    * surfaces only as a silent SQLITE_RANGE bind on the first save. */
+   if (!desc->stmts->create) {
+      OLOG_ERROR("Blob store: '%s' descriptor has no create statement",
+                 desc->name ? desc->name : "?");
+      return BLOB_STORE_INVALID;
+   }
+   int want_params = BLOB_CREATE_BASE_PARAMS + (desc->has_content_hash ? 1 : 0) +
+                     (desc->has_filename_original ? 1 : 0);
+   int have_params = sqlite3_bind_parameter_count(desc->stmts->create);
+   if (have_params != want_params) {
+      OLOG_ERROR("Blob store: '%s' create statement binds %d params, expected %d "
+                 "(has_content_hash=%d, has_filename_original=%d)",
+                 desc->name ? desc->name : "?", have_params, want_params, desc->has_content_hash,
+                 desc->has_filename_original);
       return BLOB_STORE_FAILURE;
    }
 
@@ -457,9 +492,9 @@ int blob_store_get_path(blob_store_handle_t handle,
    }
    sqlite3_reset(t->stmts->get_file);
 
-   /* Rate-limit last_accessed writes: only if > 15 min stale (flash wear). */
+   /* Rate-limit last_accessed writes: only if stale enough (flash wear). */
    time_t now = time(NULL);
-   if (now - last_acc > 900) {
+   if (now - last_acc > BLOB_ACCESS_UPDATE_INTERVAL_SEC) {
       sqlite3_reset(t->stmts->update_access);
       sqlite3_bind_int64(t->stmts->update_access, 1, (int64_t)now);
       sqlite3_bind_text(t->stmts->update_access, 2, id, -1, SQLITE_STATIC);
@@ -708,9 +743,10 @@ int blob_store_cleanup(blob_store_handle_t handle, int *deleted_out) {
 
       sqlite3_reset(t->stmts->get_expired_ids);
       sqlite3_bind_int64(t->stmts->get_expired_ids, 1, (int64_t)cutoff);
-      char filenames[100][BLOB_FILENAME_MAX];
+      char filenames[BLOB_CLEANUP_BATCH_SIZE][BLOB_FILENAME_MAX];
       int batch = 0;
-      while (sqlite3_step(t->stmts->get_expired_ids) == SQLITE_ROW && batch < 100) {
+      while (sqlite3_step(t->stmts->get_expired_ids) == SQLITE_ROW &&
+             batch < BLOB_CLEANUP_BATCH_SIZE) {
          const char *fn = (const char *)sqlite3_column_text(t->stmts->get_expired_ids, 1);
          if (fn && blob_validate_db_filename(fn)) {
             strncpy(filenames[batch], fn, BLOB_FILENAME_MAX - 1);
@@ -751,11 +787,11 @@ int blob_store_cleanup(blob_store_handle_t handle, int *deleted_out) {
 
       if (cache_bytes > cap) {
          sqlite3_reset(t->stmts->get_cache_lru_ids);
-         char cache_ids[100][BLOB_ID_LEN];
-         char cache_filenames[100][BLOB_FILENAME_MAX];
+         char cache_ids[BLOB_CLEANUP_BATCH_SIZE][BLOB_ID_LEN];
+         char cache_filenames[BLOB_CLEANUP_BATCH_SIZE][BLOB_FILENAME_MAX];
          int evict = 0;
          while (sqlite3_step(t->stmts->get_cache_lru_ids) == SQLITE_ROW && cache_bytes > cap &&
-                evict < 100) {
+                evict < BLOB_CLEANUP_BATCH_SIZE) {
             const char *cid = (const char *)sqlite3_column_text(t->stmts->get_cache_lru_ids, 0);
             const char *fn = (const char *)sqlite3_column_text(t->stmts->get_cache_lru_ids, 1);
             int64_t row_size = sqlite3_column_int64(t->stmts->get_cache_lru_ids, 2);
@@ -822,10 +858,11 @@ int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *d
       AUTH_DB_LOCK_OR_RETURN(BLOB_STORE_FAILURE);
       sqlite3_reset(t->stmts->get_orphan_ids);
       sqlite3_bind_int64(t->stmts->get_orphan_ids, 1, (int64_t)cutoff);
-      char ids[100][BLOB_ID_LEN];
-      char filenames[100][BLOB_FILENAME_MAX];
+      char ids[BLOB_CLEANUP_BATCH_SIZE][BLOB_ID_LEN];
+      char filenames[BLOB_CLEANUP_BATCH_SIZE][BLOB_FILENAME_MAX];
       int batch = 0;
-      while (sqlite3_step(t->stmts->get_orphan_ids) == SQLITE_ROW && batch < 100) {
+      while (sqlite3_step(t->stmts->get_orphan_ids) == SQLITE_ROW &&
+             batch < BLOB_CLEANUP_BATCH_SIZE) {
          const char *cid = (const char *)sqlite3_column_text(t->stmts->get_orphan_ids, 0);
          const char *fn = (const char *)sqlite3_column_text(t->stmts->get_orphan_ids, 1);
          if (cid && fn && blob_validate_db_filename(fn)) {
@@ -856,7 +893,7 @@ int blob_store_cleanup_orphans(blob_store_handle_t handle, int grace_sec, int *d
          }
       }
       total_deleted += batch;
-      if (batch < 100) {
+      if (batch < BLOB_CLEANUP_BATCH_SIZE) {
          break;
       }
    }

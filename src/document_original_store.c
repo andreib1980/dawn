@@ -119,8 +119,8 @@ int document_originals_init(const documents_config_t *cfg, const char *data_dir)
 }
 
 void document_originals_shutdown(void) {
-   /* The shared blob store is torn down by image_store_shutdown(); just drop our
-    * readiness so post-shutdown calls are rejected. */
+   /* The shared blob store is torn down once by the daemon (blob_store_shutdown);
+    * just drop our readiness so post-shutdown calls are rejected. */
    s_doc_ready = false;
 }
 
@@ -148,16 +148,16 @@ int document_original_get_filename(const char *blob_id, int user_id, char *out, 
       return BLOB_STORE_INVALID;
    }
    out[0] = '\0';
-   /* Access check first (get_path applies can_read); then read metadata. */
-   char path[BLOB_PATH_MAX];
-   int rc = blob_store_get_path(s_doc_handle, blob_id, user_id, path, NULL);
+   /* Single metadata read.  get_metadata does NOT apply the access policy, so
+    * enforce it here via the same doc_can_read hook (keeps this safe for any
+    * caller and avoids a redundant get_path query on the download path). */
+   blob_metadata_t md;
+   int rc = blob_store_get_metadata(s_doc_handle, blob_id, &md);
    if (rc != BLOB_STORE_SUCCESS) {
       return rc;
    }
-   blob_metadata_t md;
-   rc = blob_store_get_metadata(s_doc_handle, blob_id, &md);
-   if (rc != BLOB_STORE_SUCCESS) {
-      return rc;
+   if (!doc_can_read(user_id, md.user_id, md.source)) {
+      return BLOB_STORE_FORBIDDEN;
    }
    strncpy(out, md.filename_original, out_size - 1);
    out[out_size - 1] = '\0';

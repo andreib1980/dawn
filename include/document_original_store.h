@@ -31,6 +31,10 @@
 #include "blob_store.h" /* BLOB_STORE_* codes, BLOB_ID_LEN, BLOB_MIME_MAX, BLOB_PATH_MAX */
 #include "config/dawn_config.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** @brief Register the document-original blob table.  Calls blob_store_init()
  *  (idempotent) then registers the descriptor.  Safe to call once at startup. */
 int document_originals_init(const documents_config_t *cfg, const char *data_dir);
@@ -65,5 +69,9 @@ int document_original_cleanup(int *deleted_out);
 int document_original_cleanup_orphans(int grace_sec, int *deleted_out);
 
 bool document_original_validate_id(const char *blob_id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* DOCUMENT_ORIGINAL_STORE_H */

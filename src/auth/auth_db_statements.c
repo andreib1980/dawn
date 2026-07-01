@@ -723,7 +723,10 @@ int auth_db_prepare_statements(void) {
         * empty under keep-forever; revisit if messages crosses ~100k rows.  The
         * marker is "...bytes) blob:<id>]", so anchor the match with the trailing
         * ']' — blob ids are fixed-length validated tokens, so this can't match a
-        * different blob, and the anchor avoids pinning a blob on stray prose. */
+        * different blob, and the anchor avoids pinning a blob on stray prose.
+        * This "blob:<id>]" marker is mirrored by the JS producer (dawn.js) and
+        * parser (documents.js); kept in sync by scripts/check_blob_marker_sync.sh
+        * — a drift here silently reclaims still-attached files (data loss). */
        "SELECT b.id, b.filename FROM blobs b "
        "WHERE b.kind = 0 AND b.retention_policy != 1 AND b.created_at < ? "
        "AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.original_blob_id = b.id) "

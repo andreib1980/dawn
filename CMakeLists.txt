@@ -854,6 +854,16 @@ add_custom_target(no_ws_direct_write_check
     COMMENT "Checking WebUI invariant: no direct WS-frame lws_write()")
 add_dependencies(dawn no_ws_direct_write_check)
 
+# Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
+# in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or
+# the maintenance sweep silently reclaims still-attached original files (data
+# loss).  Fails the build if the marker drifts out of any site.
+add_custom_target(blob_marker_sync_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_blob_marker_sync.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking blob invariant: chat-attachment marker in sync")
+add_dependencies(dawn blob_marker_sync_check)
+
 # libgit2 link for the code-projects subsystem (detected above).
 if(DAWN_ENABLE_CODE_PROJECTS)
     target_link_libraries(dawn ${LIBGIT2_LIBRARIES})

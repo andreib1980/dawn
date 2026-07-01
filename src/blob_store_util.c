@@ -34,28 +34,45 @@
 
 #include "blob_store.h"
 
+/* Id layout: 4-char prefix + BLOB_ID_RANDOM_LEN random base62 chars + NUL. */
+#define BLOB_ID_PREFIX_LEN 4
+#define BLOB_ID_RANDOM_LEN 12
+#define BLOB_ID_CHARSET_SIZE 62 /* digits + lower + upper */
+/* Largest multiple of the charset size that fits in a byte (4*62 = 248); bytes
+ * >= this are rejected so `% CHARSET_SIZE` stays unbiased (256 is not a multiple
+ * of 62).  NB: this corrects a prior hand-coded literal of 252 — 252 is not a
+ * multiple of 62, so it leaked a slight bias toward chars 0-3. */
+#define BLOB_ID_REJECT_AT (256 / BLOB_ID_CHARSET_SIZE * BLOB_ID_CHARSET_SIZE) /* = 248 */
+
 int blob_generate_id(const char *prefix, char *out) {
    static const char charset[] = "0123456789"
                                  "abcdefghijklmnopqrstuvwxyz"
                                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-   if (!prefix || !out || strlen(prefix) != 4) {
+   if (!prefix || !out || strlen(prefix) != BLOB_ID_PREFIX_LEN) {
       return BLOB_STORE_INVALID;
    }
 
-   memcpy(out, prefix, 4);
-   /* Rejection sampling for an unbiased mapping into the 62-char set: 256 is not
-    * a multiple of 62, so a plain `% 62` over-represents the low byte values.
-    * Discard bytes at/above the largest multiple of 62 (252) and redraw. */
-   for (int i = 0; i < 12; i++) {
+   memcpy(out, prefix, BLOB_ID_PREFIX_LEN);
+   /* Draw randomness in one batch instead of a syscall per byte; refill only if
+    * rejection sampling drains the buffer.  Rejection keeps the base62 mapping
+    * unbiased (see BLOB_ID_REJECT_AT). */
+   unsigned char rnd[32];
+   size_t avail = 0, pos = 0;
+   for (int i = 0; i < BLOB_ID_RANDOM_LEN; i++) {
       unsigned char b;
       do {
-         if (getrandom(&b, 1, 0) != 1) {
-            return BLOB_STORE_FAILURE;
+         if (pos >= avail) {
+            if (getrandom(rnd, sizeof(rnd), 0) != (ssize_t)sizeof(rnd)) {
+               return BLOB_STORE_FAILURE;
+            }
+            avail = sizeof(rnd);
+            pos = 0;
          }
-      } while (b >= 252);
-      out[4 + i] = charset[b % 62];
+         b = rnd[pos++];
+      } while (b >= BLOB_ID_REJECT_AT);
+      out[BLOB_ID_PREFIX_LEN + i] = charset[b % BLOB_ID_CHARSET_SIZE];
    }
-   out[16] = '\0';
+   out[BLOB_ID_PREFIX_LEN + BLOB_ID_RANDOM_LEN] = '\0';
    return BLOB_STORE_SUCCESS;
 }
 
