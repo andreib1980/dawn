@@ -375,7 +375,12 @@
       const docs = typeof DawnDocuments !== 'undefined' ? DawnDocuments : null;
 
       documents.forEach((doc) => {
-         const ext = (doc.filename.split('.').pop() || '').toLowerCase();
+         // Dot-prefixed (".pdf") to match getFormatCategory's keys; formatExtension
+         // strips the dot for display. Fall back to a dot-less ext only when the
+         // documents module isn't loaded (category coloring is skipped then anyway).
+         const ext = docs
+            ? docs.getExtension(doc.filename)
+            : (doc.filename.split('.').pop() || '').toLowerCase();
          const hasOriginal = !!doc.blobId;
 
          const chip = document.createElement('button');

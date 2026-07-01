@@ -533,6 +533,8 @@
     * Regex to match [ATTACHED DOCUMENT: filename (N bytes)]...content...[END DOCUMENT].
     * The optional " blob:blb_xxxxxxxxxxxx" suffix (v68) links the stored original
     * file; older messages without it still match (the group is optional).
+    * The "blob:<id>]" marker is mirrored by the producer (dawn.js) and the
+    * orphan-sweep SQL; kept in sync by scripts/check_blob_marker_sync.sh.
     */
    const DOC_MARKER_RE =
       /\[ATTACHED DOCUMENT: (.+?) \((\d+) bytes\)(?: blob:(blb_[A-Za-z0-9]{12}))?\]\n([\s\S]*?)\n+\[END DOCUMENT\]/g;
@@ -673,6 +675,7 @@
       parseDocumentMarkers,
       openDocumentViewer,
       // Shared with transcript chips so reloaded documents match the upload UI.
+      getExtension,
       getFormatCategory,
       formatExtension,
    };

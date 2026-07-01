@@ -1061,6 +1061,23 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       CONFIG_CLAMP(config->documents.search_min_score, 0.0f, 1.0f);
       CONFIG_CLAMP(config->documents.version_retention_days, 0, 3650);
       CONFIG_CLAMP(config->documents.version_keep_per_doc, 1, 1000);
+
+      /* v68 original-file storage (clamps mirror parse_documents). */
+      JSON_TO_CONFIG_BOOL(section, "originals_enabled", config->documents.originals_enabled);
+      JSON_TO_CONFIG_INT(section, "original_retention_days",
+                         config->documents.original_retention_days);
+      JSON_TO_CONFIG_INT(section, "max_original_size_mb", config->documents.max_original_size_mb);
+      JSON_TO_CONFIG_INT(section, "max_originals_per_user",
+                         config->documents.max_originals_per_user);
+      JSON_TO_CONFIG_INT(section, "max_originals_total_mb_per_user",
+                         config->documents.max_originals_total_mb_per_user);
+      JSON_TO_CONFIG_INT(section, "original_grace_minutes",
+                         config->documents.original_grace_minutes);
+      CONFIG_CLAMP(config->documents.original_retention_days, 0, 3650);
+      CONFIG_CLAMP(config->documents.max_original_size_mb, 1, 512);
+      CONFIG_CLAMP(config->documents.max_originals_per_user, 1, 100000);
+      CONFIG_CLAMP(config->documents.max_originals_total_mb_per_user, 0, 1048576);
+      CONFIG_CLAMP(config->documents.original_grace_minutes, 0, 1440);
    }
 
    /* [vision] — per-upload image size and dimension limits */

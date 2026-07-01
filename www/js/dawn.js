@@ -1052,6 +1052,9 @@
                .map((d) => {
                   // v68: link the stored original file so a reloaded chip can
                   // offer the real PDF/DOCX (older messages just omit it).
+                  // Marker "blob:<id>]" format is mirrored by the parser
+                  // (documents.js DOC_MARKER_RE) and the orphan-sweep SQL; kept in
+                  // sync by scripts/check_blob_marker_sync.sh — change all together.
                   const blobSuffix = d.original_blob_id ? ` blob:${d.original_blob_id}` : '';
                   return `[ATTACHED DOCUMENT: ${d.filename} (${d.size} bytes)${blobSuffix}]\n${d.content}\n[END DOCUMENT]`;
                })

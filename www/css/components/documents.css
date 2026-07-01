@@ -97,18 +97,24 @@
    color: var(--error);
 }
 
-/* Format-category color coding for type badges (tokenized in variables.css). */
-.doc-chip-type[data-category='document'] {
+/* Format-category color coding for type badges (tokenized in variables.css).
+ * Shared by the composer chip (.doc-chip-type) and the reloaded-transcript chip
+ * (.transcript-doc-type) so the two surfaces can't drift; only their base rules
+ * differ (default background + padding). */
+.doc-chip-type[data-category='document'],
+.transcript-doc-type[data-category='document'] {
    background: var(--doc-category-document);
    color: var(--doc-category-document-fg);
 }
 
-.doc-chip-type[data-category='code'] {
+.doc-chip-type[data-category='code'],
+.transcript-doc-type[data-category='code'] {
    background: var(--doc-category-code);
    color: var(--doc-category-code-fg);
 }
 
-.doc-chip-type[data-category='text'] {
+.doc-chip-type[data-category='text'],
+.transcript-doc-type[data-category='text'] {
    background: var(--doc-category-text-bg);
    color: var(--doc-category-text-fg);
 }
@@ -219,21 +225,7 @@
    color: var(--doc-category-code-fg);
    flex-shrink: 0;
 }
-
-.transcript-doc-type[data-category='document'] {
-   background: var(--doc-category-document);
-   color: var(--doc-category-document-fg);
-}
-
-.transcript-doc-type[data-category='code'] {
-   background: var(--doc-category-code);
-   color: var(--doc-category-code-fg);
-}
-
-.transcript-doc-type[data-category='text'] {
-   background: var(--doc-category-text-bg);
-   color: var(--doc-category-text-fg);
-}
+/* Per-category colors are shared with .doc-chip-type above (single source). */
 
 /* Download glyph + downloadable-chip hint on chips backed by a stored original. */
 .transcript-doc-download {
