@@ -1258,7 +1258,30 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       }
    }
    /* Scheduler dismiss/snooze from WebUI or satellite client */
-   else if (strcmp(type, "scheduler_action") == 0) {
+   else if (strcmp(type, "phone_action") == 0) {
+      /* Answer / reject a ringing call, or hang up an active one, from a
+       * browser banner / in-call panel button. */
+      if (!conn_require_auth(conn))
+         return;
+      if (!payload)
+         return;
+
+      json_object *action_obj = NULL;
+      json_object_object_get_ex(payload, "action", &action_obj);
+      const char *action = action_obj ? json_object_get_string(action_obj) : NULL;
+      if (!action || (strcmp(action, "answer") != 0 && strcmp(action, "reject") != 0 &&
+                      strcmp(action, "hangup") != 0)) {
+         send_error_impl(conn->wsi, "INVALID_PARAM",
+                         "phone_action requires action=answer|reject|hangup");
+      } else {
+         webui_phone_handle_action(conn, action);
+      }
+   } else if (strcmp(type, "phone_status") == 0) {
+      /* Client asks for the current active call (reconnect rehydration). */
+      if (!conn_require_auth(conn))
+         return;
+      webui_phone_send_status(conn);
+   } else if (strcmp(type, "scheduler_action") == 0) {
       if (!conn_is_satellite_session(conn) && !conn_require_auth(conn))
          return;
       if (!payload)

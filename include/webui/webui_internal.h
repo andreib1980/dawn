@@ -626,6 +626,22 @@ void send_json_response(ws_connection_t *conn, json_object *response);
 void send_error_impl(struct lws *wsi, const char *code, const char *message);
 
 /**
+ * @brief Handle a phone_action WS message (answer / reject / hangup a call).
+ *
+ * Dispatches the blocking phone_service answer/hang-up onto a detached thread
+ * so the lws service thread never blocks on the ECHO round-trip. Defined in
+ * webui_phone.c. Caller must have auth-gated the connection.
+ */
+void webui_phone_handle_action(ws_connection_t *conn, const char *action);
+
+/**
+ * @brief Send the current active-call snapshot to one connection (reconnect
+ * rehydration for the in-call panel). No-op if no call is active or the
+ * connection isn't the modem owner. Defined in webui_phone.c.
+ */
+void webui_phone_send_status(ws_connection_t *conn);
+
+/**
  * @brief Force logout connections by auth session token prefix
  *
  * Finds all WebSocket connections with matching auth_session_token prefix

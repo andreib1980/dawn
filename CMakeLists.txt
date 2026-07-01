@@ -606,6 +606,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_http.c
         src/webui/webui_admin.c
         src/webui/webui_messaging.c
+        src/webui/webui_phone.c
         src/webui/webui_history.c
         src/webui/webui_memory.c
         src/webui/webui_config.c

@@ -59,6 +59,66 @@ typedef struct {
    int rate_limit_sms_per_day;
 } phone_service_config_t;
 
+/* Forward decl so this Layer-3 header doesn't pull in json-c. */
+struct json_object;
+
+/* Lifecycle of a browser incoming-call banner. */
+typedef enum {
+   PHONE_CALL_NOTIF_RINGING = 0, /* show the banner (Answer/Reject) */
+   PHONE_CALL_NOTIF_ACTIVE,      /* call answered — clear the ring banner */
+   PHONE_CALL_NOTIF_ENDED,       /* call ended/dropped — clear the banner */
+} phone_call_notif_status_t;
+
+/**
+ * @brief Push an incoming-call notification to the owner's WebUI browser sessions.
+ *
+ * Weak-symbol bridge (Layer 3 -> Layer 4), mirroring the scheduler broadcast
+ * pattern: the strong override lives in src/webui/webui_phone.c and links only
+ * in ENABLE_WEBUI builds, while phone_service.c supplies a no-op stub for
+ * WebUI-less builds so the phone service links standalone.  Called on the MQTT
+ * event thread from phone_service_handle_event().
+ *
+ * @param user_id      Modem owner — the notification is filtered to this user's sessions.
+ * @param status       ringing / active / ended (drives the banner lifecycle).
+ * @param number       Caller number (may be empty).
+ * @param contact_name Reverse-looked-up name (may be empty).
+ * @param call_id      Call-log id for client-side correlation.
+ * @param elapsed_sec  Seconds the call has been active (0 at connect / for non-active
+ *                     statuses); lets the browser show a reconnect-accurate timer.
+ * @param photo        Borrowed contact-photo json ({data,mime}) or NULL; read
+ *                     synchronously, never retained.
+ */
+void webui_broadcast_phone_call(int user_id,
+                                phone_call_notif_status_t status,
+                                const char *number,
+                                const char *contact_name,
+                                int64_t call_id,
+                                int elapsed_sec,
+                                struct json_object *photo);
+
+/**
+ * @brief Snapshot the current live call (for WebUI reconnect rehydration).
+ *
+ * Reports a call that is ringing (RINGING_IN / ANSWERING → status RINGING) or
+ * connected (ACTIVE → status ACTIVE); returns false when idle/dialing.
+ *
+ * @param status_out    Filled with RINGING or ACTIVE (optional, may be NULL).
+ * @param number_out    Filled with the call number (may be empty).
+ * @param number_size   Size of number_out.
+ * @param name_out      Filled with the contact name (may be empty).
+ * @param name_size     Size of name_out.
+ * @param call_id_out   Filled with the call-log id (optional, may be NULL).
+ * @param elapsed_sec_out Seconds since connect for ACTIVE, else 0 (optional).
+ * @return true if a call is currently ringing or active, false otherwise.
+ */
+bool phone_service_get_call_snapshot(phone_call_notif_status_t *status_out,
+                                     char *number_out,
+                                     size_t number_size,
+                                     char *name_out,
+                                     size_t name_size,
+                                     int64_t *call_id_out,
+                                     int *elapsed_sec_out);
+
 /**
  * @brief Initialize the phone service.
  *

@@ -374,6 +374,28 @@ static void broadcast_call_context(const char *message) {
 #endif
 }
 
+#ifndef ENABLE_WEBUI
+/* No-op stub for WebUI-less builds; the strong override lives in
+ * src/webui/webui_phone.c.  Declared in phone_service.h.  Marked weak (like the
+ * scheduler bridge stubs) so a future switch to target-scoped compile defs
+ * can't turn this into a duplicate-symbol error. */
+__attribute__((weak)) void webui_broadcast_phone_call(int user_id,
+                                                      phone_call_notif_status_t status,
+                                                      const char *number,
+                                                      const char *contact_name,
+                                                      int64_t call_id,
+                                                      int elapsed_sec,
+                                                      struct json_object *photo) {
+   (void)user_id;
+   (void)status;
+   (void)number;
+   (void)contact_name;
+   (void)call_id;
+   (void)elapsed_sec;
+   (void)photo;
+}
+#endif
+
 /**
  * @brief Read an entity's photo and return a json-c object with base64-encoded data.
  *
@@ -583,6 +605,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       json_object_object_add(hud, "name", json_object_new_string(contact_name));
       json_object_object_add(hud, "ring_timeout", json_object_new_int(30));
       struct json_object *photo = build_contact_photo_json(s_config.user_id, entity_id);
+      /* Browser banner (reads photo synchronously, before the HUD object takes
+       * ownership of it below). */
+      webui_broadcast_phone_call(s_config.user_id, PHONE_CALL_NOTIF_RINGING, number, contact_name,
+                                 log_id, 0, photo);
       if (photo) {
          json_object_object_add(hud, "photo", photo);
       }
@@ -659,6 +685,11 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          broadcast_call_context(ctx);
       }
 
+      /* Show the browser in-call panel now the call is up (elapsed 0 — just
+       * connected; reconnecting clients get the running elapsed via snapshot). */
+      webui_broadcast_phone_call(s_config.user_id, PHONE_CALL_NOTIF_ACTIVE, num_copy, name_copy,
+                                 log_id, 0, NULL);
+
       OLOG_INFO("phone_service: call connected");
    }
 
@@ -710,6 +741,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
                   name_copy[0] ? name_copy : num_copy, reason);
          broadcast_call_context(ctx);
       }
+
+      /* Clear the browser banner / in-call panel. */
+      webui_broadcast_phone_call(s_config.user_id, PHONE_CALL_NOTIF_ENDED, num_copy, name_copy,
+                                 log_id, 0, NULL);
 
       OLOG_INFO("phone_service: call ended (duration=%ds, reason=%s)", duration, reason);
    }
@@ -891,6 +926,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
        * broadcast takes per-session locks). */
       if (had_call) {
          broadcast_call_context("[The phone call ended: the modem disconnected.]");
+         webui_broadcast_phone_call(s_config.user_id, PHONE_CALL_NOTIF_ENDED, "", "", -1, 0, NULL);
       }
       OLOG_WARNING("phone_service: modem lost");
    }
@@ -1256,6 +1292,42 @@ int phone_service_send_sms(int user_id,
 
 phone_state_t phone_service_get_state(void) {
    return get_state();
+}
+
+bool phone_service_get_call_snapshot(phone_call_notif_status_t *status_out,
+                                     char *number_out,
+                                     size_t number_size,
+                                     char *name_out,
+                                     size_t name_size,
+                                     int64_t *call_id_out,
+                                     int *elapsed_sec_out) {
+   pthread_mutex_lock(&s_state_mutex);
+   /* Ringing / answering rehydrates the incoming-call banner; active rehydrates
+    * the in-call panel.  Dialing/idle have nothing for the browser to show. */
+   bool live = (s_state == PHONE_STATE_RINGING_IN || s_state == PHONE_STATE_ANSWERING ||
+                s_state == PHONE_STATE_ACTIVE);
+   if (live) {
+      if (status_out) {
+         *status_out = (s_state == PHONE_STATE_ACTIVE) ? PHONE_CALL_NOTIF_ACTIVE
+                                                       : PHONE_CALL_NOTIF_RINGING;
+      }
+      if (number_out && number_size) {
+         snprintf(number_out, number_size, "%s", s_active_number);
+      }
+      if (name_out && name_size) {
+         snprintf(name_out, name_size, "%s", s_active_contact);
+      }
+      if (call_id_out) {
+         *call_id_out = s_active_call_log_id;
+      }
+      if (elapsed_sec_out) {
+         *elapsed_sec_out = (s_state == PHONE_STATE_ACTIVE && s_call_start_time > 0)
+                                ? (int)(time(NULL) - s_call_start_time)
+                                : 0;
+      }
+   }
+   pthread_mutex_unlock(&s_state_mutex);
+   return live;
 }
 
 const phone_service_config_t *phone_service_get_config(void) {

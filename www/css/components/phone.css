@@ -1,0 +1,305 @@
+/* Incoming-call notification banner (see www/js/ui/phone.js) */
+
+#phone-notifications {
+   position: fixed;
+   top: 12px;
+   left: 50%;
+   transform: translateX(-50%);
+   /* Above the scheduler stack (1500) — a ringing call is the priority alert. */
+   z-index: 1600;
+   display: flex;
+   flex-direction: column;
+   gap: 8px;
+   max-width: 480px;
+   width: calc(100% - 24px);
+   pointer-events: none;
+}
+
+.phone-banner {
+   display: flex;
+   align-items: center;
+   gap: 14px;
+   padding: 12px 16px;
+   border-radius: var(--border-radius, 8px);
+   background: var(--bg-secondary, #1e1e2e);
+   border: 1px solid rgba(255, 255, 255, 0.1);
+   border-left: 3px solid #4caf50;
+   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+   pointer-events: auto;
+   opacity: 0;
+   transform: translateY(-8px);
+   transition:
+      opacity 0.2s ease-out,
+      transform 0.2s ease-out;
+}
+
+.phone-banner.phone-banner-in {
+   opacity: 1;
+   transform: translateY(0);
+}
+
+.phone-banner.phone-banner-out {
+   opacity: 0;
+   transform: translateY(-8px);
+}
+
+/* Gentle pulse while ringing to draw the eye */
+.phone-banner.phone-ringing {
+   animation: phone-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes phone-pulse {
+   0%,
+   100% {
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+   }
+   50% {
+      box-shadow:
+         0 4px 20px rgba(0, 0, 0, 0.4),
+         0 0 0 3px rgba(76, 175, 80, 0.35);
+   }
+}
+
+.phone-photo {
+   flex: 0 0 auto;
+   width: 44px;
+   height: 44px;
+   border-radius: 50%;
+   overflow: hidden;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   background: rgba(76, 175, 80, 0.18);
+   font-size: 20px;
+}
+
+.phone-photo img {
+   width: 100%;
+   height: 100%;
+   object-fit: cover;
+}
+
+.phone-info {
+   flex: 1 1 auto;
+   min-width: 0;
+   display: flex;
+   flex-direction: column;
+   gap: 2px;
+}
+
+.phone-badge {
+   font-size: 11px;
+   font-weight: 600;
+   letter-spacing: 0.02em;
+   color: #4caf50;
+}
+
+.phone-name {
+   font-weight: 600;
+   color: var(--text-primary, #e6e6e6);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.phone-number {
+   font-size: 12px;
+   color: var(--text-secondary, #a0a0b0);
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.phone-actions {
+   flex: 0 0 auto;
+   display: flex;
+   gap: 8px;
+}
+
+.phone-btn {
+   border: none;
+   border-radius: var(--border-radius, 8px);
+   padding: 8px 14px;
+   font-size: 13px;
+   font-weight: 600;
+   cursor: pointer;
+   color: #fff;
+   transition:
+      filter 0.15s ease,
+      opacity 0.15s ease;
+}
+
+.phone-btn:hover {
+   filter: brightness(1.1);
+}
+
+.phone-btn:focus-visible {
+   outline: none;
+   box-shadow: 0 0 0 2px var(--accent, #60a5fa);
+}
+
+.phone-btn:disabled {
+   opacity: 0.5;
+   cursor: default;
+}
+
+/* Darker fills so white 13px bold labels clear WCAG AA (>=4.5:1) — this is a
+ * time-critical answer/reject surface. */
+.phone-btn-answer {
+   background: #2e7d32;
+}
+
+.phone-btn-reject {
+   background: #c62828;
+}
+
+.phone-btn-hangup {
+   background: #c62828;
+   min-height: 44px;
+}
+
+/* Neutral (not a third competing solid fill) — it's a secondary control. */
+.phone-btn-minimize {
+   background: rgba(255, 255, 255, 0.09);
+   color: var(--text-primary, #e6e6e6);
+   min-width: 44px;
+   min-height: 44px;
+   font-size: 20px;
+   line-height: 1;
+   padding: 8px 12px;
+}
+
+/* =============================================================================
+ * In-call panel (persistent while a call is active) — body-level element so the
+ * minimized position:fixed pill anchors to the viewport, not the transformed
+ * #phone-notifications container.
+ * ============================================================================= */
+
+#phone-call-panel.phone-callbar {
+   position: fixed;
+   top: 12px;
+   left: 50%;
+   transform: translateX(-50%) translateY(-8px);
+   z-index: 1600;
+   max-width: 480px;
+   width: calc(100% - 24px);
+   display: flex;
+   align-items: center;
+   gap: 14px;
+   padding: 12px 16px;
+   border-radius: var(--border-radius, 8px);
+   background: var(--bg-secondary, #1e1e2e);
+   border: 1px solid rgba(255, 255, 255, 0.1);
+   border-left: 3px solid #4caf50;
+   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+   opacity: 0;
+   outline: none;
+   transition:
+      opacity 0.2s ease-out,
+      transform 0.2s ease-out;
+}
+
+#phone-call-panel.phone-callbar-in {
+   opacity: 1;
+   transform: translateX(-50%) translateY(0);
+}
+
+#phone-call-panel:focus-visible {
+   box-shadow:
+      0 0 0 2px var(--accent, #60a5fa),
+      0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.phone-callbar-full {
+   display: flex;
+   align-items: center;
+   gap: 14px;
+   width: 100%;
+}
+
+.phone-callbar-pill {
+   display: none;
+}
+
+.phone-badge-active {
+   color: #4caf50;
+}
+
+.phone-duration {
+   font-size: 12px;
+   color: var(--text-secondary, #a0a0b0);
+   font-variant-numeric: tabular-nums;
+}
+
+/* Minimized → collapse the panel to a bottom-right pill (out of the way on
+ * mobile; safe-area insets keep it clear of the home indicator / rounded
+ * corners and any on-screen keyboard docked to the bottom edge). */
+#phone-call-panel.phone-minimized {
+   top: auto;
+   left: auto;
+   bottom: max(16px, env(safe-area-inset-bottom));
+   right: max(16px, env(safe-area-inset-right));
+   transform: none;
+   width: auto;
+   max-width: none;
+   padding: 0;
+   background: none;
+   border: none;
+   box-shadow: none;
+   opacity: 1;
+}
+
+#phone-call-panel.phone-minimized .phone-callbar-full {
+   display: none;
+}
+
+#phone-call-panel.phone-minimized .phone-callbar-pill {
+   display: inline-flex;
+   align-items: center;
+   gap: 8px;
+   min-height: 44px;
+   padding: 8px 16px;
+   border: 1px solid rgba(255, 255, 255, 0.1);
+   border-left: 3px solid #4caf50;
+   border-radius: 999px;
+   background: var(--bg-secondary, #1e1e2e);
+   color: var(--text-primary, #e6e6e6);
+   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+   font-weight: 600;
+   font-variant-numeric: tabular-nums;
+   cursor: pointer;
+}
+
+#phone-call-panel.phone-minimized .phone-callbar-pill:hover {
+   filter: brightness(1.1);
+}
+
+#phone-call-panel.phone-minimized .phone-callbar-pill:focus-visible {
+   outline: none;
+   box-shadow:
+      0 0 0 2px var(--accent, #60a5fa),
+      0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+   .phone-banner {
+      transition: none;
+   }
+   .phone-banner.phone-ringing {
+      animation: none;
+   }
+   #phone-call-panel.phone-callbar {
+      transition: none;
+   }
+}
+
+@media (max-width: 480px) {
+   .phone-banner,
+   .phone-callbar-full {
+      flex-wrap: wrap;
+   }
+   .phone-actions {
+      width: 100%;
+      justify-content: flex-end;
+   }
+}

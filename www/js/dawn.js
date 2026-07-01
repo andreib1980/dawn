@@ -269,6 +269,12 @@
                }
                // Request full config to populate LLM controls
                DawnSettings.requestConfig();
+               // Rehydrate the phone banner / in-call panel if a call is live.
+               // Done here (not on raw 'connected') so the reply lands on the
+               // restored session rather than the throwaway reconnect session.
+               if (typeof DawnPhone !== 'undefined') {
+                  DawnPhone.handleReconnect();
+               }
                // Restore active conversation context (backend session may have lost it on restart)
                // This loads the conversation history into the LLM context so subsequent
                // messages have proper context
@@ -871,6 +877,11 @@
                   DawnScheduler.handleNotification(msg.payload);
                }
                break;
+            case 'phone_call_notification':
+               if (typeof DawnPhone !== 'undefined') {
+                  DawnPhone.handleNotification(msg.payload);
+               }
+               break;
             case 'scheduler_events_response':
                if (window.DawnSchedulerQueue) {
                   DawnSchedulerQueue.handleListResponse(msg.payload);
@@ -1118,6 +1129,10 @@
          if (typeof DawnAlwaysOn !== 'undefined') {
             DawnAlwaysOn.handleReconnect();
          }
+         // NOTE: DawnPhone rehydration is requested from the 'session' handler,
+         // not here — 'connected' fires before the reconnect handshake, so a
+         // request sent now would be answered on the throwaway session that the
+         // reconnect then destroys (the reply would be lost).
       } else if (status === 'connecting') {
          DawnElements.connectionStatus.textContent = 'Connecting...';
       } else {
@@ -1125,6 +1140,11 @@
          DawnElements.connectionStatus.textContent = reason
             ? 'Disconnected: ' + (reason.length > 30 ? reason.substring(0, 30) + '...' : reason)
             : 'Disconnected';
+         // Tear down stale phone call UI — a persistent "On call" pill must not
+         // outlive the connection that authenticates its state.
+         if (typeof DawnPhone !== 'undefined') {
+            DawnPhone.handleDisconnect();
+         }
       }
    }
 
