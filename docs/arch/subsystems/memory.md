@@ -10,7 +10,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ## Architecture: Sleep Consolidation Model + Entity Graph + Dynamic Context Injection
 
-Memory extraction happens at session end, not during conversation — zero latency to conversations while building a persistent user profile. The entity graph captures people, places, pets, projects, and their relationships. Per-turn dynamic context injection (May 2026, Phase 1) ranks facts / entities / relations / summaries / document chunks / calendar events for the current user input and prepends them to the LLM prompt as a focus block, so the model doesn't have to call the memory tool for routine recall.
+Memory extraction happens at session end, not during conversation — zero latency to conversations while building a persistent user profile. The entity graph captures people, places, pets, projects, and their relationships. Per-turn dynamic context injection (May 2026, Phase 1) ranks facts / entities / relations / summaries / document chunks / calendar events for the current user input and prepends them to the LLM prompt as a focus block, so the model doesn't have to call the memory tool for routine recall. When the model *does* need to reach for something explicitly, a unified cross-source **`recall`** tool (June 2026) runs the same ranking pipeline on demand via `focus_compose_ex()`, returning the best matches across all of those sources in one call instead of separate memory / document / calendar lookups.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -248,6 +248,10 @@ Schema-version highlights since v33:
 - **v44** — `users.real_name` / `preferred_address` / `identity_aliases` (entity-merge link-user-self synthetic-seed)
 - **v45** — `memory_summaries.embedding` (semantic summary search)
 - **v46** — `UPDATE users SET embeddings_model_id = NULL` (forces summary embedding backfill on next boot)
+- **v58** — `memory_facts.expires_at` — fact expiry / ephemerality (transient facts age out automatically)
+- **v67** — single continuous conversations via a compaction watermark (replaces the legacy continuation-splitting; a long session stays one logical conversation for extraction and history)
+
+(v47–v66 and v68 — entity/relation dedup, notes/reference store + hybrid search, document versioning, and the original-file blob store — are documented in [rag.md](rag.md) and the atlas archive.)
 
 ## Privacy Toggle
 

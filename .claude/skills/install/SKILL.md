@@ -35,10 +35,15 @@ for troubleshooting. Deploy commands: `./scripts/install.sh --deploy server` or 
 5. **If something fails**, diagnose it. Read error output, check logs, suggest fixes. Don't just say "it failed".
 6. **Reference the project docs** for details. The key files are:
    - `GETTING_STARTED.md` — primary install guide
+   - `docs/GETTING_STARTED_SERVER.md` — x86_64 server-mode + Docker install
    - `dawn.toml.example` — full config reference
    - `secrets.toml.example` — API keys template
    - `docs/DAP2_SATELLITE.md` — satellite setup
    - `docs/HOMEASSISTANT_SETUP.md` — Home Assistant integration
+   - `docs/MESSAGING_CHANNELS_SETUP.md` — Telegram / Slack / Discord / SMS
+   - `docs/PHONE_SMS_DESIGN.md` — phone calls & SMS via the ECHO modem daemon
+   - `docs/CODING_PROJECTS.md` — Code Projects (coding harness) + cbm server
+   - `docs/OTA_DESIGN.md` — satellite over-the-air updates
    - `generate_ssl_cert.sh` — SSL certificate generation
 
 ## Phase 0: Discovery and User Preferences
@@ -83,10 +88,20 @@ Present these as a checklist with defaults. Let the user answer all at once.
 5. **Optional features** — enable/disable:
    - [ ] SSL/TLS for HTTPS (default: yes if WebUI enabled)
    - [ ] SearXNG web search (default: no, requires Docker)
+   - [ ] Tavily commercial search + URL extract (default: no, key-only — alternative to SearXNG/FlareSolverr)
    - [ ] Plex music integration (default: no)
    - [ ] Home Assistant smart home (default: no)
    - [ ] FlareSolverr for JS-heavy sites (default: no, requires Docker)
+   - [ ] Email (IMAP/SMTP + Gmail OAuth) (default: no, needs `-DDAWN_ENABLE_EMAIL_TOOL=ON`)
+   - [ ] Messaging channels — Telegram / Slack / Discord / SMS (default: no, per-provider bot tokens)
+   - [ ] Phone & SMS via ECHO modem daemon (default: no, needs ECHO + `[phone] enabled`)
+   - [ ] OpenRouter gateway — one key fronts any cloud model (default: no)
    - [ ] MQTT integration (default: yes)
+
+   For the key-only integrations (Tavily, OpenRouter, messaging bot tokens), collect the key/token
+   now if selected and write it to `secrets.toml` in Phase 5. Point the user at the matching setup
+   section in `GETTING_STARTED.md` / `docs/MESSAGING_CHANNELS_SETUP.md` / `docs/PHONE_SMS_DESIGN.md`
+   for the ones that need external service setup.
 
 6. **Build preset?**
    - `default` — Release with WebUI (recommended)
@@ -108,11 +123,15 @@ libsamplerate0-dev libmpg123-dev libvorbis-dev libncurses-dev
 meson ninja-build libabsl-dev
 libmupdf-dev libfreetype-dev libharfbuzz-dev
 libzip-dev libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev
-libical-dev libspdlog-dev libxml2-dev
+libical-dev libspdlog-dev libxml2-dev libstemmer-dev
 ```
 
 **Known package name variations:**
 - `libabsl-dev` (Ubuntu 22.04 / Jetson Linux R36) vs `libabseil-dev` (Ubuntu 24.04+). If one isn't found, try the other via `apt-cache search abseil`.
+
+**Required-since notes:**
+- `libstemmer-dev` — required since May 2026; the memory BM25 index (`memory_stem.c`) links against it unconditionally, so the build fails without it.
+- **libgit2 ≥ 1.6** is needed only for the Code Projects feature (`DAWN_ENABLE_CODE_PROJECTS`, enabled by the `default`/`full`/`debug` presets). Jammy/Noble apt ship too old a version, so `scripts/install.sh` builds it from source (skip with `INSTALL_LIBGIT2=false` for the `server`/`local`/`ci` presets). Not an apt package.
 
 1. Check which packages from the apt install list are already installed
 2. Report what's missing
@@ -344,6 +363,31 @@ Reference: `GETTING_STARTED.md` — SearXNG section.
 ### Plex (if selected)
 1. Token and config should already be set from Phase 5
 2. **Verify**: Test Plex API connection with curl
+
+### Tavily (if selected)
+1. `tavily_api_key` (starts `tvly-`) should be in `secrets.toml` from Phase 5
+2. Set `[search] engine = "tavily"` and/or `[url_fetcher] fallback = "tavily"` in `dawn.toml`
+3. **Verify**: `curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" -d '{"api_key":"<key>","query":"test"}' https://api.tavily.com/search` → `200`
+
+### OpenRouter (if selected)
+1. `openrouter_api_key` (starts `sk-or-`) should be in `secrets.toml` from Phase 5
+2. Set `[llm.cloud] use_openrouter = true` in `dawn.toml`
+3. **Verify**: `curl -s -o /dev/null -w "%{http_code}" https://openrouter.ai/api/v1/models -H "Authorization: Bearer <key>"` → `200`
+
+### Messaging channels (if selected)
+1. Bot/app tokens should be in `secrets.toml` from Phase 5 (`telegram_bot_token`, `discord_bot_token`, `slack_app_token` + `slack_bot_token`; SMS routes through ECHO, no token). Drivers load only when their token is present.
+2. After first run, link a channel: `./build/dawn-admin messaging generate-link-code --user <username>`, then send `/link CODE` from the chat app (Slack: `link CODE`).
+3. Full per-provider bot setup: `docs/MESSAGING_CHANNELS_SETUP.md`.
+
+### Email (if selected)
+1. Requires a build with `-DDAWN_ENABLE_EMAIL_TOOL=ON` and `[email] enabled = true` in `dawn.toml`.
+2. Accounts are added in the WebUI (**Settings → Email Accounts**), not the installer — app password or Google OAuth.
+3. Reference: `GETTING_STARTED.md` — Email section.
+
+### Phone & SMS via ECHO (if selected)
+1. ECHO is a separate daemon (`~/code/The-OASIS-Project/echo`) that owns the modem; it must share DAWN's MQTT broker.
+2. Set `[phone] enabled = true` (+ `user_id`, optional `audio_device`) in `dawn.toml`.
+3. Reference: `docs/PHONE_SMS_DESIGN.md`. Note: two-way call audio through the browser is not yet shipped.
 
 ## Phase 10: Deploy as Systemd Service (optional)
 

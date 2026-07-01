@@ -107,8 +107,10 @@ sudo apt install cmake build-essential pkg-config
 sudo apt install libcurl4-openssl-dev libjson-c-dev libssl-dev libsqlite3-dev \
    libsodium-dev libspdlog-dev libwebsockets-dev libopus-dev \
    libmosquitto-dev libflac-dev libsamplerate0-dev uuid-dev libncurses-dev \
-   libabsl-dev
+   libabsl-dev libstemmer-dev
 ```
+
+> **`libstemmer-dev` note**: Required as of May 2026 — the memory subsystem's BM25 keyword index (`memory_stem.c`) links against it unconditionally, so the build fails without it. Not optional even in server mode.
 
 > **Package name note**: On Ubuntu 22.04, the abseil package is `libabsl-dev`. On Ubuntu 24.04+, it may be named `libabseil-dev`.
 
@@ -133,6 +135,13 @@ sudo apt install libmujs-dev libgumbo-dev libopenjp2-7-dev libjbig2dec0-dev
 # Calendar (CalDAV)
 sudo apt install libical-dev
 ```
+
+> **Code Projects (coding harness)**: the `debug`, `default`, and `full` presets compile in the
+> code-projects feature (`DAWN_ENABLE_CODE_PROJECTS`), which links **libgit2 ≥ 1.6**. Jammy/Noble
+> apt ship a version that's too old, so it must be built from source — `scripts/install.sh` does
+> this automatically (skip with `INSTALL_LIBGIT2=false`). The `server` / `server-debug` / `local` /
+> `ci` presets leave the feature off and don't need libgit2. See
+> [docs/CODING_PROJECTS.md](CODING_PROJECTS.md).
 
 ### CUDA (optional — for GPU-accelerated Whisper ASR)
 
@@ -395,7 +404,27 @@ On first access, you'll be prompted to create an admin account.
 - ASR engine (transcribes audio from WebUI and satellite clients)
 - WebUI (full functionality including voice chat)
 - All network services: LLM, calendar, email, memory, scheduler, MQTT
-- Satellite connections (Tier 1 RPi, Tier 2 ESP32)
+- Messaging channels (Telegram / Slack / Discord / SMS), notes / reference store, and document search (RAG)
+- Satellite connections (Tier 1 RPi, Tier 2 ESP32) — including signed over-the-air (OTA) updates
+- Code Projects (coding harness) when built with the required flags
+
+---
+
+## Optional Features
+
+Everything in the README's optional-features matrix works in server mode. Each has its own
+setup guide — the common ones:
+
+| Feature | Setup guide |
+|---------|-------------|
+| **Messaging Channels** (Telegram / Slack / Discord / SMS) | [MESSAGING_CHANNELS_SETUP.md](MESSAGING_CHANNELS_SETUP.md) |
+| **OpenRouter gateway** (one key, any cloud model) | Set `openrouter_api_key` in `secrets.toml` + `[llm.cloud] use_openrouter = true` |
+| **Tavily** (commercial search + URL extract) | [GETTING_STARTED.md — Tavily](../GETTING_STARTED.md#tavily-commercial-search--url-extract) |
+| **Home Assistant** (smart home) | [HOMEASSISTANT_SETUP.md](HOMEASSISTANT_SETUP.md) |
+| **Google OAuth** (Calendar + Gmail) | [GOOGLE_OAUTH_SETUP.md](GOOGLE_OAUTH_SETUP.md) |
+| **Satellite OTA updates** | [OTA_DESIGN.md](OTA_DESIGN.md) |
+| **Code Projects** (index repos for code Q&A) | [CODING_PROJECTS.md](CODING_PROJECTS.md) |
+| **Email** (IMAP/SMTP + Gmail OAuth) | [GETTING_STARTED.md — Email](../GETTING_STARTED.md#email-imapsmtp) |
 
 ---
 

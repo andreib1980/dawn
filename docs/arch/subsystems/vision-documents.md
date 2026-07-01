@@ -149,6 +149,8 @@ Source: `src/webui/webui_documents.c`, `www/js/ui/documents.js`
 
 **Purpose**: Document upload, extraction, and attachment for LLM context — supports plain text, PDF (MuPDF), DOCX (libzip+libxml2), and HTML-to-markdown (html_parser.c).
 
+> **Transient vs. persistent uploads**: this subsystem covers documents attached to a single conversation turn (extracted text injected into the message). Documents uploaded to the persistent **Document Library** (RAG) are chunked, embedded, and searchable — and since v68 the raw uploaded PDF/DOCX is also retained in a generic **blob store** (`documents.original_blob_id`) so it can be downloaded or re-processed later. See [rag.md](rag.md).
+
 ### Architecture: Client-Side Read + Server-Side Extraction + Transcript Chip Display
 
 ```

@@ -641,11 +641,13 @@ Then configure the HA connection URL in the WebUI admin panel (Settings → Home
 ### Code Projects (Coding Harness)
 
 Let the assistant answer questions about your source code by indexing repositories
-into a code graph. Requires the external **cbm** (`codebase-memory-mcp`) server
-running alongside DAWN, the `DAWN_ENABLE_CODE_PROJECTS` build flag, and
-`[code_projects] enabled = true`. Full setup — cbm service, import vs. link-local,
-branch tracking, refresh/rebuild, permissions/sandbox, and sharing with a coding
-assistant — is in **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)**.
+into a code graph. Three pieces are required:
+
+1. **Build flags** — `DAWN_ENABLE_MCP_BRIDGE_TOOL=ON` **and** `DAWN_ENABLE_CODE_PROJECTS=ON` (the `default`, `full`, and `debug` presets enable both; this also pulls in libgit2 ≥ 1.6, built from source by `scripts/install.sh`).
+2. **The cbm server** — the external **cbm** (`codebase-memory-mcp`) code-graph server, run by the operator (DAWN never launches it) with `mcp-proxy` in front, as the `cbm-mcp` systemd service. Install guide: **[services/cbm-mcp/README.md](services/cbm-mcp/README.md)** (clone from DeusData, build, service install, `dawn.toml` `[mcp]` block, verify).
+3. **Runtime config** — `[code_projects] enabled = true` plus the `[mcp]` / `[[mcp.server]]` block pointing at cbm.
+
+Full usage — import vs. link-local, branch tracking, refresh/rebuild, permissions/sandbox, and sharing with a coding assistant — is in **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)**.
 
 ### JavaScript-Heavy Sites (FlareSolverr)
 
@@ -825,6 +827,27 @@ Happy path:
 3. From the chat app, send `/link CODE` to the bot (Slack: `link CODE`, no slash).
 
 After linking, just talk — no wake word needed. Send `/new` to reset the conversation. See **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** for per-provider bot/app creation, the SMS active-conversation window, scheduler delivery, and channel management.
+
+### Phone Calls & SMS (via ECHO)
+
+DAWN can place and receive cellular calls and text messages on a real phone number through the **[ECHO](https://github.com/The-OASIS-Project/echo)** daemon, a standalone modem daemon for the Waveshare SIM7600G-H (USB) that talks to DAWN over MQTT. ECHO owns the serial/AT-command traffic; DAWN provides the LLM tool, call state machine, TTS announcements, WebUI incoming-call banner, and the call/SMS log.
+
+1. Set up and run ECHO (modem wiring, SIM, and AT config) — see the [ECHO repo](https://github.com/The-OASIS-Project/echo). DAWN and ECHO must share the same MQTT broker.
+2. Enable the phone tool in `dawn.toml`:
+
+   ```toml
+   [phone]
+   enabled = true
+   user_id = 1                 # user who owns the modem (contacts + logs scoped here)
+   confirm_outbound = true     # require a spoken/typed "confirm" before dialing or texting
+   # audio_device = "hw:2,0"   # USB sound card for call audio (crossover cable from the modem jack)
+   ```
+
+3. Restart DAWN. Callers are matched against your [Contacts](#persistent-memory) for name + photo on the HUD and WebUI banner.
+
+**Test it:** *"Text Bob that I'm on my way"* (two-step: draft → confirm), or place a call in and answer with *"Friday, answer"* or the browser banner.
+
+> **Note:** SMS is fully functional. Incoming/outgoing calls ring, announce, and can be answered/rejected/hung up by voice or from the WebUI, and everything is logged — but two-way call **audio** through the browser is still in progress. See [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md).
 
 ## Troubleshooting
 

@@ -57,11 +57,17 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Paragraph-aware splitting (double newline boundaries)
    - Sentence boundary splitting for oversized paragraphs
    - Configurable target/max token sizes and overlap
+   - **Structure-aware chunking** for YAML sequences and CSV: one record per chunk, so a search hit maps to a single record instead of a windowed span
 
 - **document_search.c/h** (`src/tools/`): Semantic search tool
    - Two-pass scoring: cosine similarity first, keyword boost on top 50 only
    - Results formatted with source citations and relevance scores
    - Uses `result_extended` for results exceeding the 8KB fixed buffer
+
+- **document_grep_tool.c** (`src/tools/`): Literal substring search over indexed document/note chunks
+   - Returns the matched line plus adjacent context (not meaning-based) for exact lookups where semantic search is too fuzzy
+   - Gap-safe range read (`document_db_chunk_read_range`, `BETWEEN chunk_index`) so an embed-failure gap in the chunk index doesn't misalign results
+   - Unindexed substring scan — see the FTS fast-path follow-up in `docs/TODO.md` for the large-corpus ceiling
 
 - **document_read.c/h** (`src/tools/`): Paginated document reader
    - Parameters: `document` (name), `start_chunk` (offset), `count` (page size, max 20)
@@ -111,4 +117,25 @@ max_context_tokens = 2000
 max_file_size_mb = 10
 max_index_size_kb = 2048       # Per-document index size limit
 max_indexed_documents = 50     # Per-user document count limit
+
+# Original-file retention (v68): keep the raw uploaded PDF/DOCX alongside the
+# extracted text so it can be downloaded (and re-processed later, e.g. image
+# extraction). Stored in the generic blob store; FK from documents.original_blob_id.
+originals_enabled = true
+original_retention_days = 0          # 0 = keep forever
+max_original_size_mb = 10
+max_originals_per_user = 200
+max_originals_total_mb_per_user = 2048
 ```
+
+See `dawn.toml.example` for the full `[documents]` block, including the hybrid-search
+weights (below).
+
+## Related: Notes store, hybrid lexical search, versioning
+
+The same `document_db` / `embedding_engine` foundation also backs the **notes / reference-text
+store** (`DOC_KIND_NOTES`), which adds a **hybrid lexical (BM25/FTS5 + Porter2 stemming) +
+semantic** retrieval channel, surgical edit/append, and version history with one-step undo
+(`document_versions`). Schema evolved across v61 (hybrid + notes), v62 (versioning), v63
+(multi-chunk edit), and v68 (original-file blob store). Full design:
+[atlas/dawn/archive/NOTES_REFERENCE_STORE_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/NOTES_REFERENCE_STORE_DESIGN.md).

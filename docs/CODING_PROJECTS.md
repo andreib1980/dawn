@@ -17,11 +17,14 @@ what it is, how to set it up, and how to use it.
 
 ## 1. Prerequisites
 
-1. **Build with the feature on.** The daemon must be built with
-   `DAWN_ENABLE_CODE_PROJECTS` (and libgit2 ≥ 1.6 — see `DEPENDENCIES.md`).
+1. **Build with the feature on.** The daemon must be built with both
+   `DAWN_ENABLE_MCP_BRIDGE_TOOL=ON` and `DAWN_ENABLE_CODE_PROJECTS=ON` (and
+   libgit2 ≥ 1.6 — see `DEPENDENCIES.md`). The `default`, `full`, and `debug`
+   presets enable both flags together.
 2. **Run the cbm server.** Install + start the `cbm-mcp` service (mcp-proxy fronting
-   the `codebase-memory-mcp` binary over SSE on `127.0.0.1:9750`). See
-   `services/cbm-mcp/`. Check it: `systemctl status cbm-mcp`.
+   the `codebase-memory-mcp` binary over SSE on `127.0.0.1:9750`). Full install +
+   `dawn.toml` `[mcp]` block: **[services/cbm-mcp/README.md](../services/cbm-mcp/README.md)**.
+   Check it: `systemctl status cbm-mcp`.
 3. **Enable it in `dawn.toml`:**
    ```toml
    [code_projects]

@@ -89,10 +89,22 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 - **One-time link flow** — Generate a link code in the WebUI or via `dawn-admin`, send `/link CODE` from the chat app, and you're connected. Drivers load only when their token is configured.
 - **Forever-conversations** — Each channel maps to one persistent conversation that shows up in WebUI history and feeds memory extraction like any other session. `/new` resets the thread.
 - **Scheduler delivery** — Briefings, reminders, and alarms can be delivered to a messaging channel instead of spoken aloud — "send me a morning briefing on Telegram."
+- **Read & summarize Discord channels** — Ask DAWN to catch you up on a server channel ("summarize the dev-chat channel from this morning") or a whole server at once. Read-only and pull-based — the bot reads history only on request or for a scheduled digest, never posts on its own.
 - **Channel management** — Rename, unlink (history preserved), and re-enable channels from the WebUI panel or the `dawn-admin messaging` operator commands.
 - **Setup**: [docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md).
 
 <!-- TODO: Screenshot of a Telegram/Slack conversation with DAWN -->
+
+### Phone Calls & SMS
+
+DAWN routes cellular calls and text messages through the **[ECHO](https://github.com/The-OASIS-Project/echo)** daemon (SIM7600G-H modem), so your assistant lives on a real phone number.
+
+- **SMS by voice** — "Text Bob that I'm running late." Send and receive texts with two-step confirmation, recipient resolution against your contacts, and a searchable message history.
+- **Incoming-call handling** — When a call comes in, DAWN announces it, rings on the local speaker, shows a HUD notification, and pops an **incoming-call banner in the WebUI** with the caller's name and photo (resolved from contacts).
+- **Answer from anywhere** — Accept, reject, or hang up a call by voice ("Friday, answer") or from the browser banner. A persistent in-call panel shows live call duration and rehydrates after a page reload.
+- **Call & SMS history** — Every call and message is logged to a per-user database with configurable retention.
+
+> **Note:** Two-way call *audio* through the browser is still in progress — today calls ring, announce, and can be answered/controlled, and SMS is fully functional. Setup lives in [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) and the [ECHO repo](https://github.com/The-OASIS-Project/echo).
 
 ### Smart Home & IoT
 
@@ -121,8 +133,11 @@ DAWN's LLM automatically invokes tools and incorporates results into responses. 
 - **Visual Diagrams** — The LLM generates inline SVG/HTML visuals to explain concepts. Flowcharts, architecture diagrams, data charts (Chart.js), interactive widgets, UI mockups, and illustrations render directly in the conversation with clickable nodes for drill-down. Visuals persist across page refresh and render inline within the message text. Design guidelines loaded on demand via the two-step instruction pattern keep the system prompt lightweight. Download button for SVG/HTML export.
 - **Document Search (RAG)** — Upload documents and ask questions about their content.
    - Semantic search across uploaded PDFs, DOCX, TXT, and Markdown files
+   - Literal-text search (`document_grep`) — find an exact string with the matched line plus surrounding context, for precise lookups where meaning-based search is too fuzzy
+   - Structure-aware chunking for YAML and CSV (one record per chunk) keeps record lookups precise
    - Paginated document reading for full-document summaries
    - Hybrid scoring: vector cosine similarity + keyword boosting
+   - Original uploads retained and downloadable alongside the extracted text, with configurable per-user retention caps under `[documents]`
    - Per-user document isolation with admin-controlled global sharing
    - WebUI Document Library panel with drag-and-drop upload and admin document management
 - **Notes & Reference Text** — Ask DAWN to file notes and reference text it can search and recall later ("save this as my public bio", "what's on my packing list?").
@@ -130,6 +145,7 @@ DAWN's LLM automatically invokes tools and incorporates results into responses. 
    - Surgical edits: append to or replace part of a note without re-saving the whole thing
    - Version history with one-step undo — recover the previous version or restore a deleted note
    - Filed reference text is kept out of semantic memory by default, so the canonical copy lives only in the note store (configurable under `[memory]`)
+- **Code Projects (Code Analysis)** — Index your source repositories into a code graph and ask about them by voice or chat: "what calls `parse_payload`?", "where is the session manager defined?", "what changed on this branch?". Import a GitHub-style repo (in-process libgit2 clone) or link a local checkout; per-project branch tracking and refresh/rebuild. Answering runs against an **external, operator-launched** code-graph server (**cbm**) — DAWN connects to it over MCP and never spawns it. Optional; requires the cbm server plus the coding-harness build flags. Setup: [docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md).
 
 ### Persistent Memory
 
@@ -222,6 +238,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **CalDAV Calendar** | Query and manage calendar events by voice | [GETTING_STARTED.md — CalDAV](GETTING_STARTED.md#caldav-calendar) |
 | **Email (IMAP/SMTP)** | Check, read, search, send, trash, and archive email by voice | [GETTING_STARTED.md — Email](GETTING_STARTED.md#email-imapsmtp) |
 | **Messaging Channels** | Chat with DAWN from Telegram, Slack, Discord, or SMS | [docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
+| **Phone Calls & SMS** | Place/receive calls and texts on a real number via the ECHO modem daemon | [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **Google OAuth** | Connect Google Calendar and Gmail via OAuth 2.0 (no app password needed) | [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md) |
 | **Home Assistant** | Control smart home devices by voice | [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) |
 | **Code Projects** | Index repositories so the assistant can answer questions about your code (via the external cbm code-graph server) | [docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md) |
