@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/focus/focus_candidate_helpers.h"
 #include "core/iso8601.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
@@ -118,7 +119,10 @@ static char *handle_create(struct json_object *details,
    /* Name */
    const char *name = json_get_string(details, "name");
    if (name) {
-      strncpy(event.name, name, SCHED_NAME_MAX - 1);
+      /* Cap on a UTF-8 boundary so a long name isn't byte-cut mid-glyph (event
+       * was memset, so the tail stays NUL-terminated). */
+      size_t name_cap = focus_utf8_safe_cap(name, SCHED_NAME_MAX - 1);
+      memcpy(event.name, name, name_cap);
    } else {
       /* Auto-generate name */
       snprintf(event.name, SCHED_NAME_MAX, "%s", type_str);

@@ -131,9 +131,16 @@ int auth_db_backup_before_upgrade(const char *db_path, int from_version) {
 
    char backup_dir[768];
    snprintf(backup_dir, sizeof(backup_dir), "%s/backups", dir);
-   if (mkdir(backup_dir, 0750) != 0 && errno != EEXIST) {
+   /* Owner-only (0700): the backups hold full credential snapshots (password
+    * hashes, session tokens, encrypted blobs). */
+   if (mkdir(backup_dir, 0700) != 0 && errno != EEXIST) {
       OLOG_ERROR("auth_db: cannot create backup dir %s: %s", backup_dir, strerror(errno));
       return AUTH_DB_FAILURE;
+   }
+   /* Tighten an existing dir too (older builds created it 0750). Best-effort. */
+   if (chmod(backup_dir, 0700) != 0) {
+      OLOG_WARNING("auth_db: could not chmod backup dir %s to 0700: %s", backup_dir,
+                   strerror(errno));
    }
 
    char ts[24];
@@ -142,12 +149,20 @@ int auth_db_backup_before_upgrade(const char *db_path, int from_version) {
    localtime_r(&now, &tm_now);
    strftime(ts, sizeof(ts), "%Y%m%dT%H%M%S", &tm_now);
 
-   /* "<base>.v<from>-<ts>.bak"; prune matches all "<base>.v*" for this DB. */
+   /* "<base>.v<from>-<ts>.bak"; prune matches all "<base>.v*" for this DB.
+    * Treat truncation as failure: a clipped path would back up to the wrong file
+    * (or break prune matching), defeating the safety guarantee. */
    char prefix[300];
-   snprintf(prefix, sizeof(prefix), "%s.v", base);
+   if (snprintf(prefix, sizeof(prefix), "%s.v", base) >= (int)sizeof(prefix)) {
+      OLOG_ERROR("auth_db: backup skipped — db filename too long for prefix buffer");
+      return AUTH_DB_FAILURE;
+   }
    char backup_path[1200];
-   snprintf(backup_path, sizeof(backup_path), "%s/%s.v%d-%s.bak", backup_dir, base, from_version,
-            ts);
+   if (snprintf(backup_path, sizeof(backup_path), "%s/%s.v%d-%s.bak", backup_dir, base,
+                from_version, ts) >= (int)sizeof(backup_path)) {
+      OLOG_ERROR("auth_db: backup skipped — backup path too long");
+      return AUTH_DB_FAILURE;
+   }
 
    /* %Q quotes + SQL-escapes the path (VACUUM takes a string literal, not a
     * bound parameter). */
@@ -164,6 +179,13 @@ int auth_db_backup_before_upgrade(const char *db_path, int from_version) {
                  errmsg ? errmsg : "unknown");
       sqlite3_free(errmsg);
       return AUTH_DB_FAILURE;
+   }
+
+   /* Restrict the snapshot to owner-only — it is a full credential DB copy.  The
+    * 0700 dir already blocks others; this closes the gap if the dir is ever
+    * relaxed and removes the brief umask-default window. */
+   if (chmod(backup_path, 0600) != 0) {
+      OLOG_WARNING("auth_db: could not chmod backup %s to 0600: %s", backup_path, strerror(errno));
    }
 
    OLOG_INFO("auth_db: backed up pre-upgrade database (v%d) to %s", from_version, backup_path);

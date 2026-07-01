@@ -42,12 +42,15 @@
 void llm_openai_add_anthropic_cache(json_object *root,
                                     const char *model_name,
                                     const char *base_url) {
-   if (!root || !base_url || !model_name)
+   if (!root || !base_url || !model_name) {
       return;
-   if (strstr(base_url, "openrouter.ai") == NULL)
+   }
+   if (strstr(base_url, "openrouter.ai") == NULL) {
       return;
-   if (strncmp(model_name, "anthropic/", 10) != 0)
+   }
+   if (strncmp(model_name, "anthropic/", 10) != 0) {
       return;
+   }
 
    /* Breakpoint 1: last tool — caches the entire tools array as one prefix. */
    json_object *tools = NULL;
@@ -78,10 +81,13 @@ void llm_openai_add_anthropic_cache(json_object *root,
       for (int i = 0; i < msg_count; i++) {
          json_object *msg = json_object_array_get_idx(messages, i);
          json_object *role_obj = NULL;
-         if (msg == NULL || !json_object_object_get_ex(msg, "role", &role_obj))
+         if (msg == NULL || !json_object_object_get_ex(msg, "role", &role_obj)) {
             continue;
-         if (strcmp(json_object_get_string(role_obj), "system") != 0)
+         }
+         const char *role_str = json_object_get_string(role_obj);
+         if (role_str == NULL || strcmp(role_str, "system") != 0) {
             continue;
+         }
          json_object *content_obj = NULL;
          if (json_object_object_get_ex(msg, "content", &content_obj) &&
              json_object_is_type(content_obj, json_type_string)) {

@@ -98,8 +98,10 @@ static void *maintenance_thread_func(void *arg) {
       }
 
       /* Document originals (v68): age-delete (off by default, retention_days=0)
-       * plus orphan reclamation (uploaded-but-never-indexed + post-delete). */
-      if (document_originals_ready() && g_config.documents.originals_enabled) {
+       * plus orphan reclamation (uploaded-but-never-indexed + post-delete).
+       * Gated on readiness only, NOT originals_enabled: if an operator disables
+       * originals after files exist, the sweep must still reclaim them. */
+      if (document_originals_ready()) {
          int aged = 0, orphans = 0;
          document_original_cleanup(&aged);
          document_original_cleanup_orphans(g_config.documents.original_grace_minutes * 60,

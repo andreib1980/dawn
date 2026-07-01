@@ -2463,9 +2463,12 @@ mqtt_disabled:
          OLOG_WARNING("Failed to initialize image store - vision uploads disabled");
       }
 
-      /* Initialize document-original storage (shares the blob store with images). */
-      if (g_config.documents.originals_enabled &&
-          document_originals_init(&g_config.documents, expanded_data_dir) != 0) {
+      /* Initialize document-original storage (shares the blob store with images).
+       * Always initialize, even when originals are disabled, so the maintenance
+       * sweep and account-deletion purge can still reclaim files left over from a
+       * previously-enabled period.  New writes are gated on `originals_enabled`
+       * at the upload path, not here. */
+      if (document_originals_init(&g_config.documents, expanded_data_dir) != 0) {
          OLOG_WARNING("Failed to initialize document original store - originals not retained");
       }
 

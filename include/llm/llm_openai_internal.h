@@ -108,6 +108,27 @@ const char *llm_openai_clamp_effort_for_model(const char *model_name, const char
 json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history);
 
 /**
+ * @brief Return a request-private messages array with vision images applied,
+ *        WITHOUT mutating @p history.
+ *
+ * llm_openai_prepare_chat_history may return the caller's conversation history
+ * by shared reference, so the in-place "add content to the last message" pattern
+ * would corrupt shared session state.  This copies-on-write: the changed message
+ * is private, every other message is shared read-only.  If the last message is a
+ * user turn its content becomes [text(@p input_text), image_url...]; otherwise a
+ * new user message is appended.
+ *
+ * @return New array (caller owns — json_object_put or hand to root "messages"),
+ *         or NULL on bad input / OOM (caller keeps @p history; vision dropped,
+ *         never corrupted).
+ */
+json_object *llm_openai_apply_vision_images(json_object *history,
+                                            const char *input_text,
+                                            const char **vision_images,
+                                            const size_t *vision_image_sizes,
+                                            int vision_image_count);
+
+/**
  * @brief Reconstruct a Claude-shaped tool message into OpenAI-canonical entries.
  *
  * Appends to @p out_array: a Claude assistant {content:[text, tool_use...]} →

@@ -144,8 +144,20 @@ void scheduler_broadcast_notification(const sched_event_t *event, const char *te
                           json_object_new_string(sched_event_type_to_str(event->event_type)));
    json_object_object_add(payload, "status",
                           json_object_new_string(sched_status_to_str(event->status)));
-   json_object_object_add(payload, "name", json_object_new_string(event->name));
-   json_object_object_add(payload, "message", json_object_new_string(text));
+   /* Scrub free-text (event name + message) before it enters a WS text frame:
+    * a name byte-cut mid-glyph at storage, or any stray invalid byte, would fail
+    * the frame (RFC 6455 §5.6) and wedge the client on every (re)broadcast. The
+    * replay path already does this; the two live broadcasters must match. */
+   char name_safe[SCHED_NAME_MAX];
+   snprintf(name_safe, sizeof(name_safe), "%s", event->name);
+   sanitize_utf8_for_json(name_safe);
+   char *text_safe = strdup(text);
+   if (text_safe) {
+      sanitize_utf8_for_json(text_safe);
+   }
+   json_object_object_add(payload, "name", json_object_new_string(name_safe));
+   json_object_object_add(payload, "message", json_object_new_string(text_safe ? text_safe : text));
+   free(text_safe);
    json_object_object_add(payload, "fire_at", json_object_new_int64((int64_t)event->fire_at));
 
    /* Tell WebUI clients whether TTS audio is being routed to them (skip chime if so) */
@@ -227,12 +239,16 @@ void scheduler_broadcast_briefing_notification(const sched_event_t *event,
                           json_object_new_string(sched_event_type_to_str(event->event_type)));
    json_object_object_add(payload, "status",
                           json_object_new_string(sched_status_to_str(event->status)));
-   json_object_object_add(payload, "name", json_object_new_string(event->name));
+   char name_safe[SCHED_NAME_MAX];
+   snprintf(name_safe, sizeof(name_safe), "%s", event->name);
+   sanitize_utf8_for_json(name_safe);
+   json_object_object_add(payload, "name", json_object_new_string(name_safe));
 
    /* Truncate preview to ~80 chars, backing up to a UTF-8 character boundary.
     * A blind byte-cut can split a multibyte sequence, leaving an invalid-UTF-8
     * string that fails the WebSocket text frame (RFC 6455 §5.6) when broadcast
-    * or replayed — the whole web client then loops on reconnect. */
+    * or replayed — the whole web client then loops on reconnect.  Scrub any
+    * interior invalid bytes too (the boundary cap only fixes the tail). */
    char preview[84];
    size_t text_len = strlen(text);
    size_t copy_len = focus_utf8_safe_cap(text, 80);
@@ -242,6 +258,7 @@ void scheduler_broadcast_briefing_notification(const sched_event_t *event,
    } else {
       preview[copy_len] = '\0';
    }
+   sanitize_utf8_for_json(preview);
    json_object_object_add(payload, "message", json_object_new_string(preview));
    json_object_object_add(payload, "fire_at", json_object_new_int64((int64_t)event->fire_at));
 
