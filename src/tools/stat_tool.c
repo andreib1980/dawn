@@ -126,8 +126,8 @@ static const treg_param_t stat_params[] = {
        .name = "action",
        .description = "What to report: 'all' (full live status), 'temps', 'battery' "
                       "(charge/power/health/time remaining), 'performance' (CPU and memory load), "
-                      "'history' (min/max/avg of a metric over a period), or 'trend' (how a metric "
-                      "moved over a period).",
+                      "'history' or 'trend' (both report the min/max/average and peak of a metric "
+                      "over a period).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
@@ -167,8 +167,9 @@ static const tool_metadata_t stat_metadata = {
        "(charge %, voltage, current, power draw, charging state, estimated time remaining, and "
        "health/faults), CPU and memory load, and cooling fan — from the on-board STAT sensor "
        "service. Use 'all' for a full status report, 'temps'/'battery'/'performance' for one "
-       "area, or 'history'/'trend' with a period to see how a metric changed over time (e.g. "
-       "overnight temperature peaks). Scope is THIS host (the Jetson compute unit); 'temperature' "
+       "area, or 'history'/'trend' with a period for the min/max/average and peak of a metric "
+       "over that window (e.g. overnight temperature peaks). Scope is THIS host (the Jetson "
+       "compute unit); 'temperature' "
        "is the SoC junction temperature — CPU and GPU share one die, there is no separate GPU "
        "sensor. If STAT is offline or the data is stale, that is reported instead of guessed "
        "values.",
