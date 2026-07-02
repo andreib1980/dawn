@@ -29,6 +29,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 
 /* Property cap = the registry's documented per-tool parameter limit
  * (TOOL_PARAM_MAX). It's a validation/hardening bound (reject an untrusted
@@ -116,6 +117,12 @@ char *mcp_schema_wrap_description(const char *server_alias, const char *raw_desc
    size_t cl = sanitize_into(out + bl, room + 1, raw_description, room);
    memcpy(out + bl + cl, end, el);
    out[bl + cl + el] = '\0';
+   /* sanitize_into caps at `room` byte-wise and can stop mid-codepoint, leaving
+    * an orphaned partial UTF-8 sequence.  The registry description is now read
+    * directly at schema-gen (llm_tools tool_effective_description), so repair any
+    * such split here — invalid UTF-8 would otherwise break the tools request /
+    * WebSocket frame. */
+   sanitize_utf8_for_json(out);
    return out;
 }
 

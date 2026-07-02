@@ -554,6 +554,11 @@ static void generate_tool_from_treg(const tool_metadata_t *meta, void *user_data
 
    safe_strncpy(t->name, meta->name, LLM_TOOLS_NAME_LEN);
    safe_strncpy(t->description, meta->description, LLM_TOOLS_DESC_LEN);
+   /* A long description with a multi-byte UTF-8 char near the 512-byte cut
+    * (e.g. an em-dash in an MCP tool's docs) truncates mid-codepoint, producing
+    * invalid UTF-8 that breaks the whole get_tools_config WebSocket frame and
+    * the LLM API request body.  Repair the trailing partial sequence in place. */
+   sanitize_utf8_for_json(t->description);
    t->device_name = meta->device_string;
    t->enabled = true; /* Will be updated by llm_tools_refresh() */
    t->armor_feature = (meta->capabilities & TOOL_CAP_ARMOR_FEATURE) != 0;
@@ -585,6 +590,7 @@ static void generate_tool_from_treg(const tool_metadata_t *meta, void *user_data
       safe_strncpy(dst->name, src->name, LLM_TOOLS_NAME_LEN);
       safe_strncpy(dst->description, src->description ? src->description : "",
                    sizeof(dst->description));
+      sanitize_utf8_for_json(dst->description); /* repair any mid-codepoint truncation */
       dst->type = src->type;
       dst->required = src->required;
 
@@ -842,6 +848,26 @@ static struct json_object *build_parameters_schema(const tool_definition_t *tool
    return build_parameters_schema_from_cached(tool);
 }
 
+/**
+ * @brief Full tool description as sent to the LLM.
+ *
+ * The cached tool_definition_t.description is capped at LLM_TOOLS_DESC_LEN (512),
+ * which silently truncated long tool descriptions (e.g. scheduler at ~5.8 KB).
+ * Params already read their full text live from the registry when the tools JSON
+ * is built (build_parameters_schema_from_treg); this makes the tool-level
+ * description do the same, so nothing is clipped in the request the model
+ * receives.  The tools array is rebuilt per LLM request (no cached schema), so
+ * this is an O(1) hash lookup per enabled tool per request — negligible against
+ * the per-tool json-c allocations already on that path.  Falls back to the cached
+ * copy only for tools not in the registry.  The registry always holds valid
+ * UTF-8 (static literals by construction; MCP descriptions are
+ * codepoint-safe-capped at ingest in mcp_schema_wrap_description).
+ */
+static const char *tool_effective_description(const tool_definition_t *t) {
+   const tool_metadata_t *meta = tool_registry_lookup(t->name);
+   return (meta && meta->description) ? meta->description : t->description;
+}
+
 /* =============================================================================
  * Schema Generation - OpenAI Format
  * ============================================================================= */
@@ -875,7 +901,8 @@ struct json_object *llm_tools_get_openai_format(void) {
 
       struct json_object *function = json_object_new_object();
       json_object_object_add(function, "name", json_object_new_string(t->name));
-      json_object_object_add(function, "description", json_object_new_string(t->description));
+      json_object_object_add(function, "description",
+                             json_object_new_string(tool_effective_description(t)));
       json_object_object_add(function, "parameters", build_parameters_schema(t));
 
       json_object_object_add(tool_obj, "function", function);
@@ -912,7 +939,8 @@ struct json_object *llm_tools_get_claude_format(void) {
        */
       struct json_object *tool_obj = json_object_new_object();
       json_object_object_add(tool_obj, "name", json_object_new_string(t->name));
-      json_object_object_add(tool_obj, "description", json_object_new_string(t->description));
+      json_object_object_add(tool_obj, "description",
+                             json_object_new_string(tool_effective_description(t)));
       json_object_object_add(tool_obj, "input_schema", build_parameters_schema(t));
 
       json_object_array_add(tools_array, tool_obj);
@@ -955,7 +983,8 @@ struct json_object *llm_tools_get_openai_format_filtered(bool is_remote_session)
 
       struct json_object *function = json_object_new_object();
       json_object_object_add(function, "name", json_object_new_string(t->name));
-      json_object_object_add(function, "description", json_object_new_string(t->description));
+      json_object_object_add(function, "description",
+                             json_object_new_string(tool_effective_description(t)));
       json_object_object_add(function, "parameters", build_parameters_schema(t));
 
       json_object_object_add(tool_obj, "function", function);
@@ -988,7 +1017,8 @@ struct json_object *llm_tools_get_claude_format_filtered(bool is_remote_session)
 
       struct json_object *tool_obj = json_object_new_object();
       json_object_object_add(tool_obj, "name", json_object_new_string(t->name));
-      json_object_object_add(tool_obj, "description", json_object_new_string(t->description));
+      json_object_object_add(tool_obj, "description",
+                             json_object_new_string(tool_effective_description(t)));
       json_object_object_add(tool_obj, "input_schema", build_parameters_schema(t));
 
       json_object_array_add(tools_array, tool_obj);

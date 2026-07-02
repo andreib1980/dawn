@@ -48,8 +48,14 @@ extern "C" {
 
 #define TOOL_MAX_REGISTERED 64 /* Max tools in registry */
 #define TOOL_NAME_MAX 64       /* Max length of tool name */
-#define TOOL_DESC_MAX 512      /* Max length of description */
-#define TOOL_TOPIC_MAX 32      /* Max length of MQTT topic */
+#define TOOL_DESC_MAX                                                            \
+   2048                   /* Max length of an MCP-sourced tool/param description \
+                           * (wrapped + sanitized at ingest in                   \
+                           * mcp_schema_wrap_description).  Sized to fit verbose \
+                           * MCP servers (e.g. cbm's ~1.7 KB tool docs) without  \
+                           * truncation.  Compiled-in tools use a `const char *` \
+                           * literal and are not bounded by this. */
+#define TOOL_TOPIC_MAX 32 /* Max length of MQTT topic */
 /* Max parameters per tool. No array is sized by this — it's a validation/hardening
  * cap (also the MCP bridge's property limit). 20 admits real MCP tools like cbm's
  * search_graph (14 params) while still bounding an untrusted upstream schema. */
@@ -685,24 +691,6 @@ void tool_registry_foreach_with_capability(tool_capability_t cap,
  * LLM Schema Generation
  * ============================================================================= */
 
-/**
- * @brief Generate LLM tool schema for all enabled tools
- *
- * Creates JSON array of tool definitions for LLM native tool calling.
- * Filters based on session type (local vs remote) and armor mode.
- *
- * @param buffer Output buffer
- * @param size Buffer size
- * @param remote_session true if generating for remote session
- * @param armor_mode true if armor features should be included
- * @param bytes_written_out Output: number of bytes written (may be NULL)
- * @return SUCCESS or FAILURE
- */
-int tool_registry_generate_llm_schema(char *buffer,
-                                      size_t size,
-                                      bool remote_session,
-                                      bool armor_mode,
-                                      int *bytes_written_out);
 
 /* =============================================================================
  * Dynamic Parameter Updates

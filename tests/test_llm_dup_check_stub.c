@@ -81,12 +81,15 @@ void *session_get_command_context(void) {
 void session_set_command_context(void *session) {
    (void)session;
 }
-const char *strcasestr_portable(const char *haystack, const char *needle) {
-   (void)haystack;
-   (void)needle;
+/* strcasestr_portable is NOT stubbed here: llm_tools.c now references
+ * sanitize_utf8_for_json (tool-description hardening), which pulls the real
+ * string_utils.c from dawn_common into the link — so its strcasestr_portable is
+ * available and a stub would multiply-define it. */
+const void *tool_registry_find(const char *name) {
+   (void)name;
    return NULL;
 }
-const void *tool_registry_find(const char *name) {
+const void *tool_registry_lookup(const char *name) {
    (void)name;
    return NULL;
 }

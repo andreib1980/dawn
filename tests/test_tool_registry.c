@@ -552,20 +552,12 @@ static void test_validate_null_err_buf_safe(void) {
  * ARRAY param: schema emission + custom-field encode/decode contract
  * ============================================================================ */
 
-static void test_schema_array_emits_items(void) {
-   tool_registry_register(&mock_tool_array);
-
-   char buf[4096] = { 0 };
-   int written = 0;
-   int rc = tool_registry_generate_llm_schema(buf, sizeof(buf), false, false, &written);
-   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schema generation succeeds");
-
-   /* The array param advertises type:array with string items. */
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"items\":{\"type\":\"string\"}"),
-                                "array param emits items:{type:string}");
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"type\":\"array\""), "array param emits type:array");
-}
-
+/* NOTE: the former test_schema_array_emits_items / test_schema_scalar_has_no_items
+ * tests exercised tool_registry_generate_llm_schema(), which was removed (the
+ * registry no longer generates LLM schemas — llm_tools.c does, via its own
+ * add_param_type_to_prop).  Those tests covered the deleted duplicate, not the
+ * live path, so they were dropped rather than migrated.  The safety-critical
+ * ARRAY-must-be-last rule below is unaffected. */
 static void test_array_param_must_be_last(void) {
    /* ARRAY param declared last → registers fine. */
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, tool_registry_register(&mock_tool_array),
@@ -573,17 +565,6 @@ static void test_array_param_must_be_last(void) {
    /* ARRAY param NOT last → rejected. */
    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, tool_registry_register(&mock_tool_array_bad),
                                  "ARRAY-not-last tool is rejected");
-}
-
-static void test_schema_scalar_has_no_items(void) {
-   /* A tool with only scalar params must NOT emit an items key (back-compat). */
-   tool_registry_register(&mock_tool);
-
-   char buf[4096] = { 0 };
-   int written = 0;
-   int rc = tool_registry_generate_llm_schema(buf, sizeof(buf), false, false, &written);
-   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "schema generation succeeds");
-   TEST_ASSERT_NULL_MESSAGE(strstr(buf, "\"items\""), "scalar-only tool emits no items key");
 }
 
 static void test_extract_custom_tail_reads_to_end(void) {
@@ -667,10 +648,8 @@ int main(void) {
    RUN_TEST(test_validate_action_gate);
    RUN_TEST(test_validate_null_err_buf_safe);
 
-   /* ARRAY param: schema emission + encode/decode contract */
-   RUN_TEST(test_schema_array_emits_items);
+   /* ARRAY param: must-be-last rule + encode/decode contract */
    RUN_TEST(test_array_param_must_be_last);
-   RUN_TEST(test_schema_scalar_has_no_items);
    RUN_TEST(test_extract_custom_tail_reads_to_end);
    RUN_TEST(test_extract_zero_out_len_safe);
    RUN_TEST(test_extract_base_and_custom_coexist);
