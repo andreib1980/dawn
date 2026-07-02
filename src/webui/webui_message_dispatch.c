@@ -52,6 +52,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_contacts.h"
@@ -183,6 +184,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       /* Request current configuration */
       handle_get_config(conn);
    } else if (strcmp(type, "get_system_prompt") == 0) {
+      /* Auth-gate this info-disclosure endpoint like handle_get_config: a WS
+       * session is created on `init` BEFORE authentication, and this response
+       * exposes the full system prompt AND the native-tools schema. */
+      if (!conn_require_auth(conn)) {
+         return;
+      }
       /* Request current system prompt for debugging.  Uses the FULL
        * variant so the inspector renders both segments of the two-
        * message shape (stable prefix + volatile block joined by
@@ -205,6 +212,20 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
             json_object_object_add(resp_payload, "error",
                                    json_object_new_string("No system prompt found"));
+         }
+
+         /* Native tools are a separate `tools` array in the API request, NOT part
+          * of the system-prompt text — so surface them here, serialized exactly as
+          * the LLM receives them (descriptions post-truncation), to let the
+          * inspector validate what the model actually sees. */
+         bool is_remote = (conn->session->type != SESSION_TYPE_LOCAL);
+         struct json_object *tools = llm_tools_get_openai_format_filtered(is_remote);
+         if (tools) {
+            const char *tools_json = json_object_to_json_string_ext(tools, JSON_C_TO_STRING_PRETTY);
+            json_object_object_add(resp_payload, "tools", json_object_new_string(tools_json));
+            json_object_object_add(resp_payload, "tools_count",
+                                   json_object_new_int((int)json_object_array_length(tools)));
+            json_object_put(tools);
          }
       } else {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));

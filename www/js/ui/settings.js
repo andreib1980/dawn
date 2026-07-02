@@ -367,55 +367,89 @@
          return;
       }
 
-      // Remove any existing system prompt entry
-      const existing = document.getElementById('system-prompt-entry');
-      if (existing) {
-         existing.remove();
-      }
-
-      // Create collapsible system prompt entry
-      const entry = document.createElement('div');
-      entry.id = 'system-prompt-entry';
-      entry.className = 'transcript-entry debug system-prompt';
-
-      const promptLength = payload.length || payload.prompt.length;
-      const tokenEstimate = Math.round(promptLength / 4); // Rough estimate
-
-      entry.innerHTML = `
-      <div class="system-prompt-header">
-        <span class="system-prompt-icon">&#x2699;</span>
-        <span class="system-prompt-title">System Prompt</span>
-        <span class="system-prompt-stats">${promptLength.toLocaleString()} chars (~${tokenEstimate.toLocaleString()} tokens)</span>
-        <span class="system-prompt-toggle">&#x25BC;</span>
-      </div>
-      <div class="system-prompt-content">
-        <pre>${DawnFormat.escapeHtml(payload.prompt)}</pre>
-      </div>
-    `;
-
-      // Add click handler for expand/collapse
-      const header = entry.querySelector('.system-prompt-header');
-      header.addEventListener('click', function () {
-         entry.classList.toggle('expanded');
-      });
-
-      // Insert at the top of the transcript (after placeholder if present)
       const transcript =
          typeof DawnElements !== 'undefined'
             ? DawnElements.transcript
             : document.getElementById('transcript');
-      if (transcript) {
-         const placeholder = transcript.querySelector('.transcript-placeholder');
-         if (placeholder) {
-            placeholder.after(entry);
-         } else {
-            transcript.prepend(entry);
+
+      // Build one collapsible debug entry (shared shape for the prompt and the
+      // tool schema).  afterEl, when given, places this entry directly below it
+      // so the prompt stays above the tools block.
+      function renderDebugEntry(id, icon, title, stats, bodyText, afterEl) {
+         const existing = document.getElementById(id);
+         if (existing) {
+            existing.remove();
          }
+
+         const entry = document.createElement('div');
+         entry.id = id;
+         entry.className = 'transcript-entry debug system-prompt';
+         entry.innerHTML = `
+      <div class="system-prompt-header" role="button" tabindex="0" aria-expanded="false">
+        <span class="system-prompt-icon">${icon}</span>
+        <span class="system-prompt-title">${title}</span>
+        <span class="system-prompt-stats">${stats}</span>
+        <span class="system-prompt-toggle">&#x25BC;</span>
+      </div>
+      <div class="system-prompt-content">
+        <pre>${DawnFormat.escapeHtml(bodyText)}</pre>
+      </div>
+    `;
+
+         const header = entry.querySelector('.system-prompt-header');
+         const toggle = function () {
+            const expanded = entry.classList.toggle('expanded');
+            header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+         };
+         header.addEventListener('click', toggle);
+         header.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+               e.preventDefault();
+               toggle();
+            }
+         });
+
+         if (afterEl) {
+            afterEl.after(entry);
+         } else if (transcript) {
+            const placeholder = transcript.querySelector('.transcript-placeholder');
+            if (placeholder) {
+               placeholder.after(entry);
+            } else {
+               transcript.prepend(entry);
+            }
+         }
+
+         if (typeof DawnState !== 'undefined' && !DawnState.getDebugMode()) {
+            entry.style.display = 'none';
+         }
+         return entry;
       }
 
-      // Show only if debug mode is on
-      if (typeof DawnState !== 'undefined' && !DawnState.getDebugMode()) {
-         entry.style.display = 'none';
+      const promptLength = payload.length || payload.prompt.length;
+      const promptTokens = Math.round(promptLength / 4); // Rough estimate
+      const promptEntry = renderDebugEntry(
+         'system-prompt-entry',
+         '&#x2699;',
+         'System Prompt',
+         `${promptLength.toLocaleString()} chars (~${promptTokens.toLocaleString()} tokens)`,
+         payload.prompt
+      );
+
+      // Tools are a separate `tools` array in the API request (native tool
+      // calling), not part of the prompt text — show them exactly as the LLM
+      // receives them so descriptions can be inspected for truncation.
+      if (payload.tools) {
+         const toolsLen = payload.tools.length;
+         const toolsTokens = Math.round(toolsLen / 4);
+         renderDebugEntry(
+            'system-tools-entry',
+            '&#x1F527;',
+            'Tools (as sent to the LLM)',
+            `${Number(payload.tools_count) || 0} tools, ${toolsLen.toLocaleString()} chars (~${toolsTokens.toLocaleString()} tokens)`,
+            payload.tools,
+            promptEntry
+         );
       }
    }
 
