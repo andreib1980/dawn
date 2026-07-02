@@ -363,3 +363,164 @@ int stat_db_history(int64_t start_ts, int64_t end_ts, stat_history_agg_t *out) {
    pthread_mutex_unlock(&s_stat_db.mutex);
    return SUCCESS;
 }
+
+/* The stored columns for one metric.  min_col/max_col are NULL when the schema
+ * doesn't keep that extreme for the metric (cpu/mem/fan have no min; power/
+ * voltage have neither).  All strings are trusted internal literals. */
+typedef struct {
+   const char *avg_col;
+   const char *min_col; /* NULL if not stored */
+   const char *max_col; /* NULL if not stored */
+   const char *cnt_col; /* averaging weight (per-family sample count) */
+} stat_metric_cols_t;
+
+/* Map a metric to its columns.
+ *
+ * SECURITY: the returned column names are interpolated into the series SQL text
+ * (column names can't be bound parameters), so they MUST stay trusted internal
+ * literals — this switch is the only source, and the string→enum mapping lives
+ * in the tool layer so no user/network input ever reaches here.  The default
+ * returns FAILURE (not just assert, which compiles out under NDEBUG) so an
+ * unknown metric can never fall through to a malformed query. */
+static int stat_metric_columns(stat_metric_t m, stat_metric_cols_t *out) {
+   switch (m) {
+      case STAT_METRIC_TEMP:
+         *out = (stat_metric_cols_t){ "system_temp_avg", "system_temp_min", "system_temp_max",
+                                      "sys_count" };
+         return SUCCESS;
+      case STAT_METRIC_BATTERY:
+         *out = (stat_metric_cols_t){ "batt_level_avg", "batt_level_min", "batt_level_max",
+                                      "batt_count" };
+         return SUCCESS;
+      case STAT_METRIC_POWER:
+         *out = (stat_metric_cols_t){ "batt_power_avg", NULL, NULL, "batt_count" };
+         return SUCCESS;
+      case STAT_METRIC_VOLTAGE:
+         *out = (stat_metric_cols_t){ "batt_voltage_avg", NULL, NULL, "batt_count" };
+         return SUCCESS;
+      case STAT_METRIC_CPU:
+         *out = (stat_metric_cols_t){ "cpu_usage_avg", NULL, "cpu_usage_max", "sys_count" };
+         return SUCCESS;
+      case STAT_METRIC_MEMORY:
+         *out = (stat_metric_cols_t){ "mem_usage_avg", NULL, "mem_usage_max", "sys_count" };
+         return SUCCESS;
+      case STAT_METRIC_FAN:
+         *out = (stat_metric_cols_t){ "fan_rpm_avg", NULL, "fan_rpm_max", "fan_count" };
+         return SUCCESS;
+   }
+   return FAILURE;
+}
+
+int stat_db_series(int64_t start_ts, int64_t end_ts, stat_metric_t metric, stat_series_t *out) {
+   if (!out) {
+      return FAILURE;
+   }
+   memset(out, 0, sizeof(*out));
+   out->metric = metric;
+
+   stat_metric_cols_t c;
+   if (stat_metric_columns(metric, &c) != SUCCESS) {
+      OLOG_ERROR("stat_db: series unknown metric %d", (int)metric);
+      return FAILURE;
+   }
+   out->has_min = (c.min_col != NULL);
+   out->has_max = (c.max_col != NULL);
+
+   /* Group width = ceil(span / MAX_POINTS) rounded up to the native bucket grid,
+    * clamped to one native bucket.  Integer-exact ceiling (a truncated
+    * span/MAX/bucket would under-size and blow the point cap on non-aligned
+    * spans like "today"). */
+   const int64_t bucket = STAT_BUCKET_SECS;
+   int64_t span = end_ts - start_ts;
+   if (span < 0) {
+      span = 0;
+   }
+   int64_t denom = (int64_t)STAT_SERIES_MAX_POINTS * bucket;
+   int64_t group_secs = ((span + denom - 1) / denom) * bucket;
+   if (group_secs < bucket) {
+      group_secs = bucket;
+   }
+   out->group_secs = (int)group_secs;
+
+   pthread_mutex_lock(&s_stat_db.mutex);
+   if (!s_stat_db.ready) {
+      pthread_mutex_unlock(&s_stat_db.mutex);
+      return FAILURE;
+   }
+
+   /* Build the SELECT: group timestamp, sample-weighted avg, then MIN/MAX only
+    * for the columns this metric stores.  Range is inclusive BETWEEN — matches
+    * stat_db_history() and the wider DAWN convention (memory `recent`); the
+    * boundary group an aligned `end` can add is absorbed by the +1 array slot
+    * and the row-loop cap below. */
+   char sql[512];
+   int n = snprintf(sql, sizeof(sql), "SELECT MIN(bucket_start), SUM(%s*%s)/NULLIF(SUM(%s),0)",
+                    c.avg_col, c.cnt_col, c.cnt_col);
+   if (c.min_col && n > 0 && (size_t)n < sizeof(sql)) {
+      n += snprintf(sql + n, sizeof(sql) - n, ", MIN(%s)", c.min_col);
+   }
+   if (c.max_col && n > 0 && (size_t)n < sizeof(sql)) {
+      n += snprintf(sql + n, sizeof(sql) - n, ", MAX(%s)", c.max_col);
+   }
+   /* Structural guard: a future longer column name can't arm an OOB pointer /
+    * size_t underflow in the final append (the literals fit comfortably today). */
+   if (n < 0 || (size_t)n >= sizeof(sql)) {
+      OLOG_ERROR("stat_db: series SQL build overflow");
+      pthread_mutex_unlock(&s_stat_db.mutex);
+      return FAILURE;
+   }
+   snprintf(sql + n, sizeof(sql) - n,
+            " FROM stat_samples WHERE bucket_start BETWEEN ? AND ?"
+            " GROUP BY (bucket_start - ?)/? ORDER BY 1 ASC");
+
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_stat_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_ERROR("stat_db: series prepare failed: %s", sqlite3_errmsg(s_stat_db.db));
+      pthread_mutex_unlock(&s_stat_db.mutex);
+      return FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, start_ts);
+   sqlite3_bind_int64(stmt, 2, end_ts);
+   sqlite3_bind_int64(stmt, 3, start_ts);
+   sqlite3_bind_int64(stmt, 4, group_secs);
+
+   /* Cap the read at capacity regardless of what the query returns — never trust
+    * SQL to bound a fixed buffer. */
+   const int cap = STAT_SERIES_MAX_POINTS + 1;
+   while (out->count < cap && sqlite3_step(stmt) == SQLITE_ROW) {
+      stat_series_point_t *pt = &out->points[out->count];
+      pt->t = sqlite3_column_int64(stmt, 0);
+      int ci = 1;
+      /* A NULL group value (family absent in this group) must read as a gap, not
+       * 0.0 — sqlite3_column_double(NULL) returns 0.0, which would draw a false
+       * plunge to zero. */
+      if (sqlite3_column_type(stmt, ci) != SQLITE_NULL) {
+         pt->avg = sqlite3_column_double(stmt, ci);
+         pt->have_avg = true;
+      }
+      ci++;
+      if (c.min_col) {
+         if (sqlite3_column_type(stmt, ci) != SQLITE_NULL) {
+            pt->min = sqlite3_column_double(stmt, ci);
+            pt->have_min = true;
+         }
+         ci++;
+      }
+      if (c.max_col) {
+         if (sqlite3_column_type(stmt, ci) != SQLITE_NULL) {
+            pt->max = sqlite3_column_double(stmt, ci);
+            pt->have_max = true;
+         }
+         ci++;
+      }
+      out->count++;
+   }
+   sqlite3_finalize(stmt);
+   pthread_mutex_unlock(&s_stat_db.mutex);
+
+   if (out->count > 0) {
+      out->covered_start = out->points[0].t;
+      out->covered_end = out->points[out->count - 1].t;
+   }
+   return SUCCESS;
+}

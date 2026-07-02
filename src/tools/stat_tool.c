@@ -37,6 +37,21 @@
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
 
+/* Heap buffer for a `trend` series result.  Worst case ~49 points × (label +
+ * three numeric arrays) ≈ 2.5 KB; 8 KB leaves ample headroom so the Chart.js-
+ * ready arrays are never truncated (a truncation would hand malformed JSON to
+ * the LLM). */
+#define STAT_SERIES_TEXT_MAX 8192
+
+#define STAT_SECS_PER_DAY (24 * 3600)
+
+/* Which stored value an emitted series array carries. */
+typedef enum {
+   SERIES_FIELD_AVG,
+   SERIES_FIELD_MIN,
+   SERIES_FIELD_MAX
+} series_field_t;
+
 /* ========== Forward declarations ========== */
 
 static char *stat_tool_callback(const char *action, char *value, int *should_respond);
@@ -124,10 +139,12 @@ static void stat_write_config(void *fp, const void *config) {
 static const treg_param_t stat_params[] = {
    {
        .name = "action",
-       .description = "What to report: 'all' (full live status), 'temps', 'battery' "
-                      "(charge/power/health/time remaining), 'performance' (CPU and memory load), "
-                      "'history' or 'trend' (both report the min/max/average and peak of a metric "
-                      "over a period).",
+       .description =
+           "What to report: 'all' (full live status), 'temps', 'battery' "
+           "(charge/power/health/time remaining), 'performance' (CPU and memory load), "
+           "'history' (min/max/average and peak of a metric over a period, as prose), or "
+           "'trend' (a per-interval time series of one metric — labels plus avg, and min/max "
+           "for temperature and battery — suitable for charting).",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
@@ -137,15 +154,18 @@ static const treg_param_t stat_params[] = {
    {
        .name = "period",
        .description = "Time window for 'history'/'trend', e.g. 'last hour', 'overnight', 'today', "
-                      "'24h', '7d'. Defaults to the last hour.",
+                      "'24h', '7d'. 'history' defaults to the last hour; 'trend' defaults to the "
+                      "last 24 hours.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
    },
    {
        .name = "metric",
-       .description = "For 'history'/'trend', which metric to focus on: 'temperature', 'battery', "
-                      "'cpu', 'memory', or 'fan'. Defaults to temperature + battery.",
+       .description = "Which metric to focus on. 'history' reports "
+                      "temperature/battery/cpu/memory/fan (defaults to temperature + battery). "
+                      "'trend' charts one metric — temperature, battery (charge %), power (watts "
+                      "drawn), voltage, cpu, memory, or fan (default temperature).",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
@@ -167,8 +187,10 @@ static const tool_metadata_t stat_metadata = {
        "(charge %, voltage, current, power draw, charging state, estimated time remaining, and "
        "health/faults), CPU and memory load, and cooling fan — from the on-board STAT sensor "
        "service. Use 'all' for a full status report, 'temps'/'battery'/'performance' for one "
-       "area, or 'history'/'trend' with a period for the min/max/average and peak of a metric "
-       "over that window (e.g. overnight temperature peaks). Scope is THIS host (the Jetson "
+       "area, or 'history' with a period for the min/max/average and peak of a metric over that "
+       "window (e.g. overnight temperature peaks). When the user wants to SEE a graph "
+       "(temperatures, power draw, load, etc.), use 'trend' to get the time series and then "
+       "render it as a line chart with render_visual. Scope is THIS host (the Jetson "
        "compute unit); 'temperature' "
        "is the SoC junction temperature — CPU and GPU share one die, there is no separate GPU "
        "sensor. If STAT is offline or the data is stale, that is reported instead of guessed "
@@ -373,7 +395,9 @@ static void parse_period(const char *period,
       q++;
    bool has_n = false;
    while (*q >= '0' && *q <= '9') {
-      n = n * 10 + (*q - '0');
+      if (n < 100000) { /* clamp: avoid signed overflow on absurd input; caps ~273 yrs of days */
+         n = n * 10 + (*q - '0');
+      }
       q++;
       has_n = true;
    }
@@ -477,6 +501,155 @@ static void format_history(const char *metric,
    }
 }
 
+/* ========== Trend series (chartable) ========== */
+
+/* Map a metric string to a chartable metric enum.  Empty/unknown → temperature
+ * (a chart wants one metric; temperature is the natural default).  Kept in the
+ * tool layer so only the enum — never user text — crosses into stat_db. */
+static stat_metric_t parse_metric(const char *metric) {
+   if (!metric || !metric[0]) {
+      return STAT_METRIC_TEMP;
+   }
+   if (strcasecmp(metric, "temperature") == 0 || strcasecmp(metric, "temp") == 0) {
+      return STAT_METRIC_TEMP;
+   }
+   if (strcasecmp(metric, "battery") == 0 || strcasecmp(metric, "charge") == 0) {
+      return STAT_METRIC_BATTERY;
+   }
+   if (strcasecmp(metric, "power") == 0) {
+      return STAT_METRIC_POWER;
+   }
+   if (strcasecmp(metric, "voltage") == 0 || strcasecmp(metric, "volts") == 0) {
+      return STAT_METRIC_VOLTAGE;
+   }
+   if (strcasecmp(metric, "cpu") == 0) {
+      return STAT_METRIC_CPU;
+   }
+   if (strcasecmp(metric, "memory") == 0 || strcasecmp(metric, "mem") == 0) {
+      return STAT_METRIC_MEMORY;
+   }
+   if (strcasecmp(metric, "fan") == 0) {
+      return STAT_METRIC_FAN;
+   }
+   return STAT_METRIC_TEMP;
+}
+
+typedef struct {
+   const char *label;
+   const char *unit;
+   int decimals;
+} stat_metric_fmt_t;
+
+static stat_metric_fmt_t metric_fmt(stat_metric_t m) {
+   switch (m) {
+      case STAT_METRIC_BATTERY:
+         return (stat_metric_fmt_t){ "Battery charge", "%", 0 };
+      case STAT_METRIC_POWER:
+         return (stat_metric_fmt_t){ "Power draw", "W", 1 };
+      case STAT_METRIC_VOLTAGE:
+         return (stat_metric_fmt_t){ "Battery voltage", "V", 2 };
+      case STAT_METRIC_CPU:
+         return (stat_metric_fmt_t){ "CPU load", "%", 0 };
+      case STAT_METRIC_MEMORY:
+         return (stat_metric_fmt_t){ "Memory usage", "%", 0 };
+      case STAT_METRIC_FAN:
+         return (stat_metric_fmt_t){ "Fan speed", "rpm", 0 };
+      case STAT_METRIC_TEMP:
+         return (stat_metric_fmt_t){ "SoC temperature", "°C", 1 };
+   }
+   /* No default: -Wswitch flags a metric added without a format entry. */
+   return (stat_metric_fmt_t){ "SoC temperature", "°C", 1 };
+}
+
+/* Point-time label: HH:MM within a day, "MM-DD HH:MM" for multi-day windows so
+ * points stay distinct. */
+static void fmt_label(int64_t ts, bool multiday, char *out, size_t out_sz) {
+   time_t t = (time_t)ts;
+   struct tm tm_buf;
+   localtime_r(&t, &tm_buf);
+   strftime(out, out_sz, multiday ? "%m-%d %H:%M" : "%H:%M", &tm_buf);
+}
+
+/* Emit one `"key":[…]` numeric array; missing points become `null` (a gap the
+ * chart spans, never a false 0).  Returns bytes written (clamped to sz). */
+static size_t append_series_array(char *buf,
+                                  size_t sz,
+                                  const char *key,
+                                  const stat_series_t *ser,
+                                  series_field_t field,
+                                  int decimals) {
+   size_t off = (size_t)snprintf(buf, sz, "\"%s\":[", key);
+   for (int i = 0; i < ser->count && off < sz; i++) {
+      const stat_series_point_t *p = &ser->points[i];
+      bool have = (field == SERIES_FIELD_AVG)   ? p->have_avg
+                  : (field == SERIES_FIELD_MIN) ? p->have_min
+                                                : p->have_max;
+      double v = (field == SERIES_FIELD_AVG)   ? p->avg
+                 : (field == SERIES_FIELD_MIN) ? p->min
+                                               : p->max;
+      const char *sep = i ? "," : "";
+      if (have) {
+         off += (size_t)snprintf(buf + off, sz - off, "%s%.*f", sep, decimals, v);
+      } else {
+         off += (size_t)snprintf(buf + off, sz - off, "%snull", sep);
+      }
+   }
+   if (off < sz) {
+      off += (size_t)snprintf(buf + off, sz - off, "]");
+   }
+   return off;
+}
+
+/* Format a per-interval series as copy-exact Chart.js-ready JSON fragments: a
+ * voice-friendly prose header + affordance line, then labels/avg[/min/max]
+ * arrays the LLM can drop almost verbatim into render_visual. */
+static void format_series(stat_metric_t metric,
+                          const char *label,
+                          const stat_series_t *ser,
+                          char *buf,
+                          size_t sz) {
+   stat_metric_fmt_t mf = metric_fmt(metric);
+   bool band = ser->has_min && ser->has_max;
+   int64_t span = ser->covered_end - ser->covered_start;
+   bool multiday = span > STAT_SECS_PER_DAY;
+
+   size_t off = (size_t)snprintf(
+       buf, sz,
+       "%s over %s — %d points, %s. To chart, call "
+       "render_visual_load_guidelines(modules=\"chart\") then render_visual (type html, LINE "
+       "chart, plot avg%s, spanGaps:true, category x-axis of the labels, no time adapter).\n",
+       mf.label, label, ser->count, mf.unit,
+       band ? ", shade min–max as a band (second/third dataset, fill:'-1')" : "");
+
+   if (off < sz) {
+      off += (size_t)snprintf(buf + off, sz - off, "\"labels\":[");
+      for (int i = 0; i < ser->count && off < sz; i++) {
+         char lab[24];
+         fmt_label(ser->points[i].t, multiday, lab, sizeof(lab));
+         off += (size_t)snprintf(buf + off, sz - off, "%s\"%s\"", i ? "," : "", lab);
+      }
+      if (off < sz) {
+         off += (size_t)snprintf(buf + off, sz - off, "],\n");
+      }
+   }
+
+   if (off < sz) {
+      off += append_series_array(buf + off, sz - off, "avg", ser, SERIES_FIELD_AVG, mf.decimals);
+   }
+   if (ser->has_min && off < sz) {
+      off += (size_t)snprintf(buf + off, sz - off, ",\n");
+      if (off < sz) {
+         off += append_series_array(buf + off, sz - off, "min", ser, SERIES_FIELD_MIN, mf.decimals);
+      }
+   }
+   if (ser->has_max && off < sz) {
+      off += (size_t)snprintf(buf + off, sz - off, ",\n");
+      if (off < sz) {
+         off += append_series_array(buf + off, sz - off, "max", ser, SERIES_FIELD_MAX, mf.decimals);
+      }
+   }
+}
+
 /* ========== Callback ========== */
 
 static char *stat_tool_callback(const char *action, char *value, int *should_respond) {
@@ -491,7 +664,7 @@ static char *stat_tool_callback(const char *action, char *value, int *should_res
    }
    out[0] = '\0';
 
-   if (strcasecmp(action, "history") == 0 || strcasecmp(action, "trend") == 0) {
+   if (strcasecmp(action, "history") == 0) {
       if (!stat_db_is_ready()) {
          free(out);
          return strdup(TOOL_RESULT_ERROR_MARK
@@ -513,6 +686,44 @@ static char *stat_tool_callback(const char *action, char *value, int *should_res
       }
       format_history(metric, label, &agg, out, 1024);
       return out;
+   }
+
+   if (strcasecmp(action, "trend") == 0) {
+      free(out); /* the series needs its own, larger buffer */
+      out = NULL;
+      if (!stat_db_is_ready()) {
+         return strdup(TOOL_RESULT_ERROR_MARK
+                       "No telemetry history available (history store off).");
+      }
+      char period[64] = "", metric[32] = "";
+      if (value) {
+         tool_param_extract_base(value, period, sizeof(period));
+         tool_param_extract_custom(value, "metric", metric, sizeof(metric));
+      }
+      int64_t start = 0, end = 0;
+      char label[48] = "";
+      /* A chart wants a rich window: default trend to 24h, NOT parse_period's
+       * last-hour default (~4 points at 15-min buckets). */
+      parse_period(period[0] ? period : "24h", time(NULL), &start, &end, label, sizeof(label));
+
+      stat_metric_t m = parse_metric(metric);
+      stat_series_t ser;
+      if (stat_db_series(start, end, m, &ser) != SUCCESS) {
+         return strdup(TOOL_RESULT_ERROR_MARK "Failed to query telemetry series.");
+      }
+      if (ser.count == 0) {
+         char msg[160];
+         snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "No %s history recorded for %s.",
+                  metric_fmt(m).label, label);
+         return strdup(msg);
+      }
+      char *sbuf = malloc(STAT_SERIES_TEXT_MAX);
+      if (!sbuf) {
+         return strdup(TOOL_RESULT_ERROR_MARK "system_status: out of memory.");
+      }
+      sbuf[0] = '\0';
+      format_series(m, label, &ser, sbuf, STAT_SERIES_TEXT_MAX);
+      return sbuf;
    }
 
    /* Live actions. */

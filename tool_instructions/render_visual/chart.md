@@ -53,3 +53,47 @@ Use color ramp 600 stops for dataset colors:
 - Part of whole → doughnut (not pie — doughnut is more readable)
 - Correlation → scatter
 - Multi-variable comparison → radar
+
+## Worked example: time-series line with a min–max band
+Some tools (e.g. `system_status action="trend"`) hand you a ready-made series as
+`"labels":[…]`, `"avg":[…]`, and — for temperature/battery — `"min":[…]` and
+`"max":[…]`. **Copy those arrays verbatim** into the chart; do not recompute or
+re-round them. Use a category x-axis (the labels), plot `avg` as the line, and
+shade `min`→`max` as a band. Missing points arrive as `null`; keep
+`spanGaps: true` so a data gap is bridged rather than dropping to zero.
+
+The band is two datasets (`min`, then `max` with `fill: '-1'` to fill down to
+`min`) drawn under the `avg` line. Omit the band when the series has no
+`min`/`max` (cpu/memory/fan/power/voltage) — just plot `avg`.
+
+```html
+<script src="/js/vendor/chart.umd.js"></script>
+<canvas id="c"></canvas>
+<script>
+const style = getComputedStyle(document.documentElement);
+Chart.defaults.color = style.getPropertyValue('--color-text-primary').trim();
+Chart.defaults.borderColor = style.getPropertyValue('--color-border').trim();
+
+// Paste the arrays from the tool result exactly as given:
+const labels = ["00:00","00:30","01:00"];   // "labels"
+const avg    = [44.1, 45.2, 46.0];          // "avg"
+const min    = [39.1, 40.0, 41.2];          // "min"  (omit if absent)
+const max    = [47.2, 49.1, 50.3];          // "max"  (omit if absent)
+
+new Chart(document.getElementById('c'), {
+   type: 'line',
+   data: { labels, datasets: [
+      { label: 'min', data: min, borderWidth: 0, pointRadius: 0, fill: false },
+      { label: 'range', data: max, borderWidth: 0, pointRadius: 0,
+        backgroundColor: 'rgba(83,74,183,0.15)', fill: '-1' },   // shade max→min
+      { label: 'avg', data: avg, borderColor: '#534AB7', borderWidth: 2,
+        pointRadius: 0, tension: 0.25 }
+   ]},
+   options: {
+      responsive: true, maintainAspectRatio: false, spanGaps: true,
+      scales: { x: { ticks: { maxTicksLimit: 8 } } },
+      plugins: { legend: { position: 'top' } }
+   }
+});
+</script>
+```

@@ -183,6 +183,168 @@ void test_multi_bucket(void) {
    TEST_ASSERT_EQUAL_DOUBLE(60.0, agg.temp_min);
 }
 
+/* ===== stat_db_series() — the chartable trend reader ===== */
+
+/* Insert a SystemMetrics-family bucket at an explicit time (weight = count). */
+static void insert_sys_bucket(int64_t t,
+                              double temp_avg,
+                              double temp_min,
+                              double temp_max,
+                              double cpu,
+                              int count) {
+   stat_bucket_row_t r;
+   memset(&r, 0, sizeof(r));
+   r.bucket_start = t;
+   r.have_sys = true;
+   r.sys_count = count;
+   r.temp_avg = temp_avg;
+   r.temp_min = temp_min;
+   r.temp_max = temp_max;
+   r.cpu_avg = cpu;
+   r.cpu_max = cpu;
+   r.mem_avg = 40.0;
+   r.mem_max = 40.0;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_insert_bucket(&r));
+}
+
+/* Insert a BatteryStatus-family bucket at an explicit time. */
+static void insert_batt_bucket(int64_t t, double level, double power) {
+   stat_bucket_row_t r;
+   memset(&r, 0, sizeof(r));
+   r.bucket_start = t;
+   r.have_batt = true;
+   r.batt_count = 1;
+   r.batt_avg = level;
+   r.batt_min = level;
+   r.batt_max = level;
+   r.batt_v_avg = 14.5;
+   r.batt_p_avg = power;
+   r.batt_temp_max = 30.0;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_insert_bucket(&r));
+}
+
+/* Short window (4 native buckets) → no grouping. */
+void test_series_short_window(void) {
+   for (int i = 0; i < 4; i++) {
+      insert_sys_bucket(1000 + i * 900, 45.0, 45.0, 45.0, 10.0, 1);
+   }
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(1000, 1000 + 3 * 900, STAT_METRIC_TEMP, &s));
+   TEST_ASSERT_EQUAL_INT(4, s.count);
+   TEST_ASSERT_EQUAL_INT(900, s.group_secs);
+   TEST_ASSERT_TRUE(s.has_min);
+   TEST_ASSERT_TRUE(s.has_max);
+   TEST_ASSERT_TRUE(s.points[0].have_avg);
+   TEST_ASSERT_TRUE(s.points[0].have_min);
+}
+
+/* H1: a non-aligned span ("today" mid-afternoon, 47,220s) must not blow the cap.
+ * 53 native buckets → ceil(47220/43200)=2 → group_secs 1800 → 27 groups. */
+void test_series_span_47220_cap(void) {
+   int64_t base = 100000;
+   for (int i = 0; i < 53; i++) {
+      insert_sys_bucket(base + i * 900, 45.0, 45.0, 45.0, 10.0, 1);
+   }
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(base, base + 47220, STAT_METRIC_TEMP, &s));
+   TEST_ASSERT_EQUAL_INT(1800, s.group_secs);
+   TEST_ASSERT_TRUE(s.count <= STAT_SERIES_MAX_POINTS);
+   TEST_ASSERT_EQUAL_INT(27, s.count);
+}
+
+/* H2: an aligned end (span 43,200) with a bucket AT end can yield a 49th group;
+ * the +1 array slot + capped loop must hold it with no overrun. */
+void test_series_aligned_end_no_overrun(void) {
+   int64_t base = 200000;
+   for (int i = 0; i <= 48; i++) { /* 49 buckets, last exactly at base+43200 */
+      insert_sys_bucket(base + i * 900, 45.0, 45.0, 45.0, 10.0, 1);
+   }
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(base, base + 43200, STAT_METRIC_TEMP, &s));
+   TEST_ASSERT_EQUAL_INT(900, s.group_secs);
+   TEST_ASSERT_TRUE(s.count <= STAT_SERIES_MAX_POINTS + 1);
+   TEST_ASSERT_EQUAL_INT(49, s.count);
+}
+
+/* 7-day span (672 native buckets) → ceil(604800/43200)=14 → group_secs 12600 → 48 groups. */
+void test_series_7d_downsample(void) {
+   int64_t base = 1000000;
+   for (int i = 0; i < 672; i++) {
+      insert_sys_bucket(base + i * 900, 50.0, 50.0, 50.0, 10.0, 1);
+   }
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(base, base + 604800, STAT_METRIC_TEMP, &s));
+   TEST_ASSERT_EQUAL_INT(12600, s.group_secs);
+   TEST_ASSERT_TRUE(s.count <= STAT_SERIES_MAX_POINTS);
+}
+
+/* Weighted average + exact min/max across a downsampled group. */
+void test_series_weighted_group(void) {
+   int64_t base = 300000;
+   /* Two buckets share group 0 (group_secs will be 1800): weights 1 and 3. */
+   insert_sys_bucket(base + 0, 40.0, 38.0, 42.0, 10.0, 1);
+   insert_sys_bucket(base + 900, 50.0, 48.0, 52.0, 10.0, 3);
+   /* A distant bucket stretches the span so group_secs becomes 1800. */
+   insert_sys_bucket(base + 50000, 60.0, 60.0, 60.0, 10.0, 1);
+
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(base, base + 50000, STAT_METRIC_TEMP, &s));
+   TEST_ASSERT_EQUAL_INT(1800, s.group_secs);
+   /* group 0: weighted avg (40*1 + 50*3)/4 = 47.5, min 38, max 52 */
+   TEST_ASSERT_TRUE(s.points[0].have_avg);
+   TEST_ASSERT_DOUBLE_WITHIN(0.01, 47.5, s.points[0].avg);
+   TEST_ASSERT_EQUAL_DOUBLE(38.0, s.points[0].min);
+   TEST_ASSERT_EQUAL_DOUBLE(52.0, s.points[0].max);
+}
+
+/* H3: a group with no samples for the metric's family is a GAP (have_avg false),
+ * never a spurious 0.0. */
+void test_series_null_gap_not_zero(void) {
+   int64_t base = 400000;
+   insert_sys_bucket(base, 45.0, 45.0, 45.0, 10.0, 1);       /* sys only */
+   insert_batt_bucket(base, 80.0, 15.0);                     /* + battery in group 0 */
+   insert_sys_bucket(base + 900, 46.0, 46.0, 46.0, 10.0, 1); /* group 1: sys only, NO battery */
+
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(base, base + 900, STAT_METRIC_BATTERY, &s));
+   TEST_ASSERT_EQUAL_INT(2, s.count);
+   TEST_ASSERT_TRUE(s.points[0].have_avg); /* battery present */
+   TEST_ASSERT_EQUAL_DOUBLE(80.0, s.points[0].avg);
+   TEST_ASSERT_FALSE(s.points[1].have_avg); /* battery absent → gap, not 0 */
+}
+
+/* Power is an avg-only metric: no min/max columns. */
+void test_series_power_avg_only(void) {
+   insert_batt_bucket(500000, 80.0, 17.5);
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(500000, 500000, STAT_METRIC_POWER, &s));
+   TEST_ASSERT_EQUAL_INT(1, s.count);
+   TEST_ASSERT_FALSE(s.has_min);
+   TEST_ASSERT_FALSE(s.has_max);
+   TEST_ASSERT_TRUE(s.points[0].have_avg);
+   TEST_ASSERT_FALSE(s.points[0].have_min);
+   TEST_ASSERT_DOUBLE_WITHIN(0.01, 17.5, s.points[0].avg);
+}
+
+/* CPU stores avg + max (no min). */
+void test_series_cpu_avg_max(void) {
+   insert_sys_bucket(600000, 45.0, 45.0, 45.0, 22.0, 1);
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(600000, 600000, STAT_METRIC_CPU, &s));
+   TEST_ASSERT_FALSE(s.has_min);
+   TEST_ASSERT_TRUE(s.has_max);
+   TEST_ASSERT_TRUE(s.points[0].have_avg);
+   TEST_ASSERT_TRUE(s.points[0].have_max);
+   TEST_ASSERT_FALSE(s.points[0].have_min);
+}
+
+/* Empty window → zero points (tool surfaces the error-mark path). */
+void test_series_empty_window(void) {
+   stat_series_t s;
+   TEST_ASSERT_EQUAL_INT(0, stat_db_series(900000000, 900000900, STAT_METRIC_TEMP, &s));
+   TEST_ASSERT_EQUAL_INT(0, s.count);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_topic_gating);
@@ -191,5 +353,14 @@ int main(void) {
    RUN_TEST(test_history_aggregation);
    RUN_TEST(test_empty_bucket_skipped);
    RUN_TEST(test_multi_bucket);
+   RUN_TEST(test_series_short_window);
+   RUN_TEST(test_series_span_47220_cap);
+   RUN_TEST(test_series_aligned_end_no_overrun);
+   RUN_TEST(test_series_7d_downsample);
+   RUN_TEST(test_series_weighted_group);
+   RUN_TEST(test_series_null_gap_not_zero);
+   RUN_TEST(test_series_power_avg_only);
+   RUN_TEST(test_series_cpu_avg_max);
+   RUN_TEST(test_series_empty_window);
    return UNITY_END();
 }
