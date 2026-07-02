@@ -977,6 +977,20 @@
 # rate_limit_sms_per_day = 30       # UX rate limit: max SMS per day
 
 # =============================================================================
+# STAT system telemetry — requires building with -DDAWN_ENABLE_STAT_TOOL=ON
+# (default). Subscribes to the external STAT sensor daemon over MQTT and lets
+# the assistant answer live + historical system-health questions (temps,
+# battery, load, fan). History is downsampled into its own stat.db.
+# =============================================================================
+[stat]
+# enabled = true                    # Enable the system_status tool + ingestion
+# telemetry_topic = "stat/telemetry" # MQTT topic STAT publishes metrics on
+# status_topic = "stat/status"      # MQTT topic STAT publishes online/offline on
+# db_path = "/var/lib/dawn/stat.db" # Self-contained telemetry-history DB
+# stale_after_sec = 30              # Live reads older than this report "stale"
+# history_retention_days = 30       # Prune history buckets older than N days
+
+# =============================================================================
 # MCP Bridge (coding harness) — requires building with
 # -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON. DAWN is a pure MCP *client*; the operator
 # launches each MCP server (systemd/tmux/docker). Transport is HTTP+SSE only.

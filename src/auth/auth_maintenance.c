@@ -38,6 +38,9 @@
 #include "logging.h"
 #include "memory/memory_maintenance.h"
 #include "tools/document_db.h"
+#ifdef DAWN_ENABLE_STAT_TOOL
+#include "core/stat_service.h"
+#endif
 
 /* Thread state */
 static pthread_t s_maintenance_thread;
@@ -110,6 +113,16 @@ static void *maintenance_thread_func(void *arg) {
             OLOG_INFO("auth_maintenance: document originals — %d aged, %d orphan", aged, orphans);
          }
       }
+
+      /* Flush the current STAT telemetry rollup bucket to stat.db + prune old
+       * buckets.  Own DB/WAL, so ordering vs the auth.db checkpoint below is
+       * irrelevant.  Failure-isolated: never blocks the steps that follow.
+       * NOTE: telemetry history bucket granularity == AUTH_MAINTENANCE_INTERVAL_SEC
+       * (this loop's period) — retuning that interval also changes STAT's history
+       * resolution. */
+#ifdef DAWN_ENABLE_STAT_TOOL
+      stat_history_flush();
+#endif
 
       /* Passive WAL checkpoint (non-blocking) */
       int checkpoint_result = auth_db_checkpoint_passive();

@@ -46,6 +46,9 @@
 #ifdef DAWN_ENABLE_PHONE_TOOL
 #include "tools/phone_service.h"
 #endif
+#ifdef DAWN_ENABLE_STAT_TOOL
+#include "core/stat_service.h"
+#endif
 #include "tools/tool_registry.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
@@ -369,6 +372,17 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
    OLOG_INFO("Subscribed to echo/events, echo/response, echo/status");
 #endif
 
+   /* Subscribe to STAT telemetry (QoS 0, matches STAT's publish) + status
+    * (QoS 1, retained/LWT).  Only when the service is active (enabled + inited). */
+#ifdef DAWN_ENABLE_STAT_TOOL
+   if (stat_service_is_active()) {
+      mosquitto_subscribe(mosq, NULL, stat_service_telemetry_topic(), 0);
+      mosquitto_subscribe(mosq, NULL, stat_service_status_topic(), 1);
+      OLOG_INFO("Subscribed to %s (telemetry), %s (status)", stat_service_telemetry_topic(),
+                stat_service_status_topic());
+   }
+#endif
+
    /* Initialize HUD discovery (subscribes to hud/discovery/# and requests state) */
    if (hud_discovery_init(mosq) != 0) {
       OLOG_WARNING("HUD discovery initialization failed - using defaults");
@@ -585,6 +599,14 @@ static void execute_command_for_worker(struct json_object *parsed_json, const ch
 
 /* Callback called when the client receives a message. */
 void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg) {
+#ifdef DAWN_ENABLE_STAT_TOOL
+   /* STAT telemetry is a multi-Hz firehose — consume it BEFORE the per-message
+    * INFO log below so it does not flood the log file. */
+   if (stat_service_handle_mqtt(msg->topic, (const char *)msg->payload, msg->payloadlen)) {
+      return;
+   }
+#endif
+
    OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
 
    /* Check for component status messages (hud/status) */

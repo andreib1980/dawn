@@ -43,6 +43,7 @@ option(DAWN_ENABLE_RENDER_VISUAL_TOOL "Enable visual rendering tool (SVG/HTML di
 option(DAWN_ENABLE_PHONE_TOOL "Enable phone call and SMS tool (requires ECHO daemon)" ON)
 option(DAWN_ENABLE_IMAGE_SEARCH_TOOL "Enable image search tool (requires SearXNG + image store)" ON)
 option(DAWN_ENABLE_CONTEXT_EXPAND_TOOL "Enable context expansion tool (LCM Phase 3)" ON)
+option(DAWN_ENABLE_STAT_TOOL "Enable STAT system-telemetry tool (reads the STAT MQTT sensor daemon)" ON)
 
 # =============================================================================
 # Mutual Exclusion: Home Assistant and SmartThings
@@ -348,6 +349,22 @@ if(DAWN_ENABLE_PHONE_TOOL)
     message(STATUS "DAWN: Phone tool ENABLED")
 else()
     message(STATUS "DAWN: Phone tool DISABLED")
+endif()
+
+# STAT System-Telemetry Tool (reads the external STAT MQTT sensor daemon).
+# The ingest/cache/persistence halves are leaf services in src/core/ (Layer 1,
+# like component_status.c) so Layer-2 callers (mosquitto_comms, auth_maintenance)
+# depend downward; only the LLM descriptor (stat_tool.c) stays in the tool layer.
+# All three are compiled only when the tool is enabled (compile-time removable).
+if(DAWN_ENABLE_STAT_TOOL)
+    add_definitions(-DDAWN_ENABLE_STAT_TOOL)
+    list(APPEND TOOL_SOURCES
+        src/tools/stat_tool.c
+        src/core/stat_service.c
+        src/core/stat_db.c)
+    message(STATUS "DAWN: STAT telemetry tool ENABLED")
+else()
+    message(STATUS "DAWN: STAT telemetry tool DISABLED")
 endif()
 
 # Image Search Tool (SearXNG image search + image store caching)

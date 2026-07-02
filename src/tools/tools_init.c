@@ -117,6 +117,9 @@
 #ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
 #include "tools/image_search_tool.h"
 #endif
+#ifdef DAWN_ENABLE_STAT_TOOL
+#include "tools/stat_tool.h"
+#endif
 #include "tools/messaging_tool.h"
 #ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
 #include "tools/context_expand_tool.h"
@@ -315,6 +318,12 @@ int tools_register_all(void) {
 #ifdef DAWN_ENABLE_IMAGE_SEARCH_TOOL
    if (image_search_tool_register() != 0) {
       OLOG_WARNING("Failed to register image_search tool");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_STAT_TOOL
+   if (stat_tool_register() != 0) {
+      OLOG_WARNING("Failed to register system_status tool");
    }
 #endif
 

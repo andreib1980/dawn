@@ -340,6 +340,14 @@ dawn_add_unit_test(test_music_db
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
+dawn_add_unit_test(test_stat_service
+   SOURCES test_stat_service.c
+           ${SRC_ROOT}/src/core/stat_service.c
+           ${SRC_ROOT}/src/core/stat_db.c
+           ${SRC_ROOT}/src/core/path_utils.c
+   LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_embeddings
    SOURCES test_memory_embeddings.c test_memory_embeddings_stub.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
