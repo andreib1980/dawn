@@ -232,6 +232,7 @@ static int list_conv_callback(const conversation_t *conv, void *context) {
    json_object_object_add(conv_obj, "message_count", json_object_new_int(conv->message_count));
    json_object_object_add(conv_obj, "is_archived", json_object_new_boolean(conv->is_archived));
    json_object_object_add(conv_obj, "is_private", json_object_new_boolean(conv->is_private));
+   json_object_object_add(conv_obj, "is_pinned", json_object_new_boolean(conv->is_pinned));
    json_object_object_add(conv_obj, "origin",
                           json_object_new_string(conv->origin[0] ? conv->origin : "webui"));
 
@@ -1074,6 +1075,61 @@ void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to update privacy"));
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/**
+ * @brief Pin or unpin a conversation
+ *
+ * Pinned conversations float to a dedicated section at the top of the WebUI
+ * conversation list.
+ */
+void handle_set_pinned(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_pinned_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Get conversation ID and pinned flag */
+   json_object *id_obj, *pinned_obj;
+   if (!json_object_object_get_ex(payload, "conversation_id", &id_obj) ||
+       !json_object_object_get_ex(payload, "is_pinned", &pinned_obj)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Missing conversation_id or is_pinned"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
+   int64_t conv_id = json_object_get_int64(id_obj);
+   bool is_pinned = json_object_get_boolean(pinned_obj);
+
+   int result = conv_db_set_pinned(conv_id, conn->auth_user_id, is_pinned);
+
+   if (result == AUTH_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+      json_object_object_add(resp_payload, "conversation_id", json_object_new_int64(conv_id));
+      json_object_object_add(resp_payload, "is_pinned", json_object_new_boolean(is_pinned));
+      json_object_object_add(resp_payload, "message",
+                             json_object_new_string(is_pinned ? "Conversation pinned"
+                                                              : "Conversation unpinned"));
+   } else if (result == AUTH_DB_NOT_FOUND) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Conversation not found"));
+   } else {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to update pinned state"));
    }
 
    json_object_object_add(response, "payload", resp_payload);

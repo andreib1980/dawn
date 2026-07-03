@@ -120,13 +120,16 @@ static void test_v67_db_migrates_to_v68(void) {
    sqlite3 *db = NULL;
    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(s_dbpath, &db));
 
-   /* Schema bumped to 68. */
+   /* Schema bumped to at least v68.  init always migrates to the current max
+    * (later versions exist), so assert >= not == to stay robust across future
+    * schema bumps.  The v68-specific effect is verified by the
+    * blobs/original_blob_id/index assertions below. */
    sqlite3_stmt *st = NULL;
    TEST_ASSERT_EQUAL_INT(SQLITE_OK,
                          sqlite3_prepare_v2(db, "SELECT version FROM schema_version LIMIT 1", -1,
                                             &st, NULL));
    TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
-   TEST_ASSERT_EQUAL_INT(68, sqlite3_column_int(st, 0));
+   TEST_ASSERT_TRUE_MESSAGE(sqlite3_column_int(st, 0) >= 68, "schema not migrated to >= v68");
    sqlite3_finalize(st);
 
    /* blobs table created, documents.original_blob_id added, and the index that

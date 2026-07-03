@@ -353,6 +353,9 @@ int conv_db_get(int64_t conv_id, int user_id, conversation_t *conv_out) {
    /* Compaction watermark (schema v67+) */
    conv_out->context_watermark_msg_id = sqlite3_column_int64(s_db.stmt_conv_get, 19);
 
+   /* Pinned flag (schema v69+) */
+   conv_out->is_pinned = sqlite3_column_int(s_db.stmt_conv_get, 20) != 0;
+
    sqlite3_reset(s_db.stmt_conv_get);
    AUTH_DB_UNLOCK();
 
@@ -581,6 +584,9 @@ int conv_db_list(int user_id,
          strcpy(conv.origin, "webui");
       }
 
+      /* Pinned flag (schema v69+) */
+      conv.is_pinned = sqlite3_column_int(s_db.stmt_conv_list, 13) != 0;
+
       if (callback(&conv, ctx) != 0) {
          break; /* Callback requested stop */
       }
@@ -656,6 +662,9 @@ int conv_db_list_all(bool include_archived,
          strncpy(username, uname, AUTH_USERNAME_MAX - 1);
          username[AUTH_USERNAME_MAX - 1] = '\0';
       }
+
+      /* Pinned flag (schema v69+) */
+      conv.is_pinned = sqlite3_column_int(s_db.stmt_conv_list_all, 14) != 0;
 
       if (callback(&conv, username, ctx) != 0) {
          break;
@@ -771,6 +780,37 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    if (changes > 0) {
       OLOG_INFO("Conversation %lld privacy set to %s", (long long)conv_id,
                 is_private ? "private" : "public");
+   }
+
+   /* No rows updated means either not found or forbidden */
+   return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned) {
+   if (conv_id <= 0 || user_id <= 0) {
+      return AUTH_DB_INVALID;
+   }
+
+   AUTH_DB_LOCK_OR_FAIL();
+
+   sqlite3_reset(s_db.stmt_conv_set_pinned);
+   sqlite3_bind_int(s_db.stmt_conv_set_pinned, 1, is_pinned ? 1 : 0);
+   sqlite3_bind_int64(s_db.stmt_conv_set_pinned, 2, conv_id);
+   sqlite3_bind_int(s_db.stmt_conv_set_pinned, 3, user_id);
+
+   int rc = sqlite3_step(s_db.stmt_conv_set_pinned);
+   int changes = sqlite3_changes(s_db.db);
+   sqlite3_reset(s_db.stmt_conv_set_pinned);
+
+   AUTH_DB_UNLOCK();
+
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("conv_db_set_pinned: update failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   if (changes > 0) {
+      OLOG_INFO("Conversation %lld %s", (long long)conv_id, is_pinned ? "pinned" : "unpinned");
    }
 
    /* No rows updated means either not found or forbidden */

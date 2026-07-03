@@ -50,6 +50,10 @@
    // Track scroll position for restore (M12)
    let savedScrollPosition = 0;
 
+   // After a pin/unpin re-render moves a row between the Pinned section and its
+   // date group, refocus that row's pin button (keyboard/AT continuity).
+   let pendingPinFocusId = null;
+
    // Track the last known context_max from the server (dynamic, model-specific)
    let knownContextMax = null;
 
@@ -70,6 +74,19 @@
          <line x1="1" y1="1" x2="23" y2="23"/>
       </svg>
    </span>`;
+
+   // Always-visible pushpin glyph in the title row for pinned conversations —
+   // the persistent state cue (the hover-only action button alone isn't one).
+   const PINNED_ICON_HTML = `<span class="history-item-pinned" title="Pinned" aria-label="Pinned conversation" role="img">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+         <path d="M16 3v2l-1 1v4l3 3v2h-5v5l-1 1-1-1v-5H5v-2l3-3V6L7 5V3h9z"/>
+      </svg>
+   </span>`;
+
+   // Pin/unpin toggle SVG for the action row (14x14 to match its siblings).
+   const PIN_BUTTON_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 3v2l-1 1v4l3 3v2h-5v5l-1 1-1-1v-5H5v-2l3-3V6L7 5V3z"/>
+   </svg>`;
 
    /* Providers we have explicit colorways + tooltips for.  Conversations
     * with an `origin` of "messaging:<provider>" outside this list still
@@ -290,6 +307,15 @@
       DawnWS.send({
          type: 'search_conversations',
          payload: { query: query, search_content: searchContent || false, limit: 50, offset: 0 },
+      });
+   }
+
+   function requestSetPinned(convId, pinned) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
+
+      DawnWS.send({
+         type: 'set_pinned',
+         payload: { conversation_id: convId, is_pinned: !!pinned },
       });
    }
 
@@ -661,6 +687,31 @@
       requestListConversations();
    }
 
+   function handleSetPinnedResponse(payload) {
+      if (!payload || !payload.success) {
+         pendingPinFocusId = null;
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show((payload && payload.error) || 'Failed to update pinned state', 'error');
+         }
+         return;
+      }
+
+      // Patch the cached conversation in place and re-render (no refetch), so the
+      // row moves between the Pinned section and its date group immediately.
+      const id = Number(payload.conversation_id);
+      const isPinned = payload.is_pinned === true;
+      const conv = historyState.conversations.find((c) => c.id === id);
+      if (conv) {
+         conv.is_pinned = isPinned;
+      }
+      renderConversationList();
+
+      // Toast doubles as the aria-live (polite) announcement for AT users.
+      if (typeof DawnToast !== 'undefined') {
+         DawnToast.show(isPinned ? 'Conversation pinned' : 'Conversation unpinned', 'success');
+      }
+   }
+
    function handleConversationRenamed(payload) {
       const { conversation_id, title } = payload;
       if (!conversation_id || !title) return;
@@ -891,6 +942,9 @@
       const isPrivate = conv.is_private === true;
       const privateIcon = isPrivate ? PRIVATE_ICON_HTML : '';
 
+      const isPinned = conv.is_pinned === true;
+      const pinnedIcon = isPinned ? PINNED_ICON_HTML : '';
+
       const isVoice = conv.origin === 'voice';
       const voiceIcon = isVoice
          ? `
@@ -951,18 +1005,28 @@
       // Provider colorway lives on the icon span's modifier class
       // (see renderMessagingIcon).
       if (isUnread) classes.push('unread');
+      if (isPinned) classes.push('pinned');
       if (isChainChild) classes.push('chain-child');
+
+      // Pin/unpin toggle. Stable aria-label + aria-pressed reflects state (do not
+      // also swap the label text — that double-announces); dynamic title tooltips.
+      const pinButton = `
+          <button class="pin${isPinned ? ' pinned' : ''}" title="${isPinned ? 'Unpin' : 'Pin'}" aria-label="Pin conversation" aria-pressed="${isPinned ? 'true' : 'false'}" data-action="pin">
+            ${PIN_BUTTON_SVG}
+          </button>
+        `;
 
       return `
       <div class="${classes.join(' ')}" data-conv-id="${conv.id}">
         <div class="history-item-content">
-          <div class="history-item-title">${privateIcon}${voiceIcon}${briefingIcon}${messagingIcon}${archivedIcon}${chainIcon}${DawnFormat.escapeHtml(conv.title)}</div>
+          <div class="history-item-title">${pinnedIcon}${privateIcon}${voiceIcon}${briefingIcon}${messagingIcon}${archivedIcon}${chainIcon}${DawnFormat.escapeHtml(conv.title)}</div>
           <div class="history-item-meta">
             <span class="history-item-time">${time}</span>
             <span class="history-item-count">${conv.message_count} messages</span>
           </div>
         </div>
         <div class="history-item-actions">
+          ${pinButton}
           <button class="rename" title="Rename" data-action="rename">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -1020,7 +1084,54 @@
          }
       });
 
-      // Group by date
+      // Render a top-level row plus its continuation chain (if any).  Pinning is
+      // partitioned at the top-level-row granularity so a pinned chain-parent
+      // carries its whole chain group into the Pinned section — rendering it flat
+      // would leave its children skipped-but-never-emitted (they vanish).
+      const renderTopLevel = (conv) => {
+         const children = childrenOf[conv.id] || [];
+         if (children.length > 0) {
+            const chainCount = children.length + 1;
+            return `
+            <div class="history-chain-group collapsed" data-chain-parent="${conv.id}">
+              <div class="history-chain-header">
+                <button class="history-chain-toggle" title="Expand chain">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9 18 15 12 9 6"/>
+                  </svg>
+                </button>
+                <span class="history-chain-badge" title="${chainCount} linked conversations">${chainCount}</span>
+              </div>
+              ${renderConversationItem(conv, false)}
+              <div class="history-chain-children">
+                ${children.map((child) => renderConversationItem(child, true)).join('')}
+              </div>
+            </div>
+          `;
+         }
+         return renderConversationItem(conv, false);
+      };
+
+      // Pinned browse-section is suppressed while searching (search is
+      // find-not-browse; flat results are clearer).
+      const searchActive = !!(historyState.searchQuery && historyState.searchQuery.length);
+      const isPinnedTop = (conv) => !searchActive && !isChild[conv.id] && conv.is_pinned === true;
+
+      let html = '';
+
+      // Pinned section at the top, most-recent-active first.  The server already
+      // sorts is_pinned DESC, updated_at DESC; sort defensively in case the cached
+      // array was mutated in place (pin toggle patches without a refetch).
+      const pinned = conversations.filter(isPinnedTop).sort((a, b) => b.updated_at - a.updated_at);
+      if (pinned.length > 0) {
+         // Decorative glyph (aria-hidden) — the visible "Pinned" text is the label.
+         html += `<div class="history-date-group pinned-group"><span class="history-item-pinned" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 3v2l-1 1v4l3 3v2h-5v5l-1 1-1-1v-5H5v-2l3-3V6L7 5V3h9z"/></svg></span><span>Pinned</span></div>`;
+         pinned.forEach((conv) => {
+            html += renderTopLevel(conv);
+         });
+      }
+
+      // Group the remaining top-level rows by date (pinned rows already emitted).
       const groups = {};
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -1029,6 +1140,7 @@
 
       conversations.forEach((conv) => {
          if (isChild[conv.id]) return;
+         if (isPinnedTop(conv)) return; // already in the Pinned section
 
          const timestamp = conv.updated_at * 1000;
          let groupKey;
@@ -1050,35 +1162,11 @@
          groups[groupKey].push(conv);
       });
 
-      // Render groups
-      let html = '';
+      // Render date groups
       for (const [groupName, convs] of Object.entries(groups)) {
          html += `<div class="history-date-group">${groupName}</div>`;
-
          convs.forEach((conv) => {
-            const children = childrenOf[conv.id] || [];
-
-            if (children.length > 0) {
-               const chainCount = children.length + 1;
-               html += `
-            <div class="history-chain-group collapsed" data-chain-parent="${conv.id}">
-              <div class="history-chain-header">
-                <button class="history-chain-toggle" title="Expand chain">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="9 18 15 12 9 6"/>
-                  </svg>
-                </button>
-                <span class="history-chain-badge" title="${chainCount} linked conversations">${chainCount}</span>
-              </div>
-              ${renderConversationItem(conv, false)}
-              <div class="history-chain-children">
-                ${children.map((child) => renderConversationItem(child, true)).join('')}
-              </div>
-            </div>
-          `;
-            } else {
-               html += renderConversationItem(conv, false);
-            }
+            html += renderTopLevel(conv);
          });
       }
 
@@ -1107,6 +1195,19 @@
                closeHistory();
             }
          });
+
+         const pinBtn = item.querySelector('[data-action="pin"]');
+         if (pinBtn) {
+            pinBtn.addEventListener('click', (e) => {
+               e.stopPropagation();
+               const conv = convById[convId];
+               const nextPinned = !(conv && conv.is_pinned === true);
+               // Remember which row to refocus after the re-render moves it between
+               // the Pinned section and its date group.
+               pendingPinFocusId = convId;
+               requestSetPinned(convId, nextPinned);
+            });
+         }
 
          const renameBtn = item.querySelector('[data-action="rename"]');
          if (renameBtn && callbacks.showInputModal) {
@@ -1164,6 +1265,16 @@
       // Restore scroll position after render (M12)
       if (savedScrollPosition > 0 && historyElements.list) {
          historyElements.list.scrollTop = savedScrollPosition;
+      }
+
+      // Refocus the pin button of a just-toggled row (it moved sections). The
+      // innerHTML rebuild dropped the old focused element to <body>.
+      if (pendingPinFocusId != null && historyElements.list) {
+         const btn = historyElements.list.querySelector(
+            `.history-item[data-conv-id="${CSS.escape(String(pendingPinFocusId))}"] [data-action="pin"]`
+         );
+         if (btn) btn.focus();
+         pendingPinFocusId = null;
       }
    }
 
@@ -1933,6 +2044,7 @@
       handleLoadResponse: handleLoadConversationResponse,
       handleDeleteResponse: handleDeleteConversationResponse,
       handleRenameResponse: handleRenameConversationResponse,
+      handleSetPinnedResponse: handleSetPinnedResponse,
       handleSearchResponse: handleSearchConversationsResponse,
       handleSaveResponse: handleSaveMessageResponse,
       handleContextCompacted: handleContextCompacted,

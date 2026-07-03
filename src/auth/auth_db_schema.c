@@ -170,6 +170,10 @@ static const char *SCHEMA_SQL =
     "   is_private INTEGER DEFAULT 0,"
     "   title_locked INTEGER DEFAULT 0,"
     "   origin TEXT DEFAULT 'webui',"
+    /* is_pinned (v69): user-pinned conversations float to a dedicated section at
+     * the top of the WebUI list.  Literal DEFAULT keeps the ALTER fast (see
+     * anchor_date note below). */
+    "   is_pinned INTEGER NOT NULL DEFAULT 0,"
     /* anchor_date (v42): logical "now" timestamp in epoch seconds.  Production
      * writes time(NULL) at insert; bench overrides per-session.  The 0 default
      * is the ANCHOR_DATE_NONE sentinel — extraction omits the prompt anchor
@@ -182,6 +186,11 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);"
     "CREATE INDEX IF NOT EXISTS idx_conversations_search ON conversations(user_id, title);"
+    /* Note: idx_conversations_pinned is created in the v69 migration, NOT here.
+     * The base SCHEMA_SQL runs before migrations on every boot; on an existing DB
+     * the CREATE TABLE above is a no-op (is_pinned not yet added), so referencing
+     * is_pinned in a base-schema index would fail with "no such column" until the
+     * migration runs.  The migration creates the column then the index. */
     /* Note: idx_conversations_continued is created during migration or post-init
      * to handle both new databases and upgrades from v6 */
 

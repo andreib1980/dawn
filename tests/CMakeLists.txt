@@ -99,6 +99,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v66.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v67.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v68.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v69.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -255,6 +256,15 @@ dawn_add_unit_test(test_document_original_store
 # ordering regression — the field failure "no such column: original_blob_id").
 dawn_add_unit_test(test_blob_migration
    SOURCES test_blob_migration.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+# v69: conversations.is_pinned upgrade (seeds a real v68 DB → verifies the
+# base-schema-vs-migration ordering — the field failure "no such column:
+# is_pinned").
+dawn_add_unit_test(test_v69_migration
+   SOURCES test_v69_migration.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)

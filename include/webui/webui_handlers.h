@@ -145,6 +145,13 @@ void handle_rename_conversation(ws_connection_t *conn, struct json_object *paylo
 void handle_set_private(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief Pin or unpin a conversation
+ *
+ * Pinned conversations float to a dedicated section at the top of the WebUI list.
+ */
+void handle_set_pinned(ws_connection_t *conn, struct json_object *payload);
+
+/**
  * @brief Export a conversation as a self-contained JSON document
  */
 void handle_export_conversation(ws_connection_t *conn, struct json_object *payload);

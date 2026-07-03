@@ -233,7 +233,7 @@ int auth_db_prepare_statements(void) {
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
        "context_tokens, context_max, continued_from, compaction_summary, "
        "llm_type, cloud_provider, model, tools_mode, thinking_mode, is_private, origin, "
-       "reasoning_effort, context_watermark_msg_id "
+       "reasoning_effort, context_watermark_msg_id, is_pinned "
        "FROM conversations WHERE id = ?",
        -1, &s_db.stmt_conv_get, NULL);
    if (rc != SQLITE_OK) {
@@ -244,9 +244,10 @@ int auth_db_prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT id, user_id, title, created_at, updated_at, message_count, is_archived, "
-       "context_tokens, context_max, continued_from, compaction_summary, is_private, origin "
+       "context_tokens, context_max, continued_from, compaction_summary, is_private, origin, "
+       "is_pinned "
        "FROM conversations WHERE user_id = ? AND (is_archived = 0 OR ? = 1) "
-       "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+       "ORDER BY is_pinned DESC, updated_at DESC LIMIT ? OFFSET ?",
        -1, &s_db.stmt_conv_list, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_list failed: %s", sqlite3_errmsg(s_db.db));
@@ -258,7 +259,7 @@ int auth_db_prepare_statements(void) {
        s_db.db,
        "SELECT c.id, c.user_id, c.title, c.created_at, c.updated_at, c.message_count, "
        "c.is_archived, c.context_tokens, c.context_max, c.continued_from, "
-       "c.compaction_summary, c.is_private, c.origin, u.username "
+       "c.compaction_summary, c.is_private, c.origin, u.username, c.is_pinned "
        "FROM conversations c LEFT JOIN users u ON c.user_id = u.id "
        "WHERE (c.is_archived = 0 OR ? = 1) "
        "ORDER BY c.updated_at DESC LIMIT ? OFFSET ?",
@@ -1275,6 +1276,16 @@ int auth_db_prepare_statements(void) {
                            -1, &s_db.stmt_conv_set_private, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("auth_db: prepare conv_set_private failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+
+   /* Conversation pinned statement */
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE conversations SET is_pinned = ? "
+                           "WHERE id = ? AND user_id = ?",
+                           -1, &s_db.stmt_conv_set_pinned, NULL);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("auth_db: prepare conv_set_pinned failed: %s", sqlite3_errmsg(s_db.db));
       return AUTH_DB_FAILURE;
    }
 
@@ -2657,6 +2668,10 @@ void auth_db_finalize_statements(void) {
    /* Privacy statement */
    if (s_db.stmt_conv_set_private)
       sqlite3_finalize(s_db.stmt_conv_set_private);
+
+   /* Pinned statement */
+   if (s_db.stmt_conv_set_pinned)
+      sqlite3_finalize(s_db.stmt_conv_set_pinned);
 
    /* Auto-title statements */
    if (s_db.stmt_conv_auto_title)

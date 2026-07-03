@@ -1052,6 +1052,7 @@ typedef struct {
    char origin[32];           /**< "webui" / "voice" (v17) / "briefing" /
                                    "messaging:<provider>" (e.g. "messaging:discord",
                                    "messaging:telegram" — needs > 16 bytes). */
+   bool is_pinned;            /**< If true, pinned to the top of the WebUI list (v69) */
 } conversation_t;
 
 /**
@@ -1235,6 +1236,19 @@ int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
  */
 int conv_db_set_private(int64_t conv_id, int user_id, bool is_private);
+
+/**
+ * @brief Pin or unpin a conversation
+ *
+ * Pinned conversations float to a dedicated section at the top of the WebUI
+ * conversation list.
+ *
+ * @param conv_id Conversation ID
+ * @param user_id User ID (for authorization check)
+ * @param is_pinned True to pin, false to unpin
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_INVALID, or AUTH_DB_FAILURE
+ */
+int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned);
 
 /**
  * @brief Check if a conversation is private

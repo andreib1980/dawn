@@ -957,6 +957,10 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       if (payload) {
          handle_set_private(conn, payload);
       }
+   } else if (strcmp(type, "set_pinned") == 0) {
+      if (payload) {
+         handle_set_pinned(conn, payload);
+      }
    } else if (strcmp(type, "reassign_conversation") == 0) {
       if (payload) {
          handle_reassign_conversation(conn, payload);

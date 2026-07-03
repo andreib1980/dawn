@@ -588,6 +588,9 @@
             case 'set_private_response':
                DawnSettings.handleSetPrivateResponse(msg.payload);
                break;
+            case 'set_pinned_response':
+               DawnHistory.handleSetPinnedResponse(msg.payload);
+               break;
             case 'export_conversation_response':
                DawnHistory.handleExportResponse(msg.payload);
                break;
