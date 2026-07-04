@@ -1879,6 +1879,71 @@ static struct json_object *extraction_message_strip_images(struct json_object *m
    return clean;
 }
 
+/* Per-message content budget for extraction input. A single oversized tool
+ * result (observed: a runaway 705 KB graph-query dump) can push the whole
+ * extraction payload past the model's context window and fail the request
+ * (613K-token payload -> HTTP 400). 16 KB is generous for real conversational
+ * content; tool results carry context, not user facts, so truncating them for
+ * extraction is safe. */
+#define MEMORY_EXTRACTION_MAX_MSG_BYTES 16384
+
+/* Cap a single message's string content to MEMORY_EXTRACTION_MAX_MSG_BYTES.
+ * Returns an owned ref: the original when within budget, else a copy with
+ * UTF-8-safe-truncated content plus a "[... N bytes truncated]" marker. Array
+ * (multimodal) content is not capped here — strip_images already replaces image
+ * parts, and an oversized multipart *text* part is user-typed, not the runaway
+ * tool-result case this guards (the observed failure class is plain strings). */
+static struct json_object *extraction_message_cap_content(struct json_object *msg,
+                                                          size_t max_bytes) {
+   struct json_object *content = NULL;
+   if (!json_object_object_get_ex(msg, "content", &content) ||
+       !json_object_is_type(content, json_type_string)) {
+      return json_object_get(msg);
+   }
+   const char *text = json_object_get_string(content);
+   size_t len = text != NULL ? strlen(text) : 0;
+   if (len <= max_bytes) {
+      return json_object_get(msg);
+   }
+
+   /* Copy a little past max_bytes so utf8_truncate can trim a split codepoint. */
+   size_t copy_len = len < max_bytes + 4 ? len : max_bytes + 4;
+   char *buf = malloc(copy_len + 1);
+   if (buf == NULL) {
+      return json_object_get(msg); /* OOM — keep original (oversized but valid) */
+   }
+   memcpy(buf, text, copy_len);
+   buf[copy_len] = '\0';
+   utf8_truncate(buf, max_bytes);
+
+   char marker[96];
+   snprintf(marker, sizeof(marker), "\n[... %zu bytes truncated for memory extraction]",
+            len - strlen(buf));
+
+   struct json_object *clean = json_object_new_object();
+   if (clean == NULL) {
+      free(buf);
+      return json_object_get(msg);
+   }
+   json_object_object_foreach(msg, key, val) {
+      if (strcmp(key, "content") == 0) {
+         size_t need = strlen(buf) + strlen(marker) + 1;
+         char *joined = malloc(need);
+         if (joined != NULL) {
+            snprintf(joined, need, "%s%s", buf, marker);
+            json_object_object_add(clean, "content", json_object_new_string(joined));
+            free(joined);
+         } else {
+            json_object_object_add(clean, "content", json_object_new_string(buf));
+         }
+      } else {
+         json_object_object_add(clean, key, json_object_get(val));
+      }
+   }
+   free(buf);
+   return clean;
+}
+
 /* =============================================================================
  * Public API
  * ============================================================================= */
@@ -2018,7 +2083,10 @@ int memory_trigger_extraction(int user_id,
          struct json_object *stripped = extraction_message_strip_images(msg);
          struct json_object *guarded = memory_note_guard_redact(note_guard, stripped);
          json_object_put(stripped);
-         json_object_array_add(filtered, guarded);
+         struct json_object *capped = extraction_message_cap_content(
+             guarded, MEMORY_EXTRACTION_MAX_MSG_BYTES);
+         json_object_put(guarded);
+         json_object_array_add(filtered, capped);
       }
    }
 
