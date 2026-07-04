@@ -203,13 +203,16 @@ int code_project_db_set_graph_name(int64_t id, const char *graph_name) {
 static int get_by(const char *where_col,
                   int64_t id_val,
                   const char *name_val,
+                  bool ci,
                   code_project_t *out) {
    if (out == NULL) {
       return AUTH_DB_FAILURE;
    }
+   /* ci=true applies NOCASE collation so the LLM can name a project in any case
+    * (project names are path basenames, so they're effectively case-unique). */
    char sql[256];
-   snprintf(sql, sizeof(sql), "SELECT " CP_COLS " FROM code_projects WHERE %s=? LIMIT 1",
-            where_col);
+   snprintf(sql, sizeof(sql), "SELECT " CP_COLS " FROM code_projects WHERE %s=?%s LIMIT 1",
+            where_col, ci ? " COLLATE NOCASE" : "");
    pthread_mutex_lock(&s_db.mutex);
    sqlite3_stmt *st = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
@@ -237,14 +240,14 @@ static int get_by(const char *where_col,
 }
 
 int code_project_db_get(int64_t id, code_project_t *out) {
-   return get_by("id", id, NULL, out);
+   return get_by("id", id, NULL, /* ci */ false, out);
 }
 
 int code_project_db_get_by_name(const char *name, code_project_t *out) {
    if (name == NULL) {
       return AUTH_DB_FAILURE;
    }
-   return get_by("name", 0, name, out);
+   return get_by("name", 0, name, /* ci */ true, out);
 }
 
 int code_project_db_list_visible(int64_t user_id, code_project_t *out, int max, int *count_out) {
@@ -302,8 +305,9 @@ int code_project_db_check_visible(int64_t user_id, const char *name, bool *out) 
       return AUTH_DB_FAILURE;
    }
    *out = false;
-   const char *sql =
-       "SELECT 1 FROM code_projects WHERE name=? AND (is_global=1 OR user_id=?) LIMIT 1";
+   /* NOCASE so a case-mismatched project name still resolves (see get_by). */
+   const char *sql = "SELECT 1 FROM code_projects WHERE name=? COLLATE NOCASE AND (is_global=1 OR "
+                     "user_id=?) LIMIT 1";
    pthread_mutex_lock(&s_db.mutex);
    sqlite3_stmt *st = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {

@@ -47,6 +47,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
@@ -222,12 +223,15 @@ void code_project_namemap_to_graph(const char *clean_value, char *out, size_t ou
    const char *dot = strchr(clean_value, '.');
    size_t token_len = dot != NULL ? (size_t)(dot - clean_value) : strlen(clean_value);
 
+   /* Match case-insensitively: the LLM may name a project in any case (matching
+    * code_project_db's NOCASE lookups), so "DAWN" still resolves to the "dawn" slug
+    * instead of passing through and 404ing at cbm. */
    char graph[CODE_PROJECT_GRAPH_NAME_MAX];
    graph[0] = '\0';
    pthread_mutex_lock(&s_mtx);
    for (int i = 0; i < s_map_count; i++) {
       if (strlen(s_map[i].clean) == token_len &&
-          strncmp(s_map[i].clean, clean_value, token_len) == 0) {
+          strncasecmp(s_map[i].clean, clean_value, token_len) == 0) {
          snprintf(graph, sizeof(graph), "%s", s_map[i].graph);
          break;
       }

@@ -52,13 +52,35 @@ static char *cp_list(int64_t uid) {
    return strdup(buf);
 }
 
+/* "No such project" message that lists the caller's visible projects so the LLM
+ * can self-correct (wrong name, or a stale one). Falls back to the bare message
+ * if the list can't be built. */
+static char *cp_no_such_project_msg(int64_t uid) {
+   code_project_t list[CODE_PROJECTS_MAX];
+   int n = 0;
+   if (code_project_db_list_visible(uid, list, CODE_PROJECTS_MAX, &n) != AUTH_DB_SUCCESS ||
+       n == 0) {
+      return strdup("No such project is available to you.");
+   }
+   char buf[2048];
+   int off = snprintf(buf, sizeof(buf),
+                      "No such project is available to you. Available projects: ");
+   for (int i = 0; i < n && off < (int)sizeof(buf); i++) {
+      off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i > 0 ? ", " : "", list[i].name);
+   }
+   if (off < (int)sizeof(buf)) {
+      snprintf(buf + off, sizeof(buf) - off, ".");
+   }
+   return strdup(buf);
+}
+
 static char *cp_set_active(int64_t uid, const char *name) {
    if (name == NULL || name[0] == '\0') {
       return strdup("Specify a project name to activate.");
    }
    bool visible = false;
    if (code_project_db_check_visible(uid, name, &visible) != AUTH_DB_SUCCESS || !visible) {
-      return strdup("No such project is available to you.");
+      return cp_no_such_project_msg(uid);
    }
    code_project_t p;
    if (code_project_db_get_by_name(name, &p) != AUTH_DB_SUCCESS) {
@@ -79,7 +101,7 @@ static char *cp_set_active(int64_t uid, const char *name) {
 }
 
 static char *cp_status(int64_t uid, const char *name) {
-   char resolved[64] = { 0 };
+   char resolved[CODE_PROJECT_NAME_MAX] = { 0 };
    if (name != NULL && name[0] != '\0') {
       snprintf(resolved, sizeof(resolved), "%s", name);
    } else {
@@ -95,7 +117,7 @@ static char *cp_status(int64_t uid, const char *name) {
    }
    bool visible = false;
    if (code_project_db_check_visible(uid, resolved, &visible) != AUTH_DB_SUCCESS || !visible) {
-      return strdup("No such project is available to you.");
+      return cp_no_such_project_msg(uid);
    }
    code_project_t p;
    if (code_project_db_get_by_name(resolved, &p) != AUTH_DB_SUCCESS) {
