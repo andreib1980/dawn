@@ -56,7 +56,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 69
+#define AUTH_DB_SCHEMA_VERSION 70
 
 /* Retention periods */
 #define LOGIN_ATTEMPT_RETENTION_SEC (7 * 24 * 60 * 60) /* 7 days */
@@ -562,6 +562,15 @@ int auth_db_migrations_v68(sqlite3 *db);
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
 int auth_db_migrations_v69(sqlite3 *db);
+
+/**
+ * @brief v70 migration: authoritative case-insensitive uniqueness for
+ *        code_projects.name (UNIQUE INDEX ... COLLATE NOCASE), matching the
+ *        NOCASE application-level lookups. Idempotent (IF NOT EXISTS); a
+ *        pre-existing case-variant collision is logged and skipped, not fatal.
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
+ */
+int auth_db_migrations_v70(sqlite3 *db);
 
 /**
  * @brief Prepare every cached sqlite3_stmt* in s_db.

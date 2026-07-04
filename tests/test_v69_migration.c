@@ -33,6 +33,7 @@
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h> /* mkdtemp */
 #include <string.h>
 #include <unistd.h>
 
@@ -102,6 +103,12 @@ void setUp(void) {
 void tearDown(void) {
    auth_db_shutdown();
    unlink(s_dbpath);
+   char sib[336];
+   snprintf(sib, sizeof(sib), "%s-wal", s_dbpath);
+   unlink(sib);
+   snprintf(sib, sizeof(sib), "%s-shm", s_dbpath);
+   unlink(sib);
+   rmdir(s_tmpdir);
 }
 
 /* Returns true if @sql's single-int result is > 0. */

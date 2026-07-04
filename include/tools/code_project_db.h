@@ -108,10 +108,18 @@ int code_project_db_list_visible(int64_t user_id, code_project_t *out, int max, 
 int code_project_db_list_all(code_project_t *out, int max, int *count_out);
 
 /**
- * @brief Per-call visibility re-check for a named project.
+ * @brief Fetch a project by name, scoped to what @p user_id may see (owned or
+ *        global), in a single query. Name match is case-insensitive.
+ * @return AUTH_DB_SUCCESS (row copied to @p out), AUTH_DB_NOT_FOUND when no
+ *         visible project matches, AUTH_DB_FAILURE on error.
+ */
+int code_project_db_get_visible_by_name(int64_t user_id, const char *name, code_project_t *out);
+
+/**
+ * @brief Per-call visibility re-check for a named project (bool only; use
+ *        code_project_db_get_visible_by_name when you also need the row).
  * @param out Set to true if @p name is owned by @p user_id or global, else false.
- * @return AUTH_DB_SUCCESS when the lookup ran (inspect @p out for the result),
- *         AUTH_DB_FAILURE on error.
+ * @return AUTH_DB_SUCCESS when the lookup ran (inspect @p out), AUTH_DB_FAILURE on error.
  */
 int code_project_db_check_visible(int64_t user_id, const char *name, bool *out);
 

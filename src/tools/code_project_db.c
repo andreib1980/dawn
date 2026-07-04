@@ -300,6 +300,38 @@ int code_project_db_list_all(code_project_t *out, int max, int *count_out) {
    return AUTH_DB_SUCCESS;
 }
 
+int code_project_db_get_visible_by_name(int64_t user_id, const char *name, code_project_t *out) {
+   if (name == NULL || out == NULL) {
+      return AUTH_DB_FAILURE;
+   }
+   /* Scope (is_global OR own) and fetch the canonical row in ONE query, so a
+    * caller's authorization check and its row fetch can't disagree. NOCASE so a
+    * case-mismatched name still resolves (see get_by). */
+   const char *sql = "SELECT " CP_COLS " FROM code_projects "
+                     "WHERE name=? COLLATE NOCASE AND (is_global=1 OR user_id=?) LIMIT 1";
+   pthread_mutex_lock(&s_db.mutex);
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      pthread_mutex_unlock(&s_db.mutex);
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, user_id);
+   int rc = sqlite3_step(st);
+   int result;
+   if (rc == SQLITE_ROW) {
+      read_row(st, out);
+      result = AUTH_DB_SUCCESS;
+   } else if (rc == SQLITE_DONE) {
+      result = AUTH_DB_NOT_FOUND;
+   } else {
+      result = AUTH_DB_FAILURE;
+   }
+   sqlite3_finalize(st);
+   pthread_mutex_unlock(&s_db.mutex);
+   return result;
+}
+
 int code_project_db_check_visible(int64_t user_id, const char *name, bool *out) {
    if (name == NULL || out == NULL) {
       return AUTH_DB_FAILURE;

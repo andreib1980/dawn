@@ -100,6 +100,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v67.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v68.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v69.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v70.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -265,6 +266,14 @@ dawn_add_unit_test(test_blob_migration
 # is_pinned").
 dawn_add_unit_test(test_v69_migration
    SOURCES test_v69_migration.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer
+   LABEL   ci)
+
+# v70: code_projects.name NOCASE unique index upgrade (seeds a real v69 DB with a
+# code_projects row → verifies the index exists and enforces case-uniqueness).
+dawn_add_unit_test(test_v70_migration
+   SOURCES test_v70_migration.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)

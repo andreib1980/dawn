@@ -78,13 +78,9 @@ static char *cp_set_active(int64_t uid, const char *name) {
    if (name == NULL || name[0] == '\0') {
       return strdup("Specify a project name to activate.");
    }
-   bool visible = false;
-   if (code_project_db_check_visible(uid, name, &visible) != AUTH_DB_SUCCESS || !visible) {
-      return cp_no_such_project_msg(uid);
-   }
    code_project_t p;
-   if (code_project_db_get_by_name(name, &p) != AUTH_DB_SUCCESS) {
-      return strdup("No such project.");
+   if (code_project_db_get_visible_by_name(uid, name, &p) != AUTH_DB_SUCCESS) {
+      return cp_no_such_project_msg(uid);
    }
    session_t *s = session_get_command_context();
    if (s == NULL) {
@@ -115,13 +111,9 @@ static char *cp_status(int64_t uid, const char *name) {
    if (resolved[0] == '\0') {
       return strdup("No active project. Use action 'set_active' first.");
    }
-   bool visible = false;
-   if (code_project_db_check_visible(uid, resolved, &visible) != AUTH_DB_SUCCESS || !visible) {
-      return cp_no_such_project_msg(uid);
-   }
    code_project_t p;
-   if (code_project_db_get_by_name(resolved, &p) != AUTH_DB_SUCCESS) {
-      return strdup("No such project.");
+   if (code_project_db_get_visible_by_name(uid, resolved, &p) != AUTH_DB_SUCCESS) {
+      return cp_no_such_project_msg(uid);
    }
    char msg[512];
    snprintf(msg, sizeof(msg), "Project '%s': status=%s%s%s", p.name, p.status,
