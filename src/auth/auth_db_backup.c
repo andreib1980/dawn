@@ -90,7 +90,10 @@ static void prune_old_backups(const char *backup_dir, const char *prefix) {
    qsort(entries, (size_t)n, sizeof(entries[0]), cmp_backup_mtime_asc);
    for (int i = 0; i < n - AUTH_DB_BACKUP_KEEP; i++) {
       char full[1024];
-      snprintf(full, sizeof(full), "%s/%s", backup_dir, entries[i].name);
+      int m = snprintf(full, sizeof(full), "%s/%s", backup_dir, entries[i].name);
+      if (m < 0 || (size_t)m >= sizeof(full)) {
+         continue; /* path too long — never unlink() a truncated path */
+      }
       if (unlink(full) == 0) {
          OLOG_INFO("auth_db: pruned old backup %s", entries[i].name);
       }

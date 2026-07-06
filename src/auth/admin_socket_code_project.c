@@ -228,7 +228,10 @@ int handle_code_proj_link(int client_fd, const char *payload, uint16_t payload_l
    if (name[0] == '\0') {
       const char *slash = strrchr(path, '/');
       const char *base = (slash != NULL && slash[1] != '\0') ? slash + 1 : path;
-      snprintf(name, sizeof(name), "%s", base);
+      /* Bounded precision: cap the derived name at the field capacity (base can
+       * be a full basename up to CODE_PROJECT_PATH_MAX) — silences
+       * -Wformat-truncation while preserving the existing truncate-to-fit. */
+      snprintf(name, sizeof(name), "%.*s", (int)sizeof(name) - 1, base);
    }
    int64_t id = 0;
    if (code_project_link(0, path, name, false, &id) != SUCCESS) {

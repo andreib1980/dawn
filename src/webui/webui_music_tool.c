@@ -140,7 +140,11 @@ static int resolve_item_to_path(const char *item,
       if (music_db_get_by_path(item, &r[0], &found) == SUCCESS && found) {
          safe_strncpy(path_out, r[0].path, path_len);
          if (display_out) {
-            snprintf(display_out, display_len, "%s - %s", r[0].artist, r[0].title);
+            /* Format into a full-size buffer (can't truncate → no
+             * -Wformat-truncation), then copy-truncate into the caller's. */
+            char label[2 * AUDIO_METADATA_STRING_MAX + 4];
+            snprintf(label, sizeof(label), "%s - %s", r[0].artist, r[0].title);
+            safe_strncpy(display_out, label, display_len);
          }
          return SUCCESS;
       }
@@ -168,7 +172,9 @@ static int resolve_item_to_path(const char *item,
       int pick = music_db_pick_best_match(r, count, title_query, dash ? artist : NULL);
       safe_strncpy(path_out, r[pick].path, path_len);
       if (display_out) {
-         snprintf(display_out, display_len, "%s - %s", r[pick].artist, r[pick].title);
+         char label[2 * AUDIO_METADATA_STRING_MAX + 4];
+         snprintf(label, sizeof(label), "%s - %s", r[pick].artist, r[pick].title);
+         safe_strncpy(display_out, label, display_len);
       }
       return SUCCESS;
    }
