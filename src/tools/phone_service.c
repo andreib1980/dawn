@@ -37,15 +37,18 @@
 #include <string.h>
 #include <time.h>
 
+#include "audio/flac_playback.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/worker_pool.h"
+#include "dawn_error.h"
 #include "image_store.h"
 #include "logging.h"
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "messaging/messaging_engine.h"
+#include "tools/phone_audio_bridge.h"
 #include "tools/phone_db.h"
 #include "tts/text_to_speech.h"
 
@@ -87,6 +90,10 @@ static unsigned int s_sms_day_count = 0;
 
 /* ECHO online status */
 static bool s_echo_online = false;
+
+/* True while the audio bridge paused music for a call, so teardown restores only
+ * what the call actually paused (event-thread only — no lock needed). */
+static bool s_bridge_paused_music = false;
 
 /* =============================================================================
  * Helpers
@@ -215,8 +222,11 @@ static void reverse_lookup(int user_id,
     * For now, paginate through all phone contacts to avoid the 20-contact ceiling. */
    int offset = 0;
    const int page_size = 50;
+   const int max_pages = 200; /* hard cap (~10k contacts) so a misbehaving
+                               * contacts_list that ignores offset can't loop
+                               * forever on the event thread */
    contact_result_t results[50];
-   while (1) {
+   for (int page = 0; page < max_pages; page++) {
       int count = 0;
       contacts_list(user_id, "phone", results, page_size, offset, &count);
       if (count <= 0) {
@@ -649,48 +659,96 @@ void phone_service_handle_event(const char *payload, int payload_len) {
    /* --- call_connected --- */
    else if (strcmp(event, "call_connected") == 0) {
       pthread_mutex_lock(&s_state_mutex);
-      s_state = PHONE_STATE_ACTIVE;
-      s_call_start_time = time(NULL);
-      char num_copy[24], name_copy[64];
-      snprintf(num_copy, sizeof(num_copy), "%s", s_active_number);
-      snprintf(name_copy, sizeof(name_copy), "%s", s_active_contact);
-      int64_t log_id = s_active_call_log_id;
-      int64_t eid = s_active_entity_id;
+      /* Only advance to ACTIVE from a genuine in-progress call.  echo/events is
+       * unauthenticated, so a spoofed call_connected must not fabricate an ACTIVE
+       * call — otherwise a following spoofed pcm_ready would open the local mic. */
+      bool legit = (s_state == PHONE_STATE_DIALING || s_state == PHONE_STATE_ANSWERING ||
+                    s_state == PHONE_STATE_RINGING_IN);
+      if (!legit) {
+         phone_state_t cur = s_state;
+         pthread_mutex_unlock(&s_state_mutex);
+         OLOG_WARNING("phone_service: ignoring call_connected with no call in progress (state=%d)",
+                      cur);
+      } else {
+         s_state = PHONE_STATE_ACTIVE;
+         s_call_start_time = time(NULL);
+         char num_copy[24], name_copy[64];
+         snprintf(num_copy, sizeof(num_copy), "%s", s_active_number);
+         snprintf(name_copy, sizeof(name_copy), "%s", s_active_contact);
+         int64_t log_id = s_active_call_log_id;
+         int64_t eid = s_active_entity_id;
+         pthread_mutex_unlock(&s_state_mutex);
+
+         /* Update call log to answered */
+         if (log_id >= 0) {
+            phone_db_call_log_update(log_id, 0, PHONE_CALL_ANSWERED);
+         }
+
+         /* HUD */
+         struct json_object *hud = json_object_new_object();
+         json_object_object_add(hud, "number", json_object_new_string(num_copy));
+         json_object_object_add(hud, "name", json_object_new_string(name_copy));
+         struct json_object *photo2 = build_contact_photo_json(s_config.user_id, eid);
+         if (photo2) {
+            json_object_object_add(hud, "photo", photo2);
+         }
+         publish_hud("call_active", hud);
+
+         {
+            /* Broadcast the resolution: the surface that answered learns the call
+             * is active; any other surface that saw the ring learns it was
+             * answered elsewhere and stops trying. */
+            char ctx[256];
+            snprintf(ctx, sizeof(ctx),
+                     "[The call with %s was answered and is now active. Use phone tool 'hang_up' "
+                     "to end it.]",
+                     name_copy[0] ? name_copy : num_copy);
+            broadcast_call_context(ctx);
+         }
+
+         /* Show the browser in-call panel now the call is up (elapsed 0 — just
+          * connected; reconnecting clients get the running elapsed via snapshot). */
+         webui_broadcast_phone_call(s_config.user_id, PHONE_CALL_NOTIF_ACTIVE, num_copy, name_copy,
+                                    log_id, 0, NULL);
+
+         OLOG_INFO("phone_service: call connected");
+      }
+   }
+
+   /* --- pcm_ready --- ECHO has armed CPCMREG=1 and modem audio is flowing on
+    * ttyUSB4.  Start the local-handset bridge now (rather than on call_connected)
+    * so we never open the PCM port before data flows — the race-free handshake.
+    * If pcm_ready never arrives, the bridge simply never starts (no audio) and
+    * nothing blocks, so hang-up still works. */
+   else if (strcmp(event, "pcm_ready") == 0) {
+      /* Only arm the bridge for a genuinely active call.  pcm_ready arrives over
+       * the (currently unauthenticated) echo/events topic, so without a state
+       * guard a spoofed event would open the local mic onto the modem line — a
+       * hot-mic primitive.  Read state under the mutex like the other handlers. */
+      pthread_mutex_lock(&s_state_mutex);
+      bool call_active = (s_state == PHONE_STATE_ACTIVE || s_state == PHONE_STATE_ANSWERING);
       pthread_mutex_unlock(&s_state_mutex);
-
-      /* Update call log to answered */
-      if (log_id >= 0) {
-         phone_db_call_log_update(log_id, 0, PHONE_CALL_ANSWERED);
+      if (!call_active) {
+         OLOG_WARNING("phone_service: ignoring pcm_ready with no active call");
+      } else {
+         const char *port = s_config.pcm_port[0] ? s_config.pcm_port : PHONE_PCM_PORT_DEFAULT;
+         /* Pause music only if it was actually playing, so teardown can restore
+          * the exact prior state (never resume music the user had paused). */
+         s_bridge_paused_music = (getMusicPlay() != 0);
+         if (s_bridge_paused_music) {
+            setMusicPlay(0); /* keep music out of the call mix (mic would pick it up) */
+         }
+         if (phone_bridge_start(port) == SUCCESS) {
+            OLOG_INFO("phone_service: audio bridge up on %s", port);
+         } else {
+            OLOG_ERROR("phone_service: audio bridge failed to start on %s — call has no audio",
+                       port);
+            if (s_bridge_paused_music) { /* start failed — don't leave music paused */
+               setMusicPlay(1);
+               s_bridge_paused_music = false;
+            }
+         }
       }
-
-      /* HUD */
-      struct json_object *hud = json_object_new_object();
-      json_object_object_add(hud, "number", json_object_new_string(num_copy));
-      json_object_object_add(hud, "name", json_object_new_string(name_copy));
-      struct json_object *photo2 = build_contact_photo_json(s_config.user_id, eid);
-      if (photo2) {
-         json_object_object_add(hud, "photo", photo2);
-      }
-      publish_hud("call_active", hud);
-
-      {
-         /* Broadcast the resolution: the surface that answered learns the call
-          * is active; any other surface that saw the ring learns it was
-          * answered elsewhere and stops trying. */
-         char ctx[256];
-         snprintf(ctx, sizeof(ctx),
-                  "[The call with %s was answered and is now active. Use phone tool 'hang_up' "
-                  "to end it.]",
-                  name_copy[0] ? name_copy : num_copy);
-         broadcast_call_context(ctx);
-      }
-
-      /* Show the browser in-call panel now the call is up (elapsed 0 — just
-       * connected; reconnecting clients get the running elapsed via snapshot). */
-      webui_broadcast_phone_call(s_config.user_id, PHONE_CALL_NOTIF_ACTIVE, num_copy, name_copy,
-                                 log_id, 0, NULL);
-
-      OLOG_INFO("phone_service: call connected");
    }
 
    /* --- call_ended --- */
@@ -710,6 +768,13 @@ void phone_service_handle_event(const char *payload, int payload_len) {
       s_active_number[0] = '\0';
       s_active_contact[0] = '\0';
       pthread_mutex_unlock(&s_state_mutex);
+
+      /* Tear down the audio bridge and restore music only if the call paused it. */
+      phone_bridge_stop();
+      if (s_bridge_paused_music) {
+         setMusicPlay(1);
+         s_bridge_paused_music = false;
+      }
 
       /* Calculate duration */
       int duration = 0;
@@ -922,6 +987,13 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          s_active_contact[0] = '\0';
       }
       pthread_mutex_unlock(&s_state_mutex);
+      /* Stop any running audio bridge (safe if not running); restore music only
+       * if the call paused it. */
+      phone_bridge_stop();
+      if (s_bridge_paused_music) {
+         setMusicPlay(1);
+         s_bridge_paused_music = false;
+      }
       /* Resolve the call on every surface that saw it (outside the mutex — the
        * broadcast takes per-session locks). */
       if (had_call) {
@@ -998,17 +1070,23 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
       return 1;
    }
 
-   /* Insert call log with FAILED status (updated to ANSWERED on connect) */
-   int64_t log_id = 0;
-   phone_db_call_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, 0, time(NULL),
-                            PHONE_CALL_FAILED, &log_id);
-
-   /* Lookup entity_id for outgoing contact (for photo in HUD) */
+   /* Reverse-lookup the entity (for the HUD photo) and, when the caller passed a
+    * raw number, the contact name too — otherwise resolve_number left name empty
+    * and the HUD/call log show "Unknown" instead of the contact (this mirrors the
+    * incoming-call path, which always reverse-looks-up the name). */
    int64_t out_entity_id = -1;
    {
       char tmp_name[64];
       reverse_lookup(user_id, number, tmp_name, sizeof(tmp_name), &out_entity_id);
+      if (name[0] == '\0' && tmp_name[0] != '\0') {
+         snprintf(name, sizeof(name), "%s", tmp_name);
+      }
    }
+
+   /* Insert call log with FAILED status (updated to ANSWERED on connect) */
+   int64_t log_id = 0;
+   phone_db_call_log_insert(user_id, PHONE_DIR_OUTGOING, number, name, 0, time(NULL),
+                            PHONE_CALL_FAILED, &log_id);
 
    /* Set state + tracking atomically */
    set_state_with_call(PHONE_STATE_DIALING, number, name, log_id, out_entity_id);

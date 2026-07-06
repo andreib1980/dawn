@@ -2,7 +2,7 @@
 
 ## Context
 
-Add phone call and SMS support to the OASIS ecosystem via the Waveshare SIM7600G-H 4G modem (USB, SIMCom chipset, US Mobile SIM). The modem is connected to the Jetson with 5 serial ports (`/dev/ttyUSB0-4`) and provides tertiary internet via RNDIS (`usb0`, route-metric 20100). A crossover cable from the modem's 3.5mm audio jack to a dedicated USB sound card on the Jetson provides call audio. During calls, DAWN's main mic continues wake-word listening so the user can say "Friday, hang up" etc.
+Add phone call and SMS support to the OASIS ecosystem via the Waveshare SIM7600G-H 4G modem (USB, SIMCom chipset, US Mobile SIM). The modem is connected to the Jetson with 5 serial ports (`/dev/ttyUSB0-4`) and provides tertiary internet via RNDIS (`usb0`, route-metric 20100). Call audio is carried as **raw PCM over the modem's USB audio port** (`/dev/ttyUSB4`, 16 kHz S16LE mono) — verified end-to-end on a live call 2026-07-06 (see [Hardware Notes](#hardware-notes)). **No analog crossover cable or USB sound card is required** — the earlier "3.5 mm jack only" plan was based on a false negative (`AT+CPCMREG=1` is a per-call command that returns `ERROR` at idle, exactly like `AT+CECM=1`; tested inside an active call it succeeds). During calls, DAWN's main mic continues wake-word listening so the user can say "Friday, hang up" etc.
 
 **Scope**: Voice calls, SMS, call/SMS history DB, HUD notifications, LLM tool, TTS announcements for incoming events.
 
@@ -20,11 +20,11 @@ DAWN (AI assistant)                     ECHO (modem daemon)
     |                echo/events            |
     |                echo/telemetry         |
   phone_db.c                            SIM7600G-H
-    |                                   /dev/ttyUSB2
-  audio bridge
-    |
-  USB sound card <── crossover cable ── modem 3.5mm jack
+    |                                   /dev/ttyUSB2 (AT — ECHO owns)
+  audio bridge <── raw PCM 16k S16LE ── /dev/ttyUSB4 (USB audio — DAWN owns)
 ```
+
+**Audio plane / control plane split** (verified 2026-07-06): ECHO owns the **control plane** — `/dev/ttyUSB2` (AT, flock-exclusive) — and sends the per-call `AT+CPCMREG=1` / `AT+CPCMFRM=1` in its existing `modem_call_audio_setup()`. DAWN owns the **audio plane** — it opens `/dev/ttyUSB4` (a distinct device node, no flock contention) and streams raw PCM. DAWN never touches the AT port.
 
 **ECHO** (`~/code/The-OASIS-Project/echo/`): Owns the serial port, handles all AT command traffic, publishes telemetry and events, receives commands via MQTT. ~1,850 lines of C, modeled after STAT.
 
@@ -402,7 +402,8 @@ Single tool, multiple actions — follows `email_tool.c` pattern.
 
 **Event handling** (from ECHO via MQTT):
 - `incoming_call` → set state=RINGING_IN, reverse-lookup contact, insert call log (missed initially), send HUD MQTT, TTS announce
-- `call_connected` → set state=ACTIVE, start audio bridge
+- `call_connected` → set state=ACTIVE, send HUD MQTT (bridge not started yet — waits for `pcm_ready`)
+- `pcm_ready` (after ECHO arms `AT+CPCMREG=1`) → open `/dev/ttyUSB4`, start audio bridge (bounded timeout guard if it never arrives)
 - `call_ended` → calculate duration, update call log, stop audio bridge, set state=IDLE, send HUD MQTT
 - `sms_received` → reverse-lookup sender, insert SMS log, publish `delete_sms` to ECHO (after DB commit), send HUD MQTT, TTS announce
 - `modem_lost` → if call active, log as failed, stop audio bridge, set state=IDLE
@@ -481,7 +482,7 @@ Unit tests for DB layer. Follow `test_scheduler` pattern.
 [phone]
 enabled = true
 confirm_outbound = true
-audio_device = ""                  # USB sound card device (e.g. "hw:2,0")
+pcm_port = "/dev/ttyUSB4"          # modem USB audio port (raw 16k S16LE PCM); no USB sound card
 sms_retention_days = 90
 call_log_retention_days = 90
 rate_limit_sms_per_min = 5
@@ -495,21 +496,18 @@ rate_limit_sms_per_day = 30
 
 ### Overview
 
-A dedicated `phone_audio_bridge` thread in `phone_service.c` handles bidirectional PCM streaming between the USB sound card (modem analog audio) and the active client.
+A dedicated `phone_audio_bridge` thread in `phone_service.c` handles bidirectional PCM streaming between the **modem's USB audio port** (`/dev/ttyUSB4`, raw 16 kHz S16LE mono) and the active client. There is no USB sound card and no analog path — the modem PCM port is a raw byte stream DAWN reads/writes directly.
 
 ### Audio Flow
 
 ```
-                    Crossover Cable
-  SIM7600G-H  ──────────────────────>  USB Sound Card
-  3.5mm jack   <──────────────────────  (audio device)
-  (mic + spk)                           (capture + playback)
-                                              |
-                                    audio_backend API
-                                   (2nd capture + playback handle)
-                                              |
-                                    phone_audio_bridge thread
-                                     (resample + route)
+  SIM7600G-H  ── raw PCM 16k S16LE ──>  /dev/ttyUSB4  ── read ──┐
+  (far-end     <── raw PCM 16k S16LE ──               <─ write ─┤
+   call audio)                                                  |
+                                    phone_audio_bridge thread    |
+                                     (open ttyUSB4 O_RDWR,       |
+                                      resample if client≠16k,    |
+                                      real-time-clocked writer)  |
                                               |
                           ┌───────────────────┼───────────────────┐
                           |                   |                   |
@@ -519,28 +517,35 @@ A dedicated `phone_audio_bridge` thread in `phone_service.c` handles bidirection
                                          0x01/0x02 in)
 ```
 
+Downlink at 16 kHz matches DAWN's ASR pipeline directly (no upsample for wake-word-during-call). CECM (far-end echo cancel, `AT+CECM=1`) is already set per-call by ECHO; near-end AEC is DAWN's existing AEC3 on the helmet path.
+
+### Coordination & Handshake (race-free)
+
+The control plane (ECHO) and audio plane (DAWN) hand off through an explicit ready signal so there is **no window of unknown state**:
+
+1. ECHO detects `VOICE CALL: BEGIN`, sets state ACTIVE, publishes `call_connected`, and (in `modem_call_audio_setup()`) sends `AT+CPCMFRM=1` + `AT+CPCMREG=1` on ttyUSB2.
+2. **Only after `CPCMREG=1` returns `OK`**, ECHO publishes a `pcm_ready` event (new). DAWN opens `/dev/ttyUSB4` and starts the bridge loop **on `pcm_ready`, not on `call_connected`** — this eliminates the startup race where ttyUSB4 has no data until PCM is armed.
+3. DAWN's `pcm_ready` handler **guards on call state** (only arms the bridge when the machine is `ACTIVE`/`ANSWERING`) — `echo/events` is unauthenticated by default, and an unguarded handler would let a spoofed `pcm_ready` open the local mic onto the modem line (hot-mic). The handshake is **event-driven and non-blocking**: if `pcm_ready` never arrives, the bridge simply never starts (the call has no audio) and nothing blocks, so hang-up still works — no watchdog timer is needed.
+4. On `call_ended`/`modem_lost`, DAWN stops the bridge and closes ttyUSB4 **before** returning; ECHO's `AT+CHUP` auto-stops modem PCM (no explicit `CPCMREG=0` needed). Teardown is bounded: the single bridge thread's cycle is paced by the blocking mic capture (one ~20 ms period), the ttyUSB4 fd is `O_NONBLOCK`, and a fatal error latches the run flag so the thread exits.
+
 ### Bridge Thread Lifecycle
 
-1. **Start** (on `call_connected` or successful `answer`):
-   - Pause TTS: `tts_playback_state = TTS_PLAYBACK_PAUSE`
-   - Pause music: `setMusicPlay(0)`
-   - Open USB sound card: `audio_stream_capture_open()` + `audio_stream_playback_open()`
-   - Create resamplers if sample rates differ
+1. **Start** (on `pcm_ready`, call-state-guarded):
+   - Pause music **only if it was playing** (`getMusicPlay()` snapshot → `setMusicPlay(0)`), restored to the same state on teardown. TTS announcements are already suppressed during `ACTIVE` (`phone_service` announce guard); full TTS pause during a call is deferred — an open decision tied to whether Friday should be audible on the line (see "Friday-on-the-phone" future scope).
+   - Open `/dev/ttyUSB4` (`O_RDWR | O_NONBLOCK | O_NOFOLLOW`, path allow-listed to `/dev/ttyUSB*`/`/dev/ttyACM*`, `S_ISCHR` checked, raw `cfmakeraw` termios, no flow control)
+   - No resampler needed on the local-handset path: both audio streams are opened at 16 kHz mono and PulseAudio converts to/from the device
 
-2. **Run** (bidirectional loop, ~20ms chunks):
-   - Modem → client: read USB sound card, resample, route to active client
-   - Client → modem: receive from active client, resample, write to USB sound card
+2. **Run** (single lockstep loop, per cycle): capture one mic frame (blocking ~20 ms — the real-time pace) → soft-gain + write it to ttyUSB4 (uplink) → read the matching amount of downlink from ttyUSB4 → soft-gain + write to local playback. The SIM7600 USB PCM is **synchronous full-duplex**, so read and write must stay balanced in one thread — two independent direction threads drift and the modem stops draining uplink (verified live). Both streams are 16 kHz mono (PulseAudio converts to/from the device — no resampler). Level is a `tanh` soft-limiter per direction (`PHONE_DOWNLINK_GAIN`/`PHONE_UPLINK_GAIN`): the modem's own `CRXVOL`/`CTXVOL` don't affect the USB PCM tap, so all gain is digital here.
 
-3. **Stop** (on `call_ended`):
-   - Close USB sound card streams
-   - Destroy resamplers
-   - Resume TTS and music
+3. **Stop** (on `call_ended`/`modem_lost`): signal the thread, join it, close ttyUSB4 + the audio streams; restore music if the call paused it.
 
 ### Client Routing
 
-- **Local** (helmet): Bridge USB sound card ↔ primary playback/capture device
-- **WebUI** (browser): Encode/decode via `webui_opus_encode_stream()`/`webui_opus_decode_stream()`, send as binary WebSocket messages
-- **Satellite**: Same binary audio path as WebUI
+**Implemented today: local handset only.** WebUI/satellite routing is future scope (see Phase 8) — the bridge currently hard-binds the modem side to the local capture/playback devices.
+
+- **Local** (helmet) — *implemented*: bridge ttyUSB4 modem PCM ↔ primary playback/capture device.
+- **WebUI** (browser) — *Phase 8*: encode/decode via `webui_opus_encode_stream()`/`webui_opus_decode_stream()`, send as binary WebSocket messages. Needs a jitter buffer for the async browser audio since the lockstep loop can no longer pace off a local mic.
+- **Satellite** — *Phase 8*: same binary audio path as WebUI.
 
 ### Wake Word During Calls
 
@@ -551,9 +556,14 @@ Primary mic capture continues independently during calls. The user's voice goes 
 ## Hardware Notes
 
 - **Modem**: Waveshare SIM7600G-H 4G HAT, USB ID `1e0e:9011`
-- **Serial ports**: `/dev/ttyUSB0-4` (all `option1` driver). ttyUSB2 = AT command port (primary)
+- **Serial ports**: `/dev/ttyUSB0-4` (all `option1` driver, USB IF02–IF06). ttyUSB2 = AT command port (primary); **ttyUSB4 = USB audio / raw PCM port**
 - **Network**: RNDIS via `usb0` (route-metric 20100, MTU 1420, tertiary behind wired at 100 and WiFi at 1000)
-- **Audio**: 3.5mm analog jack only (`AT+CPCMREG=1` returns ERROR — no USB PCM)
+- **Audio**: **USB PCM over `/dev/ttyUSB4`** — 16 kHz S16LE mono, full-duplex. Verified end-to-end on a live call 2026-07-06 (firmware `LE20B04SIM7600G22`): downlink transcribed cleanly by local Whisper; uplink played back at natural pitch/speed. The modem does **not** enumerate a USB Audio Class / ALSA card (`arecord -l` shows no modem card), so PCM is a raw byte stream, not an ALSA device.
+  - **`AT+CPCMREG` and `AT+CPCMFRM` are per-call commands** — like `AT+CECM=1`, they return `ERROR` at idle and must be sent inside an active call. The original "no USB PCM" conclusion was a false negative from testing `CPCMREG=1` at idle.
+  - Enable sequence (on the AT port, after `VOICE CALL: BEGIN`): `AT+CPCMFRM=1` (16 kHz; resets to 8 kHz on modem reset — set per call) then `AT+CPCMREG=1`. PCM then flows on ttyUSB4.
+  - Teardown: `AT+CHUP` ends the call and auto-stops PCM. `AT+CPCMREG=0` during teardown returns `ERROR` (harmless) — prefer just `CHUP`.
+  - **Synchronous full-duplex**: the modem exchanges one downlink and one uplink frame per period and expects the host to keep read and write balanced. The bridge does both in a **single lockstep thread paced by the blocking mic capture** (write uplink, read the matching downlink) — two independent threads drift and the modem stops draining uplink (observed live: all uplink writes `POLLOUT`-timeout mid-call). A pure sine test tone is a poor validator (the AMR voice codec distorts sustained tones — it *sounds* like a mid-tone pitch split); validate with speech, not tones.
+  - **All call-audio gain is digital in the bridge.** The modem's gain controls (`CRXVOL`/`CTXVOL`/`COUTGAIN`/`CLVL`) act on the analog codec only, **not** the USB PCM tap — verified 2026-07-06 by sweeping `CRXVOL` across its whole `0x0000-0xFFFF` range with a constant far-end source (downlink level was flat). Also: aggressive AT gain probing that leaves an extreme value set (e.g. `CTXVOL=0xFFFF`) can wedge the modem's uplink until `AT+CFUN=1,1`.
 - **SIM**: US Mobile (T-Mobile MVNO), APN `fast.t-mobile.com`
 
 ---
@@ -587,8 +597,12 @@ phone_tool.c, phone_service.c, phone_db.c, config, systemd. MIRAGE LTE signal ba
 - DAWN: Iron Man ringtone (NES pulse synthesis via audio_backend), ring event forwarding to HUD, LLM context injection for all phone events, SMS delete fire-and-forget (fixes MQTT callback self-deadlock), configurable phone service user_id
 - MIRAGE: notification system (state machine, config-driven elements, base64 photo decode, fade in/out), contact photo display from MQTT
 
-### Phase 5: Audio Bridge + End-to-End
-Audio bridge thread, crossover cable + USB sound card setup, bidirectional audio across client types, SMS end-to-end, rate limiting, edge cases.
+### Phase 5: Audio Bridge + End-to-End — **local handset FUNCTIONAL** 2026-07-06 (pending commit)
+Audio bridge thread over `/dev/ttyUSB4` (raw 16 kHz S16LE USB PCM — **no crossover cable / USB sound card**; hardware path verified 2026-07-06), ECHO per-call `CPCMFRM=1`+`CPCMREG=1` + `pcm_ready` handshake.
+
+**Shipped (local helmet handset):** `src/tools/phone_audio_bridge.c` — a **single lockstep thread** (the SIM7600 USB PCM is synchronous full-duplex; two independent threads drift and the modem stops draining uplink) bridging the local mic ↔ ttyUSB4 ↔ speaker at 16 kHz mono via PulseAudio; tanh soft-limiter gains for level (modem CRXVOL/CTXVOL don't affect the USB PCM tap, so gain is digital). Live-verified two-way on a real 3rd-party call (`up_short=0` across the whole call). Started on `pcm_ready` (call-state-guarded), stopped on `call_ended`/`modem_lost`.
+
+**Remaining for full Phase 5:** (a) **audio quality** — uplink AGC/noise-gate + downlink level (uplink reads "microphone-y/inconsistent" = room mic + cellular AMR AGC/VAD; see TODO.md); (b) **WebUI/satellite routing** — the bridge currently targets only the local handset, not the browser/DAP2 Opus paths (the `webui_broadcast_phone_call` banner can *answer* a call but there's no browser call audio yet); (c) SMS end-to-end, rate limiting, edge cases already covered by earlier phases.
 
 ### Phase 5.5: PDU Mode + Concatenated SMS ✓ (April 2026)
 
@@ -666,6 +680,36 @@ Improve contact resolution to support natural language references ("my daughter"
 
 **Complexity**: Medium. The memory system and contacts DB already exist — this is primarily logic in `phone_service.c`'s `resolve_number()` and a new disambiguation response format in `phone_tool.c`.
 
+### Phase 8: Browser call audio (WebUI phone calls) — Future
+
+Route call audio to a **browser** so a WebUI user can take/place a call from the web interface, not just the local helmet handset. The `webui_broadcast_phone_call` banner already lets a browser **answer/reject/hang up** (shipped); this adds the actual two-way **audio**.
+
+**What exists to reuse**: the WebUI already has a full-duplex Opus audio pipeline — `webui_opus_encode_stream()` / `webui_opus_decode_stream()` (`src/webui/webui_audio.c`), binary WS frames (server→client `0x11`/`0x12`, client→server `0x01`/`0x02`), 48 kHz browser ↔ 16 kHz server resamplers, and always-on voice mode. The modem PCM transport (`phone_audio_bridge.c`, ttyUSB4) is done.
+
+**Required work**:
+- Generalize the bridge's endpoint from "local pulse capture/playback" to a **routable sink/source** (an "active client" abstraction). Today `bridge_thread` hard-codes `getPcmCaptureDevice()`/`getPcmPlaybackDevice()`; a WebUI call instead binds the modem side to a WebUI session's Opus streams.
+- Downlink: far-end PCM (ttyUSB4, 16 kHz) → `webui_opus_encode_stream()` → binary WS to the browser.
+- Uplink: browser mic Opus → `webui_opus_decode_stream()` → 16 kHz → ttyUSB4 (keeping the lockstep balance — the WebUI audio arrives asynchronously, so it must feed a jitter buffer the lockstep loop drains, rather than pacing off a local mic).
+- Route selection: `phone_service` picks the audio target based on which surface answered (local handset vs a specific WebUI session).
+- Keep the local wake-word path working when the call is on the browser (or decide it's browser-only).
+
+**Complexity**: Medium. Main design question is the pacing hand-off — the lockstep loop is currently paced by the *local blocking mic capture*; a browser call has no local mic to clock it, so it must pace off the modem read (or a fixed-rate timer) and drain a WS jitter buffer for uplink. Prerequisite for treating a phone call as "just another DAP2/WebUI audio client."
+
+### Phase 9: Friday on the phone (AI converses on a call) — Future
+
+The marquee capability: a caller talks to **Friday** (the AI) over the phone — she answers, listens, and responds — rather than the phone bridging to a human. This is **net-new**, not a tweak to the bridge: it routes the call audio through DAWN's **ASR → LLM → TTS** loop instead of to a human client. The PCM bridge (Phase 5) is the prerequisite transport; this is the assistant integration on top.
+
+**Shape**:
+- A new **phone-call session type** whose audio I/O "device" is the modem (ttyUSB4), analogous to how a DAP2/WebUI session's device is a WebSocket. Downlink far-end PCM → ASR; TTS → uplink PCM.
+- **ASR over a phone line**: Whisper on narrowband, AGC-processed, noisy cellular audio — accuracy will be lower than the helmet mic; the audio-quality work (uplink AGC / cleanup, see TODO.md) feeds directly into this.
+- **Endpointing / turn-taking**: VAD tuned for phone audio to decide when the caller finished speaking (harder than a close mic; the far-end AGC/comfort-noise complicates silence detection).
+- **Barge-in**: caller talks over Friday → interrupt in-flight TTS (DAWN already has wake-word-interrupt machinery to borrow).
+- **TTS-during-call becomes required** (resolves the deferred decision in Phase 5's Bridge Thread Lifecycle) — here Friday *must* be audible on the line, so no TTS suppression.
+- **Initiation policy**: does Friday auto-answer (an "AI receptionist" mode), or is it an explicit handoff ("Friday, take this call")? Config-gated; auto-answering a real phone number has obvious safety/social implications.
+- Optional: a distinct system prompt / persona for phone callers (they aren't the authenticated owner).
+
+**Complexity**: High. It's a new session type + phone-tuned ASR endpointing + barge-in + a policy layer, all riding on the (now-working) PCM bridge. Highest-wow, biggest build. Independent of Phase 8 — either can come first; Phase 8 is breadth (same call on more surfaces), Phase 9 is depth (the AI *is* the surface).
+
 ---
 
 ## LLM Message Deletion — SHIPPED (April 2026)
@@ -727,8 +771,9 @@ The original tech-debt gap (no way for the LLM to delete SMS/call records) is re
 | TTS announce | `text_to_speech(strdup(text))` | Announce incoming calls/SMS |
 | Tool registration | `tool_registry_register()` | Standard tool pattern |
 | DB shared handle | `AUTH_DB_*` macros in `include/auth/auth_db_internal.h` | Pattern A for phone_db |
-| Audio streams | `audio_stream_capture/playback_open()` in `include/audio/audio_backend.h` | USB sound card for call audio |
-| Resampler | `resampler_create/process()` in `include/audio/resampler.h` | Modem 8kHz ↔ 48kHz |
+| Modem PCM | raw `open("/dev/ttyUSB4", O_RDWR)` read/write (not audio_backend) | Modem-side call audio: raw 16 kHz S16LE stream |
+| Audio streams | `audio_stream_capture/playback_open()` in `include/audio/audio_backend.h` | Client-side (local helmet) playback/capture |
+| Resampler | `resampler_create/process()` in `include/audio/resampler.h` | Modem 16 kHz ↔ client rate (e.g. 48 kHz WebUI) |
 | WebUI Opus | `webui_opus_encode/decode_stream()` in `src/webui/webui_audio.c` | Browser call audio |
 | TTS pause | `tts_playback_state` in `include/tts/text_to_speech.h` | Suppress TTS during call |
 | Music pause | `setMusicPlay(0/1)` in `src/audio/flac_playback.c` | Pause music during call |

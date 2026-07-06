@@ -46,12 +46,16 @@ typedef enum {
    PHONE_STATE_ANSWERING,
 } phone_state_t;
 
+/* Default modem USB audio port for the local-handset PCM bridge. */
+#define PHONE_PCM_PORT_DEFAULT "/dev/ttyUSB4"
+
 /* Phone service configuration */
 typedef struct {
    bool enabled;
    bool confirm_outbound;
-   char audio_device[64];
-   int user_id; /* owner of the modem — contacts/logs scoped to this user */
+   char audio_device[64]; /* legacy — unused (was the USB-sound-card device) */
+   char pcm_port[64];     /* modem USB audio port for the PCM bridge; empty -> default */
+   int user_id;           /* owner of the modem — contacts/logs scoped to this user */
    int sms_retention_days;
    int call_log_retention_days;
    int rate_limit_sms_per_min;
