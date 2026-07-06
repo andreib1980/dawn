@@ -991,6 +991,18 @@
 # history_retention_days = 30       # Prune history buckets older than N days
 
 # =============================================================================
+# Suit telemetry (suit_status tool) — live helmet (AURA) + armor (SPARK) feed
+# that MIRAGE republishes on MQTT.  Requires building with -DDAWN_ENABLE_SUIT_TOOL
+# (default ON) and MIRAGE republishing helmet/telemetry + armor/telemetry.
+# Live cache only (no history store).
+# =============================================================================
+[suit]
+# enabled = true                     # Enable the suit_status tool + ingestion
+# helmet_topic = "helmet/telemetry"  # MQTT topic MIRAGE republishes AURA sensors on
+# armor_topic = "armor/telemetry"    # MQTT topic MIRAGE republishes SPARK armor on
+# stale_after_sec = 30               # Live reads older than this report "stale"
+
+# =============================================================================
 # MCP Bridge (coding harness) — requires building with
 # -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON. DAWN is a pure MCP *client*; the operator
 # launches each MCP server (systemd/tmux/docker). Transport is HTTP+SSE only.

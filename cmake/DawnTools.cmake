@@ -44,6 +44,7 @@ option(DAWN_ENABLE_PHONE_TOOL "Enable phone call and SMS tool (requires ECHO dae
 option(DAWN_ENABLE_IMAGE_SEARCH_TOOL "Enable image search tool (requires SearXNG + image store)" ON)
 option(DAWN_ENABLE_CONTEXT_EXPAND_TOOL "Enable context expansion tool (LCM Phase 3)" ON)
 option(DAWN_ENABLE_STAT_TOOL "Enable STAT system-telemetry tool (reads the STAT MQTT sensor daemon)" ON)
+option(DAWN_ENABLE_SUIT_TOOL "Enable suit-telemetry tool (reads the AURA/SPARK feed MIRAGE republishes)" ON)
 
 # =============================================================================
 # Mutual Exclusion: Home Assistant and SmartThings
@@ -365,6 +366,22 @@ if(DAWN_ENABLE_STAT_TOOL)
     message(STATUS "DAWN: STAT telemetry tool ENABLED")
 else()
     message(STATUS "DAWN: STAT telemetry tool DISABLED")
+endif()
+
+# Suit-Telemetry Tool (reads the AURA helmet + SPARK armor feed that MIRAGE
+# republishes on helmet/telemetry + armor/telemetry).  The MQTT ingest/cache is a
+# leaf service in src/core/ (like stat_service.c) so Layer-2 callers depend
+# downward; only the LLM descriptor (suit_tool.c) stays in the tool layer.  SAGE
+# proactive-attention PRE phase (docs/PROACTIVE_ATTENTION_DESIGN.md).  Live cache
+# only — no history DB.
+if(DAWN_ENABLE_SUIT_TOOL)
+    add_definitions(-DDAWN_ENABLE_SUIT_TOOL)
+    list(APPEND TOOL_SOURCES
+        src/tools/suit_tool.c
+        src/core/suit_service.c)
+    message(STATUS "DAWN: Suit telemetry tool ENABLED")
+else()
+    message(STATUS "DAWN: Suit telemetry tool DISABLED")
 endif()
 
 # Image Search Tool (SearXNG image search + image store caching)

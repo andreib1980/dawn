@@ -49,6 +49,9 @@
 #ifdef DAWN_ENABLE_STAT_TOOL
 #include "core/stat_service.h"
 #endif
+#ifdef DAWN_ENABLE_SUIT_TOOL
+#include "core/suit_service.h"
+#endif
 #include "tools/tool_registry.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
@@ -383,6 +386,17 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
    }
 #endif
 
+   /* Subscribe to the AURA helmet + SPARK armor telemetry MIRAGE republishes
+    * (QoS 0, matches the publisher).  Only when the service is active. */
+#ifdef DAWN_ENABLE_SUIT_TOOL
+   if (suit_service_is_active()) {
+      mosquitto_subscribe(mosq, NULL, suit_service_helmet_topic(), 0);
+      mosquitto_subscribe(mosq, NULL, suit_service_armor_topic(), 0);
+      OLOG_INFO("Subscribed to %s (helmet), %s (armor)", suit_service_helmet_topic(),
+                suit_service_armor_topic());
+   }
+#endif
+
    /* Initialize HUD discovery (subscribes to hud/discovery/# and requests state) */
    if (hud_discovery_init(mosq) != 0) {
       OLOG_WARNING("HUD discovery initialization failed - using defaults");
@@ -603,6 +617,14 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
    /* STAT telemetry is a multi-Hz firehose — consume it BEFORE the per-message
     * INFO log below so it does not flood the log file. */
    if (stat_service_handle_mqtt(msg->topic, (const char *)msg->payload, msg->payloadlen)) {
+      return;
+   }
+#endif
+
+#ifdef DAWN_ENABLE_SUIT_TOOL
+   /* Suit telemetry (helmet/armor) — consume BEFORE the per-message INFO log so
+    * the streaming feed does not flood the log file. */
+   if (suit_service_handle_mqtt(msg->topic, (const char *)msg->payload, msg->payloadlen)) {
       return;
    }
 #endif

@@ -367,6 +367,12 @@ dawn_add_unit_test(test_stat_service
    LIBS    dawn_common unity sqlite3 pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+dawn_add_unit_test(test_suit_service
+   SOURCES test_suit_service.c
+           ${SRC_ROOT}/src/core/suit_service.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_memory_embeddings
    SOURCES test_memory_embeddings.c test_memory_embeddings_stub.c
            ${SRC_ROOT}/src/memory/memory_embeddings.c
