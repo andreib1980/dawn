@@ -499,19 +499,13 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
             }
          }
 
-         /* OpenRouter gateway is the single authority: any cloud session config
-          * change is pinned to OpenRouter regardless of the requested provider.
-          * OpenRouter model IDs are "vendor/model"; if a bare model name slipped in
-          * (e.g. from a not-yet-gateway-aware control), drop it so the resolver uses
-          * the OpenRouter default instead of sending an unrecognized ID. */
+         /* OpenRouter gateway is the single authority: force the provider enum so key
+          * validation uses the OpenRouter key.  A bare model ID is remapped to a
+          * vendor/model slug canonically in llm_resolve_config at request time (the
+          * gateway-aware UI already sends vendor/model slugs, so this path only ever
+          * carried a bare id for a stale/non-gateway-aware client). */
          if (config.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
             config.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-            if (config.model[0] != '\0' && strchr(config.model, '/') == NULL) {
-               OLOG_INFO("WebUI: OpenRouter gateway dropped bare model '%s' (not a vendor/model "
-                         "id) — resolver will use the OpenRouter default",
-                         config.model);
-               config.model[0] = '\0';
-            }
          }
 
          /* Parse tool_mode (native/command_tags/disabled) */

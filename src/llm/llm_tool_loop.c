@@ -487,6 +487,27 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
       llm_context_auto_compact_with_config(params->conversation_history, params->session_id,
                                            params->llm_type, params->cloud_provider, params->model);
 
+      /* Step 1b: Hard pre-flight window guard.  Summary-based compaction keeps the
+       * most recent messages verbatim, so if a single recent tool result is itself
+       * larger than the model window it can't be shrunk — the request would still
+       * overflow and the provider rejects it with HTTP 400.  Surface that loudly
+       * (it was previously silent) instead of shipping a doomed request; trimming
+       * such oversized results at the source is the follow-up fix.
+       *
+       * This re-estimates the history *after* the compaction pass above (a distinct
+       * value from that pass's pre-compaction decision estimate); the extra walk is
+       * sub-millisecond and negligible against the per-iteration network round-trip. */
+      {
+         int est_tokens = llm_context_estimate_tokens(params->conversation_history);
+         int window = llm_context_get_size(params->llm_type, params->cloud_provider, params->model);
+         if (window > 0 && est_tokens >= window) {
+            OLOG_ERROR("Tool loop: estimated request ~%d tokens still exceeds model window %d "
+                       "after compaction (iteration %d) — provider will likely reject with 400; "
+                       "an oversized recent tool result cannot be summarized away",
+                       est_tokens, window, iteration);
+         }
+      }
+
       /* Step 2: Gate cloud calls through rate limiter */
       if (params->llm_type != LLM_LOCAL) {
          if (llm_rate_limit_wait()) {

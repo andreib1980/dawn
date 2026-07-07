@@ -153,7 +153,12 @@ typedef struct {
    cloud_provider_t cloud_provider;              /**< Resolved cloud provider */
    const char *endpoint;                         /**< Endpoint URL (not owned, may be dangling) */
    const char *api_key;                          /**< API key for cloud providers (not owned) */
-   const char *model;                            /**< Model name (not owned, may be dangling) */
+   const char *model;                            /**< Model name; not owned / may be dangling,
+                                                    EXCEPT when remapped to an OpenRouter slug it
+                                                    aliases model_buf below (stable for the
+                                                    struct's lifetime) */
+   char model_buf[LLM_MODEL_NAME_MAX];           /**< Backs `model` when remapped to an
+                                                    OpenRouter slug (stable, in-struct) */
    char tool_mode[LLM_TOOL_MODE_MAX];            /**< Tool mode: native, command_tags, disabled */
    char thinking_mode[LLM_THINKING_MODE_MAX];    /**< Thinking: disabled, auto, enabled */
    char reasoning_effort[LLM_THINKING_MODE_MAX]; /**< Reasoning effort: low, medium, high */
@@ -421,6 +426,33 @@ const char *llm_get_default_gemini_model(void);
  * @return Model name string (pointer to config memory, do not free)
  */
 const char *llm_get_default_openrouter_model(void);
+
+/**
+ * @brief Resolve a (possibly bare) model name to an OpenRouter "vendor/model" slug.
+ *
+ * Under OpenRouter gateway mode, requests must carry a vendor-qualified slug
+ * (e.g. "openai/gpt-5.5").  A bare id like "gpt-5.5" would otherwise be dropped and
+ * silently replaced by the gateway default — a DIFFERENT vendor's model.  This maps
+ * it correctly using the provider hint:
+ *   - already "vendor/model" (contains '/')  -> copied through unchanged;
+ *   - else prefer an exact match in the configured openrouter_models[] catalog whose
+ *     tail equals @p bare_model (vendor-checked against the provider hint);
+ *   - else synthesize "<vendor>/<bare_model>" from the provider prefix
+ *     (openai/, anthropic/, google/).
+ *
+ * @param provider    Provider hint (CLOUD_PROVIDER_OPENAI/CLAUDE/GEMINI). Others
+ *                    yield a catalog-only match (no synthesized prefix).
+ * @param bare_model  Requested model name (may already be a slug). May be NULL.
+ * @param out         Output buffer for the resolved slug.
+ * @param out_len     Size of @p out.
+ * @return true if a vendor/model slug was produced; false if unresolvable (no '/',
+ *         no provider prefix, and no catalog tail match) — caller should surface an
+ *         error rather than silently fall back to the gateway default.
+ */
+bool llm_openrouter_slug_for(cloud_provider_t provider,
+                             const char *bare_model,
+                             char *out,
+                             size_t out_len);
 
 /**
  * @brief Check internet connectivity to LLM endpoint

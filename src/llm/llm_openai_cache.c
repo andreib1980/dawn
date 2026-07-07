@@ -23,7 +23,13 @@
 
 #include "llm/llm_openai_cache.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+bool llm_openai_anthropic_cache_applies(const char *model_name, const char *base_url) {
+   return base_url != NULL && model_name != NULL && strstr(base_url, "openrouter.ai") != NULL &&
+          strncmp(model_name, "anthropic/", 10) == 0;
+}
 
 /* OpenRouter forwards Anthropic prompt-cache breakpoints to Claude only when they
  * are present in the request.  The OpenAI chat-completions format we use for the
@@ -37,18 +43,12 @@
  * cache_control.  Anthropic caches everything up to and including a marked block, so
  * the stable system prompt and the tools array each become their own cache prefix.
  *
- * Gated to openrouter + anthropic/* — OpenRouter slugs are "vendor/model", and sending
+ * Gated to openrouter + `anthropic/` slugs — OpenRouter slugs are "vendor/model", and sending
  * cache_control to a non-Anthropic upstream is at best ignored, at worst rejected. */
 void llm_openai_add_anthropic_cache(json_object *root,
                                     const char *model_name,
                                     const char *base_url) {
-   if (!root || !base_url || !model_name) {
-      return;
-   }
-   if (strstr(base_url, "openrouter.ai") == NULL) {
-      return;
-   }
-   if (strncmp(model_name, "anthropic/", 10) != 0) {
+   if (!root || !llm_openai_anthropic_cache_applies(model_name, base_url)) {
       return;
    }
 
@@ -134,5 +134,102 @@ void llm_openai_add_anthropic_cache(json_object *root,
             json_object_put(wrapped); /* OOM: drop the private copy, leave root.messages as-is */
          }
       }
+   }
+}
+
+/* Collapse the leading run of plain-string system messages into one.  See the
+ * header for the full rationale (DAWN's two-segment system prompt vs strict local
+ * Jinja templates) and the copy-on-write contract. */
+void llm_openai_merge_leading_system_messages(json_object *root) {
+   if (!root) {
+      return;
+   }
+   json_object *messages = NULL;
+   if (!json_object_object_get_ex(root, "messages", &messages) ||
+       !json_object_is_type(messages, json_type_array)) {
+      return;
+   }
+   int msg_count = json_object_array_length(messages);
+
+   /* Measure the leading run of system messages that carry plain-string content;
+    * a non-string (e.g. already cache-wrapped) system message ends the run. */
+   int run = 0;
+   size_t total = 0;
+   for (int i = 0; i < msg_count; i++) {
+      json_object *msg = json_object_array_get_idx(messages, i);
+      json_object *role_obj = NULL;
+      json_object *content_obj = NULL;
+      if (msg == NULL || !json_object_object_get_ex(msg, "role", &role_obj)) {
+         break;
+      }
+      const char *role_str = json_object_get_string(role_obj);
+      if (role_str == NULL || strcmp(role_str, "system") != 0) {
+         break;
+      }
+      if (!json_object_object_get_ex(msg, "content", &content_obj) ||
+          !json_object_is_type(content_obj, json_type_string)) {
+         break;
+      }
+      total += strlen(json_object_get_string(content_obj));
+      run++;
+   }
+
+   if (run < 2) {
+      return; /* zero or one leading system message — nothing to merge */
+   }
+
+   /* Concatenate the run with "\n\n" separators into one system message. */
+   total += (size_t)(run - 1) * 2 + 1; /* separators + NUL */
+   char *merged = malloc(total);
+   if (merged == NULL) {
+      return; /* OOM: leave the request as-is (still valid, just un-merged) */
+   }
+   size_t off = 0;
+   for (int i = 0; i < run; i++) {
+      json_object *content_obj = NULL;
+      json_object_object_get_ex(json_object_array_get_idx(messages, i), "content", &content_obj);
+      const char *s = json_object_get_string(content_obj);
+      if (i > 0) {
+         merged[off++] = '\n';
+         merged[off++] = '\n';
+      }
+      size_t len = strlen(s);
+      memcpy(merged + off, s, len);
+      off += len;
+   }
+   merged[off] = '\0';
+
+   json_object *merged_msg = json_object_new_object();
+   json_object_object_add(merged_msg, "role", json_object_new_string("system"));
+   json_object_object_add(merged_msg, "content", json_object_new_string(merged));
+   free(merged);
+
+   /* COW: root.messages may ALIAS the session's canonical history (see
+    * llm_openai_add_anthropic_cache).  Swap it for a request-private array whose
+    * front is the merged system message and whose tail (indices run..end) stays
+    * shared read-only. */
+   json_object *private_msgs = json_object_new_array();
+   if (private_msgs == NULL) {
+      json_object_put(merged_msg);
+      return;
+   }
+   json_object_array_add(private_msgs, merged_msg);
+   for (int j = run; j < msg_count; j++) {
+      json_object_array_add(private_msgs, json_object_get(json_object_array_get_idx(messages, j)));
+   }
+   json_object_object_add(root, "messages", private_msgs); /* releases old array ref */
+}
+
+void llm_openai_apply_system_prompt_caching(json_object *root,
+                                            const char *model_name,
+                                            const char *base_url) {
+   if (llm_openai_anthropic_cache_applies(model_name, base_url)) {
+      /* Keep the two-segment system split intact so the cache_control breakpoint
+       * lands on the stable region only. */
+      llm_openai_add_anthropic_cache(root, model_name, base_url);
+   } else {
+      /* Every other provider (native OpenAI, llama.cpp, Ollama): collapse the
+       * split so strict chat templates don't reject the second system message. */
+      llm_openai_merge_leading_system_messages(root);
    }
 }

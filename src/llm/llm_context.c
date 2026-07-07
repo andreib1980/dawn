@@ -1112,6 +1112,31 @@ static int estimate_tokens_range(struct json_object *history, int start_idx, int
                   if (text)
                      total_chars += strlen(text);
                }
+               /* Claude tool_result blocks carry their (often huge) payload in
+                * "content", not "text".  Without this, a large tool result reads
+                * as ~0 tokens, slips past the compaction guard, and the next
+                * request overflows the model window -> provider HTTP 400.  The
+                * payload is a plain string or a nested block array. */
+               struct json_object *pcontent = NULL;
+               if (json_object_object_get_ex(part, "content", &pcontent)) {
+                  if (json_object_is_type(pcontent, json_type_string)) {
+                     const char *s = json_object_get_string(pcontent);
+                     if (s)
+                        total_chars += strlen(s);
+                  } else if (json_object_is_type(pcontent, json_type_array)) {
+                     int pclen = json_object_array_length(pcontent);
+                     for (int k = 0; k < pclen; k++) {
+                        struct json_object *blk = json_object_array_get_idx(pcontent, k);
+                        struct json_object *btext = NULL;
+                        if (json_object_object_get_ex(blk, "text", &btext) &&
+                            json_object_is_type(btext, json_type_string)) {
+                           const char *s = json_object_get_string(btext);
+                           if (s)
+                              total_chars += strlen(s);
+                        }
+                     }
+                  }
+               }
                struct json_object *type_obj = NULL;
                if (json_object_object_get_ex(part, "type", &type_obj)) {
                   const char *type = json_object_get_string(type_obj);

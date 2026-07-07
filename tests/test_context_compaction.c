@@ -184,6 +184,37 @@ static void test_estimate_tokens_range(void) {
    json_object_put(arr);
 }
 
+/* Regression: a large Claude tool_result payload lives in each block's "content"
+ * (not "text").  The estimator must count it, or a huge result reads as ~0 tokens,
+ * the compaction guard never fires, and the next request overflows the model window
+ * -> provider HTTP 400 (observed 2026-07-07 with a 316 KB cbm_get_code_snippet). */
+static void test_estimate_counts_claude_tool_result(void) {
+   /* Build a Claude tool_result message: {role:user, content:[{type:tool_result,
+    * tool_use_id, content:<big string>}]}. */
+   char big[4001];
+   memset(big, 'x', sizeof(big) - 1);
+   big[sizeof(big) - 1] = '\0';
+
+   struct json_object *block = json_object_new_object();
+   json_object_object_add(block, "type", json_object_new_string("tool_result"));
+   json_object_object_add(block, "tool_use_id", json_object_new_string("toolu_1"));
+   json_object_object_add(block, "content", json_object_new_string(big));
+   struct json_object *content_arr = json_object_new_array();
+   json_object_array_add(content_arr, block);
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "role", json_object_new_string("user"));
+   json_object_object_add(msg, "content", content_arr);
+
+   struct json_object *arr = json_object_new_array();
+   json_object_array_add(arr, msg);
+
+   /* 4000 chars / 4 = ~1000 tokens; before the fix this returned ~5 (the flat +20). */
+   int est = llm_context_estimate_tokens_range(arr, 0, 1);
+   TEST_ASSERT_TRUE_MESSAGE(est > 900, "Claude tool_result content is counted (~1000 tokens)");
+
+   json_object_put(arr);
+}
+
 /* =============================================================================
  * Level ordering test
  * ============================================================================= */
@@ -212,6 +243,7 @@ int main(void) {
    RUN_TEST(test_calculate_target_high_threshold);
    RUN_TEST(test_calculate_target_below_clamp);
    RUN_TEST(test_estimate_tokens_range);
+   RUN_TEST(test_estimate_counts_claude_tool_result);
    RUN_TEST(test_level_ordering);
    return UNITY_END();
 }

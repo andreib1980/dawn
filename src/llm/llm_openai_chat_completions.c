@@ -57,6 +57,23 @@ extern int llm_curl_progress_callback(void *clientp,
 /* Maximum tool call iterations to prevent infinite loops (used by old recursive path) */
 #define MAX_TOOL_ITERATIONS 8
 
+/* A chat-template / Jinja render failure is DETERMINISTIC: the raise lives in the
+ * model's GGUF chat template (e.g. Qwen 3.5/3.6's "System message must be at the
+ * beginning"), so the identical request fails identically on every retry.  Detect
+ * it from the server's error body so the tool loop's transient-5xx retry path
+ * fails fast instead of burning ~7s on three hopeless exponential-backoff
+ * attempts.  Genuine transient 5xx (no template signature) stay retryable. */
+static bool llm_openai_is_deterministic_template_error(const char *body) {
+   if (body == NULL) {
+      return false;
+   }
+   /* Match specific chat-template raise signatures only.  The bare token "Jinja" is
+    * deliberately NOT matched — a genuinely transient 5xx whose body merely mentions
+    * Jinja must stay retryable; a real template raise carries one of these phrases. */
+   return strstr(body, "System message must be at the beginning") != NULL ||
+          strstr(body, "raise_exception") != NULL;
+}
+
 static bool is_current_session_remote(void) {
    session_t *session = session_get_command_context();
    if (!session) {
@@ -284,8 +301,10 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
       }
    }
 
-   /* Anthropic prompt-cache breakpoints (no-op unless OpenRouter + anthropic/*). */
-   llm_openai_add_anthropic_cache(root, model_name, base_url);
+   /* Finalize system-prompt shape for caching: keep the two-segment split for the
+    * OpenRouter→Anthropic cache path, else collapse it into one system message so
+    * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
+   llm_openai_apply_system_prompt_caching(root, model_name, base_url);
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -360,7 +379,12 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
             llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
          } else if (http_code >= 500 && http_code < 600) {
             OLOG_ERROR("OpenAI API: Server error (HTTP %ld)", http_code);
-            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+            if (llm_openai_is_deterministic_template_error(chunk.data)) {
+               OLOG_ERROR("OpenAI API: deterministic chat-template error in response — "
+                          "failing fast (not retrying)");
+            } else {
+               llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+            }
          } else if (http_code != 0) {
             OLOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
          }
@@ -591,8 +615,10 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
                 iteration);
    }
 
-   /* Anthropic prompt-cache breakpoints (no-op unless OpenRouter + anthropic/*). */
-   llm_openai_add_anthropic_cache(root, model_name, base_url);
+   /* Finalize system-prompt shape for caching: keep the two-segment split for the
+    * OpenRouter→Anthropic cache path, else collapse it into one system message so
+    * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
+   llm_openai_apply_system_prompt_caching(root, model_name, base_url);
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -744,7 +770,12 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
          } else if (http_code >= 500 && http_code < 600) {
             OLOG_ERROR("OpenAI API: Server error (HTTP %ld)", http_code);
             error_code = "LLM_SERVER_ERROR";
-            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+            if (llm_openai_is_deterministic_template_error(streaming_ctx.raw_response.data)) {
+               OLOG_ERROR("OpenAI API: deterministic chat-template error in response — "
+                          "failing fast (not retrying)");
+            } else {
+               llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+            }
          } else {
             OLOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
             error_code = "LLM_ERROR";
@@ -1125,8 +1156,10 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       }
    }
 
-   /* Anthropic prompt-cache breakpoints (no-op unless OpenRouter + anthropic/*). */
-   llm_openai_add_anthropic_cache(root, model_name, base_url);
+   /* Finalize system-prompt shape for caching: keep the two-segment split for the
+    * OpenRouter→Anthropic cache path, else collapse it into one system message so
+    * strict local chat templates (Qwen 3.5/3.6 Jinja) don't reject the second. */
+   llm_openai_apply_system_prompt_caching(root, model_name, base_url);
 
    payload = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN |
                                                       JSON_C_TO_STRING_NOSLASHESCAPE);
@@ -1266,8 +1299,23 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    if (http_code != 200) {
       OLOG_ERROR("OpenAI API: Request failed (HTTP %ld)", http_code);
-      if (http_code == 429 || (http_code >= 500 && http_code < 600)) {
+      /* Log the provider's error body — the exact reason (e.g. a 400 "prompt is
+       * too long" / context-overflow, or a malformed-request detail) is otherwise
+       * invisible on this streaming path. */
+      if (streaming_ctx.raw_response.data && streaming_ctx.raw_response.size > 0) {
+         /* Bound the logged body: the actionable detail (e.g. "prompt is too long")
+          * is early, and a full body could carry echoed request content. */
+         OLOG_ERROR("OpenAI API error response: %.2048s", streaming_ctx.raw_response.data);
+      }
+      if (http_code == 429) {
          llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      } else if (http_code >= 500 && http_code < 600) {
+         if (llm_openai_is_deterministic_template_error(streaming_ctx.raw_response.data)) {
+            OLOG_ERROR("OpenAI API: deterministic chat-template error in response — "
+                       "failing fast (not retrying)");
+         } else {
+            llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+         }
       }
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();

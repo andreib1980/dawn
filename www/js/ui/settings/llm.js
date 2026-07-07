@@ -193,8 +193,12 @@
             // Request local models when switching to local mode
             if (newType === 'local') {
                requestLocalModels();
+            } else if (globalDefaults.use_openrouter) {
+               // Gateway on: reflect a read-only OpenRouter provider + slug model list
+               // instead of a direct provider picker the gateway would override.
+               applyGatewayCloudUI(true);
             } else {
-               // Switching to cloud: restore provider dropdown and update model
+               // Switching to cloud (direct providers): restore provider dropdown and update model
                if (providerSelect) {
                   // Rebuild cloud provider options
                   providerSelect.innerHTML = '';
@@ -971,6 +975,30 @@
    }
 
    /**
+    * Reflect OpenRouter gateway mode in the cloud provider/model controls: a single
+    * read-only "OpenRouter" provider plus the vendor/model slug list. Shared by the
+    * initial render and the Type->Cloud switch so both honor the gateway. Without this
+    * on the switch path, picking Cloud rebuilt a direct OpenAI/Claude/Gemini picker and
+    * let the user select a bare model that the gateway then silently replaced with a
+    * different vendor's default.
+    * @param {boolean} sendToSession - Whether to push the selected slug to the session
+    */
+   function applyGatewayCloudUI(sendToSession = false) {
+      const providerSelect = document.getElementById('llm-provider-select');
+      if (!providerSelect) return;
+      providerSelect.innerHTML = '';
+      const opt = document.createElement('option');
+      opt.value = 'openrouter';
+      opt.textContent = 'OpenRouter';
+      providerSelect.appendChild(opt);
+      providerSelect.value = 'openrouter';
+      providerSelect.disabled = true;
+      providerSelect.title = 'Gateway mode — all cloud models routed through OpenRouter';
+      setControlHint('provider-hint', 'Gateway: OpenRouter');
+      updateModelDropdownForCloud(sendToSession);
+   }
+
+   /**
     * Update cloud model lists from config
     * @param {Object} config - Config object
     */
@@ -1103,16 +1131,7 @@
       // interactive switcher under gateway is a Phase 2 item.
       const gatewayOn = !!globalDefaults.use_openrouter;
       if (providerSelect && gatewayOn && runtime.type !== 'local') {
-         providerSelect.innerHTML = '';
-         const opt = document.createElement('option');
-         opt.value = 'openrouter';
-         opt.textContent = 'OpenRouter';
-         providerSelect.appendChild(opt);
-         providerSelect.value = 'openrouter';
-         providerSelect.disabled = true;
-         providerSelect.title = 'Gateway mode — all cloud models routed through OpenRouter';
-         setControlHint('provider-hint', 'Gateway: OpenRouter');
-         updateModelDropdownForCloud();
+         applyGatewayCloudUI(false);
          if (runtime.model) {
             syncEffortDropdownToModel(runtime.model, true);
          }

@@ -3007,16 +3007,12 @@ int webui_restore_conversation_context(ws_connection_t *conn,
          }
       }
 
-      /* OpenRouter gateway is the single authority: a restored conversation always
-       * runs through OpenRouter regardless of its stored/inferred provider.  A stored
-       * bare model ID (e.g. "claude-sonnet-4-6" from a pre-gateway conversation) is not
-       * a valid OpenRouter "vendor/model" ID — drop it so the resolver uses the
-       * OpenRouter default (matches the session-dispatch guard). */
+      /* OpenRouter gateway is the single authority: a restored conversation always runs
+       * through OpenRouter regardless of its stored/inferred provider.  Force the provider
+       * enum; a stored bare model ID is remapped to the right vendor/model slug canonically
+       * in llm_resolve_config at request time (the single choke point). */
       if (cfg.type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
          cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         if (cfg.model[0] != '\0' && strchr(cfg.model, '/') == NULL) {
-            cfg.model[0] = '\0';
-         }
       }
       if (conv->tools_mode[0] != '\0') {
          strncpy(cfg.tool_mode, conv->tools_mode, sizeof(cfg.tool_mode) - 1);

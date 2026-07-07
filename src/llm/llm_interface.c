@@ -907,6 +907,64 @@ const char *llm_get_default_openrouter_model(void) {
    return g_config.llm.cloud.openrouter_models[idx];
 }
 
+bool llm_openrouter_slug_for(cloud_provider_t provider,
+                             const char *bare_model,
+                             char *out,
+                             size_t out_len) {
+   if (!bare_model || bare_model[0] == '\0' || !out || out_len == 0) {
+      return false;
+   }
+
+   /* Already a vendor/model slug — pass through unchanged. */
+   if (strchr(bare_model, '/') != NULL) {
+      int n = snprintf(out, out_len, "%s", bare_model);
+      return (n >= 0 && (size_t)n < out_len); /* truncated -> unresolvable, not a corrupt id */
+   }
+
+   /* Provider hint -> OpenRouter vendor prefix. */
+   const char *prefix = NULL;
+   switch (provider) {
+      case CLOUD_PROVIDER_OPENAI:
+         prefix = "openai/";
+         break;
+      case CLOUD_PROVIDER_CLAUDE:
+         prefix = "anthropic/";
+         break;
+      case CLOUD_PROVIDER_GEMINI:
+         prefix = "google/";
+         break;
+      default:
+         prefix = NULL;
+         break;
+   }
+
+   /* Prefer an exact match in the operator's configured openrouter_models[] catalog:
+    * a slug whose tail (after '/') equals the bare model.  When a provider hint is
+    * present, require the vendor prefix to match so "gpt-5.5" under OpenAI resolves to
+    * "openai/gpt-5.5" and not some other vendor's identically-named tail. */
+   for (int i = 0; i < g_config.llm.cloud.openrouter_models_count; i++) {
+      const char *slug = g_config.llm.cloud.openrouter_models[i];
+      const char *slash = strchr(slug, '/');
+      const char *tail = slash ? slash + 1 : slug;
+      if (strcmp(tail, bare_model) != 0) {
+         continue;
+      }
+      if (prefix != NULL && strncmp(slug, prefix, strlen(prefix)) != 0) {
+         continue; /* tail matches but wrong vendor */
+      }
+      int n = snprintf(out, out_len, "%s", slug);
+      return (n >= 0 && (size_t)n < out_len);
+   }
+
+   /* No catalog entry: synthesize from the provider prefix if we have one. */
+   if (prefix != NULL) {
+      int n = snprintf(out, out_len, "%s%s", prefix, bare_model);
+      return (n >= 0 && (size_t)n < out_len); /* truncated -> unresolvable */
+   }
+
+   return false; /* no '/', no provider hint, no catalog match — cannot resolve */
+}
+
 void llm_request_interrupt(void) {
    llm_interrupt_requested = 1;
 }
@@ -1396,7 +1454,23 @@ int llm_resolve_config(const session_llm_config_t *session_config,
     * llm.cloud.endpoint still overrides the default OpenRouter URL.  The model is left
     * as-is (session model, or the OpenRouter default filled in below). */
    if (resolved->type == LLM_CLOUD && llm_openrouter_gateway_enabled()) {
+      cloud_provider_t provider_hint = resolved->cloud_provider; /* stored provider, pre-force */
       resolved->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
+      /* Canonical bare-model remap — the single choke point every cloud request passes
+       * through.  Any session model that isn't already a "vendor/model" slug (legacy
+       * conversations, non-gateway-aware clients, or a future call site that forgot to
+       * remap) is mapped to the right OpenRouter slug here, so a bare id is never sent
+       * verbatim nor silently swapped for the gateway default.  The catalog tail-match in
+       * the helper resolves it even when the provider hint has already been forced to
+       * OPENROUTER upstream.  Transient: the session's stored model is untouched. */
+      if (resolved->model != NULL && strchr(resolved->model, '/') == NULL) {
+         if (llm_openrouter_slug_for(provider_hint, resolved->model, resolved->model_buf,
+                                     sizeof(resolved->model_buf))) {
+            resolved->model = resolved->model_buf;
+         } else {
+            resolved->model = NULL; /* unresolvable — default filled in below */
+         }
+      }
    }
 
    // Validate and get API key for cloud providers
