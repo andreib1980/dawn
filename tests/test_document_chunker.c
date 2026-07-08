@@ -321,6 +321,46 @@ static void test_indented_prose_with_dashes_not_yaml(void) {
    chunk_result_free(&r);
 }
 
+static void test_markdown_checklist_not_split_per_item(void) {
+   /* A markdown task-list ("- [ ] item") is bare bullets, not YAML records: no
+    * mapping ':' on the dash lines and no indented fields. Even though the dashes
+    * dominate the non-blank lines (clearing the structure-fraction bar), it must NOT
+    * be split one-tiny-chunk-per-line — it falls through to prose chunking. Regression
+    * for a real 2.3 KB packing list that got stored as a 40-chunk document. */
+   const char *md = "# Open Sauce 2026 — Packing List\n\n"
+                    "## Compute\n"
+                    "- [ ] Orin NX 16GB main server\n"
+                    "- [ ] Iron Man Helmet v2 HUD\n"
+                    "- [ ] Tier 1 Satellite Raspberry Pi\n"
+                    "- [ ] Tier 2 Satellite ESP32\n"
+                    "- [ ] Battery backup for STAT\n\n"
+                    "## Networking\n"
+                    "- [ ] GL-AX1800 router\n"
+                    "- [ ] Ethernet cables\n"
+                    "- [ ] Power strip\n"
+                    "- [ ] Extension cords\n\n"
+                    "## Audio\n"
+                    "- [ ] Conference speakers\n"
+                    "- [ ] Loopback audio cable\n"
+                    "- [ ] Zigbee RGB string lights\n"
+                    "- [ ] Smart bulbs with lamps\n";
+   chunk_result_t r;
+   TEST_ASSERT_EQUAL(SUCCESS, document_chunk_text(md, NULL, &r));
+   /* 13 checklist items — the pre-fix bug produced one chunk per line. With the prose
+    * fallback this short list collapses to a couple of chunks at most. */
+   TEST_ASSERT_TRUE_MESSAGE(r.count <= 3, "short markdown checklist is not split per bullet");
+   /* Distant items stay grouped in a chunk, not isolated one-per-line. */
+   bool first = false, last = false;
+   for (int i = 0; i < r.count; i++) {
+      if (strstr(r.chunks[i], "Orin NX"))
+         first = true;
+      if (strstr(r.chunks[i], "Smart bulbs"))
+         last = true;
+   }
+   TEST_ASSERT_TRUE_MESSAGE(first && last, "all checklist content preserved across the fallback");
+   chunk_result_free(&r);
+}
+
 static void test_csv_oversized_row_falls_through_no_truncation(void) {
    /* A CSV record wider than max_chars can't be one faithful chunk (read-back
     * caps chunk text), so the document must fall through to prose chunking rather
@@ -414,6 +454,7 @@ int main(void) {
    RUN_TEST(test_csv_header_plus_row_per_chunk);
    RUN_TEST(test_prose_with_bullets_not_mis_split);
    RUN_TEST(test_indented_prose_with_dashes_not_yaml);
+   RUN_TEST(test_markdown_checklist_not_split_per_item);
    RUN_TEST(test_csv_oversized_row_falls_through_no_truncation);
    RUN_TEST(test_struct_emit_oversized_line_utf8_safe);
    return UNITY_END();

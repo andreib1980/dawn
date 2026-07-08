@@ -301,6 +301,11 @@ static int split_paragraphs(const char *text,
 #define STRUCT_CSV_MAX_ROWS 2000 /* above this, fall back to prose (avoid chunk explosion) */
 #define STRUCT_YAML_INDENT_FRAC \
    0.7 /* frac of non-blank lines that must be a "- " item or indented */
+#define STRUCT_YAML_MAPPING_FRAC                                                      \
+   0.5 /* min frac of "- " items that must be record-like (indented mapping fields or \
+          a mapping ':' on the dash line).  Below this the dashes are bare bullets    \
+          (markdown checklist / scalar list), NOT YAML records — fall through to    \
+          prose so a short list isn't split one-tiny-chunk-per-line. */
 
 /* End of the line starting at p (points at the '\n' or the NUL). */
 static const char *line_end(const char *p, const char *end) {
@@ -371,7 +376,7 @@ static bool chunk_structured(const char *text, int text_len, int max_chars, chun
    const char *end = text + text_len;
 
    /* ---- Pass 1: classify lines ---- */
-   int nonblank = 0, top_dash = 0, indented = 0;
+   int nonblank = 0, top_dash = 0, indented = 0, dash_mapping = 0;
    int csv_rows = 0, csv_commas = -1, csv_consistent = 0;
    const char *p = text;
    while (p < end) {
@@ -380,6 +385,12 @@ static bool chunk_structured(const char *text, int text_len, int max_chars, chun
          nonblank++;
          if (p[0] == '-' && (p + 1 == le || p[1] == ' ')) {
             top_dash++;
+            /* Is this dash item record-like — an inline mapping ("- key: value") or
+             * the opener of a mapping block ("- id:")?  A YAML record sequence is
+             * mappings; a markdown bullet/checklist ("- [ ] item") is bare scalars
+             * with no colon.  Counted so bullet lists don't qualify as structured. */
+            if (memchr(p, ':', (size_t)(le - p)) != NULL)
+               dash_mapping++;
          } else if (p[0] == ' ' || p[0] == '\t') {
             /* Count an indented line as a YAML-structure signal only if it looks
              * like YAML: a mapping line (has a ':') or a nested sequence item
@@ -410,8 +421,15 @@ static bool chunk_structured(const char *text, int text_len, int max_chars, chun
       return false;
 
    /* ---- YAML sequence: many top-level "- " records, mostly structured lines ---- */
+   /* Also require the dashes to be actual RECORDS (mapping fields), not bare bullets:
+    * either substantial indented mapping lines, or the dash items themselves carry a
+    * mapping ':'.  Without this a flat markdown checklist ("- [ ] item" x N) crosses
+    * the dash-fraction bar with zero record structure and gets split one tiny chunk
+    * per line. */
    if (top_dash >= STRUCT_YAML_MIN_ITEMS &&
-       (double)(top_dash + indented) >= (double)nonblank * STRUCT_YAML_INDENT_FRAC) {
+       (double)(top_dash + indented) >= (double)nonblank * STRUCT_YAML_INDENT_FRAC &&
+       ((double)indented >= (double)top_dash * STRUCT_YAML_MAPPING_FRAC ||
+        (double)dash_mapping >= (double)top_dash * STRUCT_YAML_MAPPING_FRAC)) {
       if (result_init(out) != SUCCESS)
          return false;
       const char *rec = NULL;
