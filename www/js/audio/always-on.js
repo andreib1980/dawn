@@ -437,6 +437,12 @@
     * Update status dot and text to reflect always-on state.
     * Overrides the normal "IDLE" display with always-on state info.
     * Pass null to restore normal display.
+    *
+    * NOTE: this intentionally writes ONLY the top/mini status bars, NOT the composer
+    * working-indicator. Always-on micro-states (LISTENING/RECORDING/CHECKING/wake) are
+    * not LLM-busy; the reactor's busy signal comes exclusively from the normal `state`
+    * channel (updateState → updateComposerBusy), which the server still emits during
+    * always-on LLM processing. So the reactor stays correct without a hook here.
     */
    function updateStatusIndicator(alwaysOnState) {
       var dot = DawnElements.statusDot;

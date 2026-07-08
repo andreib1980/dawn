@@ -1148,6 +1148,10 @@
          if (typeof DawnPhone !== 'undefined') {
             DawnPhone.handleDisconnect();
          }
+         // Clear the composer working-indicator for the same reason: a socket drop
+         // mid-tool-loop would otherwise leave a lit "Using Tools" reactor pinned to
+         // the composer until a fresh state arrives on reconnect.
+         updateComposerBusy('idle');
       }
    }
 
@@ -1192,6 +1196,9 @@
          DawnElements.miniStatusText.innerHTML = miniText;
       }
 
+      // Sync the bottom composer "working" indicator (always-visible arc reactor).
+      updateComposerBusy(state, tools);
+
       // Update ring container - preserve fft-active class if present
       const hasFftActive = DawnElements.ringContainer.classList.contains('fft-active');
       DawnElements.ringContainer.classList.remove(previousState);
@@ -1209,6 +1216,42 @@
       // Emit state event for decoupled modules
       if (typeof DawnEvents !== 'undefined') {
          DawnEvents.emit('state', { state, previousState, detail, tools });
+      }
+   }
+
+   /**
+    * Show/hide the bottom composer "working" indicator (arc reactor) and set its
+    * label. Mirrors the codebase busy set (thinking | processing | speaking); any
+    * other state (idle/listening/recording/error) hides it. When tools are actively
+    * executing the label becomes "Using Tools" (takes precedence over the generic
+    * busy word). Shares updateState()'s single source of truth so it can't drift
+    * from the top/mini status bars.
+    * @param {string} state - Current app state string.
+    * @param {Array} [tools] - Active tool descriptors ({name,...}); non-empty while
+    *                          the tool loop is running.
+    */
+   function updateComposerBusy(state, tools) {
+      const el = DawnElements.composerBusy;
+      if (!el) return;
+
+      const LABELS = { thinking: 'Thinking', processing: 'Working', speaking: 'Speaking' };
+      let label = LABELS[state];
+      // Tool execution is the more informative signal — surface it over "Working".
+      if (label && tools && tools.length > 0) {
+         label = 'Using Tools';
+      }
+
+      if (label) {
+         const labelEl = DawnElements.composerBusyLabel;
+         // Guard so aria-live doesn't re-announce on unrelated state churn.
+         if (labelEl && labelEl.textContent !== label) {
+            labelEl.textContent = label;
+         }
+         el.classList.add('is-visible');
+         el.setAttribute('aria-hidden', 'false');
+      } else {
+         el.classList.remove('is-visible');
+         el.setAttribute('aria-hidden', 'true');
       }
    }
 

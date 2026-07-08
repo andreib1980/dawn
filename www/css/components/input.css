@@ -14,6 +14,147 @@
    background-color: var(--bg-secondary);
    border-radius: var(--border-radius);
    flex-shrink: 0;
+   /* Positioning context for the floating .composer-busy indicator. */
+   position: relative;
+}
+
+/* =============================================================================
+ * Composer "assistant is working" indicator (arc reactor)
+ *
+ * A minimal, always-visible glance at LLM busy state, mirroring the top status
+ * bar's thinking/processing/speaking without its detail.  Floats just above the
+ * composer (absolute → never shifts the input row).  Driven solely by
+ * updateState() in dawn.js, so it can't drift from the other indicators.
+ * Colors come from --accent (via currentColor), so it recolors per data-theme.
+ * ============================================================================= */
+.composer-busy {
+   position: absolute;
+   bottom: calc(100% + 6px);
+   left: 8px;
+   z-index: 2;
+   display: inline-flex;
+   align-items: center;
+   gap: 6px;
+   padding: 3px 10px 3px 6px;
+   background: var(--bg-secondary);
+   border: 1px solid var(--accent-border);
+   border-radius: 999px;
+   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   letter-spacing: 0.04em;
+   color: var(--text-secondary);
+   /* Hidden by default; fade + slight rise on show.  visibility (delayed on hide)
+    * keeps it out of the a11y/hit-test tree when idle without killing the fade. */
+   opacity: 0;
+   transform: translateY(4px);
+   pointer-events: none;
+   visibility: hidden;
+   transition:
+      opacity var(--transition-fast) ease-out,
+      transform var(--transition-fast) ease-out,
+      visibility 0s linear var(--transition-fast);
+}
+
+.composer-busy.is-visible {
+   opacity: 1;
+   transform: translateY(0);
+   visibility: visible;
+   transition:
+      opacity var(--transition-fast) ease-out,
+      transform var(--transition-fast) ease-out;
+}
+
+.composer-busy .reactor {
+   display: block;
+   flex-shrink: 0;
+   color: var(--accent); /* currentColor for all reactor strokes */
+   filter: drop-shadow(0 0 3px var(--accent-glow));
+}
+
+.composer-busy-label {
+   color: var(--text-primary);
+   white-space: nowrap;
+}
+
+/* Reactor animation: gentle pulse (glow ring + triangle) + rotating highlight arc. */
+.composer-busy .reactor-ring {
+   opacity: 0.85;
+}
+.composer-busy .reactor-glow {
+   opacity: 0.3;
+   transform-box: fill-box;
+   transform-origin: center;
+   animation: reactor-pulse 1.6s ease-in-out infinite;
+}
+.composer-busy .reactor-tri {
+   opacity: 0.9;
+   /* Pulse about the reactor center (32,32) in user space — a down-pointing
+    * triangle's own fill-box center sits ~5px lower, which would drift it against
+    * the concentric rings during the shared pulse. */
+   transform-box: view-box;
+   transform-origin: 32px 32px;
+   animation: reactor-pulse 1.6s ease-in-out infinite;
+}
+.composer-busy .reactor-arc {
+   opacity: 0.9;
+   transform-box: fill-box;
+   transform-origin: center;
+   animation: reactor-spin 3.2s linear infinite;
+}
+
+@keyframes reactor-pulse {
+   0%,
+   100% {
+      opacity: 0.3;
+      transform: scale(0.96);
+   }
+   50% {
+      opacity: 0.75;
+      transform: scale(1.04);
+   }
+}
+
+@keyframes reactor-spin {
+   to {
+      transform: rotate(360deg);
+   }
+}
+
+/* Accessibility: no motion — a static, still-lit reactor that only cross-fades. */
+@media (prefers-reduced-motion: reduce) {
+   .composer-busy .reactor-glow,
+   .composer-busy .reactor-tri {
+      animation: none;
+      opacity: 0.5;
+   }
+   .composer-busy .reactor-arc {
+      animation: none;
+      opacity: 0.6;
+   }
+   .composer-busy {
+      transform: none;
+      transition:
+         opacity var(--transition-fast) ease-out,
+         visibility 0s linear var(--transition-fast);
+   }
+   .composer-busy.is-visible {
+      transform: none;
+   }
+}
+
+/* Mobile: shrink so it never collides with a wrapped composer row. */
+@media (max-width: 600px) {
+   .composer-busy {
+      left: 6px;
+      padding: 2px 8px 2px 5px;
+      font-size: 0.68rem;
+      gap: 5px;
+   }
+   .composer-busy .reactor {
+      width: 16px;
+      height: 16px;
+   }
 }
 
 /* Normalize all input row controls to same height and suppress base hover lift */

@@ -1731,6 +1731,63 @@ Format rules:
 
          <!-- Input area -->
          <div id="input-area" class="drop-target">
+            <!-- Assistant "working" indicator: pulsating arc reactor, floats above the
+                 composer (absolute → no layout shift). Driven by updateState(). -->
+            <div
+               id="composer-busy"
+               class="composer-busy"
+               role="status"
+               aria-live="polite"
+               aria-hidden="true"
+            >
+               <svg
+                  class="reactor"
+                  viewBox="0 0 64 64"
+                  width="18"
+                  height="18"
+                  aria-hidden="true"
+                  focusable="false"
+               >
+                  <circle
+                     class="reactor-glow"
+                     cx="32"
+                     cy="32"
+                     r="24"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="5"
+                  />
+                  <circle
+                     class="reactor-ring"
+                     cx="32"
+                     cy="32"
+                     r="24"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="3"
+                  />
+                  <circle
+                     class="reactor-arc"
+                     cx="32"
+                     cy="32"
+                     r="24"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="3"
+                     stroke-linecap="round"
+                     stroke-dasharray="34 200"
+                  />
+                  <polygon
+                     class="reactor-tri"
+                     points="32,56 11.2,20 52.8,20"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="2.5"
+                     stroke-linejoin="round"
+                  />
+               </svg>
+               <span class="composer-busy-label" id="composer-busy-label">Working</span>
+            </div>
             <button
                id="tts-toggle"
                class="input-button"

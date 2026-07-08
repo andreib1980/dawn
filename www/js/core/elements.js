@@ -45,6 +45,8 @@
       miniStatusDot: null,
       miniStatusText: null,
       miniContextValue: null,
+      composerBusy: null,
+      composerBusyLabel: null,
       miniContext: null,
       visualizerCollapseToggle: null,
    };
@@ -93,6 +95,8 @@
       elements.visualizerMini = document.getElementById('visualizer-mini');
       elements.miniStatusDot = document.getElementById('mini-status-dot');
       elements.miniStatusText = document.getElementById('mini-status-text');
+      elements.composerBusy = document.getElementById('composer-busy');
+      elements.composerBusyLabel = document.getElementById('composer-busy-label');
       elements.miniContextValue = document.getElementById('mini-context-value');
       elements.miniContext = document.querySelector('.mini-context');
       elements.visualizerCollapseToggle = document.getElementById('visualizer-collapse');
