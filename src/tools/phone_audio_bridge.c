@@ -72,6 +72,11 @@
 #define PHONE_DOWNLINK_GAIN 8.0f /* far-end -> local speaker */
 #define PHONE_UPLINK_GAIN 4.0f   /* local mic -> far-end ("rough unless close to mic") */
 
+/* ~20 ms cycles: log the APM output level roughly once/second (objective tuning
+ * trace, design §8), and throttle the uplink-stall drop warning the same way. */
+#define PHONE_RMS_LOG_INTERVAL 50
+#define PHONE_DROP_LOG_INTERVAL 50
+
 /* out = FS * tanh(gain * in / FS): soft-limiting gain on one S16 sample. */
 static inline int16_t soft_gain_s16(int16_t s, float gain) {
    float y = 32767.0f * tanhf(gain * (float)s / 32767.0f);
@@ -102,6 +107,10 @@ static pthread_t s_bridge_tid;
 static int s_pcm_fd = -1;
 static audio_stream_capture_handle_t *s_capture = NULL;
 static audio_stream_playback_handle_t *s_playback = NULL;
+/* Near-end uplink processor (NULL -> raw soft-gain fallback) and the downlink
+ * soft-limiter gain, both set from config in start, owned by the bridge thread. */
+static phone_apm_t *s_uplink_apm = NULL;
+static float s_downlink_gain = PHONE_DOWNLINK_GAIN;
 
 /* Open the modem PCM serial node in raw, non-blocking binary mode. Returns fd or -1. */
 static int open_pcm_port(const char *port) {
@@ -168,15 +177,78 @@ static int open_pcm_port(const char *port) {
    return fd;
 }
 
+/* Write a byte buffer to the modem with the bridge's EAGAIN/poll/EINTR
+ * semantics.  Returns bytes actually written (< len only on a poll timeout or a
+ * fatal error); sets *fatal on an unrecoverable write error. */
+static size_t modem_write_some(const uint8_t *buf, size_t len, bool *fatal) {
+   size_t off = 0;
+   while (off < len && atomic_load(&s_running)) {
+      ssize_t wn = write(s_pcm_fd, buf + off, len - off);
+      if (wn < 0) {
+         if (errno == EINTR) {
+            continue;
+         }
+         if (errno == EAGAIN) { /* modem momentarily full — brief wait, else stop trying */
+            struct pollfd pf = { .fd = s_pcm_fd, .events = POLLOUT };
+            if (poll(&pf, 1, PHONE_PCM_POLL_MS) <= 0) {
+               break;
+            }
+            continue;
+         }
+         OLOG_ERROR("phone_bridge: uplink write error: %s", strerror(errno));
+         *fatal = true;
+         break;
+      }
+      off += (size_t)wn;
+   }
+   return off;
+}
+
 /* Single lockstep thread: mic capture paces the cycle (~20 ms); each cycle
- * writes one uplink frame and reads the matching amount of downlink, keeping the
- * modem's synchronous full-duplex PCM balanced so it never stops draining
- * uplink. */
+ * cleans + writes the uplink and reads the matching amount of downlink, keeping
+ * the modem's synchronous full-duplex PCM balanced so it never stops draining
+ * uplink.
+ *
+ * Uplink: with the near-end APM the 320-sample (20 ms) capture is staged into
+ * APM-sized 160-sample (10 ms) blocks — 320 = 2x160, so staging is a
+ * steady-state pass-through and only a transient short read carries a <160
+ * remainder.  The previous cycle's post-gain downlink is fed to the APM as a
+ * reverse (render) reference, split into two 10 ms halves so each uplink block
+ * gets its time-aligned half — dark in Phase 1 (echo_cancel off), so flipping
+ * AECM on in Phase 2 is a config change, not a re-plumb.  Without the APM the
+ * uplink falls back to the raw tanh soft-limiter.
+ *
+ * Balance: the downlink read is keyed to the samples the uplink actually emitted
+ * this cycle (E) — exactly the pre-APM behaviour in steady state (E = 320 =
+ * frames), so the read/write balance is unchanged.  arch-L1: any unwritten
+ * uplink remainder is carried in up_pending[] (pending-then-new) so a partial
+ * write() never leaves the modem mid-sample and desyncs 16-bit framing. */
 static void *bridge_thread(void *arg) {
    (void)arg;
    int16_t up[PHONE_PCM_FRAME_SAMPLES];
    uint8_t dn[PHONE_PCM_FRAME_BYTES + 1]; /* +1 for a split-sample carry byte */
    size_t dn_carry = 0;
+
+   phone_apm_t *apm = s_uplink_apm; /* may be NULL -> raw-gain fallback */
+   const float dn_gain = s_downlink_gain;
+
+   /* Uplink APM staging (bridge-thread-local -> resets per call): up to a
+    * 159-sample carry plus one fresh capture. */
+   int16_t up_stage[PHONE_APM_FRAME + PHONE_PCM_FRAME_SAMPLES];
+   int up_stage_n = 0;
+   /* Previous cycle's post-gain downlink (two 10 ms halves), fed as the reverse
+    * reference so each uplink block gets its time-aligned half. */
+   int16_t reverse_ref[PHONE_PCM_FRAME_SAMPLES];
+   memset(reverse_ref, 0, sizeof(reverse_ref));
+
+   /* arch-L1 uplink byte carry.  New bytes are only appended when the buffer is
+    * empty, so it never exceeds one frame — sized accordingly. */
+   uint8_t up_pending[PHONE_PCM_FRAME_BYTES];
+   size_t up_pending_n = 0;
+
+   unsigned cycle = 0;         /* for the ~1 s periodic APM level log */
+   uint64_t dropped_total = 0; /* uplink samples dropped during a write stall */
+   unsigned drop_events = 0;
 
    while (atomic_load(&s_running)) {
       /* ---- capture mic (blocking ~20 ms — the real-time pace) ---- */
@@ -191,38 +263,84 @@ static void *bridge_thread(void *arg) {
          atomic_store(&s_running, false);
          break;
       }
+      if (frames == 0) {
+         continue; /* no data — the blocking mic read is the loop's only pacer */
+      }
 
-      /* ---- uplink: soft-gain + write (balanced with the downlink read) ---- */
-      if (frames > 0) {
+      /* ---- uplink: produce `emit` cleaned samples for this cycle ---- */
+      int16_t *emit = up;
+      size_t emit_n = 0;
+      if (apm != NULL) {
+         memcpy(up_stage + up_stage_n, up, (size_t)frames * sizeof(int16_t));
+         up_stage_n += (int)frames;
+         int blocks = up_stage_n / PHONE_APM_FRAME;
+         for (int b = 0; b < blocks; b++) {
+            int16_t *blk = up_stage + (size_t)b * PHONE_APM_FRAME;
+            /* time-aligned reverse half; (b & 1) keeps the index in-bounds
+             * regardless of block count (blocks is at most 2 here). */
+            phone_apm_reverse_10ms(apm, reverse_ref + (size_t)(b & 1) * PHONE_APM_FRAME);
+            phone_apm_process_10ms(apm, blk); /* HPF + NS + AGC2, in place */
+         }
+         emit = up_stage;
+         emit_n = (size_t)blocks * PHONE_APM_FRAME;
+      } else {
          for (ssize_t i = 0; i < frames; i++) {
             up[i] = soft_gain_s16(up[i], PHONE_UPLINK_GAIN);
          }
-         size_t tw = (size_t)frames * sizeof(int16_t), off = 0;
-         const uint8_t *o = (const uint8_t *)up;
-         while (off < tw && atomic_load(&s_running)) {
-            ssize_t wn = write(s_pcm_fd, o + off, tw - off);
-            if (wn < 0) {
-               if (errno == EINTR) {
-                  continue;
-               }
-               if (errno == EAGAIN) { /* modem momentarily full — brief wait, else drop */
-                  struct pollfd pf = { .fd = s_pcm_fd, .events = POLLOUT };
-                  if (poll(&pf, 1, PHONE_PCM_POLL_MS) <= 0) {
-                     break;
-                  }
-                  continue;
-               }
-               OLOG_ERROR("phone_bridge: uplink write error: %s", strerror(errno));
-               atomic_store(&s_running, false);
-               break;
-            }
-            off += (size_t)wn;
+         emit_n = (size_t)frames;
+      }
+
+      /* ---- uplink write: pending-then-new, carry the remainder (arch-L1) ---- */
+      bool fatal = false;
+      bool new_written = false;
+      if (up_pending_n > 0) {
+         size_t w = modem_write_some(up_pending, up_pending_n, &fatal);
+         if (w < up_pending_n) {
+            memmove(up_pending, up_pending + w, up_pending_n - w);
+         }
+         up_pending_n -= w;
+      }
+      if (!fatal && up_pending_n == 0 && emit_n > 0) {
+         const uint8_t *nb = (const uint8_t *)emit;
+         size_t nlen = emit_n * sizeof(int16_t);
+         size_t w = modem_write_some(nb, nlen, &fatal);
+         if (w < nlen) { /* carry unwritten remainder; bounded by one frame */
+            up_pending_n = nlen - w;
+            memcpy(up_pending, nb + w, up_pending_n);
+         }
+         new_written = true;
+      }
+      if (fatal) {
+         atomic_store(&s_running, false);
+         break;
+      }
+      /* Pending didn't drain -> this cycle's cleaned uplink was neither written
+       * nor carried: dropped (bounded by design, arch-L1 keeps framing intact).
+       * Only during a sustained modem write stall — log it, throttled. */
+      if (emit_n > 0 && !new_written) {
+         dropped_total += emit_n;
+         if ((drop_events++ % PHONE_DROP_LOG_INTERVAL) == 0) {
+            OLOG_WARNING("phone_bridge: uplink write stalled — dropped ~%llu samples so far",
+                         (unsigned long long)dropped_total);
          }
       }
 
-      /* ---- downlink: read the balanced amount, soft-gain, play ---- */
-      size_t want = (frames > 0) ? (size_t)frames * 2 : PHONE_PCM_FRAME_BYTES;
-      if (want > (size_t)PHONE_PCM_FRAME_BYTES) {
+      /* ---- shift the APM stage remainder AFTER emit has been consumed ---- */
+      if (apm != NULL) {
+         int rem = up_stage_n - (int)emit_n;
+         if (rem > 0) {
+            memmove(up_stage, up_stage + emit_n, (size_t)rem * sizeof(int16_t));
+         }
+         up_stage_n = rem;
+      }
+
+      /* ---- downlink: read balanced to the emitted uplink, soft-gain, play ---- */
+      /* want tracks emitted samples so read/write stay balanced.  emit_n == 0
+       * only on a transient sub-160 capture that staged without emitting; read a
+       * full frame then (deliberate — a non-blocking cap that drains rather than
+       * starves downlink, matching the pre-APM frames==0 behaviour). */
+      size_t want = emit_n * sizeof(int16_t);
+      if (want == 0 || want > (size_t)PHONE_PCM_FRAME_BYTES) {
          want = PHONE_PCM_FRAME_BYTES;
       }
       ssize_t n = read(s_pcm_fd, dn + dn_carry, want);
@@ -239,7 +357,19 @@ static void *bridge_thread(void *arg) {
          size_t dframes = total / 2; /* mono S16 */
          int16_t *sm = (int16_t *)dn;
          for (size_t i = 0; i < dframes; i++) {
-            sm[i] = soft_gain_s16(sm[i], PHONE_DOWNLINK_GAIN);
+            sm[i] = soft_gain_s16(sm[i], dn_gain);
+         }
+         /* Stash up to the last 320 post-gain downlink samples (what actually
+          * plays out the speaker) as next cycle's reverse reference, right-
+          * aligned so the two 10 ms halves stay time-ordered for the per-block
+          * feed above. */
+         if (apm != NULL) {
+            size_t keep = dframes < (size_t)PHONE_PCM_FRAME_SAMPLES
+                              ? dframes
+                              : (size_t)PHONE_PCM_FRAME_SAMPLES;
+            memset(reverse_ref, 0, sizeof(reverse_ref));
+            memcpy(reverse_ref + (PHONE_PCM_FRAME_SAMPLES - keep), sm + (dframes - keep),
+                   keep * sizeof(int16_t));
          }
          size_t pw = 0;
          while (pw < dframes && atomic_load(&s_running)) {
@@ -266,12 +396,25 @@ static void *bridge_thread(void *arg) {
             dn[0] = dn[used];
          }
       }
+
+      /* ---- objective tuning trace: APM output level ~once/second ---- */
+      if (apm != NULL && (++cycle % PHONE_RMS_LOG_INTERVAL) == 0) {
+         int rms_dbfs = 0;
+         if (phone_apm_output_rms_dbfs(apm, &rms_dbfs)) {
+            OLOG_INFO("phone_bridge: uplink APM output ~%d dBFS", rms_dbfs);
+         }
+      }
    }
    return NULL;
 }
 
-/* Close handles + fd. Caller holds s_lock and the bridge thread is already stopped. */
+/* Close handles + fd + APM. Caller holds s_lock and the bridge thread is already
+ * stopped (so the APM has no concurrent user). */
 static void cleanup_locked(void) {
+   if (s_uplink_apm) {
+      phone_apm_destroy(s_uplink_apm);
+      s_uplink_apm = NULL;
+   }
    if (s_playback) {
       audio_stream_playback_close(s_playback);
       s_playback = NULL;
@@ -286,11 +429,12 @@ static void cleanup_locked(void) {
    }
 }
 
-int phone_bridge_start(const char *pcm_port) {
-   if (!pcm_port || !pcm_port[0]) {
+int phone_bridge_start(const phone_bridge_config_t *cfg) {
+   if (!cfg || !cfg->pcm_port || !cfg->pcm_port[0]) {
       OLOG_ERROR("phone_bridge: no PCM port configured");
       return FAILURE;
    }
+   const char *pcm_port = cfg->pcm_port;
 
    pthread_mutex_lock(&s_lock);
    if (s_started) {
@@ -346,6 +490,14 @@ int phone_bridge_start(const char *pcm_port) {
       pthread_mutex_unlock(&s_lock);
       return FAILURE;
    }
+
+   /* Downlink gain + near-end uplink processor from config.  A NULL APM (WebRTC
+    * not built, or init failed) is not an error — the thread falls back to the
+    * raw soft-limiter. */
+   s_downlink_gain = (cfg->downlink_gain > 0.0f) ? cfg->downlink_gain : PHONE_DOWNLINK_GAIN;
+   s_uplink_apm = phone_apm_create(&cfg->uplink);
+   OLOG_INFO("phone_bridge: uplink %s",
+             s_uplink_apm ? "APM (AGC2+NS+HPF)" : "raw soft-gain (APM unavailable)");
 
    atomic_store(&s_running, true);
    if (pthread_create(&s_bridge_tid, NULL, bridge_thread, NULL) != 0) {

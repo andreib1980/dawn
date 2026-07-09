@@ -29,6 +29,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "audio/phone_apm.h" /* phone_apm_config_t for the audio-config setter */
+
 /* Phone states.
  *
  * PHONE_STATE_ANSWERING is appended (not inserted after RINGING_IN) so the
@@ -131,6 +133,22 @@ bool phone_service_get_call_snapshot(phone_call_notif_status_t *status_out,
  * @return 0 on success, 1 on failure.
  */
 int phone_service_init(void);
+
+/**
+ * @brief Configure call-audio processing (from the [phone] config section).
+ *
+ * Stores the modem PCM port, near-end uplink APM knobs, and downlink gain used
+ * when the audio bridge is started on `pcm_ready`.  Resolved TOML -> struct in
+ * phone_tool and forwarded here; if never called, the bridge uses built-in
+ * defaults.  Call at startup, before any call.
+ *
+ * @param pcm_port      Modem USB audio node (empty/NULL -> default). Copied.
+ * @param uplink        Near-end APM config (NULL -> phone_apm defaults).
+ * @param downlink_gain Downlink soft-limiter gain (<=0 -> bridge default).
+ */
+void phone_service_set_audio_config(const char *pcm_port,
+                                    const phone_apm_config_t *uplink,
+                                    float downlink_gain);
 
 /**
  * @brief Shutdown the phone service.

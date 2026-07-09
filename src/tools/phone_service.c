@@ -95,6 +95,12 @@ static bool s_echo_online = false;
  * what the call actually paused (event-thread only — no lock needed). */
 static bool s_bridge_paused_music = false;
 
+/* Call-audio config from [phone] (set once at startup by
+ * phone_service_set_audio_config, read on the event thread at pcm_ready). */
+static phone_apm_config_t s_uplink_apm_cfg;
+static float s_bridge_downlink_gain = 0.0f; /* <=0 -> bridge default */
+static bool s_audio_cfg_set = false;
+
 /* =============================================================================
  * Helpers
  * ============================================================================= */
@@ -738,7 +744,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          if (s_bridge_paused_music) {
             setMusicPlay(0); /* keep music out of the call mix (mic would pick it up) */
          }
-         if (phone_bridge_start(port) == SUCCESS) {
+         phone_bridge_config_t bcfg = {
+            .pcm_port = port,
+            .uplink = s_audio_cfg_set ? s_uplink_apm_cfg : phone_apm_default_config(),
+            .downlink_gain = s_bridge_downlink_gain,
+         };
+         if (phone_bridge_start(&bcfg) == SUCCESS) {
             OLOG_INFO("phone_service: audio bridge up on %s", port);
          } else {
             OLOG_ERROR("phone_service: audio bridge failed to start on %s — call has no audio",
@@ -1415,6 +1426,17 @@ const phone_service_config_t *phone_service_get_config(void) {
 /* =============================================================================
  * Lifecycle
  * ============================================================================= */
+
+void phone_service_set_audio_config(const char *pcm_port,
+                                    const phone_apm_config_t *uplink,
+                                    float downlink_gain) {
+   if (pcm_port && pcm_port[0]) {
+      snprintf(s_config.pcm_port, sizeof(s_config.pcm_port), "%s", pcm_port);
+   }
+   s_uplink_apm_cfg = uplink ? *uplink : phone_apm_default_config();
+   s_bridge_downlink_gain = downlink_gain;
+   s_audio_cfg_set = true;
+}
 
 int phone_service_init(void) {
    /* MQTT subscriptions for echo/events, echo/response, echo/status are done

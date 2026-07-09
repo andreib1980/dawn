@@ -30,8 +30,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
+#include "audio/phone_apm.h"
 #include "logging.h"
 #include "tools/phone_db.h"
 #include "tools/phone_service.h"
@@ -61,6 +63,28 @@ static phone_tool_config_t s_config = {
    .warn_on_multi_segment = true,
    .delete_rate_limit_per_hour = 10,
 };
+
+/* Parsed [phone] call-audio config, forwarded to phone_service at init.  The
+ * near-end APM defaults live in phone_apm_default_config(); these hold whatever
+ * [phone] overrides (or the defaults if the section is absent). */
+static phone_apm_config_t s_uplink_cfg;
+static float s_downlink_gain = 0.0f; /* <=0 -> bridge default */
+static char s_pcm_port[64] = "";
+static bool s_audio_parsed = false;
+
+static phone_ns_level_t parse_ns_level(const char *s) {
+   if (s) {
+      if (strcasecmp(s, "off") == 0)
+         return PHONE_NS_OFF;
+      if (strcasecmp(s, "low") == 0)
+         return PHONE_NS_LOW;
+      if (strcasecmp(s, "high") == 0)
+         return PHONE_NS_HIGH;
+      if (strcasecmp(s, "veryhigh") == 0)
+         return PHONE_NS_VERYHIGH;
+   }
+   return PHONE_NS_MODERATE;
+}
 
 /* Global mutex protecting all mutable phone_tool state.
  *
@@ -993,7 +1017,14 @@ static char *phone_tool_callback(const char *action, char *value, int *should_re
  * ============================================================================= */
 
 static int phone_tool_init(void) {
-   return phone_service_init();
+   int rc = phone_service_init();
+   /* Forward parsed [phone] call-audio config (or defaults if the section had no
+    * audio keys) so phone_service can build the bridge config on each call. */
+   if (!s_audio_parsed) {
+      s_uplink_cfg = phone_apm_default_config();
+   }
+   phone_service_set_audio_config(s_pcm_port, &s_uplink_cfg, s_downlink_gain);
+   return rc;
 }
 
 static void phone_tool_cleanup(void) {
@@ -1029,6 +1060,44 @@ static void phone_tool_config_parse(toml_table_t *table, void *config) {
    toml_datum_t dlim = toml_int_in(table, "delete_rate_limit_per_hour");
    if (dlim.ok)
       cfg->delete_rate_limit_per_hour = (int)dlim.u.i;
+
+   /* Call-audio (near-end APM) settings — stored module-side and forwarded to
+    * phone_service at init (kept out of the registered config struct so the
+    * bridge/APM config lives with the audio plumbing, not the tool params). */
+   s_uplink_cfg = phone_apm_default_config();
+   s_audio_parsed = true;
+
+   toml_datum_t port = toml_string_in(table, "pcm_port");
+   if (port.ok) {
+      snprintf(s_pcm_port, sizeof(s_pcm_port), "%s", port.u.s);
+      free(port.u.s);
+   }
+   toml_datum_t agc = toml_bool_in(table, "uplink_agc");
+   if (agc.ok)
+      s_uplink_cfg.agc_enabled = agc.u.b;
+   toml_datum_t fg = toml_double_in(table, "uplink_fixed_gain_db");
+   if (fg.ok)
+      s_uplink_cfg.fixed_gain_db = (float)fg.u.d;
+   toml_datum_t ramp = toml_double_in(table, "uplink_agc_ramp_db_per_s");
+   if (ramp.ok)
+      s_uplink_cfg.max_gain_change_db_per_s = (float)ramp.u.d;
+   toml_datum_t noise = toml_double_in(table, "uplink_max_output_noise_dbfs");
+   if (noise.ok)
+      s_uplink_cfg.max_output_noise_dbfs = (float)noise.u.d;
+   toml_datum_t ns = toml_string_in(table, "uplink_ns_level");
+   if (ns.ok) {
+      s_uplink_cfg.ns_level = parse_ns_level(ns.u.s);
+      free(ns.u.s);
+   }
+   toml_datum_t hpf = toml_bool_in(table, "uplink_high_pass");
+   if (hpf.ok)
+      s_uplink_cfg.high_pass = hpf.u.b;
+   toml_datum_t ec = toml_bool_in(table, "uplink_echo_cancel");
+   if (ec.ok)
+      s_uplink_cfg.echo_cancel = ec.u.b;
+   toml_datum_t dg = toml_double_in(table, "downlink_gain");
+   if (dg.ok)
+      s_downlink_gain = (float)dg.u.d;
 }
 
 /* =============================================================================

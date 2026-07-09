@@ -541,6 +541,11 @@ set(DAWN_SOURCES
     src/audio/audio_alsa.c
     src/audio/audio_pulse.c
     src/audio/ringtone.c
+    # phone_apm.cpp is compiled UNCONDITIONALLY (base sources, NOT AEC_SOURCES):
+    # its WebRTC use is fenced behind #ifdef AEC_BACKEND_WEBRTC and it stubs to
+    # phone_apm_create()->NULL on AEC-off builds, so the phone bridge links and
+    # degrades to raw gain rather than failing at link time.
+    src/audio/phone_apm.cpp
     src/audio/audio_converter.c
     src/audio/music_db.c
     src/audio/music_scanner.c

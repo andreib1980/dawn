@@ -29,21 +29,37 @@
 
 #include <stdbool.h>
 
+#include "audio/phone_apm.h"
+
+/**
+ * @brief Bridge configuration, resolved from [phone] config at call setup.
+ *
+ * @p pcm_port is used only during phone_bridge_start() (to open the device); it
+ * is not retained after the call returns, so the caller keeps ownership.
+ */
+typedef struct {
+   const char *pcm_port;      /* modem USB audio node; NULL/empty -> internal default */
+   phone_apm_config_t uplink; /* near-end (mic) processing */
+   float downlink_gain;       /* tanh soft-limiter small-signal gain (far-end -> speaker) */
+} phone_bridge_config_t;
+
 /**
  * @brief Start the local-handset audio bridge.
  *
- * Opens the modem PCM port (@p pcm_port, e.g. "/dev/ttyUSB4") and the local
+ * Opens the modem PCM port (@p cfg->pcm_port, e.g. "/dev/ttyUSB4") and the local
  * capture/playback devices, then spawns the single lockstep bridge thread.  Must
  * be called only after ECHO has armed the modem PCM (i.e. on the `pcm_ready`
- * event), so data is already flowing.
+ * event), so data is already flowing.  When WebRTC APM is available the uplink
+ * is processed by a near-end APM (AGC2 + NS + HPF); otherwise it falls back to a
+ * raw soft-limiter gain.
  *
  * Serialized with phone_bridge_stop() via an internal mutex.  Idempotent: if the
  * bridge is already running this is a no-op that returns SUCCESS.
  *
- * @param pcm_port Modem USB audio device node (raw 16 kHz S16LE mono).
+ * @param cfg Bridge configuration (port + uplink APM knobs + downlink gain).
  * @return SUCCESS if the bridge is running on return, FAILURE otherwise.
  */
-int phone_bridge_start(const char *pcm_port);
+int phone_bridge_start(const phone_bridge_config_t *cfg);
 
 /**
  * @brief Stop the audio bridge.
