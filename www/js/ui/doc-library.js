@@ -34,14 +34,24 @@
       showAll: false,
       scope: 'documents', // 'documents' | 'notes' — restored from localStorage on open()
       query: '',
-      editingId: null, // null = create; note id = editing
-      editorDirty: false,
-      editorTrigger: null, // element to restore focus to on editor close
-      viewingId: null, // note id shown in the read-only viewer, else null
-      viewerTrigger: null, // element to restore focus to on viewer close
+      // Tabbed note detail: one surface for Read (markdown) + Edit (form).
+      detailId: null, // null = create mode; else the open item's id
+      detailIsNote: false, // documents open here too, but Read-only (no tabs)
+      activePane: 'read', // 'read' | 'edit'
+      editorDirty: false, // unsaved edits in the textarea (guards close/switch)
+      detailTrigger: null, // element to restore focus to when the detail closes
+      // Monotonic guard: a save/update round-trip only applies to the detail if
+      // no open/close happened meanwhile (else a late response would stamp the
+      // new id/label onto whatever note is now open — silent corruption).
+      submitSeq: 0,
+      pendingSubmitSeq: null,
    };
 
    let searchTimer = null;
+
+   // DawnTablist bindings (bound once in init(); persistent DOM)
+   let scopeTablist = null;
+   let detailTablist = null;
 
    let callbacks = {
       trapFocus: null,
@@ -83,7 +93,22 @@
       el.uploadArea = el.popover ? el.popover.querySelector('.doc-library-upload') : null;
       el.notesActions = document.getElementById('doc-library-notes-actions');
       el.newNoteBtn = document.getElementById('doc-library-new-note');
-      el.editor = document.getElementById('doc-library-note-editor');
+      // v63: tabbed note detail (Read markdown | Edit form)
+      el.detail = document.getElementById('doc-library-note-detail');
+      el.detailTabs = document.getElementById('doc-library-note-detail-tabs');
+      el.tabRead = document.getElementById('doc-library-note-tab-read');
+      el.tabEdit = document.getElementById('doc-library-note-tab-edit');
+      el.detailTabEls = el.detailTabs ? el.detailTabs.querySelectorAll('.note-detail-tab') : [];
+      el.readPane = document.getElementById('doc-library-note-read');
+      el.editPane = document.getElementById('doc-library-note-edit');
+      el.detailClose = document.getElementById('doc-library-note-detail-close');
+      // Read pane — markdown body (notes) / summary (documents)
+      el.viewerLabel = document.getElementById('doc-library-note-viewer-label');
+      el.viewerText = document.getElementById('doc-library-note-viewer-text');
+      el.viewerHistory = document.getElementById('doc-library-note-viewer-history');
+      el.viewerDelete = document.getElementById('doc-library-note-viewer-delete');
+      el.versions = document.getElementById('doc-library-note-versions');
+      // Edit pane — form
       el.noteForm = document.getElementById('doc-library-note-form');
       el.noteLabel = document.getElementById('doc-library-note-label');
       el.noteText = document.getElementById('doc-library-note-text');
@@ -91,15 +116,6 @@
       el.noteError = document.getElementById('doc-library-note-error');
       el.noteLabelHint = document.getElementById('doc-library-note-label-hint');
       el.noteCancel = document.getElementById('doc-library-note-cancel');
-      // v61 follow-up: read-only note viewer
-      el.viewer = document.getElementById('doc-library-note-viewer');
-      el.viewerLabel = document.getElementById('doc-library-note-viewer-label');
-      el.viewerText = document.getElementById('doc-library-note-viewer-text');
-      el.viewerClose = document.getElementById('doc-library-note-viewer-close');
-      el.viewerHistory = document.getElementById('doc-library-note-viewer-history');
-      el.viewerEdit = document.getElementById('doc-library-note-viewer-edit');
-      el.viewerDelete = document.getElementById('doc-library-note-viewer-delete');
-      el.versions = document.getElementById('doc-library-note-versions');
       el.deleted =
          document.getElementById('doc-library-note-deleted') ||
          document.getElementById('doc-library-deleted');
@@ -110,11 +126,24 @@
       el.btn.addEventListener('click', toggle);
       el.closeBtn.addEventListener('click', close);
 
-      // Tabs (roving tabindex + ←/→/Home/End per WAI-ARIA)
-      el.tabs.forEach((tab) => {
-         tab.addEventListener('click', () => setScope(tab.dataset.scope));
-         tab.addEventListener('keydown', onTabKeydown);
-      });
+      // Scope tabs (Documents | Notes) — shared roving-tabindex helper
+      if (el.tabs && el.tabs.length && typeof DawnTablist !== 'undefined') {
+         scopeTablist = DawnTablist.bind({
+            tabs: el.tabs,
+            getActive: () => state.scope,
+            onActivate: setScope,
+            attr: 'scope',
+         });
+      }
+      // Note-detail tabs (Read | Edit) — same helper
+      if (el.detailTabEls && el.detailTabEls.length && typeof DawnTablist !== 'undefined') {
+         detailTablist = DawnTablist.bind({
+            tabs: el.detailTabEls,
+            getActive: () => state.activePane,
+            onActivate: switchPane,
+            attr: 'pane',
+         });
+      }
 
       // Search (debounced live; Enter submits immediately)
       if (el.searchInput) {
@@ -131,9 +160,9 @@
          });
       }
 
-      // Note editor
-      if (el.newNoteBtn) el.newNoteBtn.addEventListener('click', () => openEditor(null));
-      if (el.noteCancel) el.noteCancel.addEventListener('click', () => requestCloseEditor());
+      // Note detail — create / edit form
+      if (el.newNoteBtn) el.newNoteBtn.addEventListener('click', () => openDetail(null, 'edit'));
+      if (el.noteCancel) el.noteCancel.addEventListener('click', onCancelEdit);
       if (el.noteForm) el.noteForm.addEventListener('submit', onNoteSubmit);
       if (el.noteText) {
          el.noteText.addEventListener('input', () => {
@@ -146,24 +175,16 @@
             state.editorDirty = true;
          });
 
-      // Read-only note viewer actions
-      if (el.viewerClose) el.viewerClose.addEventListener('click', () => closeViewer(true));
-      if (el.viewerEdit) {
-         el.viewerEdit.addEventListener('click', () => {
-            const doc = state.documents.find((d) => d.id === state.viewingId);
-            closeViewer(false);
-            if (doc) openEditor(doc);
-         });
-      }
+      // Note detail — Read pane actions + close
+      if (el.detailClose) el.detailClose.addEventListener('click', () => requestCloseDetail());
       if (el.viewerDelete) {
          el.viewerDelete.addEventListener('click', () => {
-            const doc = state.documents.find((d) => d.id === state.viewingId);
-            if (doc) confirmDelete(doc.id);
+            if (state.detailId != null) confirmDelete(state.detailId);
          });
       }
       if (el.viewerHistory) {
          el.viewerHistory.addEventListener('click', () => {
-            if (state.viewingId) requestVersionList(state.viewingId);
+            if (state.detailId != null) requestVersionList(state.detailId);
          });
       }
       if (el.deletedToggle) {
@@ -236,10 +257,8 @@
          if (e.key !== 'Escape' || !state.isOpen) return;
          const confirmModal = document.getElementById('confirm-modal');
          if (confirmModal && !confirmModal.classList.contains('hidden')) return;
-         if (el.editor && !el.editor.classList.contains('hidden')) {
-            requestCloseEditor();
-         } else if (el.viewer && !el.viewer.classList.contains('hidden')) {
-            closeViewer(true);
+         if (el.detail && !el.detail.classList.contains('hidden')) {
+            requestCloseDetail();
          } else {
             close();
          }
@@ -270,14 +289,18 @@
       } catch (_e) {
          /* private mode / quota — non-fatal, tab just won't persist */
       }
-      closeEditor(false);
-      closeViewer(false);
-      // Roving tabindex + aria
-      el.tabs.forEach((tab) => {
-         const active = tab.dataset.scope === scope;
-         tab.setAttribute('aria-selected', active ? 'true' : 'false');
-         tab.tabIndex = active ? 0 : -1;
-      });
+      closeDetail(false);
+      // Roving tabindex + aria via the shared helper (falls back to a manual
+      // loop if DawnTablist is unavailable for any reason)
+      if (scopeTablist) {
+         scopeTablist.sync();
+      } else {
+         el.tabs.forEach((tab) => {
+            const active = tab.dataset.scope === scope;
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
+            tab.tabIndex = active ? 0 : -1;
+         });
+      }
       // Active tabpanel labelling (a11y)
       if (el.list) {
          el.list.setAttribute('aria-labelledby', `doc-library-tab-${scope}`);
@@ -296,21 +319,6 @@
    function updateSearchPlaceholder() {
       if (!el.searchInput) return;
       el.searchInput.placeholder = state.scope === 'notes' ? 'Search notes' : 'Search documents';
-   }
-
-   function onTabKeydown(e) {
-      const tabs = Array.from(el.tabs);
-      const idx = tabs.indexOf(e.currentTarget);
-      let next = -1;
-      if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
-      else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
-      else if (e.key === 'Home') next = 0;
-      else if (e.key === 'End') next = tabs.length - 1;
-      if (next >= 0) {
-         e.preventDefault();
-         tabs[next].focus();
-         setScope(tabs[next].dataset.scope);
-      }
    }
 
    function runSearch() {
@@ -350,9 +358,8 @@
          focusTrapCleanup = callbacks.trapFocus(el.popover);
       }
 
-      // Reset to a clean state: restore the last-used tab, no search, editor/viewer closed
-      closeEditor(false);
-      closeViewer(false);
+      // Reset to a clean state: restore the last-used tab, no search, detail closed
+      closeDetail(false);
       state.query = '';
       if (el.searchInput) el.searchInput.value = '';
       setScope(loadScope());
@@ -472,8 +479,8 @@
          }
          return;
       }
-      // If the deleted note was open in the viewer, close it
-      if (state.viewingId === payload.id) closeViewer(false);
+      // If the deleted item was open in the detail (either pane), close it
+      if (state.detailId === payload.id) closeDetail(false);
       // Remove from local state
       state.documents = state.documents.filter((d) => d.id !== payload.id);
       state.offset = state.documents.length;
@@ -536,85 +543,176 @@
    }
 
    /* =============================================================================
-    * Note editor (create / edit)
+    * Tabbed note detail — Read (markdown) + Edit (form) on one surface
     * ============================================================================= */
 
-   function openEditor(note) {
-      if (!el.editor) return;
-      // Editor and viewer are mutually-exclusive inline panels
-      closeViewer(false);
-      // Remember what to return focus to when the editor closes (WCAG 2.4.3)
-      state.editorTrigger = document.activeElement;
-      state.editingId = note ? note.id : null;
+   /* Open the detail for an item on the given pane.  item === null → create mode
+    * (Edit pane, empty form).  The textarea is the SINGLE source of truth for the
+    * note text; the Read pane renders markdown from it.  Documents open here too,
+    * but Read-only (tab strip hidden, summary sentence instead of markdown). */
+   function openDetail(item, pane) {
+      if (!el.detail) return;
+      state.submitSeq++; // invalidate any in-flight save/update for the prior detail
+      // Remember what to return focus to when the detail closes (WCAG 2.4.3)
+      state.detailTrigger = document.activeElement;
+      state.detailId = item ? item.id : null;
+      state.detailIsNote = item ? !!(item.is_note || item.filetype === 'note') : true;
       state.editorDirty = false;
-      el.noteLabel.value = note ? note.filename : '';
-      el.noteText.value = note ? note.text || '' : '';
-      el.noteLabelHint.textContent = note
-         ? 'Changing the label changes how you’ll refer to this.'
-         : 'Friday can read this back to you by label.';
+      const isNote = state.detailIsNote;
+      const isCreate = state.detailId == null;
+
+      el.viewerLabel.textContent = item ? item.filename : 'New note';
+      // Seed the form (single text source).  Only notes are inline-editable.
+      el.noteLabel.value = isNote && !isCreate ? item.filename : '';
+      el.noteText.value = isNote && !isCreate ? item.text || '' : '';
+      el.noteLabelHint.textContent = isCreate
+         ? 'Friday can read this back to you by label.'
+         : 'Changing the label changes how you’ll refer to this.';
       hideNoteError();
       updateNoteCount();
-      el.editor.classList.remove('hidden');
+
+      // Documents: no Edit tab, Read pane is a plain region (no orphan tabpanel).
+      if (el.detailTabs) el.detailTabs.classList.toggle('hidden', !isNote);
+      if (el.readPane) {
+         if (isNote) {
+            el.readPane.setAttribute('role', 'tabpanel');
+            el.readPane.setAttribute('aria-labelledby', 'doc-library-note-tab-read');
+            el.readPane.removeAttribute('aria-label');
+         } else {
+            el.readPane.setAttribute('role', 'region');
+            el.readPane.setAttribute('aria-label', 'Document');
+            el.readPane.removeAttribute('aria-labelledby');
+         }
+      }
+      updateReadActions();
+
+      hideVersions();
       if (el.notesActions) el.notesActions.classList.add('hidden');
-      el.noteLabel.focus();
+      el.detail.classList.remove('hidden');
+
+      // Documents force Read; notes honor the requested pane.
+      switchPane(isNote && pane === 'edit' ? 'edit' : 'read');
+      // Initial focus per pane (switchPane already focuses the label for Edit)
+      if (state.activePane === 'read') {
+         const target = isNote ? el.tabRead : el.readPane;
+         if (target && target.focus) target.focus();
+      }
    }
 
-   // restoreFocus: return focus to the opener (cancel/save/ESC); NOT on tab-switch.
-   function closeEditor(restoreFocus) {
-      if (!el.editor) return;
-      const wasOpen = !el.editor.classList.contains('hidden');
-      el.editor.classList.add('hidden');
-      state.editingId = null;
-      state.editorDirty = false;
+   // Guard an unsaved edit before opening a different item (name click / pencil)
+   function requestOpenDetail(item, pane) {
+      if (state.editorDirty && callbacks.showConfirmModal) {
+         callbacks.showConfirmModal('Discard changes to this note?', () => openDetail(item, pane), {
+            title: 'Discard note',
+            okText: 'Discard',
+         });
+         return;
+      }
+      openDetail(item, pane);
+   }
+
+   // restoreFocus: return focus to the opener (Close/ESC); NOT on scope reset.
+   function closeDetail(restoreFocus) {
+      if (!el.detail) return;
+      state.submitSeq++; // invalidate any in-flight save/update for this detail
+      const wasOpen = !el.detail.classList.contains('hidden');
+      el.detail.classList.add('hidden');
+      hideVersions();
       hideNoteError();
+      state.detailId = null;
+      state.detailIsNote = false;
+      state.editorDirty = false;
       // Restore the "+ New note" affordance on the Notes tab
       if (el.notesActions) el.notesActions.classList.toggle('hidden', state.scope !== 'notes');
-      if (restoreFocus && wasOpen && state.editorTrigger && state.editorTrigger.focus) {
-         state.editorTrigger.focus();
+      if (restoreFocus && wasOpen && state.detailTrigger && state.detailTrigger.focus) {
+         state.detailTrigger.focus();
       }
-      state.editorTrigger = null;
+      state.detailTrigger = null;
    }
 
-   // Cancel/ESC: confirm if there are unsaved changes
-   function requestCloseEditor() {
+   // Close button / ESC: confirm if there are unsaved edits
+   function requestCloseDetail() {
       if (state.editorDirty && callbacks.showConfirmModal) {
-         callbacks.showConfirmModal('Discard changes to this note?', () => closeEditor(true), {
+         callbacks.showConfirmModal('Discard changes to this note?', () => closeDetail(true), {
             title: 'Discard note',
             okText: 'Discard',
          });
       } else {
-         closeEditor(true);
+         closeDetail(true);
       }
    }
 
-   /* =============================================================================
-    * Read-only note viewer (opened by clicking a note name)
-    * ============================================================================= */
-
-   function openViewer(item) {
-      if (!el.viewer || !item) return;
-      state.viewerTrigger = document.activeElement;
-      state.viewingId = item.id;
-      const isNote = item.is_note || item.filetype === 'note';
-      el.viewerLabel.textContent = item.filename;
-      if (isNote) {
-         el.viewerText.textContent = item.text || '';
-      } else {
-         /* Documents are multi-part; the WebUI doesn't inline-edit them (read or
-          * edit via Friday / document_read).  Show a summary — version history +
-          * delete below still apply. */
-         const n = item.num_chunks || 0;
-         el.viewerText.textContent = `Document · ${n} part${n === 1 ? '' : 's'}. Ask Friday to read or edit its content; version history and delete are below.`;
+   // Switch between Read and Edit panes.  Read is a pure (non-destructive) render
+   // of the live textarea, so Edit→Read needs no discard guard and does NOT clear
+   // state.editorDirty — a later Close/ESC/scope-switch still guards.
+   function switchPane(name) {
+      if (name !== 'read' && name !== 'edit') return;
+      if (!state.detailIsNote) name = 'read'; // documents have no Edit pane
+      state.activePane = name;
+      if (el.readPane) el.readPane.classList.toggle('hidden', name !== 'read');
+      if (el.editPane) el.editPane.classList.toggle('hidden', name !== 'edit');
+      if (detailTablist) detailTablist.sync();
+      if (name === 'read') {
+         renderReadPane();
+      } else if (el.noteLabel && el.noteLabel.focus) {
+         el.noteLabel.focus();
       }
-      /* Inline Edit is the single-chunk note editor — hide it for documents. */
-      if (el.viewerEdit) el.viewerEdit.style.display = isNote ? '' : 'none';
-      // Editor and viewer are mutually-exclusive inline panels
-      closeEditor(false);
-      hideVersions();
-      if (el.notesActions) el.notesActions.classList.add('hidden');
-      el.viewer.classList.remove('hidden');
-      // Hand keyboard users a focusable control inside the viewer (WCAG 2.4.3)
-      if (el.viewerClose) el.viewerClose.focus();
+   }
+
+   // Render the Read pane: markdown for notes (from the live textarea), or a
+   // summary sentence for documents (their body lives server-side).
+   function renderReadPane() {
+      if (!el.viewerText) return;
+      if (!state.detailIsNote) {
+         const item = state.documents.find((d) => d.id === state.detailId);
+         const n = item ? item.num_chunks || 0 : 0;
+         el.viewerText.textContent = `Document · ${n} part${n === 1 ? '' : 's'}. Ask Friday to read or edit its content; version history and delete are below.`;
+         return;
+      }
+      const text = el.noteText ? el.noteText.value || '' : '';
+      if (!text.trim()) {
+         el.viewerText.textContent = 'Nothing to preview yet.';
+         return;
+      }
+      if (typeof DawnFormat !== 'undefined' && DawnFormat.markdown) {
+         el.viewerText.innerHTML = DawnFormat.markdown(text);
+      } else {
+         el.viewerText.textContent = text; // fallback if the formatter is unavailable
+      }
+   }
+
+   // History + Delete apply to existing items only; hide them in create mode.
+   function updateReadActions() {
+      const existing = state.detailId != null;
+      if (el.viewerHistory) el.viewerHistory.style.display = existing ? '' : 'none';
+      if (el.viewerDelete) el.viewerDelete.style.display = existing ? '' : 'none';
+   }
+
+   // Cancel in the Edit form: existing note → back to Read (discard-guarded);
+   // create mode → close the detail.
+   function onCancelEdit() {
+      const revert = () => {
+         if (state.detailId != null) {
+            const item = state.documents.find((d) => d.id === state.detailId);
+            el.noteLabel.value = item ? item.filename : el.noteLabel.value;
+            el.noteText.value = item ? item.text || '' : '';
+            state.editorDirty = false;
+            hideNoteError();
+            updateNoteCount();
+            switchPane('read');
+            if (el.tabRead && el.tabRead.focus) el.tabRead.focus();
+         } else {
+            closeDetail(true);
+         }
+      };
+      if (state.editorDirty && callbacks.showConfirmModal) {
+         callbacks.showConfirmModal('Discard changes to this note?', revert, {
+            title: 'Discard note',
+            okText: 'Discard',
+         });
+      } else {
+         revert();
+      }
    }
 
    /* =============================================================================
@@ -635,8 +733,8 @@
             DawnToast.show(payload?.error || 'Could not load history', 'error');
          return;
       }
-      // Only show history for the note currently open in the viewer.
-      if (payload.id !== state.viewingId) return;
+      // Only show history for the item currently open in the detail.
+      if (payload.id !== state.detailId) return;
       renderVersions(payload.versions || []);
    }
 
@@ -684,7 +782,7 @@
          return;
       }
       if (typeof DawnToast !== 'undefined') DawnToast.show('Version restored', 'success');
-      closeViewer(false);
+      closeDetail(false);
       if (el.deleted) {
          el.deleted.classList.add('hidden');
          el.deleted.innerHTML = '';
@@ -726,33 +824,6 @@
       });
    }
 
-   // Guard an unsaved editor before replacing it with the viewer
-   function requestOpenViewer(note) {
-      if (state.editorDirty && callbacks.showConfirmModal) {
-         callbacks.showConfirmModal('Discard changes to this note?', () => openViewer(note), {
-            title: 'Discard note',
-            okText: 'Discard',
-         });
-         return;
-      }
-      openViewer(note);
-   }
-
-   // restoreFocus: return focus to the opener (close/ESC); NOT on edit/delete handoff.
-   function closeViewer(restoreFocus) {
-      if (!el.viewer) return;
-      const wasOpen = !el.viewer.classList.contains('hidden');
-      el.viewer.classList.add('hidden');
-      hideVersions();
-      state.viewingId = null;
-      // Restore the "+ New note" affordance on the Notes tab
-      if (el.notesActions) el.notesActions.classList.toggle('hidden', state.scope !== 'notes');
-      if (restoreFocus && wasOpen && state.viewerTrigger && state.viewerTrigger.focus) {
-         state.viewerTrigger.focus();
-      }
-      state.viewerTrigger = null;
-   }
-
    function updateNoteCount() {
       if (!el.noteCount || !el.noteText) return;
       const len = el.noteText.value.length;
@@ -789,30 +860,70 @@
          return;
       }
       hideNoteError();
-      if (state.editingId) {
-         requestNoteUpdate(state.editingId, label, text);
+      // Tag this round-trip so a late response can't apply to a re-targeted detail.
+      state.pendingSubmitSeq = ++state.submitSeq;
+      if (state.detailId != null) {
+         requestNoteUpdate(state.detailId, label, text);
       } else {
          requestNoteSave(label, text);
       }
    }
 
+   // True if the in-flight save/update still targets the currently-open detail.
+   // If the user closed the detail or opened another note meanwhile, the response
+   // must NOT stamp its id/label onto the new target (silent corruption).
+   function submitStillCurrent() {
+      const current =
+         state.pendingSubmitSeq != null &&
+         state.pendingSubmitSeq === state.submitSeq &&
+         el.detail &&
+         !el.detail.classList.contains('hidden');
+      state.pendingSubmitSeq = null;
+      return current;
+   }
+
+   // Save (create) success: stay open on Read with the just-saved text; adopt the
+   // new id so a follow-up edit issues an update (not a duplicate create).
    function handleNoteSaveResponse(payload) {
       if (!payload?.success) {
-         showNoteError(payload?.error || 'Could not save the note.');
+         // Show the error only if the user is still in this editor (else it's stale).
+         if (submitStillCurrent()) showNoteError(payload?.error || 'Could not save the note.');
          return;
       }
-      closeEditor(true);
       if (typeof DawnToast !== 'undefined') DawnToast.show('Note saved', 'success');
+      if (!submitStillCurrent()) {
+         refreshList(); // detail moved on — just pick up the new row
+         return;
+      }
+      if (payload.id != null) state.detailId = payload.id;
+      state.detailIsNote = true;
+      state.editorDirty = false;
+      if (payload.label != null && el.viewerLabel) el.viewerLabel.textContent = payload.label;
+      updateReadActions();
+      hideVersions();
+      switchPane('read');
+      if (el.tabRead && el.tabRead.focus) el.tabRead.focus();
       refreshList();
    }
 
+   // Update success: stay open on Read, re-rendered from the saved textarea text.
    function handleNoteUpdateResponse(payload) {
       if (!payload?.success) {
-         showNoteError(payload?.error || 'Could not update the note.');
+         if (submitStillCurrent()) showNoteError(payload?.error || 'Could not update the note.');
          return;
       }
-      closeEditor(true);
       if (typeof DawnToast !== 'undefined') DawnToast.show('Note updated', 'success');
+      if (!submitStillCurrent()) {
+         refreshList();
+         return;
+      }
+      state.editorDirty = false;
+      const label =
+         payload.label != null ? payload.label : el.noteLabel ? el.noteLabel.value.trim() : '';
+      if (label && el.viewerLabel) el.viewerLabel.textContent = label;
+      hideVersions();
+      switchPane('read');
+      if (el.tabRead && el.tabRead.focus) el.tabRead.focus();
       refreshList();
    }
 
@@ -935,7 +1046,7 @@
          e.stopPropagation();
          const id = parseInt(btn.dataset.id, 10);
          const doc = state.documents.find((d) => d.id === id);
-         if (doc) openEditor(doc);
+         if (doc) requestOpenDetail(doc, 'edit');
       });
    }
 
@@ -976,7 +1087,7 @@
       const openIt = () => {
          const id = parseInt(nameEl.dataset.viewId, 10);
          const doc = state.documents.find((d) => d.id === id);
-         if (doc) requestOpenViewer(doc);
+         if (doc) requestOpenDetail(doc, 'read');
       };
       nameEl.addEventListener('click', openIt);
       nameEl.addEventListener('keydown', (e) => {

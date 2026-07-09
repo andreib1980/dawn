@@ -1069,69 +1069,121 @@ Format rules:
                   + New note
                </button>
             </div>
-            <!-- Read-only note viewer (opened by clicking a note name) -->
-            <div
-               id="doc-library-note-viewer"
-               class="note-viewer hidden"
-               role="region"
-               aria-label="Note"
-            >
-               <div class="note-viewer-header">
+            <!-- Note detail: tabbed Read (markdown) / Edit surface.  Opened by
+                 clicking a note name (Read) or the pencil (Edit).  Documents open
+                 here too, but with the tab strip hidden (Read-only summary). -->
+            <div id="doc-library-note-detail" class="note-detail hidden">
+               <div class="note-detail-header">
                   <h4 id="doc-library-note-viewer-label" class="note-viewer-label"></h4>
+                  <button
+                     type="button"
+                     id="doc-library-note-detail-close"
+                     class="note-detail-close"
+                     aria-label="Close note"
+                  >
+                     &times;
+                  </button>
                </div>
-               <div id="doc-library-note-viewer-text" class="note-viewer-body"></div>
-               <div class="note-viewer-actions">
-                  <button type="button" id="doc-library-note-viewer-close" class="btn-link">
-                     Close
+               <!-- Read | Edit tabs (notes only; JS hides for documents) -->
+               <div
+                  id="doc-library-note-detail-tabs"
+                  class="note-detail-tabs dawn-tabs"
+                  role="tablist"
+                  aria-label="Note view"
+               >
+                  <button
+                     type="button"
+                     class="note-detail-tab dawn-tab"
+                     role="tab"
+                     id="doc-library-note-tab-read"
+                     data-pane="read"
+                     aria-selected="true"
+                     aria-controls="doc-library-note-read"
+                     tabindex="0"
+                  >
+                     Read
                   </button>
-                  <button type="button" id="doc-library-note-viewer-history" class="btn-link">
-                     History
-                  </button>
-                  <button type="button" id="doc-library-note-viewer-edit" class="btn-secondary">
+                  <button
+                     type="button"
+                     class="note-detail-tab dawn-tab"
+                     role="tab"
+                     id="doc-library-note-tab-edit"
+                     data-pane="edit"
+                     aria-selected="false"
+                     aria-controls="doc-library-note-edit"
+                     tabindex="-1"
+                  >
                      Edit
                   </button>
-                  <button type="button" id="doc-library-note-viewer-delete" class="btn-secondary">
-                     Delete
-                  </button>
                </div>
-               <!-- v62: version history (populated on demand by the History button) -->
-               <div id="doc-library-note-versions" class="note-versions hidden"></div>
-            </div>
-            <!-- Inline note editor (create / edit) -->
-            <div id="doc-library-note-editor" class="note-editor hidden">
-               <form class="dawn-form" id="doc-library-note-form" autocomplete="off">
-                  <div class="form-group">
-                     <label for="doc-library-note-label">Label</label>
-                     <input
-                        type="text"
-                        id="doc-library-note-label"
-                        maxlength="80"
-                        placeholder="e.g. Public Bio"
-                     />
-                     <div class="form-hint" id="doc-library-note-label-hint">
-                        Friday can read this back to you by label.
+               <!-- Read pane: markdown-rendered note (or document summary) -->
+               <div
+                  id="doc-library-note-read"
+                  class="note-detail-pane"
+                  role="tabpanel"
+                  aria-labelledby="doc-library-note-tab-read"
+                  tabindex="0"
+               >
+                  <div id="doc-library-note-viewer-text" class="note-viewer-body"></div>
+                  <div class="note-detail-read-actions">
+                     <button type="button" id="doc-library-note-viewer-history" class="btn-link">
+                        History
+                     </button>
+                     <button
+                        type="button"
+                        id="doc-library-note-viewer-delete"
+                        class="btn-secondary"
+                     >
+                        Delete
+                     </button>
+                  </div>
+                  <!-- v62: version history (populated on demand by the History button) -->
+                  <div id="doc-library-note-versions" class="note-versions hidden"></div>
+               </div>
+               <!-- Edit pane: create / edit form -->
+               <div
+                  id="doc-library-note-edit"
+                  class="note-detail-pane hidden"
+                  role="tabpanel"
+                  aria-labelledby="doc-library-note-tab-edit"
+                  tabindex="0"
+               >
+                  <form class="dawn-form" id="doc-library-note-form" autocomplete="off">
+                     <div class="form-group">
+                        <input
+                           type="text"
+                           id="doc-library-note-label"
+                           maxlength="80"
+                           placeholder="Label — e.g. Public Bio"
+                           aria-label="Label"
+                        />
+                        <div class="form-hint" id="doc-library-note-label-hint">
+                           Friday can read this back to you by label.
+                        </div>
                      </div>
-                  </div>
-                  <div class="form-group">
-                     <label for="doc-library-note-text">Text</label>
-                     <textarea
-                        id="doc-library-note-text"
-                        rows="6"
-                        maxlength="4000"
-                        placeholder="The exact text to keep…"
-                     ></textarea>
-                     <div class="form-hint"><span id="doc-library-note-count">0</span> / 4000</div>
-                  </div>
-                  <div class="form-error" id="doc-library-note-error"></div>
-                  <div class="form-actions">
-                     <button type="button" id="doc-library-note-cancel" class="btn-link">
-                        Cancel
-                     </button>
-                     <button type="submit" id="doc-library-note-save" class="btn-primary">
-                        Save note
-                     </button>
-                  </div>
-               </form>
+                     <div class="form-group">
+                        <textarea
+                           id="doc-library-note-text"
+                           rows="6"
+                           maxlength="4000"
+                           placeholder="The exact text to keep…"
+                           aria-label="Text"
+                        ></textarea>
+                        <div class="form-hint">
+                           <span id="doc-library-note-count">0</span> / 4000
+                        </div>
+                     </div>
+                     <div class="form-error" id="doc-library-note-error"></div>
+                     <div class="form-actions">
+                        <button type="button" id="doc-library-note-cancel" class="btn-link">
+                           Cancel
+                        </button>
+                        <button type="submit" id="doc-library-note-save" class="btn-primary">
+                           Save note
+                        </button>
+                     </div>
+                  </form>
+               </div>
             </div>
             <div class="doc-library-upload">
                <div id="doc-library-dropzone" class="doc-library-dropzone">

@@ -39,7 +39,7 @@
    position: fixed;
    top: 50px;
    right: 60px;
-   width: 360px;
+   width: 504px;
    max-height: 70vh;
    background: rgba(18, 18, 26, 0.98);
    backdrop-filter: blur(20px);
@@ -494,8 +494,8 @@
       padding: 10px;
    }
 
-   .note-editor .form-actions .btn-primary,
-   .note-editor .form-actions .btn-link {
+   .note-detail-pane .form-actions .btn-primary,
+   .note-detail-pane .form-actions .btn-link {
       flex: 1;
    }
 }
@@ -503,7 +503,7 @@
 /* Small screens - slightly narrower popover */
 @media (min-width: 481px) and (max-width: 768px) {
    #doc-library-popover {
-      width: 320px;
+      width: 420px;
       right: 10px;
    }
 }
@@ -513,10 +513,11 @@
  * ============================================================================= */
 
 /* This project has NO global `.hidden { display:none }` utility — every
- * consumer scopes its own rule.  These three new toggle targets need theirs,
- * or the editor + new-note bar render on load and the upload area never hides. */
-.note-editor.hidden,
-.note-viewer.hidden,
+ * consumer scopes its own rule.  These toggle targets need theirs, or the
+ * detail surface + new-note bar render on load and the upload area never hides. */
+.note-detail.hidden,
+.note-detail-pane.hidden,
+.note-detail-tabs.hidden,
 .doc-library-notes-actions.hidden,
 .doc-library-upload.hidden {
    display: none;
@@ -537,35 +538,88 @@
    width: 100%;
 }
 
-/* Inline note editor — the form itself reuses the .dawn-form primitive */
-.note-editor {
-   padding: 0.75rem 1rem;
+/* v63: tabbed note detail — one surface hosting a Read pane (markdown) and an
+ * Edit pane (the .dawn-form).  Container carries the chrome; panes carry padding. */
+.note-detail {
+   /* Shared starting height for the Read body + Edit textarea (one source so
+    * both panes open the same size). */
+   --note-box-height: 300px;
    border-bottom: 1px solid var(--border-color);
    background: var(--bg-secondary);
 }
 
-.note-editor textarea {
+.note-detail-header {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 0.5rem;
+   padding: 0.75rem 1rem 0.5rem;
+}
+
+.note-detail-close {
+   flex-shrink: 0;
+   background: none;
+   border: none;
+   color: var(--text-secondary);
+   font-size: 1.4rem;
+   line-height: 1;
+   cursor: pointer;
+   padding: 0 0.25rem;
+   border-radius: 4px;
+   transition: color 0.15s;
+}
+
+.note-detail-close:hover {
+   color: var(--accent);
+}
+
+.note-detail-close:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* The Read/Edit tab strip reuses the shared .dawn-tabs / .dawn-tab primitive
+ * (www/css/base/components.css); active state via aria-selected. */
+
+.note-detail-pane {
+   padding: 0.75rem 1rem;
+}
+
+.note-detail-pane textarea {
    width: 100%;
    box-sizing: border-box;
+   /* Match the Read pane's starting height so both panes open the same size. */
+   height: var(--note-box-height, 150px);
    resize: vertical;
    font-family: inherit;
 }
 
-.note-editor .form-group input[type='text'] {
+.note-detail-pane .form-group input[type='text'] {
    width: 100%;
    box-sizing: border-box;
 }
 
-/* Read-only note viewer — clicking a note name opens this (distinct from the
- * hover-pencil edit).  Mirrors the .note-editor chrome (same padding/border/bg). */
-.note-viewer {
-   padding: 0.75rem 1rem;
-   border-bottom: 1px solid var(--border-color);
-   background: var(--bg-secondary);
+/* Tighten the Edit form for this compact panel — pull Label and Text closer
+ * (base .dawn-form gaps are tuned for full-width settings forms). */
+.note-detail-pane .dawn-form {
+   gap: 0.5rem;
 }
 
-.note-viewer-header {
-   margin-bottom: 0.5rem;
+.note-detail-pane .form-group {
+   gap: 0.15rem;
+}
+
+.note-detail-pane .form-actions {
+   margin-top: 0;
+}
+
+/* Read-pane actions (History · Delete) — right-aligned under the body. */
+.note-detail-read-actions {
+   display: flex;
+   justify-content: flex-end;
+   align-items: center;
+   gap: 0.5rem;
+   margin-top: 0.75rem;
 }
 
 .note-viewer-label {
@@ -576,25 +630,34 @@
    word-break: break-word;
 }
 
+/* Read pane body: holds rendered markdown (notes) or a plain summary sentence
+ * (documents).  `white-space: normal` since markdown emits block elements; the
+ * markdown children keep their own spacing.  Opens at the same fixed height as
+ * the Edit textarea, then scrolls; user-resizable (drag the corner), unbounded
+ * upward.  `resize` needs a non-visible overflow to show the grip. */
 .note-viewer-body {
-   max-height: 240px;
-   overflow-y: auto;
-   white-space: pre-wrap;
+   box-sizing: border-box;
+   height: var(--note-box-height, 150px);
+   min-height: 80px;
+   overflow: auto;
+   resize: vertical;
+   white-space: normal;
    word-break: break-word;
    font-size: 0.85rem;
    line-height: 1.5;
    color: var(--text-primary);
-   margin-bottom: 0.75rem;
 }
 
-.note-viewer-actions {
-   display: flex;
-   justify-content: flex-end;
-   align-items: center;
-   gap: 0.5rem;
+/* Tighten the default block margins of rendered markdown inside the read pane. */
+.note-viewer-body > :first-child {
+   margin-top: 0;
 }
 
-/* v62 version history — listed under the read-only viewer on the History button */
+.note-viewer-body > :last-child {
+   margin-bottom: 0;
+}
+
+/* v62 version history — listed under the read pane on the History button */
 .note-versions {
    margin-top: 0.5rem;
    border-top: 1px solid var(--border-color);
