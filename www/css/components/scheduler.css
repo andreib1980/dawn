@@ -360,7 +360,7 @@
    position: fixed;
    top: 50px;
    right: 60px;
-   width: 460px;
+   width: 504px; /* matches the Document Library popover */
    max-height: 70vh;
    background: rgba(18, 18, 26, 0.98);
    backdrop-filter: blur(20px);
@@ -451,8 +451,26 @@
 }
 
 /* Tabs use the shared `.dawn-tabs.compact` / `.dawn-tab` primitive
- * (www/css/base/components.css). Only the two scheduler-specific deltas below
- * remain: a snappier all-property transition and the inset-shadow focus ring. */
+ * (www/css/base/components.css). Only the scheduler-specific deltas below
+ * remain: two-row wrapping, a snappier all-property transition, and the
+ * inset-shadow focus ring. */
+
+/* Two-row wrap: with 8 tabs the shared `.compact` horizontal-scroll variant
+ * pushes tabs off-screen with no scrollbar affordance.  Wrapping keeps every tab
+ * visible at the popover's 504px width instead.  DawnTablist keyboard nav
+ * (arrow keys / roving tabindex / active-underline) operates on the tab array,
+ * not the layout, so wrapping is purely visual and nav is unchanged.  Scoped to
+ * this strip (same 2-class specificity as `.dawn-tabs.compact`, later in the
+ * cascade) so other `.compact` consumers (doc-library, code-projects) keep their
+ * single-row horizontal scroll. */
+.sched-popover-tabs.compact {
+   flex-wrap: wrap;
+   row-gap: 2px;
+   overflow-x: visible;
+   scroll-snap-type: none;
+   padding: 0.1875rem 0.5rem;
+}
+
 .sched-popover-tab {
    transition: all var(--transition-fast);
 }
@@ -1009,7 +1027,7 @@
 @media (max-width: 600px) {
    #scheduler-popover {
       width: calc(100vw - 24px);
-      max-width: 460px;
+      max-width: 504px;
       top: 60px;
       right: 12px;
       left: 12px;

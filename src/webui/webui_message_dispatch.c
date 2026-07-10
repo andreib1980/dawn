@@ -55,6 +55,7 @@
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "webui/webui_always_on.h"
+#include "webui/webui_attention.h"
 #include "webui/webui_contacts.h"
 #include "webui/webui_doc_library.h"
 #ifdef DAWN_ENABLE_CODE_PROJECTS
@@ -1224,6 +1225,26 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       }
    }
 #endif /* DAWN_ENABLE_EMAIL_TOOL */
+   /* Watches (SAGE proactive attention) — per-user attention_rules CRUD */
+   else if (strcmp(type, "watch_list") == 0) {
+      handle_watch_list(conn);
+   } else if (strcmp(type, "watch_add") == 0) {
+      if (payload) {
+         handle_watch_add(conn, payload);
+      }
+   } else if (strcmp(type, "watch_update") == 0) {
+      if (payload) {
+         handle_watch_update(conn, payload);
+      }
+   } else if (strcmp(type, "watch_set_enabled") == 0) {
+      if (payload) {
+         handle_watch_set_enabled(conn, payload);
+      }
+   } else if (strcmp(type, "watch_remove") == 0) {
+      if (payload) {
+         handle_watch_remove(conn, payload);
+      }
+   }
    /* TTS control (per-connection) */
    else if (strcmp(type, "set_tts_enabled") == 0) {
       if (!conn_require_auth(conn)) {

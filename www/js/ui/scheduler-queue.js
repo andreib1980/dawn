@@ -61,6 +61,12 @@
       statMissed: null,
       clearMissedBtn: null,
       srAnnounce: null,
+      /* Scheduler-only chrome hidden when the Watches tab is active, plus the
+       * Watches pane it swaps in. */
+      statsBar: null,
+      searchWrap: null,
+      footer: null,
+      watchesPane: null,
    };
 
    /* =============================================================================
@@ -660,6 +666,8 @@
     * its state.  Errors are console-logged for the next bisect. */
    function render() {
       if (!els.list) return;
+      /* Watches tab: DawnWatches owns the visible pane; skip the event list. */
+      if (state.activeTab === 'watches') return;
       renderStats();
       try {
          renderInternal();
@@ -853,7 +861,7 @@
          els.btn.classList.remove('has-ringing');
       }
       /* aria-label reflects counts for screen-reader users */
-      let label = 'Open scheduler queue';
+      let label = 'Open scheduler and watches';
       const ringingCount = state.events.filter((e) => e.status === 'ringing').length;
       const missedCount = state.events.filter((e) => e.status === 'missed').length;
       if (ringingCount || missedCount) {
@@ -1117,6 +1125,17 @@
 
    function onDocClick(e) {
       if (!state.isOpen) return;
+      /* A layered dialog — the Watches add/edit modal or a confirm dialog — is
+       * rendered at BODY level, outside this popover.  Without this guard the
+       * outside-click test below would read a click inside such a modal as an
+       * outside click and tear the popover (and the modal) down on the first
+       * interaction.  Skip while any modal is open. */
+      if (
+         e.target.closest &&
+         e.target.closest('.modal:not(.hidden), .modal-overlay:not(.hidden)')
+      ) {
+         return;
+      }
       /* Click outside the popover entirely → close it */
       if (
          els.popover &&
@@ -1192,11 +1211,30 @@
     * state and re-applies DOM via tablist.sync() after state change. */
    let tablist = null;
 
+   /* Swap between the scheduler event list and the Watches pane based on the
+    * active tab.  The Watches tab shows genuinely different content (per-user
+    * attention_rules, owned by DawnWatches), so we hide the scheduler-only
+    * chrome (stats / search / list / footer) rather than filter the shared
+    * list.  DawnWatches owns the pane's data + rendering + live-value polling. */
+   function applyPaneVisibility() {
+      const onWatches = state.activeTab === 'watches';
+      if (els.statsBar) els.statsBar.classList.toggle('hidden', onWatches);
+      if (els.searchWrap) els.searchWrap.classList.toggle('hidden', onWatches);
+      if (els.list) els.list.classList.toggle('hidden', onWatches);
+      if (els.footer) els.footer.classList.toggle('hidden', onWatches);
+      if (els.watchesPane) els.watchesPane.classList.toggle('hidden', !onWatches);
+      if (typeof DawnWatches !== 'undefined') {
+         if (onWatches) DawnWatches.activate();
+         else DawnWatches.deactivate();
+      }
+   }
+
    function setTab(tab) {
       if (state.activeTab === tab) return;
       state.activeTab = tab;
       clearArm();
       if (tablist) tablist.sync();
+      applyPaneVisibility();
       render();
    }
 
@@ -1221,9 +1259,10 @@
                isActiveStatus(e.status) &&
                (e.effective_fire_at || e.fire_at) - Math.floor(Date.now() / 1000) < 3600
          );
-         if (needsTick && state.isOpen) {
+         if (needsTick && state.isOpen && state.activeTab !== 'watches') {
             /* Only update time columns in-place — avoids tearing down the
-             * armed pill or open menu. */
+             * armed pill or open menu.  Skipped on the Watches tab, where the
+             * event list is hidden. */
             updateTimeColumns();
          }
       }, 1000);
@@ -1268,6 +1307,10 @@
       state.isOpen = true;
       sendList();
       startCountdown();
+      /* Restore the correct pane (event list vs Watches) for the active tab —
+       * activeTab persists across close/open, so a user who left on Watches
+       * gets it back (and its live-value polling restarts). */
+      applyPaneVisibility();
       /* Defer focus so the popover is in the layout when we focus the close
        * button — avoids triggering the focus-back-to-trigger fallback. */
       setTimeout(() => {
@@ -1294,6 +1337,8 @@
       disarmClearMissed();
       closeMenu();
       stopCountdown();
+      /* Stop the Watches pane's live-value polling while the popover is hidden. */
+      if (typeof DawnWatches !== 'undefined') DawnWatches.deactivate();
       if (state.focusTrapCleanup) {
          state.focusTrapCleanup();
          state.focusTrapCleanup = null;
@@ -1340,6 +1385,10 @@
       els.clearMissedBtn = document.getElementById('sched-clear-missed');
       els.srAnnounce = document.getElementById('sched-popover-sr-announce');
       els.tabs = els.popover ? Array.from(els.popover.querySelectorAll('.sched-popover-tab')) : [];
+      els.statsBar = els.popover ? els.popover.querySelector('.sched-popover-stats') : null;
+      els.searchWrap = els.popover ? els.popover.querySelector('.sched-popover-search') : null;
+      els.footer = els.popover ? els.popover.querySelector('.sched-popover-footer') : null;
+      els.watchesPane = document.getElementById('watches-pane');
 
       if (!els.btn || !els.popover) return;
 

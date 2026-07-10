@@ -630,6 +630,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_ota.c
         src/webui/webui_contacts.c
         src/webui/webui_scheduler.c
+        src/webui/webui_attention.c
     )
     if(DAWN_ENABLE_CALENDAR_TOOL)
         list(APPEND DAWN_SOURCES src/webui/webui_calendar.c)

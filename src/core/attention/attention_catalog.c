@@ -28,6 +28,7 @@
  */
 
 #include <string.h>
+#include <strings.h>
 
 #include "core/attention/attention_internal.h"
 
@@ -364,4 +365,89 @@ const char *attention_catalog_unit(const char *key) {
 
 bool attention_catalog_has(const char *key) {
    return attention_catalog_lookup(key) != NULL;
+}
+
+/* =============================================================================
+ * Enum <-> wire-string serialization (canonical; shared by the `attention` tool
+ * and the WebUI Watches panel — see the contract note in attention.h).
+ * ============================================================================= */
+
+const char *sage_notify_to_str(sage_notify_t n) {
+   switch (n) {
+      case SAGE_NOTIFY_ALERT:
+         return "alert";
+      case SAGE_NOTIFY_AMBIENT:
+         return "ambient";
+      case SAGE_NOTIFY_DIGEST:
+      default:
+         return "digest";
+   }
+}
+
+sage_notify_t sage_notify_from_str(const char *s, sage_notify_t fallback) {
+   if (!s || !s[0]) {
+      return fallback;
+   }
+   if (strcasecmp(s, "alert") == 0) {
+      return SAGE_NOTIFY_ALERT;
+   }
+   if (strcasecmp(s, "ambient") == 0) {
+      return SAGE_NOTIFY_AMBIENT;
+   }
+   if (strcasecmp(s, "digest") == 0) {
+      return SAGE_NOTIFY_DIGEST;
+   }
+   return fallback;
+}
+
+const char *sage_direction_to_str(sage_direction_t d) {
+   switch (d) {
+      case SAGE_DIR_BELOW:
+         return "below";
+      case SAGE_DIR_RISING:
+         return "rising";
+      case SAGE_DIR_ABOVE:
+      default:
+         return "above";
+   }
+}
+
+sage_direction_t sage_direction_from_str(const char *s, sage_direction_t fallback) {
+   if (!s || !s[0]) {
+      return fallback;
+   }
+   if (strcasecmp(s, "below") == 0) {
+      return SAGE_DIR_BELOW;
+   }
+   if (strcasecmp(s, "above") == 0) {
+      return SAGE_DIR_ABOVE;
+   }
+   if (strcasecmp(s, "rising") == 0) {
+      return SAGE_DIR_RISING;
+   }
+   return fallback;
+}
+
+const char *sage_rule_type_to_str(sage_rule_type_t r) {
+   switch (r) {
+      case SAGE_RULE_SLOPE:
+         return "slope";
+      case SAGE_RULE_ABSENCE:
+         return "absence";
+      case SAGE_RULE_MATCH:
+         return "match";
+      case SAGE_RULE_THRESHOLD:
+      default:
+         return "threshold";
+   }
+}
+
+int attention_clamp_seconds(double v) {
+   if (v < 0.0) {
+      return 0;
+   }
+   if (v > 604800.0) {
+      return 604800; /* a week — far above any real feed-silence window */
+   }
+   return (int)v;
 }

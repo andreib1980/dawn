@@ -862,6 +862,25 @@
                if (typeof DawnEmailAccounts !== 'undefined')
                   DawnEmailAccounts.handleSetEnabledResponse(msg.payload);
                break;
+            // Watches (SAGE proactive attention) management
+            case 'watch_list_response':
+               if (typeof DawnWatches !== 'undefined') DawnWatches.handleListResponse(msg.payload);
+               break;
+            case 'watch_add_response':
+               if (typeof DawnWatches !== 'undefined') DawnWatches.handleAddResponse(msg.payload);
+               break;
+            case 'watch_update_response':
+               if (typeof DawnWatches !== 'undefined')
+                  DawnWatches.handleUpdateResponse(msg.payload);
+               break;
+            case 'watch_set_enabled_response':
+               if (typeof DawnWatches !== 'undefined')
+                  DawnWatches.handleSetEnabledResponse(msg.payload);
+               break;
+            case 'watch_remove_response':
+               if (typeof DawnWatches !== 'undefined')
+                  DawnWatches.handleRemoveResponse(msg.payload);
+               break;
             case 'conversation_reset':
                // Tool triggered conversation reset - sync frontend
                console.log('Conversation reset by tool');
@@ -2003,6 +2022,15 @@
          trapFocus: DawnSettings.trapFocus,
          getAuthState: () => DawnState.authState,
       });
+
+      // Initialize watches panel (SAGE proactive attention — a tab inside the
+      // scheduler popover, so init it before the scheduler queue below).
+      if (typeof DawnWatches !== 'undefined') {
+         DawnWatches.setCallbacks({
+            showConfirmModal: DawnSettings.showConfirmModal,
+         });
+         DawnWatches.init();
+      }
 
       // Initialize scheduler queue panel
       if (window.DawnSchedulerQueue) {

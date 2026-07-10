@@ -289,8 +289,8 @@
                <button
                   id="scheduler-btn"
                   class="hidden"
-                  title="Scheduler"
-                  aria-label="Open scheduler queue"
+                  title="Scheduler &amp; Watches"
+                  aria-label="Open scheduler and watches"
                   aria-haspopup="dialog"
                   aria-expanded="false"
                >
@@ -606,8 +606,10 @@
             <div class="popover-arrow"></div>
 
             <header class="sched-popover-header">
-               <h3 id="scheduler-popover-title">Scheduler</h3>
-               <button id="scheduler-close" aria-label="Close scheduler queue">&times;</button>
+               <h3 id="scheduler-popover-title">Scheduler &amp; Watches</h3>
+               <button id="scheduler-close" aria-label="Close scheduler and watches">
+                  &times;
+               </button>
             </header>
 
             <div class="sched-popover-stats">
@@ -678,6 +680,16 @@
                >
                   Missed
                </button>
+               <button
+                  class="sched-popover-tab dawn-tab"
+                  id="sched-tab-watches"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="watches-pane"
+                  data-tab="watches"
+               >
+                  Watches
+               </button>
             </nav>
 
             <div class="sched-popover-search">
@@ -712,6 +724,23 @@
                   Clear all missed
                </button>
             </footer>
+
+            <!-- Watches pane (SAGE proactive attention) — shown when the
+                 Watches tab is active; scheduler-queue.js toggles visibility. -->
+            <div
+               id="watches-pane"
+               class="watches-pane hidden"
+               role="tabpanel"
+               aria-labelledby="sched-tab-watches"
+            >
+               <ul class="watches-list" id="watches-list" role="list"></ul>
+               <footer class="watches-pane-footer">
+                  <span class="watches-pane-hint"> Say “watch the CO2” or add one manually </span>
+                  <button class="watches-add-btn" id="watches-add-btn" type="button">
+                     + Add watch
+                  </button>
+               </footer>
+            </div>
          </div>
 
          <!-- Memory Source Modal (v40 provenance) -->
@@ -3403,6 +3432,7 @@ token = "eyJ..."</pre
       <!-- Main settings orchestrator -->
       <script defer src="/js/ui/settings.js"></script>
       <script defer src="/js/ui/scheduler.js"></script>
+      <script defer src="/js/ui/watches.js"></script>
       <script defer src="/js/ui/scheduler-queue.js"></script>
       <script defer src="/js/ui/phone.js"></script>
       <script defer src="/js/ui/visual-render.js"></script>

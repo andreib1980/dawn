@@ -218,6 +218,25 @@ bool attention_catalog_has(const char *key);
 bool attention_metric_current(const char *key, double *value);
 
 /* =============================================================================
+ * Enum <-> wire-string serialization
+ *
+ * The `attention` LLM tool and the WebUI Watches panel both read and write the
+ * same attention_rules rows, so the string forms of these enums are a wire
+ * contract — a watch created by voice must render identically in the panel.
+ * These are the canonical serializers (kept beside the enums they mirror) so the
+ * two surfaces can't drift.  *_from_str return @fallback for NULL/empty/unknown.
+ * ============================================================================= */
+
+const char *sage_notify_to_str(sage_notify_t n);
+sage_notify_t sage_notify_from_str(const char *s, sage_notify_t fallback);
+const char *sage_direction_to_str(sage_direction_t d);
+sage_direction_t sage_direction_from_str(const char *s, sage_direction_t fallback);
+const char *sage_rule_type_to_str(sage_rule_type_t r);
+
+/** Clamp a seconds value (e.g. an absence window) to a sane [0, 604800] range. */
+int attention_clamp_seconds(double v);
+
+/* =============================================================================
  * Watch management (tool + WebUI CRUD; each mutation reloads the cache)
  * ============================================================================= */
 

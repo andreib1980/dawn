@@ -146,22 +146,9 @@ static const tool_metadata_t attention_metadata = {
 
 /* ========== Helpers ========== */
 
-static sage_notify_t parse_level(const char *s, sage_notify_t fallback) {
-   if (!s || !s[0]) {
-      return fallback;
-   }
-   if (strcasecmp(s, "alert") == 0) {
-      return SAGE_NOTIFY_ALERT;
-   }
-   if (strcasecmp(s, "ambient") == 0) {
-      return SAGE_NOTIFY_AMBIENT;
-   }
-   return fallback;
-}
-
-static const char *level_str(sage_notify_t n) {
-   return (n == SAGE_NOTIFY_ALERT) ? "alert" : (n == SAGE_NOTIFY_AMBIENT) ? "ambient" : "digest";
-}
+/* Notify-level parse/format + absence-window clamp are shared with the WebUI
+ * Watches panel via the attention core (sage_notify_from_str / _to_str /
+ * attention_clamp_seconds) so the two surfaces can't drift on the wire vocab. */
 
 /* Append a "(disabled — enable proactive attention in settings)" note when the
  * master switch is off, so a freshly-created watch honestly reports it's dormant. */
@@ -239,7 +226,7 @@ static char *do_list(int user_id, char *out) {
          append_fmt(out, ATTN_RESULT_MAX, &off, " — alerts if silent over %ds",
                     w->absence_after_sec);
       } else {
-         append_fmt(out, ATTN_RESULT_MAX, &off, " — %s %s %g%s", level_str(w->notify),
+         append_fmt(out, ATTN_RESULT_MAX, &off, " — %s %s %g%s", sage_notify_to_str(w->notify),
                     w->direction == SAGE_DIR_BELOW ? "below" : "above", w->threshold,
                     unit[0] ? unit : "");
       }
@@ -289,18 +276,6 @@ static bool parse_threshold(const char *s, double *out) {
    return true;
 }
 
-/* Clamp a seconds value to a sane, non-negative int range (avoids UB casting a
- * huge double to int for absence windows). */
-static int clamp_seconds(double v) {
-   if (v < 0.0) {
-      return 0;
-   }
-   if (v > 604800.0) {
-      return 604800; /* a week — far above any real feed-silence window */
-   }
-   return (int)v;
-}
-
 /* Apply an optional user threshold onto @w; returns false (with the reason in
  * @out) if the string was non-numeric. */
 static bool apply_threshold(sage_watch_t *w, const char *threshold, char **err_out) {
@@ -313,7 +288,7 @@ static bool apply_threshold(sage_watch_t *w, const char *threshold, char **err_o
       return false;
    }
    if (w->rule_type == SAGE_RULE_ABSENCE) {
-      w->absence_after_sec = clamp_seconds(t);
+      w->absence_after_sec = attention_clamp_seconds(t);
    } else {
       w->threshold = t;
    }
@@ -334,7 +309,7 @@ static char *do_watch(int user_id,
    if (direction && direction[0]) {
       w.direction = (strcasecmp(direction, "below") == 0) ? SAGE_DIR_BELOW : SAGE_DIR_ABOVE;
    }
-   w.notify = parse_level(level, w.notify);
+   w.notify = sage_notify_from_str(level, w.notify);
    char *terr = NULL;
    if (!apply_threshold(&w, threshold, &terr)) {
       return terr;
@@ -408,7 +383,7 @@ static char *do_set(int user_id,
    if (direction && direction[0]) {
       w.direction = (strcasecmp(direction, "below") == 0) ? SAGE_DIR_BELOW : SAGE_DIR_ABOVE;
    }
-   w.notify = parse_level(level, w.notify);
+   w.notify = sage_notify_from_str(level, w.notify);
    char *terr = NULL;
    if (!apply_threshold(&w, threshold, &terr)) {
       return terr;
@@ -420,8 +395,9 @@ static char *do_set(int user_id,
    if (w.rule_type == SAGE_RULE_ABSENCE) {
       snprintf(out, ATTN_RESULT_MAX, "Updated %s — silent over %ds.", w.name, w.absence_after_sec);
    } else {
-      snprintf(out, ATTN_RESULT_MAX, "Updated %s — %s %s %g%s.", w.name, level_str(w.notify),
-               w.direction == SAGE_DIR_BELOW ? "below" : "above", w.threshold, unit[0] ? unit : "");
+      snprintf(out, ATTN_RESULT_MAX, "Updated %s — %s %s %g%s.", w.name,
+               sage_notify_to_str(w.notify), w.direction == SAGE_DIR_BELOW ? "below" : "above",
+               w.threshold, unit[0] ? unit : "");
    }
    append_current_value(out, ATTN_RESULT_MAX, &w);
    return out;
