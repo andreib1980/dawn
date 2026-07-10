@@ -181,9 +181,6 @@ static webrtc::AudioProcessing::Config build_apm_config(const phone_apm_config_t
    c.gain_controller2.adaptive_digital.enabled = cfg->agc_enabled;
    c.gain_controller2.adaptive_digital.max_gain_change_db_per_second = ramp;
    c.gain_controller2.adaptive_digital.max_output_noise_level_dbfs = noise_floor;
-
-   /* Near-free; exposes output_rms_dbfs for the objective level trace. */
-   c.level_estimation.enabled = true;
    return c;
 }
 
@@ -299,18 +296,6 @@ extern "C" void phone_apm_process_10ms(phone_apm_t *a, int16_t *frame160) {
    a->apm->ProcessStream(frame160, a->stream_config, a->stream_config, frame160);
 }
 
-extern "C" bool phone_apm_output_rms_dbfs(phone_apm_t *a, int *out_dbfs) {
-   if (a == nullptr || a->apm == nullptr || out_dbfs == nullptr) {
-      return false;
-   }
-   webrtc::AudioProcessingStats stats = a->apm->GetStatistics();
-   if (!stats.output_rms_dbfs.has_value()) {
-      return false;
-   }
-   *out_dbfs = *stats.output_rms_dbfs;
-   return true;
-}
-
 extern "C" void phone_apm_destroy(phone_apm_t *a) {
    if (a == nullptr) {
       return;
@@ -320,12 +305,6 @@ extern "C" void phone_apm_destroy(phone_apm_t *a) {
 }
 
 #else /* !AEC_BACKEND_WEBRTC — stubs so the bridge links and falls back to raw gain */
-
-extern "C" bool phone_apm_output_rms_dbfs(phone_apm_t *a, int *out_dbfs) {
-   (void)a;
-   (void)out_dbfs;
-   return false;
-}
 
 extern "C" phone_apm_t *phone_apm_create(const phone_apm_config_t *cfg) {
    (void)cfg;

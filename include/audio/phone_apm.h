@@ -120,13 +120,6 @@ void phone_apm_reverse_10ms(phone_apm_t *a, const int16_t *frame160);
  */
 void phone_apm_process_10ms(phone_apm_t *a, int16_t *frame160);
 
-/**
- * @brief Read the near-end output level (RMS dBFS) for the objective tuning trace.
- * @param out_dbfs Filled with the last output RMS in dBFS (negative; 0 = full scale).
- * @return true if a level is available (WebRTC built, level estimation on), else false.
- */
-bool phone_apm_output_rms_dbfs(phone_apm_t *a, int *out_dbfs);
-
 /** @brief Destroy a processor.  Safe on NULL. */
 void phone_apm_destroy(phone_apm_t *a);
 

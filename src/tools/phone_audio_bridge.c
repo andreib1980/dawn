@@ -46,6 +46,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
@@ -76,6 +77,15 @@
  * trace, design §8), and throttle the uplink-stall drop warning the same way. */
 #define PHONE_RMS_LOG_INTERVAL 50
 #define PHONE_DROP_LOG_INTERVAL 50
+
+/* eff-M1 downlink backlog drain: the balanced read consumes exactly one cycle's
+ * worth of downlink, so a scheduling stall that lets the modem's tty buffer back
+ * up becomes permanent added mouth-to-ear latency.  When the backlog exceeds the
+ * trigger, discard the oldest bytes down to the target (hysteresis).  Bounded per
+ * cycle so a flooded fd can't stall the loop. */
+#define PHONE_DN_DRAIN_TRIGGER_BYTES (PHONE_PCM_FRAME_BYTES * 3) /* ~60 ms */
+#define PHONE_DN_DRAIN_TARGET_BYTES (PHONE_PCM_FRAME_BYTES)      /* drain down to ~20 ms */
+#define PHONE_DN_DRAIN_MAX_PER_CYCLE (PHONE_PCM_FRAME_BYTES * 8) /* ~160 ms/cycle ceiling */
 
 /* out = FS * tanh(gain * in / FS): soft-limiting gain on one S16 sample. */
 static inline int16_t soft_gain_s16(int16_t s, float gain) {
@@ -235,6 +245,64 @@ static size_t modem_write_some(const uint8_t *buf, size_t len, bool *fatal) {
  * frames), so the read/write balance is unchanged.  arch-L1: any unwritten
  * uplink remainder is carried in up_pending[] (pending-then-new) so a partial
  * write() never leaves the modem mid-sample and desyncs 16-bit framing. */
+/* RMS of accumulated squared S16 samples, in dBFS (0 = full scale, negative =
+ * quieter).  Returns a silence floor when there's no signal/data. */
+static int rms_dbfs(uint64_t sumsq, uint64_t count) {
+   if (count == 0) {
+      return -120;
+   }
+   double rms = sqrt((double)sumsq / (double)count);
+   if (rms < 1.0) {
+      return -120; /* effective silence floor */
+   }
+   return (int)lrint(20.0 * log10(rms / 32768.0));
+}
+
+/* eff-M1: cap downlink latency by discarding any backlog beyond the target.  It
+ * consumes bytes with the SAME dn_carry accounting the play path uses (read into
+ * dn+dn_carry, advance the odd-byte carry), just without gain/play — so 16-bit
+ * framing stays aligned regardless of how many bytes are dropped.  Non-blocking
+ * (O_NONBLOCK fd, stops at EAGAIN) and bounded per cycle. */
+static void downlink_drain_backlog(uint8_t *dn,
+                                   size_t *dn_carry,
+                                   unsigned *log_throttle,
+                                   uint64_t *drained_total) {
+   int avail = 0;
+   if (ioctl(s_pcm_fd, FIONREAD, &avail) != 0 || avail <= PHONE_DN_DRAIN_TRIGGER_BYTES) {
+      return;
+   }
+   size_t budget = (size_t)avail - (size_t)PHONE_DN_DRAIN_TARGET_BYTES;
+   if (budget > (size_t)PHONE_DN_DRAIN_MAX_PER_CYCLE) {
+      budget = PHONE_DN_DRAIN_MAX_PER_CYCLE;
+   }
+   size_t drained = 0;
+   while (drained < budget && atomic_load(&s_running)) {
+      size_t want = budget - drained;
+      if (want > (size_t)PHONE_PCM_FRAME_BYTES) {
+         want = PHONE_PCM_FRAME_BYTES;
+      }
+      ssize_t n = read(s_pcm_fd, dn + *dn_carry, want);
+      if (n <= 0) {
+         break; /* EAGAIN / EOF -> nothing more to drop */
+      }
+      size_t total = *dn_carry + (size_t)n;
+      size_t used = (total / 2) * 2; /* whole samples consumed */
+      *dn_carry = total - used;      /* 0 or 1, exactly like the play path */
+      if (*dn_carry) {
+         dn[0] = dn[used];
+      }
+      drained += (size_t)n;
+   }
+   if (drained) {
+      *drained_total += drained;
+      if ((*log_throttle)++ % PHONE_DROP_LOG_INTERVAL == 0) {
+         OLOG_WARNING(
+             "phone_bridge: downlink backlog drained ~%zu bytes (%llu total) to cap latency",
+             drained, (unsigned long long)*drained_total);
+      }
+   }
+}
+
 static void *bridge_thread(void *arg) {
    (void)arg;
    int16_t up[PHONE_PCM_FRAME_SAMPLES];
@@ -267,6 +335,12 @@ static void *bridge_thread(void *arg) {
    unsigned cycle = 0;         /* for the ~1 s periodic APM level log */
    uint64_t dropped_total = 0; /* uplink samples dropped during a write stall */
    unsigned drop_events = 0;
+   uint64_t dn_drained_total = 0; /* downlink bytes discarded to cap latency (eff-M1) */
+   unsigned dn_drain_events = 0;
+   /* Level trace: squared-sample sums of the emitted uplink / played downlink,
+    * averaged into dBFS once per log interval (0 = full scale). */
+   uint64_t up_sumsq = 0, dn_sumsq = 0;
+   uint64_t up_n = 0, dn_n = 0;
 
    while (atomic_load(&s_running)) {
       /* ---- live reconfigure (BEFORE the blocking capture read) ----
@@ -327,6 +401,11 @@ static void *bridge_thread(void *arg) {
          }
          emit_n = (size_t)frames;
       }
+
+      for (size_t i = 0; i < emit_n; i++) { /* level trace */
+         up_sumsq += (uint64_t)((int32_t)emit[i] * emit[i]);
+      }
+      up_n += emit_n;
 
       /* ---- uplink write: pending-then-new, carry the remainder (arch-L1) ---- */
       bool fatal = false;
@@ -418,6 +497,11 @@ static void *bridge_thread(void *arg) {
             play_n = dframes;
          }
 
+         for (size_t i = 0; i < play_n; i++) { /* level trace */
+            dn_sumsq += (uint64_t)((int32_t)play_ptr[i] * play_ptr[i]);
+         }
+         dn_n += play_n;
+
          /* Stash the last <=320 PLAYED samples (right-aligned into two 10 ms
           * halves) as next cycle's reverse reference — post-processing, and only
           * the emitted samples (the staging remainder hasn't played yet). */
@@ -468,19 +552,15 @@ static void *bridge_thread(void *arg) {
          }
       }
 
-      /* ---- objective tuning trace: APM output levels ~once/second ---- */
+      /* ---- eff-M1: drop any accrued downlink backlog to cap latency ---- */
+      downlink_drain_backlog(dn, &dn_carry, &dn_drain_events, &dn_drained_total);
+
+      /* ---- objective level trace ~once/second (real dBFS, 0 = full scale) ---- */
       if ((++cycle % PHONE_RMS_LOG_INTERVAL) == 0) {
-         int up_rms = 0, dn_rms = 0;
-         bool have_up = apm != NULL && phone_apm_output_rms_dbfs(apm, &up_rms);
-         bool have_dn = (dn_apm != NULL && dn_use_apm) &&
-                        phone_apm_output_rms_dbfs(dn_apm, &dn_rms);
-         if (have_up && have_dn) {
-            OLOG_INFO("phone_bridge: APM out uplink ~%d dBFS, downlink ~%d dBFS", up_rms, dn_rms);
-         } else if (have_up) {
-            OLOG_INFO("phone_bridge: uplink APM output ~%d dBFS", up_rms);
-         } else if (have_dn) {
-            OLOG_INFO("phone_bridge: downlink APM output ~%d dBFS", dn_rms);
-         }
+         OLOG_INFO("phone_bridge: level uplink %d dBFS, downlink %d dBFS (0 = full scale)",
+                   rms_dbfs(up_sumsq, up_n), rms_dbfs(dn_sumsq, dn_n));
+         up_sumsq = dn_sumsq = 0;
+         up_n = dn_n = 0;
       }
    }
    return NULL;
