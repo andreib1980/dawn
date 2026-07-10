@@ -6,6 +6,8 @@ Add phone call and SMS support to the OASIS ecosystem via the Waveshare SIM7600G
 
 **Scope**: Voice calls, SMS, call/SMS history DB, HUD notifications, LLM tool, TTS announcements for incoming events.
 
+> **Call-audio quality (WebRTC APM — uplink + downlink, live tuning, WebUI settings)** is a distinct shipped sub-design: see [atlas/dawn/archive/PHONE_CALL_AUDIO_APM_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/PHONE_CALL_AUDIO_APM_DESIGN.md). This doc covers the transport, call/SMS state machine, and ECHO daemon.
+
 ---
 
 ## Architecture — Two-Daemon Design

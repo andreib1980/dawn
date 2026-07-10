@@ -88,7 +88,7 @@ static void test_nondefault_round_trip(void) {
    phone_audio_config_t in = phone_audio_config_default();
    snprintf(in.pcm_port, sizeof(in.pcm_port), "%s", "/dev/ttyUSB4");
    in.uplink.agc_enabled = false;             /* default true */
-   in.uplink.fixed_gain_db = 12.5f;           /* default 6.0 */
+   in.uplink.fixed_gain_db = 12.5f;           /* default 1.0 */
    in.uplink.max_gain_change_db_per_s = 1.5f; /* default 3.0 */
    in.uplink.max_output_noise_dbfs = -40.0f;  /* default -50.0 */
    in.uplink.ns_level = PHONE_NS_HIGH;        /* default moderate */
