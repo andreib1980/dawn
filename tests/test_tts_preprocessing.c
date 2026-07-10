@@ -378,6 +378,143 @@ static void test_preprocess_month_abbrev(void) {
    TEST_ASSERT_NOT_NULL(strstr(out, "January"));
 }
 
+/* ── phone-number expansion ──────────────────────────────────────────────── */
+
+static void test_phone_e164_spelled(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Call +16786432695 now", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 6 7 8 6 4 3 2 6 9 5")); /* spelled digit-by-digit */
+   TEST_ASSERT_NULL(strstr(out, "16786432695"));               /* no unspaced run */
+}
+
+static void test_phone_e164_with_formatting(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("at +1 (678) 643-2695.", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NULL(strstr(out, "(678)")); /* punctuation consumed */
+   TEST_ASSERT_NULL(strstr(out, "+"));     /* the '+' is dropped, not leaked */
+}
+
+static void test_phone_us_parens(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("Reach me at (678) 643-2695.", out,
+                                                      sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, ".")); /* sentence period preserved */
+}
+
+static void test_phone_us_dashes_with_country_code(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("dial 1-678-643-2695 please", out,
+                                                      sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1 6 7 8 6 4 3 2 6 9 5"));
+}
+
+static void test_phone_bare_run_untouched(void) {
+   char out[256];
+   int written = 0;
+   /* No '+' and no separators — treated as an ordinary number, left for espeak. */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("order 6786432695 shipped", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "6786432695"));
+}
+
+static void test_phone_oversized_groups_rejected(void) {
+   char out[256];
+   int written = 0;
+   /* 5+5 grouping is not a phone number (groups exceed 4 digits). */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("codes 12345 67890 here", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "12345 67890"));
+}
+
+static void test_phone_year_untouched(void) {
+   char out[128];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("back in 2024", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2024")); /* too short to be a phone number */
+}
+
+static void test_phone_plus_below_e164_min_untouched(void) {
+   char out[128];
+   int written = 0;
+   /* 7 digits after '+' is below the E.164 minimum — not a phone. */
+   TEST_ASSERT_EQUAL_INT(0,
+                         preprocess_text_for_tts_c("code +1234567 x", out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "+1234567"));
+}
+
+static void test_phone_trailing_number_not_merged(void) {
+   char out[256];
+   int written = 0;
+   /* Finding #1: a phone followed by " <digit>" must still expand (retry with
+    * space-separator disabled), and the trailing number stays intact. */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("dial 678-643-2695 2 times", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2 times"));
+}
+
+static void test_phone_two_in_one_sentence(void) {
+   char out[256];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("call 678-643-2695 or 555.123.4567", out,
+                                                      sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "6 7 8 6 4 3 2 6 9 5"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "5 5 5 1 2 3 4 5 6 7"));
+}
+
+static void test_phone_leading_nonone_11_untouched(void) {
+   char out[256];
+   int written = 0;
+   /* Finding #4: an 11-digit dashed number NOT starting with 1 is not a US
+    * phone, and must not have its 10-digit tail mangled. */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("id 2-678-643-2695 ok", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2-678-643-2695"));
+}
+
+static void test_phone_ip_untouched(void) {
+   char out[128];
+   int written = 0;
+   /* Finding #3: an IP address ({3,3,1,3}) is not a phone shape. */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("host 192.168.1.100 up", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "192.168.1.100"));
+}
+
+static void test_phone_iso_datetime_untouched(void) {
+   char out[128];
+   int written = 0;
+   /* Finding #3: "YYYY-MM-DD HH:MM" ({4,2,2} + time) is not a phone shape. */
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c("on 2026-06-16 12:30 today", out, sizeof(out),
+                                                      &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2026-06-16"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "12:30"));
+}
+
+static void test_phone_adversarial_bounded(void) {
+   /* Security: a long separator-dense run must return promptly (bounded scan)
+    * and pass through unchanged — pins the O(n) behavior. */
+   char in[600];
+   for (int k = 0; k < 299; k++) {
+      in[2 * k] = '1';
+      in[2 * k + 1] = '.';
+   }
+   in[598] = '1';
+   in[599] = '\0';
+   char out[700];
+   int written = 0;
+   TEST_ASSERT_EQUAL_INT(0, preprocess_text_for_tts_c(in, out, sizeof(out), &written));
+   TEST_ASSERT_NOT_NULL(strstr(out, "1.1.1")); /* left as ordinary text */
+}
+
 /* ── preprocess_text_for_tts_c: buffer truncation ────────────────────────── */
 
 static void test_preprocess_buffer_too_small(void) {
@@ -450,6 +587,21 @@ int main(void) {
    RUN_TEST(test_preprocess_state_abbrev);
    RUN_TEST(test_preprocess_day_abbrev);
    RUN_TEST(test_preprocess_month_abbrev);
+
+   RUN_TEST(test_phone_e164_spelled);
+   RUN_TEST(test_phone_e164_with_formatting);
+   RUN_TEST(test_phone_us_parens);
+   RUN_TEST(test_phone_us_dashes_with_country_code);
+   RUN_TEST(test_phone_bare_run_untouched);
+   RUN_TEST(test_phone_oversized_groups_rejected);
+   RUN_TEST(test_phone_year_untouched);
+   RUN_TEST(test_phone_plus_below_e164_min_untouched);
+   RUN_TEST(test_phone_trailing_number_not_merged);
+   RUN_TEST(test_phone_two_in_one_sentence);
+   RUN_TEST(test_phone_leading_nonone_11_untouched);
+   RUN_TEST(test_phone_ip_untouched);
+   RUN_TEST(test_phone_iso_datetime_untouched);
+   RUN_TEST(test_phone_adversarial_bounded);
 
    /* preprocess: truncation */
    RUN_TEST(test_preprocess_buffer_too_small);

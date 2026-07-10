@@ -1161,6 +1161,182 @@ static inline size_t generate_output(const char *src, size_t len, char *out) {
 }
 
 // ============================================================================
+// Phone-number expansion (pre-pass)
+// ============================================================================
+
+/* Phone numbers must be read digit-by-digit ("+16786432695" -> "1 6 7 8 ...")
+ * rather than as one cardinal ("sixteen billion ...").  A dedicated pre-pass
+ * (rather than a branch in the two-pass core) keeps that delicate size-calc /
+ * generate symmetry untouched: it rewrites the input string first, and the
+ * rest of the pipeline runs on the result.
+ *
+ * Detection policy (deliberately conservative — a bare undelimited digit run is
+ * NOT a phone number, so IDs/order numbers are never mis-spoken):
+ *   - a '+'-prefixed run of PHONE_E164_MIN_DIGITS..PHONE_E164_MAX_DIGITS digits
+ *     (E.164, e.g. "+16786432695", "+1 (678) 643-2695"), OR
+ *   - a punctuated US number whose digit groups match exactly {3,3,4} (10-digit)
+ *     or {1,3,3,4} with a leading "1" (11-digit), separated by "-.() " or a
+ *     mid-number space.  The exact-shape rule (not just "every group <= 4")
+ *     rejects IPs ({3,3,1,3}), ISO dates ({4,2,2}), and score lists ({2,2,...}).
+ * 7-digit local numbers, bare runs, and everything else pass through unchanged. */
+#define PHONE_E164_MIN_DIGITS 8
+#define PHONE_E164_MAX_DIGITS 15
+#define PHONE_US_DIGITS 10
+#define PHONE_US_CC_DIGITS 11
+#define PHONE_MAX_GROUPS 8
+/* Longest scan window: nothing beyond 15 digits + a few separators can ever
+ * match, so bounding the scan keeps the whole pre-pass O(n) even on adversarial
+ * separator-dense input (e.g. "1.1.1.1...") instead of O(n^2). */
+#define PHONE_MAX_SCAN 40
+
+/* Result of scanning a candidate phone token. */
+struct phone_scan_t {
+   char digits[PHONE_E164_MAX_DIGITS + 1]; /* NUL-terminated, capped at max */
+   int ndig;
+   bool has_plus;
+   bool has_sep;
+   int groups[PHONE_MAX_GROUPS]; /* length of each digit group */
+   int num_groups;
+   size_t digit_end; /* index one past the LAST digit (emit/skip end) */
+   bool valid;       /* false if over the scan/digit/group cap -> not a phone */
+};
+
+/* Scan a candidate phone token at s[start].  @p allow_space controls whether a
+ * mid-number space counts as a group separator: the caller tries space=true
+ * first (catches "678 643 2695" and "+1 (678) ...") and retries space=false on
+ * reject (so "678-643-2695 2 times" doesn't merge the trailing " 2"). */
+static void scan_phone_token(const std::string &s,
+                             size_t start,
+                             bool allow_space,
+                             phone_scan_t &r) {
+   r.ndig = 0;
+   r.has_plus = false;
+   r.has_sep = false;
+   r.num_groups = 0;
+   r.digit_end = start;
+   r.valid = true;
+   r.digits[0] = '\0';
+
+   size_t i = start;
+   const size_t limit = start + PHONE_MAX_SCAN;
+   if (i < s.size() && s[i] == '+') {
+      r.has_plus = true;
+      i++;
+   }
+
+   int cur = 0; /* current group length */
+   while (i < s.size() && i < limit) {
+      unsigned char c = (unsigned char)s[i];
+      if (std::isdigit(c)) {
+         if (r.ndig >= PHONE_E164_MAX_DIGITS) {
+            r.valid = false; /* longer than any phone number */
+            break;
+         }
+         r.digits[r.ndig++] = (char)c;
+         cur++;
+         i++;
+         r.digit_end = i;
+      } else if (c == '-' || c == '.' || c == '(' || c == ')' ||
+                 (allow_space && c == ' ' && i + 1 < s.size() &&
+                  (std::isdigit((unsigned char)s[i + 1]) || s[i + 1] == '('))) {
+         /* Separator: close the current group (a space counts only mid-number,
+          * i.e. followed by a digit or a '(' area-code group). */
+         if (cur > 0) {
+            if (r.num_groups >= PHONE_MAX_GROUPS) {
+               r.valid = false;
+               break;
+            }
+            r.groups[r.num_groups++] = cur;
+            cur = 0;
+         }
+         r.has_sep = true;
+         i++;
+      } else {
+         break;
+      }
+   }
+   if (cur > 0) {
+      if (r.num_groups < PHONE_MAX_GROUPS)
+         r.groups[r.num_groups++] = cur;
+      else
+         r.valid = false;
+   }
+   if (i >= limit)
+      r.valid = false; /* overran the window -> not a phone */
+   r.digits[r.ndig] = '\0';
+}
+
+/* Decide whether a scanned token is a phone number per the detection policy. */
+static bool phone_accept(const phone_scan_t &r) {
+   if (!r.valid || r.ndig == 0)
+      return false;
+   if (r.has_plus)
+      return r.ndig >= PHONE_E164_MIN_DIGITS && r.ndig <= PHONE_E164_MAX_DIGITS;
+   if (!r.has_sep)
+      return false; /* bare undelimited run -> ordinary number */
+   /* Exact US shapes: {3,3,4} (10 digits) or {1,3,3,4} with a literal leading 1. */
+   if (r.num_groups == 3)
+      return r.groups[0] == 3 && r.groups[1] == 3 && r.groups[2] == 4;
+   if (r.num_groups == 4)
+      return r.groups[0] == 1 && r.groups[1] == 3 && r.groups[2] == 3 && r.groups[3] == 4 &&
+             r.digits[0] == '1';
+   return false;
+}
+
+/* Rewrite phone numbers in @p input to space-separated digits, writing the
+ * result to @p out.  Returns true iff at least one number was rewritten; on
+ * false @p out is left untouched so the caller uses @p input directly (zero
+ * allocation on the common no-phone path). */
+static bool expand_phone_numbers_for_tts(const std::string &input, std::string &out) {
+   const size_t n = input.size();
+   bool started = false;
+
+   size_t i = 0;
+   while (i < n) {
+      unsigned char c = (unsigned char)input[i];
+      /* Attempt a match only at a token boundary: start-of-string, or after a
+       * char that is neither alphanumeric nor a phone separator/currency sign.
+       * Excluding a preceding '-'/'.'/'$' stops us from re-matching the tail of
+       * a rejected number ("2-678-643-2695") or a currency-prefixed run. */
+      char prev = (i == 0) ? '\0' : input[i - 1];
+      bool boundary = (i == 0) || (!std::isalnum((unsigned char)prev) && prev != '-' &&
+                                   prev != '.' && prev != '$');
+      if (boundary && (c == '+' || c == '(' || std::isdigit(c))) {
+         phone_scan_t r;
+         bool ok = false;
+         /* Try space-as-separator first, then retry without it. */
+         for (int pass = 0; pass < 2 && !ok; pass++) {
+            scan_phone_token(input, i, pass == 0, r);
+            bool end_boundary = (r.digit_end >= n) ||
+                                !std::isalnum((unsigned char)input[r.digit_end]);
+            if (end_boundary && phone_accept(r))
+               ok = true;
+         }
+         if (ok) {
+            if (!started) {
+               out.clear();
+               out.reserve(n + 8);
+               out.append(input, 0, i); /* copy the prefix scanned so far */
+               started = true;
+            }
+            for (int k = 0; k < r.ndig; k++) {
+               if (k)
+                  out.push_back(' ');
+               out.push_back(r.digits[k]);
+            }
+            i = r.digit_end;
+            continue;
+         }
+      }
+      if (started)
+         out.push_back((char)c);
+      i++;
+   }
+
+   return started;
+}
+
+// ============================================================================
 // Main Preprocessing Function (Optimized Two-Pass)
 // ============================================================================
 
@@ -1170,8 +1346,16 @@ std::string preprocess_text_for_tts(const std::string &input) {
    if (input.empty())
       return input;
 
-   const char *src = input.data();
-   const size_t len = input.length();
+   /* Pre-pass: rewrite phone numbers to spaced digits before the number/currency
+    * passes so they read digit-by-digit instead of as a giant cardinal.  When
+    * there is no phone number (the common case) the pass allocates nothing and
+    * we run the pipeline directly on `input`. */
+   std::string phone_buf;
+   const std::string &phone_expanded = expand_phone_numbers_for_tts(input, phone_buf) ? phone_buf
+                                                                                      : input;
+
+   const char *src = phone_expanded.data();
+   const size_t len = phone_expanded.length();
 
    // === PASS 1: Calculate exact output size ===
    size_t output_size = calculate_output_size(src, len);
