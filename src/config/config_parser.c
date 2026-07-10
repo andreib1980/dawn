@@ -1919,6 +1919,27 @@ static void parse_code_projects(toml_table_t *table, code_projects_config_t *con
    }
 }
 
+static void parse_attention(toml_table_t *table, attention_config_t *config) {
+   if (!table)
+      return;
+
+   static const char *const known_keys[] = { "enabled",
+                                             "max_alerts_per_hour",
+                                             "inject_into_sessions",
+                                             "judge_enabled",
+                                             "judge_threshold",
+                                             "quiet_hours",
+                                             NULL };
+   warn_unknown_keys(table, "attention", known_keys);
+
+   PARSE_BOOL(table, "enabled", config->enabled);
+   PARSE_INT(table, "max_alerts_per_hour", config->max_alerts_per_hour);
+   PARSE_BOOL(table, "inject_into_sessions", config->inject_into_sessions);
+   PARSE_BOOL(table, "judge_enabled", config->judge_enabled);
+   PARSE_DOUBLE(table, "judge_threshold", config->judge_threshold);
+   PARSE_STRING(table, "quiet_hours", config->quiet_hours);
+}
+
 int config_parse_file(const char *path, dawn_config_t *config) {
    if (!path || !config) {
       OLOG_ERROR("config_parse_file: NULL argument");
@@ -1970,6 +1991,7 @@ int config_parse_file(const char *path, dawn_config_t *config) {
    parse_ota(toml_table_in(root, "ota"), &config->ota);
    parse_mcp(toml_table_in(root, "mcp"), &config->mcp);
    parse_code_projects(toml_table_in(root, "code_projects"), &config->code_projects);
+   parse_attention(toml_table_in(root, "attention"), &config->attention);
 
    toml_free(root);
 

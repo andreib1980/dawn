@@ -102,6 +102,10 @@ static void set_valid_defaults(void) {
    s_config.memory.recall.budget_bytes = 24576;
    s_config.memory.recall.min_score = 0.25f;
    s_config.memory.recall.per_source_max = 16;
+   /* attention.* (SAGE) — judge_threshold has a [1.0,5.0] validator, so a
+    * zeroed baseline would fail; provide the shipped defaults. */
+   s_config.attention.max_alerts_per_hour = 4;
+   s_config.attention.judge_threshold = 3.5;
    s_config.mqtt.port = 1883;
    s_config.network.workers = 4;
    s_config.network.session_timeout_sec = 3600;

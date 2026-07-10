@@ -75,6 +75,35 @@ void scheduler_shutdown(void);
  */
 void scheduler_notify_new_event(void);
 
+/**
+ * @brief Speak an ad-hoc "now" alert, reusing the scheduler's TTS routing —
+ *        WITHOUT a persisted event or the ringing/dismiss state machine.
+ *
+ * Synthesizes a transient (id = 0, never stored) event and speaks @text verbatim
+ * (no "Reminder:" prefix) via the same TTS routing a fired reminder uses; also
+ * delivers to a messaging channel when @deliver_to is set.  Does NOT emit a
+ * WebUI banner — the caller owns any visual surface (SAGE uses its own
+ * attention_alert channel).  Built for the SAGE proactive-attention layer.
+ *
+ * @param user_id      Owner the alert is delivered to.
+ * @param text         The message to speak / show (verbatim).
+ * @param type         Event type carried on the transient event (informational).
+ * @param deliver_to   Optional messaging channel; when set, delivery is
+ *                     EXCLUSIVE to it (suppresses local TTS + banner), matching
+ *                     the scheduler's deliver_to semantics.  Pass "" or NULL for
+ *                     the default local speaker + WebUI banner.
+ * @param speak        true to speak @text aloud; false to suppress voice.  This
+ *                     function emits NO WebUI banner in either case — the caller
+ *                     owns any visual surface.  Ignored when @deliver_to routes
+ *                     to a messaging channel.
+ * @return SUCCESS, or FAILURE on bad input.
+ */
+int scheduler_emit_alert(int user_id,
+                         const char *text,
+                         sched_event_type_t type,
+                         const char *deliver_to,
+                         bool speak);
+
 /* =============================================================================
  * Ringing State Queries
  * ============================================================================= */

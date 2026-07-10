@@ -885,6 +885,22 @@
                   DawnScheduler.handleNotification(msg.payload);
                }
                break;
+            case 'attention_alert': {
+               // SAGE proactive-attention banner. Its own channel (not the
+               // scheduler's) so it shows an ATTENTION badge and never chimes.
+               const ap = msg.payload || {};
+               if (typeof DawnToast !== 'undefined' && ap.summary) {
+                  // 'alert' is accompanied by server-side voice (urgent → assertive,
+                  // longer dwell); 'ambient' is a silent, non-interrupting banner
+                  // (polite live-region — the a11y equivalent of not chiming).
+                  const isAlert = ap.level !== 'ambient';
+                  DawnToast.show(ap.summary, 'attention', isAlert ? 10000 : 6000, {
+                     badge: 'ATTENTION',
+                     assertive: isAlert,
+                  });
+               }
+               break;
+            }
             case 'phone_call_notification':
                if (typeof DawnPhone !== 'undefined') {
                   DawnPhone.handleNotification(msg.payload);

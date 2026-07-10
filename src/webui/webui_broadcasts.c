@@ -46,6 +46,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/attention/attention.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
 #include "core/missed_notifications_db.h"
@@ -385,6 +386,55 @@ int scheduler_route_tts_to_user(int user_id,
 }
 
 /* =============================================================================
+ * Shared per-user JSON fan-out
+ *
+ * The many "build a {type,payload} object and push it to a user's browser
+ * sessions" broadcasters share one loop body.  This helper owns it: it takes
+ * ownership of @root, serializes it into a stable string, drops @root BEFORE the
+ * registry walk (so the object tree isn't held alive across it), then fans out
+ * strdup copies to matching connections.  user_id > 0 delivers to that user's
+ * authenticated sessions; user_id <= 0 fans out to every authenticated session.
+ * Returns the number of sessions queued.  Thread-safe (registry mutex + response
+ * queue).  NOT for the scheduler notification / silent-observation /
+ * context-injection paths — those carry per-function variation (missed-queue,
+ * satellite filter, WebUI-session gate) that doesn't belong here.
+ * ============================================================================= */
+static int broadcast_json_to_user(int user_id, json_object *root) {
+   if (!root)
+      return 0;
+
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_cached = json_str ? strdup(json_str) : NULL;
+   json_object_put(root); /* drop the tree before the walk */
+   if (!json_cached)
+      return 0;
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      if (user_id > 0 && conn->auth_user_id != user_id)
+         continue;
+
+      char *json_copy = strdup(json_cached);
+      if (!json_copy)
+         continue;
+
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free(json_cached);
+   return sent;
+}
+
+/* =============================================================================
  * Conversation Title Broadcast (called from memory extraction thread)
  * ============================================================================= */
 
@@ -400,31 +450,7 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
    json_object_object_add(payload, "title", json_object_new_string(title));
    json_object_object_add(root, "payload", payload);
 
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated)
-         continue;
-      if (conn->auth_user_id != user_id)
-         continue;
-
-      char *json_copy = strdup(json_str);
-      if (!json_copy)
-         continue;
-
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   json_object_put(root);
-
+   int sent = broadcast_json_to_user(user_id, root);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast conversation rename to %d client(s): %s", sent, title);
    }
@@ -441,31 +467,7 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
    json_object_object_add(payload, "conversation_id", json_object_new_int64(conv_id));
    json_object_object_add(root, "payload", payload);
 
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated)
-         continue;
-      if (conn->auth_user_id != user_id)
-         continue;
-
-      char *json_copy = strdup(json_str);
-      if (!json_copy)
-         continue;
-
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   json_object_put(root);
-
+   int sent = broadcast_json_to_user(user_id, root);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast conversation_messages_appended (conv=%lld) to %d client(s)",
                 (long long)conv_id, sent);
@@ -849,33 +851,36 @@ void webui_broadcast_memory_notice(int user_id, const char *level, const char *m
    json_object_object_add(payload, "message", json_object_new_string(message));
    json_object_object_add(root, "payload", payload);
 
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated)
-         continue;
-      if (conn->auth_user_id != user_id)
-         continue;
-
-      char *json_copy = strdup(json_str);
-      if (!json_copy)
-         continue;
-
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   json_object_put(root);
-
+   int sent = broadcast_json_to_user(user_id, root);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast memory notice (%s) to %d client(s)", level, sent);
+   }
+}
+
+/* SAGE proactive-attention banner — strong override of the weak stub in
+ * attention_core.c.  Its own channel (not scheduler_notification) so it shows an
+ * ATTENTION badge and never triggers the scheduler client chime. */
+void webui_broadcast_attention_alert(int user_id, const char *summary, const char *level) {
+   if (user_id <= 0 || !summary || !level)
+      return;
+
+   /* Scrub free-text before it enters a WS text frame (RFC 6455 §5.6): a stray
+    * invalid byte would fail the frame and wedge the client.  Stack buffer (no
+    * alloc, no OOM-fallback-sends-unsanitized gap). */
+   char summary_safe[SAGE_SUMMARY_LEN];
+   snprintf(summary_safe, sizeof(summary_safe), "%s", summary);
+   sanitize_utf8_for_json(summary_safe);
+
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("attention_alert"));
+   json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "summary", json_object_new_string(summary_safe));
+   json_object_object_add(payload, "level", json_object_new_string(level));
+   json_object_object_add(root, "payload", payload);
+
+   int sent = broadcast_json_to_user(user_id, root);
+   if (sent > 0) {
+      OLOG_INFO("WebUI: attention alert (%s) to %d client(s)", level, sent);
    }
 }
 
@@ -895,31 +900,7 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
    json_object_object_add(payload, "count", json_object_new_int(pending));
    json_object_object_add(root, "payload", payload);
 
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated)
-         continue;
-      if (conn->auth_user_id != user_id)
-         continue;
-
-      char *json_copy = strdup(json_str);
-      if (!json_copy)
-         continue;
-
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   json_object_put(root);
-
+   int sent = broadcast_json_to_user(user_id, root);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast memory_proposals_changed (count=%d) to %d client(s)", pending,
                 sent);
@@ -935,34 +916,9 @@ void scheduler_broadcast_events_changed(int user_id) {
    json_object_object_add(root, "type", json_object_new_string("scheduler_events_changed"));
    json_object_object_add(root, "payload", json_object_new_object());
 
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated)
-         continue;
-      /* user_id <= 0 means "system event" — fan out to every authenticated
-       * session.  The startup missed-recovery sweep uses this since multiple
-       * users' events may have transitioned to 'missed' in one pass. */
-      if (user_id > 0 && conn->auth_user_id != user_id)
-         continue;
-
-      char *json_copy = strdup(json_str);
-      if (!json_copy)
-         continue;
-
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   json_object_put(root);
-
+   /* user_id <= 0 ("system event", e.g. the startup missed-recovery sweep) fans
+    * out to every authenticated session — handled by the helper's convention. */
+   int sent = broadcast_json_to_user(user_id, root);
    if (sent > 0) {
       OLOG_INFO("WebUI: Broadcast scheduler_events_changed (user=%d) to %d client(s)", user_id,
                 sent);
@@ -983,25 +939,9 @@ void code_project_broadcast_status_changed(int64_t project_id) {
    json_object *payload = json_object_new_object();
    json_object_object_add(payload, "project_id", json_object_new_int64(project_id));
    json_object_object_add(root, "payload", payload);
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
 
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated) {
-         continue;
-      }
-      char *json_copy = strdup(json_str);
-      if (!json_copy) {
-         continue;
-      }
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-   json_object_put(root);
+   /* Ping every authenticated browser (user_id <= 0 = fan out to all). */
+   broadcast_json_to_user(0, root);
 }
 
 /* Strong override of the weak code_project_broadcast_import_failed stub. A
@@ -1019,24 +959,8 @@ void code_project_broadcast_import_failed(int64_t user_id, const char *name, con
    json_object_object_add(payload, "name", json_object_new_string(name != NULL ? name : ""));
    json_object_object_add(payload, "reason", json_object_new_string(reason != NULL ? reason : ""));
    json_object_object_add(root, "payload", payload);
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
 
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session || !conn->authenticated || conn->auth_user_id != user_id) {
-         continue;
-      }
-      char *json_copy = strdup(json_str);
-      if (!json_copy) {
-         continue;
-      }
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-   json_object_put(root);
+   /* Toast only the requesting user. */
+   broadcast_json_to_user((int)user_id, root);
 }
 #endif /* DAWN_ENABLE_CODE_PROJECTS */

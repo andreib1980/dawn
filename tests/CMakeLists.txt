@@ -101,6 +101,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v68.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v69.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v70.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v71.c
     ${SRC_ROOT}/src/auth/auth_db_statements.c
     ${SRC_ROOT}/src/auth/auth_db_user.c
     ${SRC_ROOT}/src/auth/auth_db_session.c
@@ -389,6 +390,14 @@ dawn_add_unit_test(test_context_compaction
 dawn_add_unit_test(test_time_query_parser
    SOURCES test_time_query_parser.c
            ${SRC_ROOT}/src/core/time_query_parser.c
+   LIBS    unity m
+   LABEL   ci)
+
+dawn_add_unit_test(test_attention_gate
+   SOURCES test_attention_gate.c
+           ${SRC_ROOT}/src/core/attention/attention_gate.c
+           ${SRC_ROOT}/src/core/attention/attention_policy.c
+           ${SRC_ROOT}/src/core/attention/attention_catalog.c
    LIBS    unity m
    LABEL   ci)
 

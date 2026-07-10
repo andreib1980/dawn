@@ -146,6 +146,7 @@ DAWN's LLM automatically invokes tools and incorporates results into responses. 
    - Version history with one-step undo — recover the previous version or restore a deleted note
    - Filed reference text is kept out of semantic memory by default, so the canonical copy lives only in the note store (configurable under `[memory]`)
 - **Code Projects (Code Analysis)** — Index your source repositories into a code graph and ask about them by voice or chat: "what calls `parse_payload`?", "where is the session manager defined?", "what changed on this branch?". Import a GitHub-style repo (in-process libgit2 clone) or link a local checkout; per-project branch tracking and refresh/rebuild. Answering runs against an **external, operator-launched** code-graph server (**cbm**) — DAWN connects to it over MCP and never spawns it. Optional; requires the cbm server plus the coding-harness build flags. Setup: [docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md).
+- **Suit & System Telemetry** — Ask about the live state of the armor and the machine DAWN runs on: environment (temperature, humidity, air quality, CO₂), helmet orientation (heading/pitch/roll), GPS position, and per-piece armor status via `suit_status`; CPU, memory, battery, power, thermals, and fault counts via `system_status`. Fed over MQTT from the AURA helmet + SPARK armor (through MIRAGE) and the STAT daemon; values age out and report staleness when a source goes quiet rather than returning stale guesses.
 
 ### Persistent Memory
 
@@ -163,6 +164,16 @@ DAWN remembers facts, preferences, and relationships about its users across sess
 - **Memory Viewer** — Browse, search, and manage all memory types in the WebUI. Five tabs: Facts, Preferences, Summaries, Graph, Contacts.
 - **Import / Export** — Export memories as DAWN JSON (lossless backup) or human-readable text (portable). Import from Claude, ChatGPT, or other AIs — paste text or upload a file. Preview before committing with automatic duplicate detection.
 - **Per-User Isolation** — Each user's memory is separate in multi-user households.
+
+### Proactive Attention
+
+DAWN doesn't just answer — it watches, and speaks up on its own. Tell it what to keep an eye on, in plain language, and it flags anomalies without being asked.
+
+- **Set watches by voice** — "Keep an eye on the CO₂", "Tell me if the battery drops below 20%", "Let me know if system temp goes above 70°C", "Alert me if the helmet link goes quiet". Watches are per-user and managed conversationally — "What are you watching?", "Ignore that temperature for now", "Stop watching the CPU".
+- **~24 watchable signals** across the suit (CO₂, air quality, heat index, helmet/armor temperature, armor voltage, telemetry-silence) and the compute unit (CPU, memory, battery level/voltage/runtime, thermals, critical/warning faults).
+- **Smart, not noisy** — a deterministic gate with threshold/slope/absence rules, hysteresis, and exponential backoff means one alert per genuine excursion, not a stream: it fires when a value crosses the line, stays quiet while it's out, and re-arms once it recovers. A per-hour budget caps spoken interruptions.
+- **Two loudness levels** — spoken **ATTENTION** alerts (voice + banner) for the things you want to hear, or silent banners for the things you just want on the HUD. Your wording picks which.
+- **Off by default** — opt in with `[attention] enabled = true` (or the WebUI Settings toggle). Alerts are delivered chime-free off the audio path so they never stall the voice loop.
 
 ### Music Playback
 

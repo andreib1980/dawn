@@ -1121,6 +1121,25 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
                           config->scheduler.briefing_speak_aloud_on_webui_source);
    }
 
+   /* [attention] (SAGE) — operator scalars only; watch rules are DB-managed.
+    * Clamp here since this path does not run config_validate (see note above). */
+   if (json_object_object_get_ex(payload, "attention", &section)) {
+      JSON_TO_CONFIG_BOOL(section, "enabled", config->attention.enabled);
+      JSON_TO_CONFIG_INT(section, "max_alerts_per_hour", config->attention.max_alerts_per_hour);
+      if (config->attention.max_alerts_per_hour < 0)
+         config->attention.max_alerts_per_hour = 0;
+      if (config->attention.max_alerts_per_hour > 100)
+         config->attention.max_alerts_per_hour = 100;
+      JSON_TO_CONFIG_BOOL(section, "inject_into_sessions", config->attention.inject_into_sessions);
+      JSON_TO_CONFIG_BOOL(section, "judge_enabled", config->attention.judge_enabled);
+      JSON_TO_CONFIG_DOUBLE(section, "judge_threshold", config->attention.judge_threshold);
+      if (config->attention.judge_threshold < 1.0)
+         config->attention.judge_threshold = 1.0;
+      if (config->attention.judge_threshold > 5.0)
+         config->attention.judge_threshold = 5.0;
+      JSON_TO_CONFIG_STR(section, "quiet_hours", config->attention.quiet_hours);
+   }
+
    /* [mcp] — coding-harness MCP bridge. Only the scalars are settings-editable;
     * the [[mcp.server]] array is TOML-managed and intentionally not applied here. */
    if (json_object_object_get_ex(payload, "mcp", &section)) {

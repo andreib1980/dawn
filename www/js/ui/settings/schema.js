@@ -2057,6 +2057,51 @@
             },
          },
       },
+      attention: {
+         label: 'Proactive Attention',
+         icon: '&#x1F441;',
+         fields: {
+            enabled: {
+               type: 'checkbox',
+               label: 'Enable Proactive Attention',
+               hint: 'Let DAWN watch telemetry and speak up when a watch fires. Manage the watches themselves by voice ("keep an eye on the CO2") or the Watches panel.',
+            },
+            max_alerts_per_hour: {
+               type: 'number',
+               label: 'Max Spoken Alerts / Hour',
+               min: 0,
+               max: 100,
+               hint: 'Global budget for spoken alerts; over-budget alerts degrade to a silent banner.',
+            },
+            inject_into_sessions: {
+               type: 'checkbox',
+               label: 'Make Conversations Aware',
+               hint: 'Also seed an active conversation with a fired alert so DAWN can reference it in chat.',
+               advanced: true,
+            },
+            judge_enabled: {
+               type: 'checkbox',
+               label: 'LLM Salience Judge',
+               hint: 'Reserved — the LLM salience judge is not yet active.',
+               advanced: true,
+            },
+            judge_threshold: {
+               type: 'number',
+               label: 'Judge Score Floor',
+               min: 1,
+               max: 5,
+               step: 0.1,
+               hint: 'Reserved for the LLM judge (1.0-5.0).',
+               advanced: true,
+            },
+            quiet_hours: {
+               type: 'text',
+               label: 'Quiet Hours',
+               hint: 'Reserved — quiet-hours window, e.g. "23:00-07:00".',
+               advanced: true,
+            },
+         },
+      },
       scheduler: {
          label: 'Scheduler',
          icon: '&#x23F0;',

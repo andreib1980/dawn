@@ -900,6 +900,25 @@
                                     # (default: 600 = 10 minutes).
 
 # =============================================================================
+# Proactive attention (SAGE)
+# =============================================================================
+# DAWN watches live telemetry (STAT / suit / helmet-link) and speaks up on its
+# own when a WATCH you've set fires — "power's at twelve percent, sir".  Only
+# operator-level knobs live here; the watches themselves are managed by voice or
+# the WebUI Watches panel ("Friday, keep an eye on the CO2", "ignore that temp
+# for now"), NOT in this file.  Master switch is OFF by default.
+
+[attention]
+# enabled = false                 # Master switch (evaluation + delivery).
+# max_alerts_per_hour = 4         # Global spoken-alert budget; over-budget
+                                  #   alerts degrade to a silent banner. 0-100.
+# inject_into_sessions = false    # Also make an active conversation aware of a
+                                  #   fired alert (so Friday can reference it).
+# judge_enabled = false           # P2 LLM salience judge (not yet active).
+# judge_threshold = 3.5           # P2 score floor (1.0-5.0).
+# quiet_hours = ""                # P1 quiet-hours window, e.g. "23:00-07:00".
+
+# =============================================================================
 # OTA (over-the-air satellite updates)
 # =============================================================================
 # Server→satellite firmware updates. Release artifacts are signed OFFLINE with

@@ -526,6 +526,11 @@ int config_validate(const dawn_config_t *config,
       }
    }
 
+   /* Proactive attention (SAGE) */
+   VALIDATE_RANGE_INT("attention.max_alerts_per_hour", config->attention.max_alerts_per_hour, 0,
+                      100);
+   VALIDATE_RANGE_FLOAT("attention.judge_threshold", config->attention.judge_threshold, 1.0f, 5.0f);
+
    return error_count;
 }
 

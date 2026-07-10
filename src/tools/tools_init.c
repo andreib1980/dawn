@@ -123,6 +123,8 @@
 #ifdef DAWN_ENABLE_SUIT_TOOL
 #include "tools/suit_tool.h"
 #endif
+/* attention: core subsystem, always compiled + registered unconditionally. */
+#include "tools/attention_tool.h"
 #include "tools/messaging_tool.h"
 #ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
 #include "tools/context_expand_tool.h"
@@ -335,6 +337,12 @@ int tools_register_all(void) {
       OLOG_WARNING("Failed to register suit_status tool");
    }
 #endif
+
+   /* SAGE proactive-attention management tool (always compiled — the module is
+    * core; the master switch gates whether watches actually fire). */
+   if (attention_tool_register() != 0) {
+      OLOG_WARNING("Failed to register attention tool");
+   }
 
 #ifdef DAWN_ENABLE_CONTEXT_EXPAND_TOOL
    if (context_expand_tool_register() != 0) {

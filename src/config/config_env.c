@@ -1723,6 +1723,21 @@ json_object *config_to_json(const dawn_config_t *config) {
                               config->scheduler.briefing_speak_aloud_on_webui_source));
    json_object_object_add(root, "scheduler", scheduler);
 
+   /* [attention] (SAGE proactive attention — operator scalars; watch rules are DB) */
+   json_object *attention = json_object_new_object();
+   json_object_object_add(attention, "enabled", json_object_new_boolean(config->attention.enabled));
+   json_object_object_add(attention, "max_alerts_per_hour",
+                          json_object_new_int(config->attention.max_alerts_per_hour));
+   json_object_object_add(attention, "inject_into_sessions",
+                          json_object_new_boolean(config->attention.inject_into_sessions));
+   json_object_object_add(attention, "judge_enabled",
+                          json_object_new_boolean(config->attention.judge_enabled));
+   json_object_object_add(attention, "judge_threshold",
+                          json_object_new_double(config->attention.judge_threshold));
+   json_object_object_add(attention, "quiet_hours",
+                          json_object_new_string(config->attention.quiet_hours));
+   json_object_object_add(root, "attention", attention);
+
    /* [calendar] */
    json_object *calendar = json_object_new_object();
    json_object_object_add(calendar, "enabled", json_object_new_boolean(config->calendar.enabled));
@@ -2453,6 +2468,17 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "release_dir = \"%s\"\n", config->ota.release_dir);
    fprintf(fp, "download_token_ttl_sec = %d\n", config->ota.download_token_ttl_sec);
    fprintf(fp, "require_tls = %s\n", config->ota.require_tls ? "true" : "false");
+
+   /* [attention] (SAGE) — round-trips so a WebUI settings save can't drop the
+    * operator's master switch / budget. Watch RULES live in the DB, not here. */
+   fprintf(fp, "\n[attention]\n");
+   fprintf(fp, "enabled = %s\n", config->attention.enabled ? "true" : "false");
+   fprintf(fp, "max_alerts_per_hour = %d\n", config->attention.max_alerts_per_hour);
+   fprintf(fp, "inject_into_sessions = %s\n",
+           config->attention.inject_into_sessions ? "true" : "false");
+   fprintf(fp, "judge_enabled = %s\n", config->attention.judge_enabled ? "true" : "false");
+   fprintf(fp, "judge_threshold = %.2f\n", config->attention.judge_threshold);
+   fprintf(fp, "quiet_hours = \"%s\"\n", config->attention.quiet_hours);
 
    /* [mcp] + [[mcp.server]] (coding harness) — round-trips so a settings save
     * can't drop a manually-configured bridge server. */

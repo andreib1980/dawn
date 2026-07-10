@@ -179,6 +179,9 @@
    display: flex;
    flex-direction: column;
    gap: 0.5rem;
+   /* Cap width so a full-sentence SAGE summary wraps instead of sprawling
+    * across the viewport. */
+   max-width: min(420px, calc(100vw - 2rem));
 }
 
 .toast {
@@ -211,6 +214,30 @@
    background: rgba(245, 158, 11, 0.9);
 }
 
+/* SAGE proactive-attention alert — HUD-style cyan, distinct from warning/error,
+ * with a leading ATTENTION badge chip.  The cyan is a fixed cross-theme channel
+ * identity (like success is always green), NOT the theme accent. */
+.toast-attention {
+   display: flex;
+   align-items: center;
+   gap: 0.6rem;
+   background: rgba(8, 20, 30, 0.95);
+   border: 1px solid rgba(34, 211, 238, 0.6);
+   border-left: 3px solid rgb(34, 211, 238);
+}
+
+/* Shape/typography come from the shared .dawn-badge primitive; this only tints
+ * the chip SAGE-cyan. */
+.toast-badge {
+   flex: 0 0 auto;
+   background: rgba(34, 211, 238, 0.18);
+   color: rgb(34, 211, 238);
+}
+
+.toast-text {
+   flex: 1 1 auto;
+}
+
 .toast-action {
    display: inline-block;
    margin-left: 0.5rem;
@@ -230,6 +257,19 @@
 
 .toast-fade-out {
    animation: toast-out 0.3s ease forwards;
+}
+
+/* Vestibular safety: a proactive, unrequested toast must not lurch in/out for
+ * users who prefer reduced motion — fade/appear without the horizontal slide. */
+@media (prefers-reduced-motion: reduce) {
+   .toast {
+      animation: none;
+   }
+
+   .toast-fade-out {
+      animation: none;
+      opacity: 0;
+   }
 }
 
 @keyframes toast-in {

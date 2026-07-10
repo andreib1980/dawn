@@ -1077,6 +1077,22 @@ typedef struct {
 } code_projects_config_t;
 
 /* =============================================================================
+ * Proactive attention (SAGE) — [attention]
+ * -----------------------------------------------------------------------------
+ * Operator scalars only.  The watch RULES are per-user database rows managed at
+ * runtime by the `attention` LLM tool and the WebUI Watches panel (the JARVIS
+ * conversational-control principle) — never listed here.
+ * ============================================================================= */
+typedef struct {
+   bool enabled;              /* master switch (evaluation + delivery) */
+   int max_alerts_per_hour;   /* global spoken-alert budget */
+   bool inject_into_sessions; /* also seed active-conversation LLM context (P0: off) */
+   bool judge_enabled;        /* P2 LLM judge (parsed, ignored in P0) */
+   double judge_threshold;    /* P2 score floor 1.0-5.0 */
+   char quiet_hours[16];      /* P1 quiet-hours window, e.g. "23:00-07:00" */
+} attention_config_t;
+
+/* =============================================================================
  * Main Configuration Struct
  * ============================================================================= */
 typedef struct {
@@ -1109,6 +1125,7 @@ typedef struct {
    ota_config_t ota;
    mcp_config_t mcp;
    code_projects_config_t code_projects;
+   attention_config_t attention;
 } dawn_config_t;
 
 /* =============================================================================

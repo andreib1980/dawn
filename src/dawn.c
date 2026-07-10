@@ -58,6 +58,7 @@
 #include "audio/music_db.h"
 #include "audio/music_scanner.h"
 #include "audio/plex_db.h"
+#include "core/attention/attention.h"
 #include "core/command_executor.h"
 #include "core/command_router.h"
 #include "core/component_status.h"
@@ -2415,6 +2416,13 @@ mqtt_disabled:
 #endif
 #endif
 
+   /* SAGE proactive attention: load per-user watches + seed the safety set on
+    * first run (needs auth_db open).  Master switch [attention] enabled gates
+    * whether the heartbeat tick actually evaluates + delivers. */
+   if (auth_db_ready) {
+      attention_init();
+   }
+
    /* OTA subsystem (after the DB is ready — it reconciles device state).
     * Non-fatal: a failure just leaves OTA serving disabled. */
    if (ota_init() != SUCCESS) {
@@ -2500,6 +2508,8 @@ mqtt_disabled:
                 g_config.webui.port);
       while (!quit) {
          sleep(1);
+         /* SAGE heartbeat (server mode has no per-second loop of its own). */
+         attention_tick(time(NULL));
       }
       goto server_shutdown;
    }
@@ -2514,6 +2524,8 @@ mqtt_disabled:
          if (now_rollout != s_last_rollout_tick) {
             s_last_rollout_tick = now_rollout;
             ota_rollout_tick(now_rollout);
+            /* SAGE proactive-attention heartbeat (same once-per-second cadence). */
+            attention_tick(now_rollout);
          }
       }
 
@@ -3929,6 +3941,7 @@ server_shutdown:
    OLOG_INFO("Shutdown: stopping heartbeat");
    component_status_publish_offline(mosq);
    component_status_shutdown();
+   attention_shutdown();
 
    // Ensure LLM thread is stopped before cleanup
    // This prevents resource leaks if restart was requested during LLM processing

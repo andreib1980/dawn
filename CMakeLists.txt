@@ -699,6 +699,19 @@ list(APPEND DAWN_SOURCES
     src/core/ota_rollout.c
 )
 
+# SAGE proactive-attention subsystem (Layer 1 core, always compiled; master
+# switch is [attention] enabled, default OFF). Ingest polls the STAT/suit
+# service caches, so it degrades gracefully when those tools are compiled out.
+list(APPEND DAWN_SOURCES
+    src/core/attention/attention_core.c
+    src/core/attention/attention_catalog.c
+    src/core/attention/attention_ingest.c
+    src/core/attention/attention_gate.c
+    src/core/attention/attention_policy.c
+    src/core/attention/attention_db.c
+    src/tools/attention_tool.c
+)
+
 # Document DB, chunker, extraction, and indexing pipeline (RAG document search)
 list(APPEND DAWN_SOURCES
     src/tools/document_db.c
@@ -741,6 +754,8 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v68.c
     src/auth/auth_db_migrations_v69.c
     src/auth/auth_db_migrations_v70.c
+    src/auth/auth_db_migrations_v71.c
+    src/auth/auth_db_attention.c
     src/auth/auth_db_statements.c
     # DB-layer tables depended on by the always-compiled memory / OTA / tool
     # subsystems (extraction, summaries, history, satellite OTA, image tools), so

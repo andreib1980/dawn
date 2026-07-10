@@ -16,7 +16,7 @@
     * @param {string} message - Text to display
     * @param {string} type - Toast type: 'info', 'success', 'error', 'warning'
     * @param {number} duration - Auto-dismiss in ms (default 4000, 0 = manual)
-    * @param {object} options - Optional: {actions: [{label, onClick}]}
+    * @param {object} options - Optional: {actions: [{label, onClick}], badge: 'TEXT'}
     * @returns {HTMLElement} The toast element (for attaching event listeners)
     */
    function showToast(message, type = 'info', duration = 4000, options = {}) {
@@ -30,23 +30,43 @@
 
       const toast = document.createElement('div');
       toast.className = 'toast toast-' + type;
-      toast.textContent = message;
+      // Optional leading badge chip (e.g. 'ATTENTION'); built via DOM so both the
+      // badge and the message stay textContent (no innerHTML — XSS-safe).
+      if (options.badge) {
+         const badge = document.createElement('span');
+         // Compose the shared .dawn-badge primitive (shape/typography); .toast-badge
+         // only tints it. No per-component re-implementation of the chip.
+         badge.className = 'dawn-badge toast-badge';
+         badge.textContent = options.badge;
+         toast.appendChild(badge);
+         const text = document.createElement('span');
+         text.className = 'toast-text';
+         text.textContent = message;
+         toast.appendChild(text);
+      } else {
+         toast.textContent = message;
+      }
 
-      // Append action buttons via DOM construction (no innerHTML)
+      // Append action buttons via DOM construction (no innerHTML).  Stop the
+      // click bubbling so an action press doesn't also trigger dismiss-on-click.
       if (options.actions) {
          options.actions.forEach((action) => {
             const btn = document.createElement('button');
             btn.className = 'toast-action';
             btn.textContent = action.label;
-            btn.addEventListener('click', action.onClick);
+            btn.addEventListener('click', (e) => {
+               e.stopPropagation();
+               action.onClick(e);
+            });
             toast.appendChild(btn);
          });
       }
 
-      // ARIA attributes for screen reader accessibility
-      // Errors use 'alert' role (assertive - interrupts user)
-      // Other types use 'status' role (polite - waits for pause)
-      if (type === 'error') {
+      // ARIA: interrupt the screen-reader user only for genuinely urgent toasts
+      // (errors, and callers that opt in via options.assertive — e.g. a spoken
+      // ATTENTION alert).  Ambient/status toasts stay polite so they don't cut
+      // across whatever the user is doing.
+      if (type === 'error' || options.assertive) {
          toast.setAttribute('role', 'alert');
          toast.setAttribute('aria-live', 'assertive');
       } else {
@@ -56,24 +76,35 @@
 
       container.appendChild(toast);
 
-      if (duration > 0) {
-         // Auto-dismiss timer
-         let dismissTimer;
-         const startDismissTimer = () => {
-            dismissTimer = setTimeout(() => {
-               toast.classList.add('toast-fade-out');
-               setTimeout(() => toast.remove(), 300);
-            }, duration);
-         };
+      let dismissTimer = null;
+      const dismiss = () => {
+         clearTimeout(dismissTimer);
+         toast.classList.add('toast-fade-out');
+         setTimeout(() => toast.remove(), 300);
+      };
 
+      if (duration > 0) {
+         const startDismissTimer = () => {
+            dismissTimer = setTimeout(dismiss, duration);
+         };
          // Pause timer on hover/focus for accessibility (H10)
          toast.addEventListener('mouseenter', () => clearTimeout(dismissTimer));
          toast.addEventListener('mouseleave', startDismissTimer);
          toast.addEventListener('focus', () => clearTimeout(dismissTimer));
          toast.addEventListener('blur', startDismissTimer);
-
          startDismissTimer();
       }
+
+      // The pointer cursor promises dismissal — wire it (click, or Enter/Escape
+      // for keyboard users on the focusable toast).
+      toast.addEventListener('click', dismiss);
+      toast.addEventListener('keydown', (e) => {
+         // Escape always dismisses; Enter only when the toast itself is focused
+         // (so Enter on an action button runs the action, not a dismiss).
+         if (e.key === 'Escape' || (e.key === 'Enter' && e.target === toast)) {
+            dismiss();
+         }
+      });
 
       // Make focusable for keyboard users (M11)
       toast.setAttribute('tabindex', '0');

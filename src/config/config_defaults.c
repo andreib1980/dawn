@@ -569,6 +569,15 @@ void config_set_defaults(dawn_config_t *config) {
    config->scheduler.event_retention_days = 30;
    config->scheduler.briefing_speak_aloud_on_webui_source = false;
 
+   /* Proactive attention (SAGE) — master switch OFF by default (opt-in). Watch
+    * rules are DB-backed, not config. Numeric defaults mirror the module's
+    * SAGE_MAX_ALERTS_PER_HOUR / judge floor. */
+   config->attention.enabled = false;
+   config->attention.max_alerts_per_hour = 4;
+   config->attention.inject_into_sessions = false;
+   config->attention.judge_enabled = false;
+   config->attention.judge_threshold = 3.5;
+
    /* Calendar */
    config->calendar.enabled = true;
    config->calendar.sync_interval_sec = 900;

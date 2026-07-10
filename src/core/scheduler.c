@@ -339,6 +339,47 @@ static void announce_event(const sched_event_t *event) {
 #endif
 }
 
+int scheduler_emit_alert(int user_id,
+                         const char *text,
+                         sched_event_type_t type,
+                         const char *deliver_to,
+                         bool speak) {
+   if (!text || !text[0]) {
+      return FAILURE;
+   }
+
+   /* Transient event: id 0, never persisted, never entered into the ringing
+    * state machine.  We drive the delivery channels directly (not via
+    * announce_event) so @text is spoken verbatim, without the type-specific
+    * "Reminder:"/"Timer" phrasing generate_announcement_text would add. */
+   sched_event_t ev;
+   memset(&ev, 0, sizeof(ev));
+   ev.id = 0;
+   ev.user_id = user_id;
+   ev.event_type = type;
+   ev.status = SCHED_STATUS_FIRED;
+   ev.source_client_type = SCHED_SOURCE_LOCAL;
+   snprintf(ev.name, sizeof(ev.name), "%s", text);
+   snprintf(ev.message, sizeof(ev.message), "%s", text);
+   if (deliver_to && deliver_to[0]) {
+      snprintf(ev.deliver_to, sizeof(ev.deliver_to), "%s", deliver_to);
+   }
+
+   /* Voice + optional messaging-channel delivery only.  The WebUI/HUD banner is
+    * the CALLER's responsibility (SAGE uses its own attention_alert channel so it
+    * doesn't inherit the scheduler notification's badge + client chime). */
+   const bool deliver_via_messaging = (ev.deliver_to[0] != '\0');
+   if (!deliver_via_messaging && speak) {
+      route_tts_announcement(&ev, text);
+   }
+#ifdef ENABLE_WEBUI
+   if (deliver_via_messaging) {
+      scheduler_send_to_messaging_channel(ev.user_id, ev.deliver_to, text);
+   }
+#endif
+   return SUCCESS;
+}
+
 /* =============================================================================
  * Scheduled Task Execution
  * ============================================================================= */

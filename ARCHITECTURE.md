@@ -359,6 +359,7 @@ Per-module locks (scoped to a single subsystem):
   worker_pool::pool_mutex                         — worker thread pool
   command_router::registry_mutex                  — request/response routing
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
+  attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
   ...and similar per-tool mutexes in src/tools/*.c
 ```
 
