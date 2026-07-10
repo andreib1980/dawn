@@ -966,6 +966,17 @@ dawn_add_unit_test(test_tool_registry
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Round-trip symmetry gate for the [phone] audio config (parse<->write). Links
+# the dependency-light audio-config module + toml + phone_apm's pure default
+# helper (phone_apm.cpp compiles as a stub without AEC_BACKEND_WEBRTC).
+dawn_add_unit_test(test_phone_audio_config
+   SOURCES test_phone_audio_config.c
+           ${SRC_ROOT}/src/tools/phone_audio_config.c
+           ${SRC_ROOT}/src/tools/toml.c
+           ${SRC_ROOT}/src/audio/phone_apm.cpp
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_device_types
    SOURCES test_device_types.c
            ${SRC_ROOT}/src/core/device_types.c

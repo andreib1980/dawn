@@ -34,16 +34,19 @@
 #include "audio/phone_apm.h"
 
 #include <algorithm>
+#include <cstring>
 
-/* Default near-end config (design §3.3) — starting points, tuned by ear on a
- * live 2-party call.  Named constants, not literals (no magic numbers). */
+/* Default near-end (uplink) config — live-tuned by ear on real 2-party calls
+ * 2026-07-09 (echo cancel on; minimal fixed gain, let AGC2 do the work).  Named
+ * constants, not literals.  The downlink derives from these with a few overrides
+ * (see phone_audio_config_default). */
 #define PHONE_APM_DEF_AGC_ENABLED true
-#define PHONE_APM_DEF_FIXED_GAIN_DB 6.0f
+#define PHONE_APM_DEF_FIXED_GAIN_DB 1.0f
 #define PHONE_APM_DEF_RAMP_DB_PER_S 3.0f
 #define PHONE_APM_DEF_MAX_NOISE_DBFS (-50.0f)
 #define PHONE_APM_DEF_NS_LEVEL PHONE_NS_MODERATE
 #define PHONE_APM_DEF_HIGH_PASS true
-#define PHONE_APM_DEF_ECHO_CANCEL false
+#define PHONE_APM_DEF_ECHO_CANCEL true
 
 /* Vendored WebRTC v1.3 GainController2::Validate() requires fixed_digital.gain_db
  * in [0, 50): a value >=50 FAILS validation and ApplyConfig() silently reverts
@@ -57,6 +60,31 @@
 #define PHONE_APM_RAMP_MAX 100.0f
 #define PHONE_APM_NOISE_DBFS_MIN (-90.0f)
 #define PHONE_APM_NOISE_DBFS_MAX 0.0f
+
+extern "C" bool phone_apm_available(void) {
+#ifdef AEC_BACKEND_WEBRTC
+   return true;
+#else
+   return false;
+#endif
+}
+
+/* Clamp the tunable knobs to their valid ranges (pure; both builds).  Callers that
+ * store/persist a config from user input should clamp first so the stored value
+ * matches what the APM will actually apply (fixed_gain >= 50 would otherwise be
+ * silently reverted).  build_apm_config also clamps at apply time (defence in
+ * depth), using these same constants. */
+extern "C" void phone_apm_clamp_config(phone_apm_config_t *cfg) {
+   if (cfg == nullptr) {
+      return;
+   }
+   cfg->fixed_gain_db = std::min(std::max(cfg->fixed_gain_db, PHONE_APM_FIXED_GAIN_MIN),
+                                 PHONE_APM_FIXED_GAIN_MAX);
+   cfg->max_gain_change_db_per_s = std::min(
+       std::max(cfg->max_gain_change_db_per_s, PHONE_APM_RAMP_MIN), PHONE_APM_RAMP_MAX);
+   cfg->max_output_noise_dbfs = std::min(
+       std::max(cfg->max_output_noise_dbfs, PHONE_APM_NOISE_DBFS_MIN), PHONE_APM_NOISE_DBFS_MAX);
+}
 
 /* phone_apm_default_config() is pure data and must exist in both builds. */
 extern "C" phone_apm_config_t phone_apm_default_config(void) {
@@ -87,10 +115,13 @@ extern "C" {
 #include "logging.h"
 }
 
-/* One APM instance + a cached StreamConfig (built once, not per frame). */
+/* One APM instance + a cached StreamConfig (built once, not per frame) + the
+ * last-applied config, kept so phone_apm_reconfigure can diff and apply only what
+ * changed (some AGC2 params need a runtime setting, not ApplyConfig — see there). */
 struct phone_apm {
    webrtc::AudioProcessing *apm = nullptr;
    webrtc::StreamConfig stream_config{ PHONE_APM_RATE, 1 };
+   phone_apm_config_t cur{};
 };
 
 static webrtc::AudioProcessing::Config::NoiseSuppression::Level map_ns_level(phone_ns_level_t lvl) {
@@ -106,6 +137,54 @@ static webrtc::AudioProcessing::Config::NoiseSuppression::Level map_ns_level(pho
       default:
          return NS::kModerate;
    }
+}
+
+/* AGC2 fixed gain, clamped strictly below 50 (>=50 fails v1.3 validation and
+ * silently reverts the whole AGC2 block to disabled). */
+static float clamped_fixed_gain(const phone_apm_config_t *cfg) {
+   return std::min(std::max(cfg->fixed_gain_db, PHONE_APM_FIXED_GAIN_MIN),
+                   PHONE_APM_FIXED_GAIN_MAX);
+}
+
+/* Build the WebRTC config from our config, applying ALL clamps.  Shared by
+ * phone_apm_create and phone_apm_reconfigure so the fixed_gain<50 guard and the
+ * adaptive-knob clamps can never drift between the two paths (a divergence would
+ * let a mid-call save silently disable AGC2). */
+static webrtc::AudioProcessing::Config build_apm_config(const phone_apm_config_t *cfg,
+                                                        bool warn_on_clamp) {
+   webrtc::AudioProcessing::Config c;
+
+   /* Echo canceller: off in Phase 1 (reverse stream fed "dark").  When enabled,
+    * mobile_mode = AECM — AEC3 does NOT cancel at 16 kHz (see aec_webrtc.cpp:82-90). */
+   c.echo_canceller.enabled = cfg->echo_cancel;
+   c.echo_canceller.mobile_mode = true;
+
+   c.high_pass_filter.enabled = cfg->high_pass;
+
+   c.noise_suppression.enabled = (cfg->ns_level != PHONE_NS_OFF);
+   c.noise_suppression.level = map_ns_level(cfg->ns_level);
+
+   float fixed_gain = clamped_fixed_gain(cfg);
+   if (warn_on_clamp && fixed_gain != cfg->fixed_gain_db) {
+      OLOG_WARNING("phone_apm: fixed_gain_db %.1f out of range [%.0f,%.0f) — clamped to %.1f",
+                   (double)cfg->fixed_gain_db, (double)PHONE_APM_FIXED_GAIN_MIN, 50.0,
+                   (double)fixed_gain);
+   }
+   float ramp = std::min(std::max(cfg->max_gain_change_db_per_s, PHONE_APM_RAMP_MIN),
+                         PHONE_APM_RAMP_MAX);
+   float noise_floor = std::min(std::max(cfg->max_output_noise_dbfs, PHONE_APM_NOISE_DBFS_MIN),
+                                PHONE_APM_NOISE_DBFS_MAX);
+
+   c.gain_controller1.enabled = false;
+   c.gain_controller2.enabled = cfg->agc_enabled;
+   c.gain_controller2.fixed_digital.gain_db = fixed_gain;
+   c.gain_controller2.adaptive_digital.enabled = cfg->agc_enabled;
+   c.gain_controller2.adaptive_digital.max_gain_change_db_per_second = ramp;
+   c.gain_controller2.adaptive_digital.max_output_noise_level_dbfs = noise_floor;
+
+   /* Near-free; exposes output_rms_dbfs for the objective level trace. */
+   c.level_estimation.enabled = true;
+   return c;
 }
 
 extern "C" phone_apm_t *phone_apm_create(const phone_apm_config_t *cfg) {
@@ -144,51 +223,60 @@ extern "C" phone_apm_t *phone_apm_create(const phone_apm_config_t *cfg) {
       return nullptr;
    }
 
-   webrtc::AudioProcessing::Config apm_config;
-
-   /* Echo canceller: off in Phase 1 (reverse stream is fed "dark" so enabling
-    * this is a config flip).  When enabled use mobile_mode = AECM — AEC3 does
-    * NOT cancel at 16 kHz (see aec_webrtc.cpp:82-90), AECM is the narrowband
-    * canceller built for this rate and is more robust to delay error. */
-   apm_config.echo_canceller.enabled = cfg->echo_cancel;
-   apm_config.echo_canceller.mobile_mode = true;
-
-   apm_config.high_pass_filter.enabled = cfg->high_pass;
-
-   apm_config.noise_suppression.enabled = (cfg->ns_level != PHONE_NS_OFF);
-   apm_config.noise_suppression.level = map_ns_level(cfg->ns_level);
-
-   /* AGC2 (per-frame, VAD-gated digital gain) — the fix for the "threshold-y"
-    * pumping; AGC1 stays off.  All three knobs are clamped: an out-of-range
-    * fixed gain would silently disable the whole AGC2 block (see the MAX comment
-    * above), and the adaptive knobs are unvalidated by WebRTC. */
-   float fixed_gain = std::min(std::max(cfg->fixed_gain_db, PHONE_APM_FIXED_GAIN_MIN),
-                               PHONE_APM_FIXED_GAIN_MAX);
-   if (fixed_gain != cfg->fixed_gain_db) {
-      OLOG_WARNING("phone_apm: fixed_gain_db %.1f out of range [%.0f,%.0f) — clamped to %.1f",
-                   (double)cfg->fixed_gain_db, (double)PHONE_APM_FIXED_GAIN_MIN, 50.0,
-                   (double)fixed_gain);
-   }
-   float ramp = std::min(std::max(cfg->max_gain_change_db_per_s, PHONE_APM_RAMP_MIN),
-                         PHONE_APM_RAMP_MAX);
-   float noise_floor = std::min(std::max(cfg->max_output_noise_dbfs, PHONE_APM_NOISE_DBFS_MIN),
-                                PHONE_APM_NOISE_DBFS_MAX);
-
-   apm_config.gain_controller1.enabled = false;
-   apm_config.gain_controller2.enabled = cfg->agc_enabled;
-   apm_config.gain_controller2.fixed_digital.gain_db = fixed_gain;
-   apm_config.gain_controller2.adaptive_digital.enabled = cfg->agc_enabled;
-   apm_config.gain_controller2.adaptive_digital.max_gain_change_db_per_second = ramp;
-   apm_config.gain_controller2.adaptive_digital.max_output_noise_level_dbfs = noise_floor;
-
-   /* Near-free; exposes output_rms_dbfs for the objective level trace. */
-   apm_config.level_estimation.enabled = true;
-
-   a->apm->ApplyConfig(apm_config);
+   a->apm->ApplyConfig(build_apm_config(cfg, /*warn_on_clamp=*/true));
+   a->cur = *cfg;
 
    OLOG_INFO("phone_apm: 16 kHz near-end active (agc=%d ns=%d hpf=%d aec=%d)", cfg->agc_enabled,
              (int)cfg->ns_level, cfg->high_pass, cfg->echo_cancel);
    return a;
+}
+
+extern "C" void phone_apm_reconfigure(phone_apm_t *a, const phone_apm_config_t *cfg) {
+   if (a == nullptr || a->apm == nullptr || cfg == nullptr) {
+      return;
+   }
+   /* Nothing to do if this instance's config is unchanged (e.g. a save that only
+    * touched the other direction or the soft-limiter gain).  memcmp is
+    * conservative — mismatched struct padding at worst does a redundant (cheap)
+    * ApplyConfig, never skips a real change. */
+   if (memcmp(&a->cur, cfg, sizeof(*cfg)) == 0) {
+      return;
+   }
+   const phone_apm_config_t old = a->cur;
+   webrtc::AudioProcessing::Config c = build_apm_config(cfg, /*warn_on_clamp=*/true);
+
+   /* ApplyConfig reinits AGC2 ONLY on an enabled flip (v1.3
+    * audio_processing_impl.cc:574 compares only .enabled), so with AGC staying on
+    * a fixed_gain/ramp/noise change would be a silent no-op.  NS(level)/HPF/echo/
+    * AGC-enable-toggle all reinit correctly through ApplyConfig. */
+   const bool agc_stays_on = old.agc_enabled && cfg->agc_enabled;
+   const bool ramp_or_noise_changed = cfg->max_gain_change_db_per_s !=
+                                          old.max_gain_change_db_per_s ||
+                                      cfg->max_output_noise_dbfs != old.max_output_noise_dbfs;
+
+   if (agc_stays_on && ramp_or_noise_changed) {
+      /* Force an AGC2 reinit to push the new adaptive params (this also re-pushes
+       * fixed gain): disable then re-enable.  One-cycle dip, acceptable for a rare
+       * tuning change; runs on the bridge thread pre-capture (spike absorbed). */
+      webrtc::AudioProcessing::Config off = c;
+      off.gain_controller2.enabled = false;
+      a->apm->ApplyConfig(off);
+      a->apm->ApplyConfig(c);
+   } else {
+      a->apm->ApplyConfig(c);
+      /* Fixed-gain change with AGC staying on: the top-level ApplyConfig won't
+       * apply it (enabled unchanged) — push it via the runtime setting.  In v1.3
+       * this is applied on the NEXT ProcessStream and its handler rebuilds
+       * AdaptiveAgc (a small mid-cycle alloc + adaptive-state reset — the same dip
+       * as the reinit path, just deferred); fine for a rare save.  Clamp first: the
+       * runtime path has only an RTC_DCHECK, not the top-level <50 revert-guard. */
+      if (agc_stays_on && cfg->fixed_gain_db != old.fixed_gain_db) {
+         a->apm->SetRuntimeSetting(
+             webrtc::AudioProcessing::RuntimeSetting::CreateCaptureFixedPostGain(
+                 clamped_fixed_gain(cfg)));
+      }
+   }
+   a->cur = *cfg;
 }
 
 extern "C" void phone_apm_reverse_10ms(phone_apm_t *a, const int16_t *frame160) {
@@ -242,6 +330,10 @@ extern "C" bool phone_apm_output_rms_dbfs(phone_apm_t *a, int *out_dbfs) {
 extern "C" phone_apm_t *phone_apm_create(const phone_apm_config_t *cfg) {
    (void)cfg;
    return nullptr;
+}
+extern "C" void phone_apm_reconfigure(phone_apm_t *a, const phone_apm_config_t *cfg) {
+   (void)a;
+   (void)cfg;
 }
 extern "C" void phone_apm_reverse_10ms(phone_apm_t *a, const int16_t *frame160) {
    (void)a;

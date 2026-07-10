@@ -983,13 +983,22 @@
 # "microphone-y / threshold-y / pumping" audio.  Tune these on a live 2-party call.
 # pcm_port = "/dev/ttyUSB4"          # modem USB audio device node
 # uplink_agc = true                  # AGC2 per-frame VAD-gated digital gain
-# uplink_fixed_gain_db = 6.0         # static pre-gain, dB (clamped 0..49; >=50 disables AGC2)
+# uplink_fixed_gain_db = 1.0         # static pre-gain, dB (clamped 0..49; >=50 disables AGC2)
 # uplink_agc_ramp_db_per_s = 3.0     # AGC ramp rate; lower = less pumping
 # uplink_max_output_noise_dbfs = -50.0 # AGC won't lift noise above this floor
 # uplink_ns_level = "moderate"       # noise suppression: off|low|moderate|high|veryhigh
 # uplink_high_pass = true            # remove DC/handling rumble
-# uplink_echo_cancel = false         # AECM on the reverse stream (enable if you hear yourself)
-# downlink_gain = 8.0                # far-end -> speaker soft-limiter small-signal gain
+# uplink_echo_cancel = true          # AECM on the reverse stream (on if the far end hears themselves)
+# Downlink (far end -> speaker): AGC2 normalizes quiet/loud callers a fixed gain can't.
+# NS defaults OFF (far end already codec-processed; a 2nd pass sounds "underwater").
+# downlink_apm = true                # true -> AGC2 path; false -> tanh soft-limiter (downlink_gain)
+# downlink_agc = true                # AGC2 per-frame VAD-gated digital gain
+# downlink_fixed_gain_db = 6.0       # static pre-gain, dB (clamped 0..49)
+# downlink_agc_ramp_db_per_s = 3.0   # AGC ramp rate; lower = less pumping
+# downlink_max_output_noise_dbfs = -50.0 # AGC won't lift noise above this floor
+# downlink_ns_level = "off"          # off|low|moderate|high|veryhigh (off recommended)
+# downlink_high_pass = true          # remove DC/rumble
+# downlink_gain = 8.0                # soft-limiter gain, used only when downlink_apm = false
 
 # =============================================================================
 # STAT system telemetry — requires building with -DDAWN_ENABLE_STAT_TOOL=ON

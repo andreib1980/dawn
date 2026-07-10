@@ -347,6 +347,7 @@ if(DAWN_ENABLE_PHONE_TOOL)
         src/tools/phone_tool.c
         src/tools/phone_service.c
         src/tools/phone_audio_bridge.c
+        src/tools/phone_audio_config.c
         src/tools/phone_db.c)
     message(STATUS "DAWN: Phone tool ENABLED")
 else()

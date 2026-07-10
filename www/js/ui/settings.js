@@ -91,6 +91,9 @@
       if (typeof DawnHomeAssistant !== 'undefined') {
          DawnHomeAssistant.requestStatus();
       }
+      if (typeof DawnPhoneAudio !== 'undefined') {
+         DawnPhoneAudio.requestConfig();
+      }
    }
 
    function close() {
@@ -582,6 +585,15 @@
             saveUrlBtn: document.getElementById('ha-save-url-btn'),
             hueCorrection: document.getElementById('ha-hue-correction'),
             hueCorrectionValue: document.getElementById('ha-hue-correction-value'),
+         });
+      }
+
+      // Phone call-audio panel initialization
+      if (typeof DawnPhoneAudio !== 'undefined') {
+         DawnPhoneAudio.setElements({
+            section: document.getElementById('phone-audio-section'),
+            controls: document.getElementById('phone-audio-controls'),
+            status: document.getElementById('phone-audio-status'),
          });
       }
    }

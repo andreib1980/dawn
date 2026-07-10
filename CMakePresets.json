@@ -14,6 +14,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "ENABLE_WEBUI": "ON",
+        "ENABLE_AEC": "ON",
         "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON",
         "DAWN_ENABLE_CODE_PROJECTS": "ON"
       }
@@ -36,6 +37,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "ENABLE_WEBUI": "ON",
+        "ENABLE_AEC": "ON",
         "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON",
         "DAWN_ENABLE_CODE_PROJECTS": "ON"
       }
@@ -48,6 +50,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "ENABLE_WEBUI": "ON",
+        "ENABLE_AEC": "ON",
         "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON",
         "DAWN_ENABLE_CODE_PROJECTS": "ON"
       }

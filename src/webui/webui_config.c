@@ -58,6 +58,7 @@
 #include "tools/tool_registry.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
+#include "webui/webui_phone_config.h"
 #include "webui/webui_server.h" /* For WEBUI_MAX_THUMBNAIL_SIZE */
 #ifdef DAWN_ENABLE_HOMEASSISTANT_TOOL
 #include "tools/homeassistant_service.h"
@@ -1370,6 +1371,22 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
                handle_ha_status(conn);
                OLOG_INFO("WebUI: Home Assistant config updated");
             }
+         }
+      }
+#endif
+
+#ifdef DAWN_ENABLE_PHONE_TOOL
+      /* Apply phone call-audio config (tool-owned; not in dawn_config_t). The body
+       * lives in webui_phone_config.c to keep this file under its size limit. */
+      {
+         struct json_object *phone_section = NULL;
+         if (json_object_object_get_ex(payload, "phone", &phone_section)) {
+            webui_phone_apply_config(conn, phone_section); /* update + live-apply + echo-back */
+            /* Second write persists the now-updated tool struct (the write at the
+             * top of this handler ran before the tool state changed). */
+            pthread_rwlock_wrlock(&s_config_rwlock);
+            config_write_toml((const dawn_config_t *)config_get(), config_path);
+            pthread_rwlock_unlock(&s_config_rwlock);
          }
       }
 #endif

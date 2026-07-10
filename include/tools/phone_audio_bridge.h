@@ -38,9 +38,11 @@
  * is not retained after the call returns, so the caller keeps ownership.
  */
 typedef struct {
-   const char *pcm_port;      /* modem USB audio node; NULL/empty -> internal default */
-   phone_apm_config_t uplink; /* near-end (mic) processing */
-   float downlink_gain;       /* tanh soft-limiter small-signal gain (far-end -> speaker) */
+   const char *pcm_port;        /* modem USB audio node; NULL/empty -> internal default */
+   phone_apm_config_t uplink;   /* near-end (mic) processing */
+   phone_apm_config_t downlink; /* far-end processing, used when downlink_use_apm */
+   bool downlink_use_apm;       /* true -> AGC2 path; false -> tanh soft-limiter */
+   float downlink_gain;         /* soft-limiter gain (used when !downlink_use_apm) */
 } phone_bridge_config_t;
 
 /**
@@ -60,6 +62,17 @@ typedef struct {
  * @return SUCCESS if the bridge is running on return, FAILURE otherwise.
  */
 int phone_bridge_start(const phone_bridge_config_t *cfg);
+
+/**
+ * @brief Apply new audio config to a running call, live (no restart, no drop).
+ *
+ * Thread-safe hand-off: stashes @p cfg and flags the bridge thread, which applies
+ * it (uplink + downlink APM reconfigure, downlink path/gain) at the top of its
+ * next cycle.  @p cfg->pcm_port is NOT live-applicable (the device is open) and is
+ * ignored; it takes effect on the next call.  A no-op when no call is active — the
+ * persistent next-call config is delivered via phone_bridge_start(), not here.
+ */
+void phone_bridge_reconfigure(const phone_bridge_config_t *cfg);
 
 /**
  * @brief Stop the audio bridge.

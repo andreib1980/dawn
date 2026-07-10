@@ -24,10 +24,25 @@
 #ifndef PHONE_TOOL_H
 #define PHONE_TOOL_H
 
+#include "tools/phone_audio_config.h"
+
 /**
  * @brief Register the phone tool with the tool registry.
  * @return 0 on success, non-zero on failure.
  */
 int phone_tool_register(void);
+
+/**
+ * @brief Apply a new call-audio config at runtime (from the WebUI settings save).
+ *
+ * Updates the module state and forwards to phone_service, which persists it for
+ * the next call and live-applies to a call in progress.  Thread-safe.
+ */
+void phone_tool_update_config(const phone_audio_config_t *audio);
+
+/**
+ * @brief Snapshot the current call-audio config (for the WebUI GET). Thread-safe.
+ */
+void phone_tool_get_audio_config(phone_audio_config_t *out);
 
 #endif /* PHONE_TOOL_H */

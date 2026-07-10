@@ -1,0 +1,126 @@
+/*
+ * Phone Call Audio settings panel — schema-driven controls rendered by
+ * www/js/admin/phone-audio.js.  Theme-aware via CSS variables.
+ */
+
+.phone-audio-intro {
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+   margin: 0 0 0.75rem;
+   line-height: 1.4;
+}
+
+.phone-audio-status {
+   font-size: 0.8rem;
+   color: var(--text-secondary);
+   background: var(--bg-tertiary);
+   border-left: 3px solid var(--accent);
+   border-radius: var(--border-radius-sm);
+   padding: 0.4rem 0.6rem;
+   margin-bottom: 0.9rem;
+}
+
+.phone-audio-status.phone-audio-status-warn {
+   border-left-color: var(--error);
+   color: var(--text-primary);
+}
+
+.phone-audio-group {
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius-sm);
+   margin-bottom: 0.9rem;
+   overflow: hidden;
+}
+
+.phone-audio-group-title {
+   margin: 0;
+   padding: 0.5rem 0.7rem;
+   font-size: 0.82rem;
+   font-weight: 600;
+   color: var(--text-primary);
+   background: var(--bg-tertiary);
+   border-bottom: 1px solid var(--border-color);
+}
+
+.phone-audio-group-body {
+   padding: 0.4rem 0.7rem;
+}
+
+.phone-audio-field {
+   padding: 0.45rem 0;
+   border-bottom: 1px solid var(--border-color);
+}
+
+.phone-audio-field:last-child {
+   border-bottom: none;
+}
+
+.phone-audio-row {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 0.75rem;
+}
+
+.phone-audio-label {
+   color: var(--text-primary);
+   font-size: 0.85rem;
+   flex: 1 1 auto;
+}
+
+.phone-audio-control {
+   flex: 0 0 auto;
+}
+
+.phone-audio-hint {
+   color: var(--text-tertiary);
+   font-size: 0.72rem;
+   margin-top: 0.2rem;
+   line-height: 1.35;
+}
+
+/* Number/select match the settings-modal sibling controls: same font size and the
+ * spinner reset so number fields don't show OS spin buttons (the toggle uses the
+ * shared .dawn-toggle primitive from components.css). */
+.phone-audio-number,
+.phone-audio-select {
+   background: var(--bg-secondary);
+   color: var(--text-primary);
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius-sm);
+   padding: 0.35rem 0.5rem;
+   font-size: 0.875rem;
+   min-width: 6rem;
+   transition: border-color var(--transition-fast);
+}
+
+.phone-audio-number {
+   width: 6rem;
+   -moz-appearance: textfield;
+   appearance: textfield;
+}
+
+.phone-audio-number::-webkit-inner-spin-button,
+.phone-audio-number::-webkit-outer-spin-button {
+   -webkit-appearance: none;
+   margin: 0;
+}
+
+.phone-audio-number:focus-visible,
+.phone-audio-select:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 1px;
+   border-color: var(--accent);
+}
+
+.phone-audio-number:disabled,
+.phone-audio-select:disabled {
+   opacity: 0.5;
+   cursor: not-allowed;
+}
+
+.phone-audio-field:has(.dawn-toggle:disabled) .phone-audio-label,
+.phone-audio-field:has(.phone-audio-number:disabled) .phone-audio-label,
+.phone-audio-field:has(.phone-audio-select:disabled) .phone-audio-label {
+   color: var(--text-tertiary);
+}

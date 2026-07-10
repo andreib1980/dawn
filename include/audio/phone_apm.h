@@ -74,6 +74,14 @@ typedef struct {
 /* Sensible defaults for the phone uplink. */
 phone_apm_config_t phone_apm_default_config(void);
 
+/** @brief True if WebRTC APM is compiled in (else all APM controls are inert and
+ *         the bridge uses the raw soft-limiter). */
+bool phone_apm_available(void);
+
+/** @brief Clamp tunable knobs (fixed_gain, ramp, noise floor) to valid ranges.
+ *         Clamp user-supplied config before storing so it matches what's applied. */
+void phone_apm_clamp_config(phone_apm_config_t *cfg);
+
 /**
  * @brief Create a near-end processor.
  * @return Handle, or NULL if WebRTC APM is not compiled in or init failed — the
@@ -83,6 +91,19 @@ phone_apm_config_t phone_apm_default_config(void);
 struct phone_apm;
 typedef struct phone_apm phone_apm_t;
 phone_apm_t *phone_apm_create(const phone_apm_config_t *cfg);
+
+/**
+ * @brief Apply a new config to a live processor (no realloc for value changes).
+ *
+ * Handles the vendored WebRTC quirk that `ApplyConfig` reinits AGC2 only when its
+ * enabled flag flips: fixed-gain changes go via a runtime setting (applied on the
+ * next ProcessStream); ramp/noise changes force a brief AGC2 reinit; NS/HPF/echo/
+ * enable-toggle apply directly.  MUST run on the bridge thread (single-owner), and
+ * — because a submodule toggle allocates + resets — BEFORE the blocking capture
+ * read so the capture ring absorbs the spike.  No-op when @p a is NULL or the
+ * config is unchanged.
+ */
+void phone_apm_reconfigure(phone_apm_t *a, const phone_apm_config_t *cfg);
 
 /**
  * @brief Feed the downlink about to be played as the echo reference.

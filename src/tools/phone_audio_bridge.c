@@ -107,10 +107,22 @@ static pthread_t s_bridge_tid;
 static int s_pcm_fd = -1;
 static audio_stream_capture_handle_t *s_capture = NULL;
 static audio_stream_playback_handle_t *s_playback = NULL;
-/* Near-end uplink processor (NULL -> raw soft-gain fallback) and the downlink
- * soft-limiter gain, both set from config in start, owned by the bridge thread. */
+/* Near-end uplink + far-end downlink processors (NULL -> raw soft-gain fallback),
+ * the downlink path selector, and the downlink soft-limiter gain — set from config
+ * in start, owned by the bridge thread.  Both APM instances are created at start
+ * (even if a direction's APM is off) so a mid-call toggle has an instance to use. */
 static phone_apm_t *s_uplink_apm = NULL;
+static phone_apm_t *s_downlink_apm = NULL;
+static bool s_downlink_use_apm = false;
 static float s_downlink_gain = PHONE_DOWNLINK_GAIN;
+
+/* Live-reconfigure hand-off: phone_bridge_reconfigure (any thread) stashes the
+ * new config under s_pending_lock + sets s_cfg_dirty; the bridge thread picks it
+ * up at the top of a cycle (see bridge_thread).  s_cfg_dirty is a relaxed hint;
+ * s_pending_lock provides the real synchronization for s_pending_cfg. */
+static pthread_mutex_t s_pending_lock = PTHREAD_MUTEX_INITIALIZER;
+static phone_bridge_config_t s_pending_cfg;
+static atomic_bool s_cfg_dirty = false;
 
 /* Open the modem PCM serial node in raw, non-blocking binary mode. Returns fd or -1. */
 static int open_pcm_port(const char *port) {
@@ -229,13 +241,19 @@ static void *bridge_thread(void *arg) {
    uint8_t dn[PHONE_PCM_FRAME_BYTES + 1]; /* +1 for a split-sample carry byte */
    size_t dn_carry = 0;
 
-   phone_apm_t *apm = s_uplink_apm; /* may be NULL -> raw-gain fallback */
-   const float dn_gain = s_downlink_gain;
+   phone_apm_t *apm = s_uplink_apm;      /* uplink; may be NULL -> raw-gain fallback */
+   phone_apm_t *dn_apm = s_downlink_apm; /* downlink; may be NULL -> soft-limiter */
+   bool dn_use_apm = s_downlink_use_apm; /* select downlink APM vs soft-limiter */
+   float dn_gain = s_downlink_gain;      /* soft-limiter gain (live-tunable via reconfigure) */
 
-   /* Uplink APM staging (bridge-thread-local -> resets per call): up to a
-    * 159-sample carry plus one fresh capture. */
+   /* Uplink + downlink APM staging (bridge-thread-local -> reset per call): up to a
+    * 159-sample carry plus one fresh capture/read.  320 = 2x160 so in steady state
+    * staging is a pass-through; a transient short read carries a <160 remainder.
+    * Bound: 159 + 320 = 479 <= 480 (never overflows). */
    int16_t up_stage[PHONE_APM_FRAME + PHONE_PCM_FRAME_SAMPLES];
    int up_stage_n = 0;
+   int16_t dn_stage[PHONE_APM_FRAME + PHONE_PCM_FRAME_SAMPLES];
+   int dn_stage_n = 0;
    /* Previous cycle's post-gain downlink (two 10 ms halves), fed as the reverse
     * reference so each uplink block gets its time-aligned half. */
    int16_t reverse_ref[PHONE_PCM_FRAME_SAMPLES];
@@ -251,6 +269,26 @@ static void *bridge_thread(void *arg) {
    unsigned drop_events = 0;
 
    while (atomic_load(&s_running)) {
+      /* ---- live reconfigure (BEFORE the blocking capture read) ----
+       * A submodule enable-toggle makes ApplyConfig allocate + reset; doing it here
+       * lets the ~80 ms capture ring absorb the spike, never between the uplink
+       * write and downlink read (which would stall the modem lockstep). */
+      if (atomic_load_explicit(&s_cfg_dirty, memory_order_relaxed)) {
+         phone_bridge_config_t pc;
+         pthread_mutex_lock(&s_pending_lock);
+         pc = s_pending_cfg;
+         atomic_store_explicit(&s_cfg_dirty, false, memory_order_relaxed);
+         pthread_mutex_unlock(&s_pending_lock);
+         dn_gain = (pc.downlink_gain > 0.0f) ? pc.downlink_gain : PHONE_DOWNLINK_GAIN;
+         if (pc.downlink_use_apm != dn_use_apm) {
+            dn_stage_n = 0; /* drop any stale staged samples across a path switch */
+         }
+         dn_use_apm = pc.downlink_use_apm;
+         pc.downlink.echo_cancel = false;             /* N/A on downlink (no reverse feed) */
+         phone_apm_reconfigure(apm, &pc.uplink);      /* no-op if apm == NULL */
+         phone_apm_reconfigure(dn_apm, &pc.downlink); /* no-op if dn_apm == NULL */
+      }
+
       /* ---- capture mic (blocking ~20 ms — the real-time pace) ---- */
       ssize_t frames = audio_stream_capture_read(s_capture, up, PHONE_PCM_FRAME_SAMPLES);
       if (frames < 0) {
@@ -354,26 +392,48 @@ static void *bridge_thread(void *arg) {
       }
       if (n > 0) {
          size_t total = dn_carry + (size_t)n;
-         size_t dframes = total / 2; /* mono S16 */
+         size_t dframes = total / 2; /* mono S16; byte-carry resolved first (below) */
          int16_t *sm = (int16_t *)dn;
-         for (size_t i = 0; i < dframes; i++) {
-            sm[i] = soft_gain_s16(sm[i], dn_gain);
+
+         /* Produce the samples that actually play this cycle: the downlink APM
+          * (staged into 160-blocks, symmetric to the uplink) or the tanh
+          * soft-limiter fallback.  play_ptr/play_n both plays AND feeds the uplink
+          * reverse reference (post-processing = what the far end could echo). */
+         int16_t *play_ptr;
+         size_t play_n;
+         if (dn_apm != NULL && dn_use_apm) {
+            memcpy(dn_stage + dn_stage_n, sm, dframes * sizeof(int16_t));
+            dn_stage_n += (int)dframes;
+            int dblocks = dn_stage_n / PHONE_APM_FRAME;
+            for (int b = 0; b < dblocks; b++) {
+               phone_apm_process_10ms(dn_apm, dn_stage + (size_t)b * PHONE_APM_FRAME);
+            }
+            play_ptr = dn_stage;
+            play_n = (size_t)dblocks * PHONE_APM_FRAME;
+         } else {
+            for (size_t i = 0; i < dframes; i++) {
+               sm[i] = soft_gain_s16(sm[i], dn_gain);
+            }
+            play_ptr = sm;
+            play_n = dframes;
          }
-         /* Stash up to the last 320 post-gain downlink samples (what actually
-          * plays out the speaker) as next cycle's reverse reference, right-
-          * aligned so the two 10 ms halves stay time-ordered for the per-block
-          * feed above. */
-         if (apm != NULL) {
-            size_t keep = dframes < (size_t)PHONE_PCM_FRAME_SAMPLES
-                              ? dframes
+
+         /* Stash the last <=320 PLAYED samples (right-aligned into two 10 ms
+          * halves) as next cycle's reverse reference — post-processing, and only
+          * the emitted samples (the staging remainder hasn't played yet). */
+         if (apm != NULL && play_n > 0) {
+            size_t keep = play_n < (size_t)PHONE_PCM_FRAME_SAMPLES
+                              ? play_n
                               : (size_t)PHONE_PCM_FRAME_SAMPLES;
             memset(reverse_ref, 0, sizeof(reverse_ref));
-            memcpy(reverse_ref + (PHONE_PCM_FRAME_SAMPLES - keep), sm + (dframes - keep),
+            memcpy(reverse_ref + (PHONE_PCM_FRAME_SAMPLES - keep), play_ptr + (play_n - keep),
                    keep * sizeof(int16_t));
          }
+
          size_t pw = 0;
-         while (pw < dframes && atomic_load(&s_running)) {
-            ssize_t w = audio_stream_playback_write(s_playback, dn + pw * 2, dframes - pw);
+         while (pw < play_n && atomic_load(&s_running)) {
+            ssize_t w = audio_stream_playback_write(s_playback, (uint8_t *)play_ptr + pw * 2,
+                                                    play_n - pw);
             if (w < 0) {
                int err = (int)(-w);
                if (err == AUDIO_ERR_UNDERRUN) {
@@ -390,6 +450,17 @@ static void *bridge_thread(void *arg) {
             }
             pw += (size_t)w;
          }
+
+         /* Shift the downlink APM stage remainder AFTER play consumed play_ptr. */
+         if (dn_apm != NULL && dn_use_apm) {
+            int rem = dn_stage_n - (int)play_n;
+            if (rem > 0) {
+               memmove(dn_stage, dn_stage + play_n, (size_t)rem * sizeof(int16_t));
+            }
+            dn_stage_n = rem;
+         }
+
+         /* Byte-carry on the raw read buffer (independent of the sample stage). */
          size_t used = dframes * 2;
          dn_carry = total - used;
          if (dn_carry) {
@@ -397,11 +468,18 @@ static void *bridge_thread(void *arg) {
          }
       }
 
-      /* ---- objective tuning trace: APM output level ~once/second ---- */
-      if (apm != NULL && (++cycle % PHONE_RMS_LOG_INTERVAL) == 0) {
-         int rms_dbfs = 0;
-         if (phone_apm_output_rms_dbfs(apm, &rms_dbfs)) {
-            OLOG_INFO("phone_bridge: uplink APM output ~%d dBFS", rms_dbfs);
+      /* ---- objective tuning trace: APM output levels ~once/second ---- */
+      if ((++cycle % PHONE_RMS_LOG_INTERVAL) == 0) {
+         int up_rms = 0, dn_rms = 0;
+         bool have_up = apm != NULL && phone_apm_output_rms_dbfs(apm, &up_rms);
+         bool have_dn = (dn_apm != NULL && dn_use_apm) &&
+                        phone_apm_output_rms_dbfs(dn_apm, &dn_rms);
+         if (have_up && have_dn) {
+            OLOG_INFO("phone_bridge: APM out uplink ~%d dBFS, downlink ~%d dBFS", up_rms, dn_rms);
+         } else if (have_up) {
+            OLOG_INFO("phone_bridge: uplink APM output ~%d dBFS", up_rms);
+         } else if (have_dn) {
+            OLOG_INFO("phone_bridge: downlink APM output ~%d dBFS", dn_rms);
          }
       }
    }
@@ -414,6 +492,10 @@ static void cleanup_locked(void) {
    if (s_uplink_apm) {
       phone_apm_destroy(s_uplink_apm);
       s_uplink_apm = NULL;
+   }
+   if (s_downlink_apm) {
+      phone_apm_destroy(s_downlink_apm);
+      s_downlink_apm = NULL;
    }
    if (s_playback) {
       audio_stream_playback_close(s_playback);
@@ -491,13 +573,24 @@ int phone_bridge_start(const phone_bridge_config_t *cfg) {
       return FAILURE;
    }
 
-   /* Downlink gain + near-end uplink processor from config.  A NULL APM (WebRTC
-    * not built, or init failed) is not an error — the thread falls back to the
-    * raw soft-limiter. */
+   /* Audio config from cfg.  Both APM instances are created here (even if a
+    * direction's APM is off) so a mid-call reconfigure toggle has an instance to
+    * switch to.  A NULL APM (WebRTC not built, or init failed) is not an error —
+    * that direction falls back to the raw soft-limiter. */
    s_downlink_gain = (cfg->downlink_gain > 0.0f) ? cfg->downlink_gain : PHONE_DOWNLINK_GAIN;
+   s_downlink_use_apm = cfg->downlink_use_apm;
    s_uplink_apm = phone_apm_create(&cfg->uplink);
-   OLOG_INFO("phone_bridge: uplink %s",
-             s_uplink_apm ? "APM (AGC2+NS+HPF)" : "raw soft-gain (APM unavailable)");
+   /* Downlink has no reverse stream — echo cancellation is N/A; force it off so a
+    * config built from a WebUI payload can't create a useless AECM instance. */
+   phone_apm_config_t dncfg = cfg->downlink;
+   dncfg.echo_cancel = false;
+   s_downlink_apm = phone_apm_create(&dncfg);
+   /* Fresh call starts from this authoritative config; drop any reconfigure
+    * flagged while idle (its persistent value already arrived via cfg). */
+   atomic_store_explicit(&s_cfg_dirty, false, memory_order_relaxed);
+   OLOG_INFO("phone_bridge: uplink %s, downlink %s",
+             s_uplink_apm ? "APM (AGC2+NS+HPF)" : "raw soft-gain",
+             (s_downlink_apm && cfg->downlink_use_apm) ? "APM (AGC2+HPF)" : "soft-limiter");
 
    atomic_store(&s_running, true);
    if (pthread_create(&s_bridge_tid, NULL, bridge_thread, NULL) != 0) {
@@ -533,4 +626,22 @@ void phone_bridge_stop(void) {
 
 bool phone_bridge_is_active(void) {
    return atomic_load(&s_running);
+}
+
+void phone_bridge_reconfigure(const phone_bridge_config_t *cfg) {
+   if (!cfg) {
+      return;
+   }
+   /* Only meaningful for a running call; otherwise the next call's config is
+    * delivered authoritatively via phone_bridge_start (and any stale flag is
+    * cleared there).  Checking s_running here also means a store landing just
+    * after a concurrent stop is harmless — start() resets the flag. */
+   if (!atomic_load(&s_running)) {
+      return;
+   }
+   pthread_mutex_lock(&s_pending_lock);
+   s_pending_cfg = *cfg;
+   s_pending_cfg.pcm_port = NULL; /* not live-applicable; taken on the next call */
+   atomic_store_explicit(&s_cfg_dirty, true, memory_order_relaxed);
+   pthread_mutex_unlock(&s_pending_lock);
 }

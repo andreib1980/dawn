@@ -2693,6 +2693,27 @@ token = "eyJ..."</pre
                      </div>
                   </div>
                </div>
+
+               <div class="settings-section admin-only" id="phone-audio-section">
+                  <h3 class="section-header" data-section="phone-audio">
+                     <span class="section-icon">&#x1F4DE;</span>
+                     Phone Call Audio
+                     <span class="section-toggle">&#x25B6;</span>
+                  </h3>
+                  <div class="section-content">
+                     <p class="phone-audio-intro">
+                        Tune how you and the caller sound on a phone call. Changes apply to a call
+                        in progress immediately, or to the next call.
+                     </p>
+                     <div
+                        class="phone-audio-status"
+                        id="phone-audio-status"
+                        role="status"
+                        aria-live="polite"
+                     ></div>
+                     <div id="phone-audio-controls"></div>
+                  </div>
+               </div>
             </div>
 
             <div class="settings-footer">
@@ -3350,6 +3371,7 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/attach.js"></script>
       <script defer src="/js/ui/metrics.js"></script>
       <script defer src="/js/admin/homeassistant.js"></script>
+      <script defer src="/js/admin/phone-audio.js"></script>
       <script defer src="/js/admin/tools.js"></script>
       <script defer src="/js/admin/metrics-panel.js"></script>
       <script defer src="/js/admin/users.js"></script>

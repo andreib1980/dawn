@@ -95,10 +95,11 @@ static bool s_echo_online = false;
  * what the call actually paused (event-thread only — no lock needed). */
 static bool s_bridge_paused_music = false;
 
-/* Call-audio config from [phone] (set once at startup by
- * phone_service_set_audio_config, read on the event thread at pcm_ready). */
-static phone_apm_config_t s_uplink_apm_cfg;
-static float s_bridge_downlink_gain = 0.0f; /* <=0 -> bridge default */
+/* Call-audio config from [phone].  Set once at startup by
+ * phone_service_set_audio_config (event-safe today); Phase D makes the setter
+ * runtime-callable and must then guard s_audio_cfg/s_audio_cfg_set + the pcm_ready
+ * read under s_state_mutex (arch-H2). */
+static phone_audio_config_t s_audio_cfg;
 static bool s_audio_cfg_set = false;
 
 /* =============================================================================
@@ -733,11 +734,14 @@ void phone_service_handle_event(const char *payload, int payload_len) {
        * hot-mic primitive.  Read state under the mutex like the other handlers. */
       pthread_mutex_lock(&s_state_mutex);
       bool call_active = (s_state == PHONE_STATE_ACTIVE || s_state == PHONE_STATE_ANSWERING);
+      /* Snapshot the audio config under the lock — it can be written concurrently
+       * by the WebUI thread via phone_service_set_audio_config (arch-H2). */
+      phone_audio_config_t acfg = s_audio_cfg_set ? s_audio_cfg : phone_audio_config_default();
       pthread_mutex_unlock(&s_state_mutex);
       if (!call_active) {
          OLOG_WARNING("phone_service: ignoring pcm_ready with no active call");
       } else {
-         const char *port = s_config.pcm_port[0] ? s_config.pcm_port : PHONE_PCM_PORT_DEFAULT;
+         const char *port = acfg.pcm_port[0] ? acfg.pcm_port : PHONE_PCM_PORT_DEFAULT;
          /* Pause music only if it was actually playing, so teardown can restore
           * the exact prior state (never resume music the user had paused). */
          s_bridge_paused_music = (getMusicPlay() != 0);
@@ -746,8 +750,10 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          }
          phone_bridge_config_t bcfg = {
             .pcm_port = port,
-            .uplink = s_audio_cfg_set ? s_uplink_apm_cfg : phone_apm_default_config(),
-            .downlink_gain = s_bridge_downlink_gain,
+            .uplink = acfg.uplink,
+            .downlink = acfg.downlink,
+            .downlink_use_apm = acfg.downlink_use_apm,
+            .downlink_gain = acfg.downlink_gain,
          };
          if (phone_bridge_start(&bcfg) == SUCCESS) {
             OLOG_INFO("phone_service: audio bridge up on %s", port);
@@ -1427,15 +1433,29 @@ const phone_service_config_t *phone_service_get_config(void) {
  * Lifecycle
  * ============================================================================= */
 
-void phone_service_set_audio_config(const char *pcm_port,
-                                    const phone_apm_config_t *uplink,
-                                    float downlink_gain) {
-   if (pcm_port && pcm_port[0]) {
-      snprintf(s_config.pcm_port, sizeof(s_config.pcm_port), "%s", pcm_port);
+void phone_service_set_audio_config(const phone_audio_config_t *audio) {
+   if (!audio) {
+      return;
    }
-   s_uplink_apm_cfg = uplink ? *uplink : phone_apm_default_config();
-   s_bridge_downlink_gain = downlink_gain;
+   /* Runtime-callable (WebUI thread) now, so guard the statics that the ECHO
+    * event thread reads at pcm_ready.  Snapshot the reconfigure payload under the
+    * lock, release, THEN call the bridge (don't hold s_state_mutex across the
+    * bridge's own lock). */
+   phone_bridge_config_t bcfg;
+   pthread_mutex_lock(&s_state_mutex);
+   s_audio_cfg = *audio;
    s_audio_cfg_set = true;
+   bcfg.pcm_port = NULL; /* not live-applicable */
+   bcfg.uplink = s_audio_cfg.uplink;
+   bcfg.downlink = s_audio_cfg.downlink;
+   bcfg.downlink_use_apm = s_audio_cfg.downlink_use_apm;
+   bcfg.downlink_gain = s_audio_cfg.downlink_gain;
+   pthread_mutex_unlock(&s_state_mutex);
+
+   /* Live-apply to a running bridge — unconditional; phone_bridge_reconfigure
+    * no-ops when no call is active.  (Gating on ACTIVE here would miss a save in
+    * the ANSWERING window, where the bridge is already up.) */
+   phone_bridge_reconfigure(&bcfg);
 }
 
 int phone_service_init(void) {

@@ -363,6 +363,11 @@
                   DawnHomeAssistant.handleStatusResponse(msg.payload);
                }
                break;
+            case 'phone_audio_config_response':
+               if (typeof DawnPhoneAudio !== 'undefined') {
+                  DawnPhoneAudio.handleConfigResponse(msg.payload);
+               }
+               break;
             case 'ha_test_connection_response':
                if (typeof DawnHomeAssistant !== 'undefined') {
                   DawnHomeAssistant.handleTestConnectionResponse(msg.payload);

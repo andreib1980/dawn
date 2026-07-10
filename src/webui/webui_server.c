@@ -90,6 +90,9 @@
 #ifdef DAWN_ENABLE_CALENDAR_TOOL
 #include "webui/webui_calendar.h"
 #endif
+#ifdef DAWN_ENABLE_PHONE_TOOL
+#include "webui/webui_phone_config.h"
+#endif
 #ifdef DAWN_ENABLE_EMAIL_TOOL
 #include "webui/webui_email.h"
 #endif
@@ -700,7 +703,14 @@ bool handle_smart_home_message(ws_connection_t *conn,
    }
 #endif /* DAWN_ENABLE_HOMEASSISTANT_TOOL */
 
-   (void)payload; /* Suppress unused warning when both tools are disabled */
+#ifdef DAWN_ENABLE_PHONE_TOOL
+   if (strcmp(type, "get_phone_audio_config") == 0) {
+      handle_phone_audio_config_get(conn);
+      return true;
+   }
+#endif /* DAWN_ENABLE_PHONE_TOOL */
+
+   (void)payload; /* Suppress unused warning when the gated tools are all disabled */
    return false;
 }
 

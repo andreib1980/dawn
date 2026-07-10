@@ -393,62 +393,65 @@ if(NOT ENABLE_AEC)
     message(STATUS "AEC: DISABLED (use -DENABLE_AEC=ON to enable WebRTC AEC3)")
     set(AEC_ENABLED FALSE)
 else()
-    set(AEC_ENABLED TRUE)
     message(STATUS "AEC: Checking WebRTC dependencies...")
 
     # WebRTC AEC3 backend
     set(WEBRTC_AP_ROOT ${CMAKE_SOURCE_DIR}/webrtc-audio-processing)
     set(WEBRTC_AP_BUILD ${WEBRTC_AP_ROOT}/build)
 
-    # Check that submodule exists and was built
-    if(NOT EXISTS "${WEBRTC_AP_ROOT}/webrtc/modules/audio_processing/include/audio_processing.h")
-        message(FATAL_ERROR
-            "WebRTC audio processing submodule not found or not initialized.\n"
-            "Run: git submodule update --init --recursive\n"
-            "Then: cd webrtc-audio-processing && meson setup build && ninja -C build")
+    # The webrtc-audio-processing submodule is a separate meson build that fresh
+    # clones / git worktrees don't auto-populate.  If it isn't built, degrade
+    # gracefully to a no-AEC build with a warning instead of failing configure —
+    # this keeps unrelated / worktree / CI builds working while AEC defaults ON
+    # (presets) wherever the lib exists.  NOTE: this also drops the phone-call APM
+    # (echo cancel + call AGC/NS), which shares this backend.
+    if(NOT EXISTS "${WEBRTC_AP_ROOT}/webrtc/modules/audio_processing/include/audio_processing.h"
+       OR NOT EXISTS "${WEBRTC_AP_BUILD}/webrtc/modules/audio_processing/libwebrtc-audio-processing-1.a")
+        message(WARNING
+            "ENABLE_AEC=ON but webrtc-audio-processing is not built — building WITHOUT "
+            "echo cancellation and the phone-call APM.\n"
+            "To enable: git submodule update --init --recursive && "
+            "cd webrtc-audio-processing && meson setup build && ninja -C build")
+        set(AEC_ENABLED FALSE)
+    else()
+        set(AEC_ENABLED TRUE)
+
+        # Include paths for headers
+        include_directories(${WEBRTC_AP_ROOT})
+        include_directories(${WEBRTC_AP_ROOT}/webrtc)
+        include_directories(${WEBRTC_AP_BUILD})
+        include_directories(${WEBRTC_AP_BUILD}/webrtc)
+
+        # Abseil includes for WebRTC
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(ABSL REQUIRED
+            absl_base
+            absl_strings
+            absl_synchronization
+            absl_bad_optional_access
+            absl_optional
+            absl_bad_variant_access
+            absl_variant
+            absl_status
+            absl_statusor
+            absl_flags
+            absl_flags_parse
+        )
+        include_directories(${ABSL_INCLUDE_DIRS})
+
+        message(STATUS "  webrtc-audio-processing: Found (local build v1.3)")
+        message(STATUS "AEC: ENABLED (WebRTC AEC3)")
+
+        set(AEC_SOURCES
+            src/audio/aec_webrtc.cpp
+            src/audio/aec_calibration.c
+        )
+        set(AEC_LIBRARIES
+            ${WEBRTC_AP_BUILD}/webrtc/modules/audio_processing/libwebrtc-audio-processing-1.a
+            ${SAMPLERATE_LIBRARIES}
+            ${ABSL_LIBRARIES}
+        )
     endif()
-
-    if(NOT EXISTS "${WEBRTC_AP_BUILD}/webrtc/modules/audio_processing/libwebrtc-audio-processing-1.a")
-        message(FATAL_ERROR
-            "WebRTC audio processing not built.\n"
-            "Run: cd webrtc-audio-processing && meson setup build && ninja -C build")
-    endif()
-
-    # Include paths for headers
-    include_directories(${WEBRTC_AP_ROOT})
-    include_directories(${WEBRTC_AP_ROOT}/webrtc)
-    include_directories(${WEBRTC_AP_BUILD})
-    include_directories(${WEBRTC_AP_BUILD}/webrtc)
-
-    # Abseil includes for WebRTC
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(ABSL REQUIRED
-        absl_base
-        absl_strings
-        absl_synchronization
-        absl_bad_optional_access
-        absl_optional
-        absl_bad_variant_access
-        absl_variant
-        absl_status
-        absl_statusor
-        absl_flags
-        absl_flags_parse
-    )
-    include_directories(${ABSL_INCLUDE_DIRS})
-
-    message(STATUS "  webrtc-audio-processing: Found (local build v1.3)")
-    message(STATUS "AEC: ENABLED (WebRTC AEC3)")
-
-    set(AEC_SOURCES
-        src/audio/aec_webrtc.cpp
-        src/audio/aec_calibration.c
-    )
-    set(AEC_LIBRARIES
-        ${WEBRTC_AP_BUILD}/webrtc/modules/audio_processing/libwebrtc-audio-processing-1.a
-        ${SAMPLERATE_LIBRARIES}
-        ${ABSL_LIBRARIES}
-    )
 endif()
 
 # ASR Engine Options
@@ -633,6 +636,9 @@ if(ENABLE_WEBUI)
     endif()
     if(DAWN_ENABLE_HOMEASSISTANT_TOOL)
         list(APPEND DAWN_SOURCES src/webui/webui_homeassistant.c)
+    endif()
+    if(DAWN_ENABLE_PHONE_TOOL)
+        list(APPEND DAWN_SOURCES src/webui/webui_phone_config.c)
     endif()
     if(OPUS_FOUND)
         list(APPEND DAWN_SOURCES src/webui/webui_audio.c)

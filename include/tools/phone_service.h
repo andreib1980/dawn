@@ -29,7 +29,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "audio/phone_apm.h" /* phone_apm_config_t for the audio-config setter */
+#include "tools/phone_audio_config.h" /* phone_audio_config_t for the audio-config setter */
 
 /* Phone states.
  *
@@ -56,7 +56,7 @@ typedef struct {
    bool enabled;
    bool confirm_outbound;
    char audio_device[64]; /* legacy — unused (was the USB-sound-card device) */
-   char pcm_port[64];     /* modem USB audio port for the PCM bridge; empty -> default */
+   char pcm_port[64];     /* legacy — unused; pcm_port now lives in phone_audio_config_t */
    int user_id;           /* owner of the modem — contacts/logs scoped to this user */
    int sms_retention_days;
    int call_log_retention_days;
@@ -142,13 +142,9 @@ int phone_service_init(void);
  * phone_tool and forwarded here; if never called, the bridge uses built-in
  * defaults.  Call at startup, before any call.
  *
- * @param pcm_port      Modem USB audio node (empty/NULL -> default). Copied.
- * @param uplink        Near-end APM config (NULL -> phone_apm defaults).
- * @param downlink_gain Downlink soft-limiter gain (<=0 -> bridge default).
+ * @param audio Full call-audio config (port + uplink + downlink + gains). Copied.
  */
-void phone_service_set_audio_config(const char *pcm_port,
-                                    const phone_apm_config_t *uplink,
-                                    float downlink_gain);
+void phone_service_set_audio_config(const phone_audio_config_t *audio);
 
 /**
  * @brief Shutdown the phone service.
