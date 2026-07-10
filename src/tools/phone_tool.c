@@ -34,6 +34,7 @@
 
 #include "logging.h"
 #include "tools/phone_audio_config.h"
+#include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
 #include "tools/phone_service.h"
 #include "tools/toml.h"
@@ -303,15 +304,32 @@ static char *handle_call(struct json_object *details, int user_id) {
    }
 
    if (s_config.confirm_outbound) {
-      /* Store target for confirmation — service layer resolves on confirm */
-      snprintf(s_pending_call_number, sizeof(s_pending_call_number), "%s", target);
+      /* Resolve the contact NOW (at preview) so the user confirms a real,
+       * verified number — not a name we haven't checked.  Ambiguous or
+       * fuzzy-only matches surface candidates instead of arming a call. */
+      phone_resolve_t rez;
+      phone_contacts_resolve(user_id, target, &rez);
+      if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
+         s_pending_call_number[0] = '\0'; /* nothing armed — model must disambiguate first */
+         char buf[512];
+         phone_contacts_format_disambiguation(target, &rez, buf, sizeof(buf));
+         return strdup(buf);
+      }
+
+      /* Arm the resolved number so confirm dials exactly what was previewed. */
+      snprintf(s_pending_call_number, sizeof(s_pending_call_number), "%s", rez.number);
       s_pending_call_at = time(NULL);
       char buf[256];
-      snprintf(buf, sizeof(buf), "About to call %s. Say 'confirm' to proceed.", target);
+      if (rez.name[0]) {
+         snprintf(buf, sizeof(buf), "About to call %s at %s. Say 'confirm' to proceed.", rez.name,
+                  rez.number);
+      } else {
+         snprintf(buf, sizeof(buf), "About to call %s. Say 'confirm' to proceed.", rez.number);
+      }
       return strdup(buf);
    }
 
-   /* No confirmation — dial immediately */
+   /* No confirmation — dial immediately (service layer applies the same guard) */
    char result[RESULT_BUF_SIZE];
    phone_service_call(user_id, target, result, sizeof(result));
    return strdup(result);
@@ -359,21 +377,34 @@ static char *handle_send_sms(struct json_object *details, int user_id) {
    }
 
    if (s_config.confirm_outbound) {
-      /* Store target and body for confirmation — service layer resolves on confirm */
-      snprintf(s_pending_sms_number, sizeof(s_pending_sms_number), "%s", target);
+      /* Resolve the recipient NOW (at preview) — same guard as calls, so the
+       * user confirms a verified number rather than an unchecked name. */
+      phone_resolve_t rez;
+      phone_contacts_resolve(user_id, target, &rez);
+      if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
+         s_pending_sms_number[0] = '\0'; /* nothing armed — disambiguate first */
+         s_pending_sms_body[0] = '\0';
+         char buf[512];
+         phone_contacts_format_disambiguation(target, &rez, buf, sizeof(buf));
+         return strdup(buf);
+      }
+
+      /* Arm the resolved number so confirm sends exactly what was previewed. */
+      snprintf(s_pending_sms_number, sizeof(s_pending_sms_number), "%s", rez.number);
       snprintf(s_pending_sms_body, sizeof(s_pending_sms_body), "%s", body);
       s_pending_sms_at = time(NULL);
 
+      const char *recipient = rez.name[0] ? rez.name : rez.number;
       int segs = s_config.warn_on_multi_segment ? estimate_sms_segments(body) : 1;
       char buf[768];
       if (segs > 1) {
          snprintf(buf, sizeof(buf),
                   "About to send SMS to %s: \"%s\". This will send as %d text messages. "
                   "Say 'confirm' to send.",
-                  target, body, segs);
+                  recipient, body, segs);
       } else {
          snprintf(buf, sizeof(buf), "About to send SMS to %s: \"%s\". Say 'confirm' to send.",
-                  target, body);
+                  recipient, body);
       }
       return strdup(buf);
    }
@@ -1161,8 +1192,10 @@ static const treg_param_t phone_params[] = {
            "status {}.\n"
            "  target: E.164 phone number ('+16785551212') OR a contact name resolvable via "
            "the contacts system. Bare digits ('6785551212') are also accepted and normalized. "
-           "If the contact name matches multiple contacts, the tool returns a disambiguation "
-           "request — pass the user's choice back on the next turn.\n"
+           "The tool checks contacts itself before dialing: pass the name the user said and let "
+           "the tool resolve it — you do NOT need the number. If the name is ambiguous or only a "
+           "near-miss (e.g. a mis-heard surname), the tool returns candidates ('did you mean…') "
+           "instead of dialing; relay them and pass the user's choice back on the next turn.\n"
            "  body: SMS message text. Concatenated SMS (multi-segment) is supported "
            "automatically; concise messages save segments.\n"
            "  IMPORTANT: after 'call' or 'send_sms' returns a preview, the LLM MUST stop "

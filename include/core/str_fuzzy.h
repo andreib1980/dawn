@@ -37,6 +37,11 @@ extern "C" {
 #define STR_FUZZY_SCORE_CONTAINS 80    /* candidate contains needle as substring */
 #define STR_FUZZY_SCORE_TOKEN_BONUS 20 /* per whitespace-delimited needle token found */
 
+/* Upper bound on string length compared by str_fuzzy_ratio().  Longer inputs
+ * are truncated to this many characters before the edit-distance DP so the
+ * two-row buffers stay stack-bounded.  Names/entity labels are well under it. */
+#define STR_FUZZY_RATIO_MAXLEN 128
+
 /**
  * @brief Lowercase @p src into @p dst (ASCII tolower), bounded by @p max_len.
  *
@@ -67,6 +72,25 @@ void str_fuzzy_tolower(char *dst, const char *src, size_t max_len);
  * @return Match score (0 = no overlap; higher is better).
  */
 int str_fuzzy_score(const char *haystack_lower, const char *needle_lower);
+
+/**
+ * @brief Normalized edit-distance similarity between two lowercased strings.
+ *
+ * Complements str_fuzzy_score(): where the token scorer only rewards SHARED
+ * whole tokens/substrings, this catches near-misses where no token is shared
+ * verbatim — e.g. an ASR/typo garble of a name ("kersey" vs "curzy").  The
+ * result is 100*(1 - levenshtein(a,b)/max(len_a,len_b)), clamped to [0,100]:
+ *   100 = identical, 0 = maximally different (or either side empty).
+ *
+ * Both arguments MUST already be lowercased (see str_fuzzy_tolower()).  Inputs
+ * longer than STR_FUZZY_RATIO_MAXLEN are truncated before scoring.  Callers
+ * typically take max(str_fuzzy_score, str_fuzzy_ratio) and apply a threshold.
+ *
+ * @param a_lower First string, lowercased.
+ * @param b_lower Second string, lowercased.
+ * @return Similarity in [0,100]; higher is more similar.
+ */
+int str_fuzzy_ratio(const char *a_lower, const char *b_lower);
 
 #ifdef __cplusplus
 }

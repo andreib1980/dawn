@@ -49,6 +49,7 @@
 #include "memory/memory_db.h"
 #include "messaging/messaging_engine.h"
 #include "tools/phone_audio_bridge.h"
+#include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
 #include "tts/text_to_speech.h"
 
@@ -152,56 +153,6 @@ static phone_state_t get_state(void) {
    phone_state_t st = s_state;
    pthread_mutex_unlock(&s_state_mutex);
    return st;
-}
-
-/**
- * @brief Resolve a name or number to a phone number via contacts DB.
- *
- * If input looks like a phone number (starts with + or digit), returns it as-is.
- * Otherwise, searches contacts by name and returns the first phone match.
- */
-static int resolve_number(int user_id,
-                          const char *input,
-                          char *number_out,
-                          size_t number_size,
-                          char *name_out,
-                          size_t name_size) {
-   if (!input || input[0] == '\0') {
-      return 1;
-   }
-
-   /* If it looks like a number already, validate and normalize */
-   if (input[0] == '+' || (input[0] >= '0' && input[0] <= '9')) {
-      size_t len = strlen(input);
-      if (len < 3 || len > 20) {
-         return 1;
-      }
-      /* Validate: only digits, +, -, spaces, parens, dots allowed */
-      for (size_t i = 0; i < len; i++) {
-         char c = input[i];
-         if (c != '+' && c != '-' && c != ' ' && c != '(' && c != ')' && c != '.' &&
-             !(c >= '0' && c <= '9')) {
-            return 1;
-         }
-      }
-      /* Normalize so DB rows use canonical E.164 — matches delete-by-number later. */
-      phone_number_normalize(input, number_out, number_size);
-      name_out[0] = '\0';
-      return 0;
-   }
-
-   /* Search contacts by name for phone type */
-   contact_result_t results[5];
-   int count = 0;
-   contacts_find(user_id, input, "phone", results, 5, &count);
-   if (count <= 0) {
-      return 1; /* no contact found */
-   }
-
-   /* Normalize stored contact value in case it was entered with punctuation. */
-   phone_number_normalize(results[0].value, number_out, number_size);
-   snprintf(name_out, name_size, "%s", results[0].entity_name);
-   return 0;
 }
 
 /**
@@ -1070,15 +1021,18 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
       return 1;
    }
 
-   /* Resolve contact */
+   /* Resolve contact — only a number or a single unambiguous contact dials;
+    * anything ambiguous or fuzzy comes back as a disambiguation prompt so we
+    * never place a call to a guessed contact. */
    char number[24], name[64];
-   if (resolve_number(user_id, name_or_number, number, sizeof(number), name, sizeof(name)) != 0) {
-      snprintf(result_buf, buf_size,
-               "Error: could not find a phone number for '%s'. "
-               "Please provide a phone number or add one to their contact.",
-               name_or_number);
+   phone_resolve_t rez;
+   phone_contacts_resolve(user_id, name_or_number, &rez);
+   if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
+      phone_contacts_format_disambiguation(name_or_number, &rez, result_buf, buf_size);
       return 1;
    }
+   snprintf(number, sizeof(number), "%s", rez.number);
+   snprintf(name, sizeof(name), "%s", rez.name);
 
    /* Publish dial to ECHO */
    pending_request_t *req = command_router_register(0);
@@ -1088,9 +1042,9 @@ int phone_service_call(int user_id, const char *name_or_number, char *result_buf
    }
 
    /* Reverse-lookup the entity (for the HUD photo) and, when the caller passed a
-    * raw number, the contact name too — otherwise resolve_number left name empty
-    * and the HUD/call log show "Unknown" instead of the contact (this mirrors the
-    * incoming-call path, which always reverse-looks-up the name). */
+    * raw number, the contact name too — a NUMBER-kind resolve leaves name empty,
+    * so without this the HUD/call log show "Unknown" instead of the contact (this
+    * mirrors the incoming-call path, which always reverse-looks-up the name). */
    int64_t out_entity_id = -1;
    {
       char tmp_name[64];
@@ -1318,15 +1272,17 @@ int phone_service_send_sms(int user_id,
       return 1;
    }
 
-   /* Resolve contact */
+   /* Resolve contact — same guard as calls: a number or one unambiguous
+    * contact sends; ambiguous/fuzzy comes back as a disambiguation prompt. */
    char number[24], name[64];
-   if (resolve_number(user_id, name_or_number, number, sizeof(number), name, sizeof(name)) != 0) {
-      snprintf(result_buf, buf_size,
-               "Error: could not find a phone number for '%s'. "
-               "Please provide a phone number or add one to their contact.",
-               name_or_number);
+   phone_resolve_t rez;
+   phone_contacts_resolve(user_id, name_or_number, &rez);
+   if (rez.kind != PHONE_RESOLVE_NUMBER && rez.kind != PHONE_RESOLVE_UNIQUE) {
+      phone_contacts_format_disambiguation(name_or_number, &rez, result_buf, buf_size);
       return 1;
    }
+   snprintf(number, sizeof(number), "%s", rez.number);
+   snprintf(name, sizeof(name), "%s", rez.name);
 
    /* Build data JSON */
    char data[1024];

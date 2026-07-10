@@ -346,6 +346,7 @@ if(DAWN_ENABLE_PHONE_TOOL)
     list(APPEND TOOL_SOURCES
         src/tools/phone_tool.c
         src/tools/phone_service.c
+        src/tools/phone_contacts.c
         src/tools/phone_audio_bridge.c
         src/tools/phone_audio_config.c
         src/tools/phone_db.c)

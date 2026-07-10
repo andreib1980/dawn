@@ -87,6 +87,38 @@ static void test_score_tie_is_detectable(void) {
    TEST_ASSERT_EQUAL_INT(STR_FUZZY_SCORE_EXACT, a);
 }
 
+/* ---- str_fuzzy_ratio (normalized edit-distance similarity) ---- */
+
+static void test_ratio_identical(void) {
+   TEST_ASSERT_EQUAL_INT(100, str_fuzzy_ratio("shelley kersey", "shelley kersey"));
+}
+
+static void test_ratio_empty_or_null(void) {
+   TEST_ASSERT_EQUAL_INT(0, str_fuzzy_ratio("", "x"));
+   TEST_ASSERT_EQUAL_INT(0, str_fuzzy_ratio("x", ""));
+   TEST_ASSERT_EQUAL_INT(0, str_fuzzy_ratio(NULL, "x"));
+   TEST_ASSERT_EQUAL_INT(0, str_fuzzy_ratio("x", NULL));
+}
+
+/* The motivating case: an ASR-garbled surname must still read as a near-miss
+ * (well above the phone resolver's suggest threshold of 50) where the token
+ * scorer alone only sees the shared first name. */
+static void test_ratio_asr_garble_is_near_miss(void) {
+   int r = str_fuzzy_ratio("shelley kersey", "shelley curzy");
+   TEST_ASSERT_TRUE(r >= 50);
+   TEST_ASSERT_TRUE(str_fuzzy_score("shelley kersey", "shelley curzy") < 50);
+}
+
+/* An unrelated contact must stay well below threshold so it is not offered. */
+static void test_ratio_unrelated_is_low(void) {
+   TEST_ASSERT_TRUE(str_fuzzy_ratio("john smith", "shelley curzy") < 50);
+}
+
+/* Symmetry: edit distance is symmetric, so the ratio must be too. */
+static void test_ratio_symmetric(void) {
+   TEST_ASSERT_EQUAL_INT(str_fuzzy_ratio("kersey", "curzy"), str_fuzzy_ratio("curzy", "kersey"));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_tolower_basic);
@@ -99,5 +131,10 @@ int main(void) {
    RUN_TEST(test_score_no_match);
    RUN_TEST(test_score_null_args);
    RUN_TEST(test_score_tie_is_detectable);
+   RUN_TEST(test_ratio_identical);
+   RUN_TEST(test_ratio_empty_or_null);
+   RUN_TEST(test_ratio_asr_garble_is_near_miss);
+   RUN_TEST(test_ratio_unrelated_is_low);
+   RUN_TEST(test_ratio_symmetric);
    return UNITY_END();
 }

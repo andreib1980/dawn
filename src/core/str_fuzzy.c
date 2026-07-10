@@ -73,3 +73,54 @@ int str_fuzzy_score(const char *haystack_lower, const char *needle_lower) {
 
    return score;
 }
+
+int str_fuzzy_ratio(const char *a_lower, const char *b_lower) {
+   if (!a_lower || !b_lower) {
+      return 0;
+   }
+
+   size_t la = strlen(a_lower);
+   size_t lb = strlen(b_lower);
+   if (la > STR_FUZZY_RATIO_MAXLEN) {
+      la = STR_FUZZY_RATIO_MAXLEN;
+   }
+   if (lb > STR_FUZZY_RATIO_MAXLEN) {
+      lb = STR_FUZZY_RATIO_MAXLEN;
+   }
+   if (la == 0 || lb == 0) {
+      return 0;
+   }
+
+   /* Two-row Levenshtein DP.  prev/curr are indexed 0..lb, bounded by
+    * STR_FUZZY_RATIO_MAXLEN + 1 (the +1 is the empty-prefix column). */
+   int prev[STR_FUZZY_RATIO_MAXLEN + 1];
+   int curr[STR_FUZZY_RATIO_MAXLEN + 1];
+   for (size_t j = 0; j <= lb; j++) {
+      prev[j] = (int)j;
+   }
+   for (size_t i = 1; i <= la; i++) {
+      curr[0] = (int)i;
+      for (size_t j = 1; j <= lb; j++) {
+         int cost = (a_lower[i - 1] == b_lower[j - 1]) ? 0 : 1;
+         int del = prev[j] + 1;
+         int ins = curr[j - 1] + 1;
+         int sub = prev[j - 1] + cost;
+         int best = del < ins ? del : ins;
+         curr[j] = best < sub ? best : sub;
+      }
+      for (size_t j = 0; j <= lb; j++) {
+         prev[j] = curr[j];
+      }
+   }
+
+   int dist = prev[lb];
+   size_t maxlen = la > lb ? la : lb;
+   int ratio = (int)(((maxlen - (size_t)dist) * 100) / maxlen);
+   if (ratio < 0) {
+      ratio = 0;
+   }
+   if (ratio > 100) {
+      ratio = 100;
+   }
+   return ratio;
+}

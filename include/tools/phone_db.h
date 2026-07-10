@@ -104,7 +104,7 @@ void phone_number_format_for_tts(const char *in, char *out, size_t out_size);
  * "1 555 123 4567"). Stored rows are E.164 without punctuation ("+15551234567").
  * Strip whitespace/dashes/parens/dots, keep digits and an optional leading '+',
  * prefix a bare 10-digit US number with "+1". Used on both ingestion (inbound
- * SMS sender, outbound resolve_number) and delete (by-number) paths so rows
+ * SMS sender, outbound contact resolution) and delete (by-number) paths so rows
  * match on any LLM-supplied format.
  *
  * @param in       Raw input (may be NULL/empty → out receives "").
