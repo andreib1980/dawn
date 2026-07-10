@@ -969,17 +969,6 @@ dawn_state_t currentState = DAWN_STATE_INVALID;
 /* Mutex for thread-safe conversation management */
 static pthread_mutex_t conversation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Public accessors (declared in dawn.h) so other modules — the MQTT
- * background-command path — can serialize against the main thread's per-turn
- * rebuild/swap of `conversation_history`. */
-void conversation_history_lock(void) {
-   pthread_mutex_lock(&conversation_mutex);
-}
-
-void conversation_history_unlock(void) {
-   pthread_mutex_unlock(&conversation_mutex);
-}
-
 /**
  * @brief Reset conversation context (save current, start fresh)
  *
@@ -2693,8 +2682,12 @@ mqtt_disabled:
             }
             pthread_mutex_unlock(&tts_mutex);
 
-            /* Check for text input from any source (TUI, future REST, etc.) */
-            if (check_and_process_input_queue(&command_text, &recState, &silenceNextState)) {
+            /* Check for text input from any source (TUI, MQTT device relay, future REST).
+             * Gated on !llm_processing so a queued item is never popped into a turn while
+             * the worker is running — it waits until the pipeline is free, so the
+             * main pipeline never mutates conversation_history mid-turn. */
+            if (!llm_processing &&
+                check_and_process_input_queue(&command_text, &recState, &silenceNextState)) {
                break;
             }
 
@@ -3022,8 +3015,12 @@ mqtt_disabled:
             }
             pthread_mutex_unlock(&tts_mutex);
 
-            /* Check for text input from any source (TUI, future REST, etc.) */
-            if (check_and_process_input_queue(&command_text, &recState, &silenceNextState)) {
+            /* Check for text input from any source (TUI, MQTT device relay, future REST).
+             * Gated on !llm_processing so a queued item is never popped into a turn while
+             * the worker is running — it waits until the pipeline is free, so the
+             * main pipeline never mutates conversation_history mid-turn. */
+            if (!llm_processing &&
+                check_and_process_input_queue(&command_text, &recState, &silenceNextState)) {
                break;
             }
 
@@ -3675,9 +3672,20 @@ mqtt_disabled:
 
             int direct_command_found = 0;
 
-            // Add user message to conversation history first (needed for vision context)
-            // We'll add it regardless of whether it's a direct command or LLM processing
-            if (command_processing_mode != CMD_MODE_DIRECT_ONLY) {
+            /* Snapshot llm_processing once for this turn. To keep the main voice
+             * path from racing its own LLM worker on conversation_history, never
+             * mutate the array while the worker is running. We gate the
+             * user-message append below AND the LLM-busy
+             * bail further down on this same snapshot so they stay consistent
+             * (the worker can clear llm_processing between the two points). When
+             * busy the turn is dropped either way (see the bail), so skipping the
+             * append is behavior-preserving — it just removes the concurrent
+             * append that raced the worker. */
+            int llm_busy = llm_processing;
+
+            // Add user message to conversation history first (needed for vision context).
+            // Skipped while the LLM worker is running (turn is dropped at the busy bail).
+            if (command_processing_mode != CMD_MODE_DIRECT_ONLY && !llm_busy) {
                struct json_object *user_message_early = json_object_new_object();
                json_object_object_add(user_message_early, "role", json_object_new_string("user"));
                json_object_object_add(user_message_early, "content",
@@ -3800,20 +3808,14 @@ mqtt_disabled:
                                           &speech_duration, &recording_duration, &preroll_write_pos,
                                           &preroll_valid_bytes);
                } else {
-                  // User message already added at top of DAWN_STATE_PROCESS_COMMAND
-
                   // Check if an LLM thread is already running (from a previous request or
-                  // interrupt)
-                  if (llm_processing) {
+                  // interrupt). Uses the llm_busy snapshot taken at the top of this turn so
+                  // it agrees with the user-message append gate above — when busy the append
+                  // was skipped, so there is nothing to remove here.
+                  if (llm_busy) {
                      OLOG_WARNING(
                          "LLM thread already running - ignoring new request (say command again "
                          "after response completes)");
-
-                     // Remove the user message we just added (last item in conversation history)
-                     int history_len = json_object_array_length(conversation_history);
-                     if (history_len > 0) {
-                        json_object_array_del_idx(conversation_history, history_len - 1, 1);
-                     }
 
                      // Free command text
                      if (command_text) {
@@ -3847,24 +3849,21 @@ mqtt_disabled:
 
                   /* Parity with WebUI/satellite: rebuild the local session's system
                    * prompt with this turn's memory + focus context before dispatch.
-                   * session_dispatch_user_turn() runs the structured builder and
-                   * swaps conversation_history (rebuilding [0]=stable / [1]=volatile
-                   * system messages, freeing the old array), so re-sync the global
-                   * alias afterward — the worker reads it at spawn (pthread_create
-                   * publishes the new pointer). The swap+re-sync is held under
-                   * conversation_mutex so the free/replace is serialized against the
-                   * MQTT background-command path (mosquitto_comms.c), which snapshots
-                   * this array under the same lock — that closes the swap/UAF window.
-                   * NOTE: broad serialization of every conversation_history mutator
-                   * (the LLM worker tool-loop, the main-thread turn append/delete
-                   * sites, switch_llm compaction) is a separate follow-up; this lock
-                   * only guards the swap vs the MQTT snapshot. No prior worker is live
-                   * here (past the llm_processing busy-check). A no-op when no
-                   * structured builder is registered (non-WebUI) → static prompt. */
-                  pthread_mutex_lock(&conversation_mutex);
+                   * session_dispatch_user_turn() swaps conversation_history (rebuilding
+                   * [0]=stable / [1]=volatile system messages, freeing the old array),
+                   * so re-sync the global alias afterward — the worker reads it at
+                   * spawn (pthread_create publishes the new pointer). No swap lock:
+                   * this runs on the main thread past the llm_processing busy-check
+                   * with no worker live, and the MQTT device relay no longer mutates
+                   * the array (it routes through input_queue). CAVEAT: not yet fully
+                   * single-owner — session_broadcast_system_message / session_add_message
+                   * (phone call-state, from the echo/MQTT thread) still append to this
+                   * array under history_mutex while the main path appends unlocked. That
+                   * pre-existing narrow race is closed by the tracked "session owns its
+                   * history under history_mutex (incl. LLM providers)" refactor. A no-op
+                   * when no structured builder is registered (non-WebUI) → static prompt. */
                   session_dispatch_user_turn(local_session, command_text);
                   conversation_history = local_session->conversation_history;
-                  pthread_mutex_unlock(&conversation_mutex);
 
                   // Spawn LLM thread to process request (non-blocking)
                   pthread_mutex_lock(&llm_mutex);

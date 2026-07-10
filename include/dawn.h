@@ -113,21 +113,6 @@ extern volatile sig_atomic_t g_restart_requested;
  */
 void dawn_request_restart(void);
 
-/**
- * @brief Lock/unlock the local conversation history.
- *
- * Serializes access to the shared global `conversation_history` array (the
- * local mic session's message list). The main voice thread rebuilds and
- * *swaps* that array on every turn (session_dispatch_user_turn ->
- * session_update_system_messages), freeing the old one — so any other thread
- * that touches `conversation_history` (notably the MQTT background-command
- * path in mosquitto_comms.c) must hold this lock while reading it and snapshot
- * a refcounted pointer before doing slow work on it. Wraps the module-private
- * `conversation_mutex`.
- */
-void conversation_history_lock(void);
-void conversation_history_unlock(void);
-
 #ifdef __cplusplus
 }
 #endif

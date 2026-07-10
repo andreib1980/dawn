@@ -38,6 +38,7 @@
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "dawn.h"
+#include "input_queue.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -86,8 +87,6 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    struct json_object *actionObject = NULL;
    struct json_object *valueObject = NULL;
 
-   extern struct json_object *conversation_history;
-   char *response_text = NULL;
    char gpt_response[GPT_RESPONSE_BUFFER_SIZE];
 
    const char *deviceName = NULL;
@@ -213,117 +212,29 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
       return;
    }
 
-   // Format system data with clear instruction to speak it to the user
-   // Using "system" role so LLM knows this is data to relay, not user input
+   /* Route the device-data relay through the main input queue rather than running
+    * an LLM turn here on the MQTT background thread. This keeps the MQTT background
+    * thread out of the local session's conversation_history — removing that
+    * cross-thread writer. (The phone call-state broadcaster is a separate remaining
+    * writer, closed by the tracked "session owns history under history_mutex"
+    * refactor.) The main loop
+    * drains the queue in SILENCE (promptly when idle, deferred until the current
+    * turn finishes if one is in flight), then speaks the result via TTS.
+    *
+    * Behavior notes (relay now flows through the normal turn path as a user-role
+    * input): it gains per-turn memory/focus context + native tool-calling, is
+    * subject to utterance dedup, and lands in the session history that feeds
+    * end-of-session memory extraction. Device data on MQTT is operator-trusted
+    * (see the MQTT-auth hardening TODO); the explicit [DEVICE DATA] delimiter is
+    * retained. A burst of relays during one long turn can exceed the 8-slot queue
+    * (drop-oldest). Revisit tool-scoping / extraction-tagging for relays if the
+    * MQTT LOCAL PATH sees heavy use. */
+   (void)mosq; /* command chaining + TTS now handled by the main pipeline */
    snprintf(gpt_response, sizeof(gpt_response),
             "[DEVICE DATA] Speak this information naturally to the user: %s",
             pending_command_result);
+   input_queue_push(INPUT_SOURCE_MQTT, gpt_response);
 
-   // Add as system message so LLM knows to relay it, not just confirm it
-   struct json_object *system_response_message = json_object_new_object();
-   json_object_object_add(system_response_message, "role", json_object_new_string("system"));
-   json_object_object_add(system_response_message, "content", json_object_new_string(gpt_response));
-
-   /* This runs on the MQTT background thread against the local session's shared
-    * conversation array, which the main voice thread can free-and-swap mid-turn
-    * (session_dispatch_user_turn -> session_update_system_messages). Serialize
-    * on conversation_history_lock() and snapshot a refcounted pointer so (a) our
-    * append is not concurrent with that rebuild and (b) the array can't be freed
-    * under the LLM call below. json_object_get() bumps the ref; we put() it at
-    * the end. In the common (no-collision) case `hist` IS the live array.
-    * NOTE: this closes the free/swap UAF window only. The array is still mutated
-    * unlocked by the LLM worker tool-loop and the main-thread turn sites, so the
-    * pre-existing concurrent-mutation race remains until the full conversation_
-    * history serialization pass lands (tracked follow-up). */
-   conversation_history_lock();
-   struct json_object *hist = json_object_get(conversation_history);
-   json_object_array_add(hist, system_response_message);
-   conversation_history_unlock();
-
-   response_text = llm_chat_completion(hist, gpt_response, NULL, NULL, 0, true);
-   if (response_text != NULL) {
-      // AI returned successfully, vocalize response.
-      OLOG_WARNING("AI: %s\n", response_text);
-      char *match = NULL;
-      if ((match = strstr(response_text, "<end_of_turn>")) != NULL) {
-         *match = '\0';
-         OLOG_INFO("AI: %s\n", response_text);
-      }
-
-      // Process any commands in the LLM follow-up response (chained commands)
-      if (command_processing_mode == CMD_MODE_LLM_ONLY ||
-          command_processing_mode == CMD_MODE_DIRECT_FIRST) {
-         int cmds_processed = parse_llm_response_for_commands(response_text, mosq);
-         if (cmds_processed > 0) {
-            OLOG_INFO("Processed %d chained commands from LLM follow-up", cmds_processed);
-         }
-      }
-
-      // Skip TTS if response is pure JSON (no conversational text)
-      // Check by trying to parse as JSON - if valid JSON object/array, skip TTS
-      const char *p = response_text;
-      while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
-         p++;  // Skip whitespace
-      int is_pure_json = 0;
-      if (*p == '{' || *p == '[') {
-         struct json_object *test_json = json_tokener_parse(response_text);
-         if (test_json) {
-            is_pure_json = 1;
-            json_object_put(test_json);
-         }
-      }
-
-      if (!is_pure_json) {
-         // Create cleaned version for TTS (remove command tags)
-         char *tts_response = strdup(response_text);
-         if (tts_response) {
-            char *cmd_start, *cmd_end;
-            while ((cmd_start = strstr(tts_response, "<command>")) != NULL) {
-               cmd_end = strstr(cmd_start, "</command>");
-               if (cmd_end) {
-                  cmd_end += strlen("</command>");
-                  memmove(cmd_start, cmd_end, strlen(cmd_end) + 1);
-               } else {
-                  break;
-               }
-            }
-            // Remove emojis before TTS to prevent them from being read aloud
-            remove_emojis(tts_response);
-            text_to_speech(tts_response);
-            free(tts_response);
-         } else {
-            // Fallback: need to copy for emoji removal since remove_emojis modifies in-place
-            char *fallback = strdup(response_text);
-            if (fallback) {
-               remove_emojis(fallback);
-               text_to_speech(fallback);
-               free(fallback);
-            } else {
-               text_to_speech(response_text);  // Last resort: skip emoji removal
-            }
-         }
-
-         // Update TUI with the AI response (full response including commands)
-         metrics_set_last_ai_response(response_text);
-
-         // Add the successful AI response to the conversation (to the same
-         // refcounted snapshot, under the lock — see the snapshot note above).
-         struct json_object *ai_message = json_object_new_object();
-         json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
-         json_object_object_add(ai_message, "content", json_object_new_string(response_text));
-         conversation_history_lock();
-         json_object_array_add(hist, ai_message);
-         conversation_history_unlock();
-      }
-
-      free(response_text);
-      response_text = NULL;
-   } else {
-      // Error on AI response
-      OLOG_ERROR("GPT error.\n");
-      text_to_speech("I'm sorry but I'm currently unavailable.");
-   }
-   json_object_put(hist); /* drop the snapshot ref taken before the LLM call */
    free(pending_command_result);
    pending_command_result = NULL;
    // Note: parsedJson is owned by caller, do not free here

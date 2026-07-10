@@ -38,6 +38,7 @@
 
 #include "conversation_manager.h"
 #include "core/session_manager.h"
+#include "dawn.h"
 #include "input_queue.h"
 #include "llm/llm_interface.h"
 #include "logging.h"
@@ -1191,7 +1192,15 @@ int tui_handle_input(void) {
 
       case 'r':
       case 'R':
-         reset_conversation();
+         /* reset_conversation() frees + swaps the local conversation array. Doing
+          * that here (main thread) while the LLM worker is mid-turn would pull the
+          * array out from under the worker thread — a use-after-free. Defer the
+          * reset until the pipeline is idle so it isn't freed under the worker. */
+         if (is_llm_processing()) {
+            metrics_log_activity("Reset ignored - LLM turn in flight");
+         } else {
+            reset_conversation();
+         }
          break;
 
       case '1':
