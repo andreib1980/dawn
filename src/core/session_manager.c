@@ -2183,12 +2183,6 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
    if (session == NULL || user_turn_text == NULL)
       return SUCCESS;
 
-   /* SESSION_TYPE_LOCAL is out of scope for 1e — local-mic uses its
-    * own static-string builder peer (s_local_prompt_builder).  Local
-    * focus injection lands in a follow-up phase. */
-   if (session->type == SESSION_TYPE_LOCAL)
-      return SUCCESS;
-
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL)
       return SUCCESS; /* No builder registered — leave system prompt as-is. */
@@ -2197,8 +2191,18 @@ int session_dispatch_user_turn(session_t *session, const char *user_turn_text) {
     * occurred since last turn are picked up.  Session manager design
     * pattern (matches refresh_all_prompts at line 1700-1702). */
    pthread_mutex_lock(&session->metrics_mutex);
-   const int user_id = session->metrics.user_id;
+   int user_id = session->metrics.user_id;
    pthread_mutex_unlock(&session->metrics_mutex);
+   /* The LOCAL mic session carries no authenticated user_id (metrics.user_id
+    * stays 0); its memory is bound to the configured default voice user —
+    * resolved the same way as the extraction / voice-conversation-save path
+    * (session_save_voice_conversation, get_current_user_id).  This is what
+    * gives the local mic the same per-turn memory + focus injection every
+    * other surface already gets. */
+   if (user_id <= 0 && session->type == SESSION_TYPE_LOCAL) {
+      user_id = g_config.memory.default_voice_user_id > 0 ? g_config.memory.default_voice_user_id
+                                                          : 1;
+   }
    if (user_id <= 0)
       return SUCCESS; /* Unauthenticated — base prompt only; nothing to refresh. */
 

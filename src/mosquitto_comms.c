@@ -223,9 +223,24 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    struct json_object *system_response_message = json_object_new_object();
    json_object_object_add(system_response_message, "role", json_object_new_string("system"));
    json_object_object_add(system_response_message, "content", json_object_new_string(gpt_response));
-   json_object_array_add(conversation_history, system_response_message);
 
-   response_text = llm_chat_completion(conversation_history, gpt_response, NULL, NULL, 0, true);
+   /* This runs on the MQTT background thread against the local session's shared
+    * conversation array, which the main voice thread can free-and-swap mid-turn
+    * (session_dispatch_user_turn -> session_update_system_messages). Serialize
+    * on conversation_history_lock() and snapshot a refcounted pointer so (a) our
+    * append is not concurrent with that rebuild and (b) the array can't be freed
+    * under the LLM call below. json_object_get() bumps the ref; we put() it at
+    * the end. In the common (no-collision) case `hist` IS the live array.
+    * NOTE: this closes the free/swap UAF window only. The array is still mutated
+    * unlocked by the LLM worker tool-loop and the main-thread turn sites, so the
+    * pre-existing concurrent-mutation race remains until the full conversation_
+    * history serialization pass lands (tracked follow-up). */
+   conversation_history_lock();
+   struct json_object *hist = json_object_get(conversation_history);
+   json_object_array_add(hist, system_response_message);
+   conversation_history_unlock();
+
+   response_text = llm_chat_completion(hist, gpt_response, NULL, NULL, 0, true);
    if (response_text != NULL) {
       // AI returned successfully, vocalize response.
       OLOG_WARNING("AI: %s\n", response_text);
@@ -291,11 +306,14 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
          // Update TUI with the AI response (full response including commands)
          metrics_set_last_ai_response(response_text);
 
-         // Add the successful AI response to the conversation.
+         // Add the successful AI response to the conversation (to the same
+         // refcounted snapshot, under the lock — see the snapshot note above).
          struct json_object *ai_message = json_object_new_object();
          json_object_object_add(ai_message, "role", json_object_new_string("assistant"));
          json_object_object_add(ai_message, "content", json_object_new_string(response_text));
-         json_object_array_add(conversation_history, ai_message);
+         conversation_history_lock();
+         json_object_array_add(hist, ai_message);
+         conversation_history_unlock();
       }
 
       free(response_text);
@@ -305,6 +323,7 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
       OLOG_ERROR("GPT error.\n");
       text_to_speech("I'm sorry but I'm currently unavailable.");
    }
+   json_object_put(hist); /* drop the snapshot ref taken before the LLM call */
    free(pending_command_result);
    pending_command_result = NULL;
    // Note: parsedJson is owned by caller, do not free here

@@ -451,13 +451,24 @@ static char *maybe_append_memory_body_and_footer(char *base, int user_id) {
 }
 
 static char *build_stable_segment(int user_id) {
-   /* Take an owned copy of the base prompt up-front. get_remote_command_prompt()
-    * returns a pointer into a shared static buffer that can be rebuilt in place
+   /* Take an owned copy of the base prompt up-front. get_{remote,local}_command_prompt()
+    * return a pointer into a shared static buffer that can be rebuilt in place
     * by invalidate_system_instructions() firing from MQTT callback threads
     * (HUD status / discovery). We may do DB I/O below — holding the static
     * pointer across that work would race against a concurrent rebuild and
-    * read a torn buffer. */
-   const char *source = get_remote_command_prompt();
+    * read a torn buffer.
+    *
+    * The LOCAL mic session keeps its local-flavored base (which includes
+    * local-only command guidance: HUD / helmet / faceplate) so unifying it onto
+    * this structured builder is purely additive — it gains the memory/focus
+    * layers below without losing local-hardware guidance. Remote sessions
+    * (WebUI / satellites) use the remote base, which excludes those. The
+    * dispatch session is published into TLS by session_dispatch_user_turn()
+    * before this runs; NULL (session-start / non-dispatch) falls to remote. */
+   session_t *dispatch = session_get_dispatch_session();
+   const char *source = (dispatch && dispatch->type == SESSION_TYPE_LOCAL)
+                            ? get_local_command_prompt()
+                            : get_remote_command_prompt();
    if (!source)
       return NULL;
 

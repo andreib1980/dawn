@@ -969,6 +969,17 @@ dawn_state_t currentState = DAWN_STATE_INVALID;
 /* Mutex for thread-safe conversation management */
 static pthread_mutex_t conversation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Public accessors (declared in dawn.h) so other modules — the MQTT
+ * background-command path — can serialize against the main thread's per-turn
+ * rebuild/swap of `conversation_history`. */
+void conversation_history_lock(void) {
+   pthread_mutex_lock(&conversation_mutex);
+}
+
+void conversation_history_unlock(void) {
+   pthread_mutex_unlock(&conversation_mutex);
+}
+
 /**
  * @brief Reset conversation context (save current, start fresh)
  *
@@ -3833,6 +3844,27 @@ mqtt_disabled:
                      trigger_config.thinking_mode[sizeof(trigger_config.thinking_mode) - 1] = '\0';
                      session_set_llm_config(local_session, &trigger_config);
                   }
+
+                  /* Parity with WebUI/satellite: rebuild the local session's system
+                   * prompt with this turn's memory + focus context before dispatch.
+                   * session_dispatch_user_turn() runs the structured builder and
+                   * swaps conversation_history (rebuilding [0]=stable / [1]=volatile
+                   * system messages, freeing the old array), so re-sync the global
+                   * alias afterward — the worker reads it at spawn (pthread_create
+                   * publishes the new pointer). The swap+re-sync is held under
+                   * conversation_mutex so the free/replace is serialized against the
+                   * MQTT background-command path (mosquitto_comms.c), which snapshots
+                   * this array under the same lock — that closes the swap/UAF window.
+                   * NOTE: broad serialization of every conversation_history mutator
+                   * (the LLM worker tool-loop, the main-thread turn append/delete
+                   * sites, switch_llm compaction) is a separate follow-up; this lock
+                   * only guards the swap vs the MQTT snapshot. No prior worker is live
+                   * here (past the llm_processing busy-check). A no-op when no
+                   * structured builder is registered (non-WebUI) → static prompt. */
+                  pthread_mutex_lock(&conversation_mutex);
+                  session_dispatch_user_turn(local_session, command_text);
+                  conversation_history = local_session->conversation_history;
+                  pthread_mutex_unlock(&conversation_mutex);
 
                   // Spawn LLM thread to process request (non-blocking)
                   pthread_mutex_lock(&llm_mutex);
