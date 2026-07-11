@@ -1204,6 +1204,12 @@ static void *audio_worker_thread(void *arg) {
    /* Echo transcription as user message (server_saved prevents duplicate client save) */
    webui_send_transcript_ex(session, "user", transcript, saved_to_db);
 
+   /* This turn's input is ASR-transcribed (voice) — flag it before dispatch so
+    * the prompt builder injects the ASR-disambiguation hint for this turn.
+    * Correctness relies on per-session turn serialization (one dispatch in flight
+    * per session); atomic_bool guards visibility, not logical interleave. */
+   session->input_was_voice = true;
+
    /* Phase 1e: per-turn focus injection.  Synchronous; runs on this
     * audio_worker_thread (spawned via pthread_create — NEVER on the
     * lws service thread).  Uses the post-ASR transcript as the turn

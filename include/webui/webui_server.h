@@ -490,11 +490,15 @@ void webui_send_conversation_reset(struct session *session);
  *
  * @param session Session that sent the message
  * @param text User's text input
+ * @param input_was_voice True if this turn's input was ASR-transcribed (voice),
+ *                        false if typed.  Applied to session->input_was_voice on
+ *                        the worker thread right before dispatch so the prompt
+ *                        builder gates the ASR-disambiguation hint per turn.
  * @return 0 on success, non-zero on error
  *
  * @note Called from WebUI thread when text message received
  */
-int webui_process_text_input(struct session *session, const char *text);
+int webui_process_text_input(struct session *session, const char *text, bool input_was_voice);
 
 /**
  * @brief Process text input message with optional vision images.
@@ -504,6 +508,8 @@ int webui_process_text_input(struct session *session, const char *text);
  * the vision arrays to behave as the plain text variant.  Defined in
  * webui_text_processing.c.
  *
+ * @param input_was_voice True if voice (ASR) input, false if typed.  See the
+ *                        wrapper above.
  * @return 0 on success, non-zero on error
  */
 int webui_process_text_input_with_vision(struct session *session,
@@ -511,7 +517,8 @@ int webui_process_text_input_with_vision(struct session *session,
                                          const char **vision_images,
                                          const size_t *vision_image_sizes,
                                          const char **vision_mimes,
-                                         int vision_image_count);
+                                         int vision_image_count,
+                                         bool input_was_voice);
 
 /* =============================================================================
  * Real-Time Metrics for UI Visualization

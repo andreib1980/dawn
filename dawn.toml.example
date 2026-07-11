@@ -110,6 +110,14 @@
                                   # Default ASR_DEDUP_WINDOW_SEC_DEFAULT, max
                                   # ASR_DEDUP_WINDOW_SEC_MAX (dawn_config.h).
                                   # Runtime-tunable. Env: DAWN_ASR_DEDUP_WINDOW_SEC
+# disambiguation_hint = ""        # Prompt hint injected on voice-input surfaces
+                                  # (satellites, local mic, WebUI voice turns) warning
+                                  # the LLM its input was speech-transcribed and may
+                                  # contain homophone / similar-sounding mis-recognitions
+                                  # to interpret from context. Leave empty for the
+                                  # built-in default (DEFAULT_ASR_DISAMBIGUATION_HINT).
+                                  # Multi-line allowed ('''...'''). Editable in the WebUI
+                                  # Speech Recognition panel. Env: DAWN_ASR_DISAMBIGUATION_HINT
 
 # =============================================================================
 # Text-to-Speech (TTS)
@@ -123,6 +131,19 @@
                                   # Env: DAWN_TTS_VOICE_MODEL
 # length_scale = 0.85             # Speech speed: <1.0 = faster, >1.0 = slower
                                   # Env: DAWN_TTS_LENGTH_SCALE
+# voice_directive = ""            # Spoken-output shaping directive for satellites +
+                                  # local mic (reply is read aloud, not shown). Steers
+                                  # the LLM toward concise, speech-friendly answers
+                                  # (no markdown/tables/lists). Leave empty for the
+                                  # built-in default (DEFAULT_VOICE_OUTPUT_DIRECTIVE).
+                                  # Multi-line allowed ('''...'''). Editable in the WebUI
+                                  # Text-to-Speech panel. Env: DAWN_TTS_VOICE_DIRECTIVE
+# voice_directive_webui = ""      # Softer spoken-output directive for WebUI voice turns
+                                  # (whole reply is read aloud, but the screen can still
+                                  # show visuals via render_visual/images). Leave empty
+                                  # for the built-in default
+                                  # (DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI).
+                                  # Env: DAWN_TTS_VOICE_DIRECTIVE_WEBUI
 
 # =============================================================================
 # Command Processing

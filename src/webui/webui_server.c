@@ -3146,9 +3146,11 @@ void handle_text_message(ws_connection_t *conn,
       OLOG_INFO("WebUI: Text input from session %u: %s", conn->session->session_id, text);
    }
 
+   /* Typed input (not ASR): pass input_was_voice=false so the worker stamps the
+    * flag right before dispatch and the prompt builder omits the ASR hint. */
    int ret = webui_process_text_input_with_vision(conn->session, text, vision_images,
                                                   vision_image_sizes, vision_mimes,
-                                                  vision_image_count);
+                                                  vision_image_count, /*input_was_voice=*/false);
    if (ret != 0) {
       send_error_impl(conn->wsi, "PROCESSING_ERROR", "Failed to process text input");
    }

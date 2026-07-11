@@ -707,6 +707,20 @@ static void initialize_command_prompt(void) {
    const char *sys_instr = get_system_instructions(false);
    const char *loc_ctx = get_localization_context();
    const char *tools_mode = g_config.llm.tools.mode;
+   /* Local mic is a voice surface: input is ASR-transcribed and output is spoken.
+    * Append the spoken-output directive + ASR-disambiguation hint (config-or-
+    * built-in-default) so the local prompt shapes replies for the ear and warns
+    * about homophone mis-recognition.  Rebuilt on invalidate_system_instructions()
+    * so a WebUI config edit takes effect.
+    *
+    * NOTE: this is ONE of TWO injection sites for these directives.  The other is
+    * the per-turn builder for satellites/WebUI (append_block_directive in
+    * src/webui/webui_auth_helpers.c dawn_build_prompt).  Local bakes them into the
+    * static prompt here (the shared remote base can't carry them — text-WebUI
+    * reuses it); satellites/WebUI append per turn.  Keep the two in sync if you
+    * change the injection contract (ordering, separators, gates). */
+   const char *voice_dir = voice_directive_effective();
+   const char *asr_hint = asr_disambiguation_hint_effective();
 
    pthread_mutex_lock(&system_instructions_mutex);
    if (prompt_initialized) {
@@ -714,8 +728,8 @@ static void initialize_command_prompt(void) {
       return;
    }
 
-   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s", persona,
-                             sys_instr, loc_ctx);
+   int prompt_len = snprintf(command_prompt, PROMPT_BUFFER_SIZE, "%s\n\n%s\n\n%s\n\n%s\n\n%s",
+                             persona, sys_instr, loc_ctx, voice_dir, asr_hint);
    prompt_initialized = 1;
    pthread_mutex_unlock(&system_instructions_mutex);
 
@@ -817,6 +831,39 @@ char *build_remote_prompt_for_mode(const char *tool_mode) {
 
    OLOG_INFO("Built prompt for %s mode. Length: %d", tool_mode, len);
    return prompt;
+}
+
+/* =============================================================================
+ * Voice-session prompt directives — effective-value accessors
+ *
+ * Config field set → use it; empty → fall back to the compile-time default.
+ * See the header contract and dawn.h for the built-in text.
+ *
+ * Concurrency note: these return a pointer directly into g_config and are read
+ * unlocked on the prompt-build path — consistent with every other g_config read
+ * there (persona, llm.tools.mode, localization, ...).  A WebUI config save
+ * (handle_set_config, under s_config_rwlock wrlock) racing an in-flight turn
+ * could yield a torn directive for that one turn.  The buffers are fixed-size
+ * (CONFIG_DESCRIPTION_MAX) and strncpy-padded, so a torn read is still a bounded,
+ * NUL-terminated string (no over-read / memory unsafety) — worst case is one
+ * turn's directive being garbled.  Not spot-locked here on purpose: locking only
+ * these three fields while the rest of the prompt-build g_config reads stay
+ * unlocked would be inconsistent and give false assurance.  A proper fix is a
+ * broader prompt-build config snapshot, tracked separately.
+ * ============================================================================= */
+const char *voice_directive_effective(void) {
+   return g_config.tts.voice_directive[0] ? g_config.tts.voice_directive
+                                          : DEFAULT_VOICE_OUTPUT_DIRECTIVE;
+}
+
+const char *voice_directive_webui_effective(void) {
+   return g_config.tts.voice_directive_webui[0] ? g_config.tts.voice_directive_webui
+                                                : DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI;
+}
+
+const char *asr_disambiguation_hint_effective(void) {
+   return g_config.asr.disambiguation_hint[0] ? g_config.asr.disambiguation_hint
+                                              : DEFAULT_ASR_DISAMBIGUATION_HINT;
 }
 
 /**

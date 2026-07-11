@@ -367,24 +367,30 @@ static void parse_asr(toml_table_t *table, asr_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "model", "models_path", "dedup_window_sec", NULL };
+   static const char *const known_keys[] = { "model", "models_path", "dedup_window_sec",
+                                             "disambiguation_hint", NULL };
    warn_unknown_keys(table, "asr", known_keys);
 
    PARSE_STRING(table, "model", config->model);
    PARSE_STRING(table, "models_path", config->models_path);
    PARSE_INT(table, "dedup_window_sec", config->dedup_window_sec);
+   PARSE_STRING(table, "disambiguation_hint", config->disambiguation_hint);
 }
 
 static void parse_tts(toml_table_t *table, tts_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "models_path", "voice_model", "length_scale", NULL };
+   static const char *const known_keys[] = { "models_path",           "voice_model",
+                                             "length_scale",          "voice_directive",
+                                             "voice_directive_webui", NULL };
    warn_unknown_keys(table, "tts", known_keys);
 
    PARSE_STRING(table, "models_path", config->models_path);
    PARSE_STRING(table, "voice_model", config->voice_model);
    PARSE_DOUBLE(table, "length_scale", config->length_scale);
+   PARSE_STRING(table, "voice_directive", config->voice_directive);
+   PARSE_STRING(table, "voice_directive_webui", config->voice_directive_webui);
 }
 
 static void parse_commands(toml_table_t *table, commands_config_t *config) {

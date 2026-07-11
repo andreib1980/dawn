@@ -101,4 +101,19 @@ void invalidate_system_instructions(void);
  */
 char *build_remote_prompt_for_mode(const char *tool_mode);
 
+/* =============================================================================
+ * Voice-session prompt directives (effective-value accessors)
+ *
+ * Each returns the configured directive text ([tts]/[asr] in dawn.toml) when
+ * set, else the compile-time built-in default (dawn.h).  The prompt-build path
+ * injects these only on the relevant voice surfaces:
+ *   - voice_directive:            satellites (DAP2/DAP) + local mic (spoken out)
+ *   - voice_directive_webui:      WebUI voice turns (softer; screen leeway)
+ *   - asr_disambiguation_hint:    any voice-input turn (speech-transcribed input)
+ * Returned pointer is valid until the next config change; treat as read-only.
+ * ============================================================================= */
+const char *voice_directive_effective(void);
+const char *voice_directive_webui_effective(void);
+const char *asr_disambiguation_hint_effective(void);
+
 #endif  // LLM_COMMAND_PARSER_H

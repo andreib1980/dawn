@@ -52,6 +52,48 @@
 // Combined default for backwards compatibility (uses default AI_NAME)
 #define AI_PERSONA "Your name is " AI_NAME ". " AI_PERSONA_TRAITS
 
+// =============================================================================
+// Voice-session prompt directives (compile-time defaults)
+// =============================================================================
+// Built-in text for the three voice-session prompt directives.  Each is
+// overridable at runtime via config ([tts] voice_directive / voice_directive_webui,
+// [asr] disambiguation_hint); an empty config field falls back to the macro here.
+// Applied only on voice surfaces by the prompt-build path — see
+// voice_directive_effective() and friends in llm_command_parser.
+//
+// Deliberately avoid hard word/sentence caps: convey intent, don't over-constrain.
+// Bare text (no leading separator); each injection site adds its own "\n\n".
+
+// Spoken-output directive for satellites + local mic (reply is heard, not read).
+#define DEFAULT_VOICE_OUTPUT_DIRECTIVE                                            \
+   "This conversation is spoken aloud: your reply is read to the user by "        \
+   "text-to-speech, not shown on a screen. Answer the way you'd say it out "      \
+   "loud - lead with the useful part, keep it tight and natural, and leave out "  \
+   "anything that only works visually (markdown, bullet or numbered lists, "      \
+   "tables, code blocks, raw URLs, emoji). Give the short answer first; go into " \
+   "detail only if the user asks."
+
+// Spoken-output directive for WebUI voice turns.  The whole prose reply is read
+// aloud, but the screen is available for silent visual aids (render_visual tool /
+// images), so this is softer than the satellite/local variant.
+#define DEFAULT_VOICE_OUTPUT_DIRECTIVE_WEBUI                                    \
+   "The user is talking to you by voice, and your entire written reply is "     \
+   "read aloud by text-to-speech - you can't mark part of it as screen-only. "  \
+   "Keep the reply conversational and to the point rather than a long passage " \
+   "that's tedious to hear. The screen is still available for things better "   \
+   "seen than heard: use the render_visual tool (charts, diagrams, tables) or " \
+   "images for those - that content displays without being spoken."
+
+// ASR-disambiguation hint for any voice-input turn (input was speech-transcribed).
+#define DEFAULT_ASR_DISAMBIGUATION_HINT                                          \
+   "Your input was transcribed from speech, so it may contain recognition "      \
+   "errors - especially with homophones and similar-sounding words, names, and " \
+   "technical terms (a name may arrive misspelled or as a different word that "  \
+   "merely sounds alike). When a word seems out of place but resembles "         \
+   "something that fits the context, treat it as the most plausible intended "   \
+   "word rather than taking it literally. Ask for clarification only when the "  \
+   "meaning is genuinely unclear."
+
 // Vision support is now controlled via runtime config:
 // - g_config.llm.cloud.vision_enabled (for cloud LLMs)
 // - g_config.llm.local.vision_enabled (for local LLMs like LLaVA, Qwen-VL)

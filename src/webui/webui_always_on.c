@@ -713,7 +713,9 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
                OLOG_INFO("Always-on: Dedup suppressed duplicate utterance: \"%s\"", cmd);
                always_on_processing_complete(ctx);
             } else {
-               webui_process_text_input(conn->session, cmd);
+               /* Always-on voice: this turn's input is ASR-transcribed.  Passed
+                * as input_was_voice=true; the worker stamps it before dispatch. */
+               webui_process_text_input(conn->session, cmd, /*input_was_voice=*/true);
             }
          }
          free(cmd);
@@ -768,7 +770,9 @@ static void always_on_consume_cmd_result(always_on_ctx_t *ctx, void *conn_ptr) {
          free(transcript);
          always_on_processing_complete(ctx);
       } else {
-         webui_process_text_input(conn->session, transcript);
+         /* Always-on voice: this turn's input is ASR-transcribed.  Passed as
+          * input_was_voice=true; the worker stamps it before dispatch. */
+         webui_process_text_input(conn->session, transcript, /*input_was_voice=*/true);
          free(transcript);
       }
    } else {

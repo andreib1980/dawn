@@ -9,7 +9,7 @@
 
    // Schema version — bump when adding/removing/reordering fields or sections.
    // When this changes, the settings DOM is rebuilt from scratch.
-   const SCHEMA_VERSION = 8;
+   const SCHEMA_VERSION = 9;
 
    // Track whether DOM has been rendered and which schema version it represents
    let renderedSchemaVersion = null;
@@ -332,6 +332,14 @@
                step: 1,
                hint: 'Suppress duplicate responses when two devices hear one command within this window (0 disables; default: 4)',
             },
+            disambiguation_hint: {
+               type: 'textarea',
+               label: 'Voice-Input Disambiguation Hint',
+               rows: 5,
+               placeholder:
+                  'Leave empty to use the built-in default (warns the LLM that speech-transcribed input may contain homophone / similar-sounding mis-recognitions to interpret from context).',
+               hint: 'Prompt hint injected on voice-input turns (satellites, local mic, WebUI voice) so the LLM interprets likely ASR mis-hearings from context instead of literally. Empty = built-in default.',
+            },
          },
       },
       tts: {
@@ -361,6 +369,22 @@
                step: 0.05,
                hint: 'Speaking rate: <1.0 = faster, >1.0 = slower',
                advanced: true,
+            },
+            voice_directive: {
+               type: 'textarea',
+               label: 'Spoken Reply Style (satellites & local mic)',
+               rows: 5,
+               placeholder:
+                  'Leave empty to use the built-in default (steers spoken replies to be concise and speech-friendly — no markdown, tables, or lists — since the reply is read aloud, not shown).',
+               hint: 'Injected on satellite and local-mic turns, where the reply is read aloud with no screen. Empty = built-in default.',
+            },
+            voice_directive_webui: {
+               type: 'textarea',
+               label: 'Spoken Reply Style (WebUI voice)',
+               rows: 5,
+               placeholder:
+                  'Leave empty to use the built-in default (keeps spoken WebUI replies conversational; visuals can still go on-screen via the render_visual tool / images).',
+               hint: 'Injected on WebUI voice turns. Softer than the satellite/local directive because the browser can still show visuals. Empty = built-in default.',
             },
          },
       },

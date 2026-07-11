@@ -171,11 +171,14 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_ASR_MODEL", config->asr.model);
    ENV_STRING("DAWN_ASR_MODELS_PATH", config->asr.models_path);
    ENV_INT("DAWN_ASR_DEDUP_WINDOW_SEC", config->asr.dedup_window_sec);
+   ENV_STRING("DAWN_ASR_DISAMBIGUATION_HINT", config->asr.disambiguation_hint);
 
    /* [tts] */
    ENV_STRING("DAWN_TTS_MODELS_PATH", config->tts.models_path);
    ENV_STRING("DAWN_TTS_VOICE_MODEL", config->tts.voice_model);
    ENV_FLOAT("DAWN_TTS_LENGTH_SCALE", config->tts.length_scale);
+   ENV_STRING("DAWN_TTS_VOICE_DIRECTIVE", config->tts.voice_directive);
+   ENV_STRING("DAWN_TTS_VOICE_DIRECTIVE_WEBUI", config->tts.voice_directive_webui);
 
    /* [commands] */
    ENV_STRING("DAWN_COMMANDS_PROCESSING_MODE", config->commands.processing_mode);
@@ -339,11 +342,17 @@ void config_dump(const dawn_config_t *config) {
    printf("  model = \"%s\"\n", config->asr.model);
    printf("  models_path = \"%s\"\n", config->asr.models_path);
    printf("  dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   printf("  disambiguation_hint = %s\n",
+          config->asr.disambiguation_hint[0] ? "(custom)" : "(built-in default)");
 
    printf("\n[tts]\n");
    printf("  models_path = \"%s\"\n", config->tts.models_path);
    printf("  voice_model = \"%s\"\n", config->tts.voice_model);
    printf("  length_scale = %.2f\n", config->tts.length_scale);
+   printf("  voice_directive = %s\n",
+          config->tts.voice_directive[0] ? "(custom)" : "(built-in default)");
+   printf("  voice_directive_webui = %s\n",
+          config->tts.voice_directive_webui[0] ? "(custom)" : "(built-in default)");
 
    printf("\n[commands]\n");
    printf("  processing_mode = \"%s\"\n", config->commands.processing_mode);
@@ -671,6 +680,9 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_INT("dedup_window_sec", config->asr.dedup_window_sec, "DAWN_ASR_DEDUP_WINDOW_SEC",
                      detect_source_int(config->asr.dedup_window_sec, defaults.asr.dedup_window_sec,
                                        "DAWN_ASR_DEDUP_WINDOW_SEC"));
+   /* Prose directive: report set/default rather than dumping multi-line text. */
+   printf("  disambiguation_hint = %s\n",
+          config->asr.disambiguation_hint[0] ? "(custom)" : "(built-in default)");
 
    /* [tts] */
    printf("[tts]\n");
@@ -683,6 +695,11 @@ void config_dump_settings(const dawn_config_t *config,
    PRINT_SETTING_FLOAT("length_scale", config->tts.length_scale, "DAWN_TTS_LENGTH_SCALE",
                        detect_source_float(config->tts.length_scale, defaults.tts.length_scale,
                                            "DAWN_TTS_LENGTH_SCALE"));
+   /* Prose directives: report set/default rather than dumping multi-line text. */
+   printf("  voice_directive = %s\n",
+          config->tts.voice_directive[0] ? "(custom)" : "(built-in default)");
+   printf("  voice_directive_webui = %s\n",
+          config->tts.voice_directive_webui[0] ? "(custom)" : "(built-in default)");
 
    /* [commands] */
    printf("[commands]\n");
@@ -1108,6 +1125,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(asr, "models_path", json_object_new_string(config->asr.models_path));
    json_object_object_add(asr, "dedup_window_sec",
                           json_object_new_int(config->asr.dedup_window_sec));
+   json_object_object_add(asr, "disambiguation_hint",
+                          json_object_new_string(config->asr.disambiguation_hint));
    json_object_object_add(root, "asr", asr);
 
    /* [tts] */
@@ -1115,6 +1134,10 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object_object_add(tts, "models_path", json_object_new_string(config->tts.models_path));
    json_object_object_add(tts, "voice_model", json_object_new_string(config->tts.voice_model));
    json_object_object_add(tts, "length_scale", json_object_new_double(config->tts.length_scale));
+   json_object_object_add(tts, "voice_directive",
+                          json_object_new_string(config->tts.voice_directive));
+   json_object_object_add(tts, "voice_directive_webui",
+                          json_object_new_string(config->tts.voice_directive_webui));
    json_object_object_add(root, "tts", tts);
 
    /* [commands] */
@@ -1912,6 +1935,52 @@ static void write_toml_string(FILE *fp, const char *key, const char *value) {
    }
 }
 
+/**
+ * @brief Write a TOML string key that may contain newlines.
+ *
+ * Multi-line prose (e.g. the voice-session prompt directives) is emitted as a
+ * TOML literal triple-quoted string ('''...''') so embedded newlines survive
+ * the round-trip; single-line values fall back to the escaped basic string.
+ * No-op when @p value is empty (empty config field = built-in default, so we
+ * keep dawn.toml clean rather than persisting the fallback text).
+ */
+static void write_toml_string_multiline(FILE *fp, const char *key, const char *value) {
+   if (!value || value[0] == '\0')
+      return;
+   /* Sanitize: cap any run of apostrophes at 2 so the value can never contain
+    * '''.  Reasons: (a) ''' terminates / breaks out of a TOML multi-line literal
+    * ('''...'''), which would let a crafted value forge new TOML keys/sections on
+    * the next load (CWE-91); (b) our TOML reader mis-parses ''' even inside a
+    * double-quoted BASIC string, so there is NO safe TOML representation of a
+    * value containing '''.  ''' is not meaningful in a prose directive, so
+    * collapsing it is lossless in practice and guarantees the config always
+    * round-trips.  Callers pass CONFIG_DESCRIPTION_MAX-sized fields; the sanitizer
+    * only ever shrinks, so `safe` cannot overflow. */
+   char safe[CONFIG_DESCRIPTION_MAX];
+   size_t si = 0;
+   int apos_run = 0;
+   for (const char *p = value; *p != '\0' && si < sizeof(safe) - 1; p++) {
+      if (*p == '\'') {
+         if (apos_run >= 2)
+            continue; /* drop the 3rd+ consecutive apostrophe */
+         apos_run++;
+      } else {
+         apos_run = 0;
+      }
+      safe[si++] = *p;
+   }
+   safe[si] = '\0';
+
+   /* Readable triple-quoted literal for multi-line prose; escaped basic string
+    * otherwise (write_toml_string escapes quotes/backslash/newline).  Neither can
+    * contain ''' after sanitization, so both re-parse cleanly. */
+   if (strchr(safe, '\n')) {
+      fprintf(fp, "%s = '''\n%s\n'''\n", key, safe);
+   } else {
+      write_toml_string(fp, key, safe);
+   }
+}
+
 int config_write_toml(const dawn_config_t *config, const char *path) {
    if (!config || !path)
       return 1;
@@ -1934,12 +2003,12 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
 
    if (config->persona.description[0]) {
       fprintf(fp, "\n[persona]\n");
-      /* For multiline strings, use triple quotes in TOML (literal string) */
-      if (strchr(config->persona.description, '\n')) {
-         fprintf(fp, "description = '''\n%s\n'''\n", config->persona.description);
-      } else {
-         write_toml_string(fp, "description", config->persona.description);
-      }
+      /* Route through the multiline-aware writer, which uses the readable
+       * triple-quote literal only when safe and falls back to the escaped
+       * basic string when the value contains ''' — closing the same TOML
+       * literal-string breakout as the voice-directive fields (security
+       * review 2026-07; admin-only, but fixed on merit). */
+      write_toml_string_multiline(fp, "description", config->persona.description);
    }
 
    fprintf(fp, "\n[localization]\n");
@@ -1979,11 +2048,14 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "model = \"%s\"\n", config->asr.model);
    fprintf(fp, "models_path = \"%s\"\n", config->asr.models_path);
    fprintf(fp, "dedup_window_sec = %d\n", config->asr.dedup_window_sec);
+   write_toml_string_multiline(fp, "disambiguation_hint", config->asr.disambiguation_hint);
 
    fprintf(fp, "\n[tts]\n");
    fprintf(fp, "models_path = \"%s\"\n", config->tts.models_path);
    fprintf(fp, "voice_model = \"%s\"\n", config->tts.voice_model);
    fprintf(fp, "length_scale = %.2f\n", config->tts.length_scale);
+   write_toml_string_multiline(fp, "voice_directive", config->tts.voice_directive);
+   write_toml_string_multiline(fp, "voice_directive_webui", config->tts.voice_directive_webui);
 
    fprintf(fp, "\n[commands]\n");
    fprintf(fp, "processing_mode = \"%s\"\n", config->commands.processing_mode);

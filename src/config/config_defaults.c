@@ -98,11 +98,15 @@ void config_set_defaults(dawn_config_t *config) {
    SAFE_COPY(config->asr.model, "base.en");
    SAFE_COPY(config->asr.models_path, "models/whisper.cpp");
    config->asr.dedup_window_sec = ASR_DEDUP_WINDOW_SEC_DEFAULT;
+   /* disambiguation_hint left empty by the memset above → built-in default
+    * (DEFAULT_ASR_DISAMBIGUATION_HINT) is used at prompt-build time. */
 
    /* TTS */
    SAFE_COPY(config->tts.models_path, "models");
    SAFE_COPY(config->tts.voice_model, "en_GB-alba-medium");
    config->tts.length_scale = 0.85f;
+   /* voice_directive / voice_directive_webui left empty by the memset above →
+    * built-in defaults (DEFAULT_VOICE_OUTPUT_DIRECTIVE[_WEBUI]) are used. */
 
    /* Commands */
    SAFE_COPY(config->commands.processing_mode, "direct_first");

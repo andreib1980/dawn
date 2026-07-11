@@ -67,6 +67,9 @@ typedef struct {
    session_t *session;
    char *text;
    unsigned int request_gen; /* Captured request_generation to detect superseded requests */
+   bool input_was_voice;     /* True = this turn's input was ASR-transcribed (voice); applied
+                              * to session->input_was_voice on the worker thread right before
+                              * dispatch so the prompt builder gates the ASR hint per turn. */
    /* Vision support fields - supports multiple images per message */
    char *vision_images[WEBUI_MAX_VISION_IMAGES_CAP];       /* Base64 encoded images */
    size_t vision_image_sizes[WEBUI_MAX_VISION_IMAGES_CAP]; /* Size of each image */
@@ -441,6 +444,14 @@ static void *text_worker_thread(void *arg) {
    ws_connection_t *conn = (ws_connection_t *)session->client_data;
    bool tts_enabled = conn && conn->tts_enabled;
 
+   /* Stamp this turn's input modality (voice vs typed) onto the session right
+    * before dispatch, on THIS worker thread — same pattern as tts_enabled above.
+    * Setting it at the entry point (LWS/always-on thread) instead left a window
+    * where a concurrent always-on voice turn could clobber a typed turn's reset;
+    * stamping it here, adjacent to the synchronous build, closes that window. The
+    * prompt builder reads session->input_was_voice to gate the ASR hint. */
+   session->input_was_voice = work->input_was_voice;
+
    /* Dispatch the turn through the provider-agnostic Layer 2 helper:
     * add user msg → persist to conv_db → transcript echo (via callback)
     * → focus injection → LLM call.  Vision buffers are owned by `work`
@@ -630,7 +641,8 @@ int webui_process_text_input_with_vision(session_t *session,
                                          const char **vision_images,
                                          const size_t *vision_image_sizes,
                                          const char **vision_mimes,
-                                         int vision_image_count) {
+                                         int vision_image_count,
+                                         bool input_was_voice) {
    if (!session || !text || strlen(text) == 0) {
       return 1;
    }
@@ -659,6 +671,7 @@ int webui_process_text_input_with_vision(session_t *session,
    work->session = session;
    work->text = strdup(text);
    work->request_gen = new_gen; /* Capture generation for this request */
+   work->input_was_voice = input_was_voice;
    if (!work->text) {
       OLOG_ERROR("WebUI: Failed to allocate text copy");
       free(work);
@@ -719,6 +732,6 @@ int webui_process_text_input_with_vision(session_t *session,
    return 0;
 }
 
-int webui_process_text_input(session_t *session, const char *text) {
-   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0);
+int webui_process_text_input(session_t *session, const char *text, bool input_was_voice) {
+   return webui_process_text_input_with_vision(session, text, NULL, NULL, NULL, 0, input_was_voice);
 }

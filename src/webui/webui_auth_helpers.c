@@ -805,6 +805,41 @@ static char *append_satellite_context_to_stable(char *base, session_t *dispatch)
    return combined;
 }
 
+/**
+ * @brief Append a directive block to a heap-allocated prompt segment.
+ *
+ * Concatenates @p text onto @p base with a "\n\n" separator, matching the
+ * spacing the satellite/messaging context appends use.  Used for the
+ * voice-session directives on both the stable prefix (satellites) and the
+ * volatile block (WebUI).  Transfers ownership of @p base and frees it on
+ * success; no-op (returns @p base unchanged) when @p text is empty or on OOM.
+ * When @p base is NULL/empty the directive becomes the whole segment (no
+ * leading separator).
+ */
+static char *append_block_directive(char *base, const char *text) {
+   if (text == NULL || text[0] == '\0')
+      return base;
+   const size_t tlen = strlen(text);
+   if (base == NULL || base[0] == '\0') {
+      char *out = malloc(tlen + 1);
+      if (out == NULL)
+         return base;
+      memcpy(out, text, tlen + 1);
+      free(base); /* base may be a non-NULL empty string */
+      return out;
+   }
+   const size_t blen = strlen(base);
+   char *out = malloc(blen + 2 + tlen + 1);
+   if (out == NULL)
+      return base;
+   memcpy(out, base, blen);
+   out[blen] = '\n';
+   out[blen + 1] = '\n';
+   memcpy(out + blen + 2, text, tlen + 1);
+   free(base);
+   return out;
+}
+
 int dawn_build_prompt(int user_id,
                       const char *user_turn_text,
                       prompt_refresh_kind_t kind,
@@ -842,6 +877,22 @@ int dawn_build_prompt(int user_id,
                                                               dispatch_for_satellite);
       out->stable_prefix = append_messaging_context_to_stable(out->stable_prefix,
                                                               dispatch_for_satellite);
+      /* Satellites (DAP2 Tier-1/2 + legacy DAP) are full-duplex voice: input is
+       * ASR-transcribed and output is read aloud.  Both directives are constant
+       * for the surface, so they ride in the cacheable stable prefix (unlike the
+       * WebUI variants below, whose gates vary per turn).
+       *
+       * NOTE: this + the WebUI volatile block below are ONE of TWO injection
+       * sites for these directives; the LOCAL mic bakes the same directives into
+       * its static prompt in initialize_command_prompt (src/llm/llm_command_
+       * parser.c).  Keep the two in sync if the injection contract changes. */
+      if (dispatch_for_satellite->type == SESSION_TYPE_DAP2 ||
+          dispatch_for_satellite->type == SESSION_TYPE_DAP) {
+         out->stable_prefix = append_block_directive(out->stable_prefix,
+                                                     voice_directive_effective());
+         out->stable_prefix = append_block_directive(out->stable_prefix,
+                                                     asr_disambiguation_hint_effective());
+      }
    }
 
    /* Segment 2 (volatile): focus block only.  Memory body (USER
@@ -861,6 +912,24 @@ int dawn_build_prompt(int user_id,
       focus_body = NULL;
 
    out->volatile_block = build_volatile_segment(focus_body);
+
+   /* WebUI voice directives ride in the VOLATILE (non-cached) segment because
+    * their gates vary turn-to-turn: tts_enabled flips when the user toggles
+    * voice mode, and input_was_voice differs between spoken and typed turns.
+    * Putting them here (not the stable prefix) keeps the Anthropic prompt cache
+    * warm across those toggles — same reasoning as the SMS channel_hint.
+    *   - voice_directive_webui: gated on spoken OUTPUT (tts_enabled).
+    *   - disambiguation_hint:   gated on voice INPUT (input_was_voice).
+    * These are independent gates (voice-in + TTS-off gets only the ASR hint). */
+   if (dispatch != NULL && dispatch->type == SESSION_TYPE_WEBUI) {
+      ws_connection_t *conn = (ws_connection_t *)dispatch->client_data;
+      if (conn != NULL && conn->tts_enabled)
+         out->volatile_block = append_block_directive(out->volatile_block,
+                                                      voice_directive_webui_effective());
+      if (dispatch->input_was_voice)
+         out->volatile_block = append_block_directive(out->volatile_block,
+                                                      asr_disambiguation_hint_effective());
+   }
 
    return SUCCESS;
 }

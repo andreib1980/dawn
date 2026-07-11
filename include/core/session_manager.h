@@ -338,6 +338,16 @@ typedef struct session {
    // Cancellation (atomic for cross-thread visibility on ARM64)
    atomic_bool disconnected;  // Set on client disconnect
 
+   /* WebUI: was THIS turn's input voice (ASR-transcribed) vs typed?  Stamped on
+    * the WORKER thread immediately before the synchronous prompt build — from the
+    * text_work_t item for the text/always-on path, and directly before
+    * session_dispatch_user_turn for the push-to-talk audio path — so it is
+    * authoritative for the turn at build time (same discipline as the tts_enabled
+    * read).  Read by the prompt builder to gate the ASR-disambiguation hint.  Only
+    * meaningful for SESSION_TYPE_WEBUI (satellites/local are always voice-input).
+    * Atomic for ARM64 visibility across worker threads. */
+   atomic_bool input_was_voice;
+
    /* Idle-timeout-sweep exemption.
     *
     * Set by subsystems that retain a long-lived reference to this
