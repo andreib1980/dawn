@@ -27,8 +27,8 @@
    let enabled = false; // Whether continuous listening is currently active
    let state = 'disabled'; // Server state
    let textOverride = false; // Textarea has text in a voice mode
-   let pendingUnmute = false; // Defer unmute until TTS playback finishes
-   let pendingVisualState = null; // Defer visual state update until TTS finishes
+   let pendingVisualState = null; // Defer visual "listening" flip until TTS finishes (cosmetic)
+   let resumeAfterReconnect = false; // Always-on was on when the WS dropped; re-enable post-handshake
 
    /**
     * Initialize always-on module
@@ -229,8 +229,8 @@
 
       enabled = false;
       state = 'disabled';
-      pendingUnmute = false;
       pendingVisualState = null;
+      resumeAfterReconnect = false; // explicit user disable overrides any pending auto-resume
       updateActionButton();
       resolveButtonState();
       announce('Continuous listening stopped');
@@ -259,34 +259,40 @@
     * Handle state change from server
     */
    function onStateChange(newState) {
-      var oldState = state;
       state = newState;
 
-      // TTS echo prevention: mute during processing, unmute on listening
-      if (newState === 'processing' && DawnAudioCapture.muteContinuous) {
-         DawnAudioCapture.muteContinuous();
-         pendingUnmute = false;
-         pendingVisualState = null;
-      } else if (
-         newState === 'listening' &&
-         oldState === 'processing' &&
-         DawnAudioCapture.unmuteContinuous
-      ) {
-         // Defer unmute AND visual state until TTS playback finishes
-         if (typeof DawnAudioPlayback !== 'undefined' && DawnAudioPlayback.isPlaying()) {
-            pendingUnmute = true;
-            pendingVisualState = newState;
-            console.log('Always-on: deferring unmute + visual until TTS playback finishes');
-            return;
-         } else {
-            DawnAudioCapture.unmuteContinuous();
-         }
-      }
+      // Mic mute/unmute is driven by actual TTS PLAYBACK (onPlaybackStart /
+      // onPlaybackEnd), NOT by this server state. TTS echo prevention only needs
+      // the mic paused while the browser is actually speaking; a turn that
+      // produces no browser TTS — e.g. a dedup-suppressed turn — therefore never
+      // mutes, so it can't get stuck muted while the server still reports
+      // "listening" (the old processing→mute / listening→deferred-unmute path
+      // hung exactly there when no playback-end event ever arrived).
 
-      // Handle server-side disable (e.g., auto-disable on no audio)
+      // Handle server-side disable (e.g., auto-disable on no audio).
       if (newState === 'disabled' && enabled) {
          DawnAudioCapture.stopContinuous();
          enabled = false;
+      }
+
+      // Cosmetic only: don't flip the UI to "listening" while the browser is
+      // still speaking the reply — defer the visual until playback ends
+      // (applied in onPlaybackEnd). This does NOT touch the mic.
+      if (
+         newState === 'listening' &&
+         typeof DawnAudioPlayback !== 'undefined' &&
+         DawnAudioPlayback.isPlaying()
+      ) {
+         pendingVisualState = newState;
+         return;
+      }
+
+      // Safety net: reaching 'listening' with nothing playing means the mic
+      // should be live. onPlaybackEnd normally unmutes, but if that event is
+      // ever dropped (tab backgrounded / AudioContext suspended mid-playback)
+      // the mic could stay muted; ensure it's unmuted here. Idempotent.
+      if (newState === 'listening' && enabled && DawnAudioCapture.unmuteContinuous) {
+         DawnAudioCapture.unmuteContinuous();
       }
 
       updateActionButton();
@@ -579,16 +585,40 @@
    }
 
    function handleReconnect() {
-      // Server-side always_on_ctx is destroyed on disconnect. Reset client state
-      // so the UI doesn't show active when the server has no context.
+      // Server-side always_on_ctx is destroyed on disconnect. Tear down the
+      // client capture so the UI doesn't show active against a server with no
+      // context — but REMEMBER that always-on was on, so we can turn it back on
+      // once the reconnect handshake completes.
+      //
+      // This runs on the raw 'connected' event, BEFORE the reconnect handshake,
+      // so we must NOT re-enable here — an always_on_enable sent now would target
+      // the throwaway pre-handshake session and be lost (same reason phone
+      // rehydration is deferred to the 'session' handler). The actual re-enable
+      // happens in resumeAfterReconnectIfNeeded(), called from that handler.
       if (enabled) {
+         resumeAfterReconnect = true;
          DawnAudioCapture.stopContinuous();
          enabled = false;
          state = 'disabled';
-         pendingUnmute = false;
+         pendingVisualState = null;
          updateActionButton();
          resolveButtonState();
       }
+   }
+
+   /**
+    * Re-enable always-on after a reconnect handshake completes, if it was active
+    * when the connection dropped. Called from the 'session' handler (post-restore),
+    * NOT from handleReconnect (which runs pre-handshake). Idempotent across the
+    * multiple 'session' messages one reconnect emits — the flag is cleared on the
+    * first call so we only re-enable once.
+    */
+   function resumeAfterReconnectIfNeeded() {
+      if (!resumeAfterReconnect) return;
+      resumeAfterReconnect = false;
+      if (enabled) return; // already re-enabled by some other path
+      console.log('Always-on: resuming after reconnect');
+      enable(); // re-acquires mic (permission persists) + re-sends always_on_enable
    }
 
    function handleMicRevoked() {
@@ -647,20 +677,35 @@
    }
 
    /**
-    * Called when TTS playback finishes. Completes deferred unmute if pending.
+    * Called when the browser STARTS playing TTS audio (per playback chunk).
+    * Pause the mic so it doesn't capture our own spoken reply (echo → false
+    * wake). Idempotent — safe to call for each queued chunk. A turn with no
+    * browser TTS (e.g. dedup-suppressed) never fires this, so it never mutes.
+    */
+   function onPlaybackStart() {
+      if (enabled && DawnAudioCapture.muteContinuous) {
+         DawnAudioCapture.muteContinuous();
+      }
+   }
+
+   /**
+    * Called when ALL queued TTS playback finishes (or is stopped/errors).
+    * Resume the mic, and apply any visual "listening" state we deferred while
+    * speaking. Tied to the real playback lifecycle, so the mic can't stay muted
+    * once we've stopped speaking.
+    *
+    * If TTS delivery gaps let the queue empty between sentences, this unmutes
+    * then the next sentence re-mutes (onPlaybackStart) — a brief flicker. Benign:
+    * unmute only happens when nothing is playing (no live echo to capture), and
+    * the server is still in PROCESSING and ignores the audio anyway.
     */
    function onPlaybackEnd() {
-      if (pendingUnmute) {
-         pendingUnmute = false;
-         if (enabled && DawnAudioCapture.unmuteContinuous) {
-            console.log('Always-on: TTS finished, unmuting now');
-            DawnAudioCapture.unmuteContinuous();
-         }
+      if (enabled && DawnAudioCapture.unmuteContinuous) {
+         DawnAudioCapture.unmuteContinuous();
       }
       if (pendingVisualState) {
          var deferred = pendingVisualState;
          pendingVisualState = null;
-         console.log('Always-on: TTS finished, applying deferred state:', deferred);
          updateActionButton();
          resolveButtonState();
          updateVisualizer();
@@ -700,7 +745,9 @@
       toggle: toggle,
       handleMessage: handleMessage,
       handleReconnect: handleReconnect,
+      resumeAfterReconnectIfNeeded: resumeAfterReconnectIfNeeded,
       handleMicRevoked: handleMicRevoked,
+      onPlaybackStart: onPlaybackStart,
       onPlaybackEnd: onPlaybackEnd,
       isContinuousMode: isContinuousMode,
       isPushToTalkMode: isPushToTalkMode,

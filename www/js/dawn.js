@@ -275,6 +275,13 @@
                if (typeof DawnPhone !== 'undefined') {
                   DawnPhone.handleReconnect();
                }
+               // Re-enable always-on if it was active before the connection
+               // dropped. Deferred to here (not raw 'connected') for the same
+               // reason as phone: always_on_enable must land on the restored
+               // session, and this fires once per reconnect (flag-guarded).
+               if (typeof DawnAlwaysOn !== 'undefined') {
+                  DawnAlwaysOn.resumeAfterReconnectIfNeeded();
+               }
                // Restore active conversation context (backend session may have lost it on restart)
                // This loads the conversation history into the LLM context so subsequent
                // messages have proper context
@@ -1892,7 +1899,14 @@
 
       // Initialize audio playback module
       DawnAudioPlayback.setCallbacks({
-         onPlaybackStart: DawnVisualization.startFFT,
+         onPlaybackStart: function () {
+            DawnVisualization.startFFT();
+            // Pause always-on mic capture while we speak (echo prevention).
+            // Playback-driven so a turn with no TTS never mutes.
+            if (typeof DawnAlwaysOn !== 'undefined') {
+               DawnAlwaysOn.onPlaybackStart();
+            }
+         },
          onPlaybackEnd: function () {
             DawnVisualization.stopFFT();
             // If server sent "idle" while we were playing, apply it now
@@ -1901,7 +1915,7 @@
                console.log('Audio playback finished, applying deferred idle state');
                updateState('idle', null, null);
             }
-            // Complete deferred always-on unmute after TTS finishes
+            // Resume always-on mic capture after TTS finishes
             if (typeof DawnAlwaysOn !== 'undefined') {
                DawnAlwaysOn.onPlaybackEnd();
             }

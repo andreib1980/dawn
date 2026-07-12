@@ -811,6 +811,13 @@ void process_one_response(void) {
       case WS_RESP_AUDIO:
          send_audio_impl(conn->wsi, resp.audio.data, resp.audio.len);
          free(resp.audio.data);
+         /* Progress signal for the always-on PROCESSING watchdog: a long,
+          * TTS-paced reply keeps streaming audio, so treat each drained frame as
+          * progress (prevents a false "LLM stalled" timeout). Done HERE on the
+          * LWS service thread — same thread as always_on_destroy — so touching
+          * conn->always_on is lifetime-safe (a worker-thread bump would race the
+          * ctx free; security/arch review). NULL-safe + PROCESSING-gated inside. */
+         always_on_note_tts_activity(conn->always_on);
          break;
       case WS_RESP_AUDIO_END:
          send_audio_end_impl(conn->wsi, resp.audio.is_opus);

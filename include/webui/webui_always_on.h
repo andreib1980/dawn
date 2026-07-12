@@ -261,6 +261,25 @@ void always_on_processing_complete(always_on_ctx_t *ctx);
 void send_always_on_state(struct lws *wsi, const char *state_name);
 
 /**
+ * @brief Note TTS-streaming progress so the PROCESSING watchdog doesn't false-fire.
+ *
+ * Call as TTS audio frames are sent to the answering connection. While the
+ * context is in PROCESSING, this resets the watchdog clock — a long, TTS-paced
+ * reply then can't trip the "LLM stalled" timeout, while a genuinely hung turn
+ * (no TTS) still recovers. NULL-safe (no-op when always-on is inactive).
+ *
+ * THREAD SAFETY: call ONLY from the LWS service thread (e.g. the response-queue
+ * drain in webui_send.c). It touches the always_on context, which is freed on
+ * that same thread by always_on_destroy — calling from a worker thread would
+ * race that free (use-after-free). It also writes state_entry_ms locklessly,
+ * which the watchdog reader (always_on_check_timeouts, also LWS thread) reads;
+ * keeping both on one thread avoids the race.
+ *
+ * @param ctx Always-on context (typically `conn->always_on`; may be NULL).
+ */
+void always_on_note_tts_activity(always_on_ctx_t *ctx);
+
+/**
  * @brief Handle `always_on_enable` WebSocket message.
  *
  * Validates per-user uniqueness, push-to-talk conflict, sample-rate;

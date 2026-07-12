@@ -1093,8 +1093,12 @@ static int callback_websocket(struct lws *wsi,
                       conn->audio_buffer_len + data_len <= conn->audio_buffer_capacity) {
                      memcpy(conn->audio_buffer + conn->audio_buffer_len, data, data_len);
                      conn->audio_buffer_len += data_len;
-                     OLOG_INFO("WebUI: Fragment continuation, added %zu bytes (total: %zu)",
-                               data_len, conn->audio_buffer_len);
+                     /* Per-fragment protocol tracing — fires ~20x/sec during
+                      * raw-PCM always-on streaming (9600B chunks split by the
+                      * lws RX buffer). Developer-only: OLOG_DEBUG is a no-op
+                      * unless built with -DDEBUG. */
+                     OLOG_DEBUG("WebUI: Fragment continuation, added %zu bytes (total: %zu)",
+                                data_len, conn->audio_buffer_len);
                   }
                }
 

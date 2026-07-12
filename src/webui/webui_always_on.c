@@ -162,6 +162,19 @@ void send_always_on_state(struct lws *wsi, const char *state_name) {
    json_object_put(obj);
 }
 
+void always_on_note_tts_activity(always_on_ctx_t *ctx) {
+   if (!ctx)
+      return;
+   /* Progress signal: each streamed TTS sentence resets the PROCESSING watchdog
+    * clock so a long, TTS-paced reply doesn't false-trip "LLM stalled". Only
+    * bumps while actually answering (state == PROCESSING); a genuinely hung turn
+    * emits no TTS, so the watchdog still recovers it. Reuses state_entry_ms, the
+    * same field the timeout reads — matching the existing lockless access. */
+   if (atomic_load(&ctx->state) == ALWAYS_ON_PROCESSING) {
+      ctx->state_entry_ms = now_ms();
+   }
+}
+
 /**
  * Rate limiting check. Returns true if the frame should be dropped.
  */

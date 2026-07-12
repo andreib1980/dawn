@@ -485,6 +485,16 @@
          await new Promise((resolve) => setTimeout(resolve, 50));
       }
 
+      // A concurrent startContinuous() may have re-armed capture during the
+      // await above (e.g. the post-reconnect resume racing this teardown). If so,
+      // the teardown below would rip out the FRESH audioProcessor/mediaStream —
+      // leaving the server enabled but receiving no audio. Bail: the new capture
+      // owns the graph now.
+      if (continuousMode) {
+         console.log('Continuous audio capture stop aborted — capture re-armed during teardown');
+         return;
+      }
+
       if (audioProcessor) {
          audioProcessor.disconnect();
          audioProcessor = null;

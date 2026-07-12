@@ -93,6 +93,7 @@ bool utterance_dedup_check(uint32_t session_id) {
    dedup_slot_t *own = NULL;
    dedup_slot_t *empty = NULL;
    dedup_slot_t *lru = NULL;
+   dedup_slot_t *newest_other = NULL; /* most-recent live peer (for diagnostics) */
 
    for (int i = 0; i < UTTERANCE_DEDUP_SLOTS; i++) {
       dedup_slot_t *e = &s_slots[i];
@@ -118,6 +119,9 @@ bool utterance_dedup_check(uint32_t session_id) {
          own = e;
       } else {
          other_active = true;
+         if (!newest_other || e->ts_ms > newest_other->ts_ms) {
+            newest_other = e;
+         }
       }
 
       if (!lru || e->ts_ms < lru->ts_ms) {
@@ -129,8 +133,18 @@ bool utterance_dedup_check(uint32_t session_id) {
     * record — anchor the window to the winner so this suppressed device can't
     * later suppress the winner's own deliberate repeat. */
    if (other_active) {
+      /* Snapshot peer id + age under the lock; the slot pointer is unstable
+       * after unlock (another thread may reclaim it). */
+      const uint32_t peer = newest_other ? newest_other->session_id : 0;
+      const uint64_t age_ms = newest_other ? (now - newest_other->ts_ms) : 0;
       pthread_mutex_unlock(&s_mutex);
-      OLOG_INFO("Dedup: suppressing session %u (another source fired within %ds)", session_id,
+      /* Diagnostic (utterance-dedup skew): logs on BOTH decision paths so a
+       * double-response (allow+allow, no suppress) is still visible — compare
+       * the t= values across sessions to read the cross-device skew, and this
+       * SUPPRESS line shows the exact peer + age when the gate does catch. */
+      OLOG_INFO("Dedup CHECK session=%u t=%llums -> SUPPRESS (peer session=%u fired %llums ago, "
+                "window=%ds)",
+                session_id, (unsigned long long)now, peer, (unsigned long long)age_ms,
                 s_window_sec);
       return true;
    }
@@ -146,6 +160,10 @@ bool utterance_dedup_check(uint32_t session_id) {
    }
 
    pthread_mutex_unlock(&s_mutex);
+   /* See the SUPPRESS-path note above: this ALLOW line is the one that makes a
+    * missed dedup diagnosable (both devices log ALLOW; the t= delta is the skew). */
+   OLOG_INFO("Dedup CHECK session=%u t=%llums -> ALLOW (recorded, window=%ds)", session_id,
+             (unsigned long long)now, s_window_sec);
    return false;
 }
 
