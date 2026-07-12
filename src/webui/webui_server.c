@@ -770,11 +770,36 @@ static int callback_websocket(struct lws *wsi,
          break;
       }
 
+      case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE: {
+         /* The peer (browser) sent a WebSocket CLOSE frame — decode its code +
+          * reason. NOTE: a pure 1006 (abnormal, no close frame) NEVER reaches
+          * here, so if a disconnect shows CLOSED with no preceding peer-close
+          * log, the socket died at the transport layer (not a clean app close) —
+          * that absence is itself the diagnostic signal for the 1006 drops. */
+         uint16_t code = 0;
+         char reason[128] = { 0 };
+         if (in && len >= 2) {
+            const unsigned char *p = (const unsigned char *)in;
+            code = (uint16_t)((p[0] << 8) | p[1]);
+            size_t rlen = len - 2;
+            if (rlen > sizeof(reason) - 1)
+               rlen = sizeof(reason) - 1;
+            memcpy(reason, p + 2, rlen);
+            reason[rlen] = '\0';
+         }
+         OLOG_INFO("WebUI: peer-initiated WS close: code=%u reason=\"%s\" (session %u)", code,
+                   reason, conn && conn->session ? conn->session->session_id : 0);
+         break; /* return 0: let lws finish the close handshake */
+      }
+
       case LWS_CALLBACK_CLOSED: {
          /* Unregister from connection registry */
          unregister_connection(conn);
          /* WebSocket disconnected.
-          * Atomic load: maintenance thread may have NULLed conn->session. */
+          * Atomic load: maintenance thread may have NULLed conn->session.
+          * If no LWS_CALLBACK_WS_PEER_INITIATED_CLOSE was logged just above for
+          * this connection, the close was transport-level (abnormal 1006) — the
+          * lws NOTICE routed via webui_lws_log_emit should name the cause. */
          session_t *closing_session = conn_get_session(conn);
          OLOG_INFO("WebUI: WebSocket client disconnecting (session %u)",
                    closing_session ? closing_session->session_id : 0);
@@ -1609,6 +1634,31 @@ static void webui_tool_execution_callback(void *session_ptr,
  * Public API
  * ============================================================================= */
 
+/* Route libwebsockets' own diagnostics into DAWN's log instead of the default
+ * stderr emitter, so connection-close reasons (abnormal 1006 closes, TLS
+ * errors, internal timeouts, HANGUPs) are captured in dawn.log with timestamps
+ * rather than vanishing. Called by lws on the service thread; OLOG is
+ * thread-safe. lws appends a trailing newline we strip. */
+static void webui_lws_log_emit(int level, const char *line) {
+   if (!line)
+      return;
+   char buf[512];
+   size_t n = strlen(line);
+   if (n > sizeof(buf) - 1)
+      n = sizeof(buf) - 1;
+   memcpy(buf, line, n);
+   while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+      n--;
+   buf[n] = '\0';
+   if (level & LLL_ERR) {
+      OLOG_ERROR("lws: %s", buf);
+   } else if (level & LLL_WARN) {
+      OLOG_WARNING("lws: %s", buf);
+   } else {
+      OLOG_INFO("lws: %s", buf);
+   }
+}
+
 int webui_server_init(int port, const char *www_path) {
    struct lws_context_creation_info info;
 
@@ -1701,9 +1751,11 @@ int webui_server_init(int port, const char *www_path) {
    OLOG_INFO("WebUI: Initializing %s server on port %d, serving from: %s",
              use_https ? "HTTPS" : "HTTP", port, s_www_path);
 
-   /* Suppress noisy LWS lifecycle logs (connection tags, accept gate, netlink).
-    * Only show errors and warnings — everything else is handled by DAWN's own logging. */
-   lws_set_log_level(LLL_ERR | LLL_WARN, NULL);
+   /* Route lws error/warn/notice into DAWN's log (see webui_lws_log_emit).
+    * NOTICE is included so connection-close reasons (which lws emits at NOTICE)
+    * are captured for diagnosing abnormal 1006 disconnects; INFO/DEBUG stay off
+    * to avoid the noisy per-connection lifecycle spam. */
+   lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE, webui_lws_log_emit);
 
    /* Create context */
    s_lws_context = lws_create_context(&info);
