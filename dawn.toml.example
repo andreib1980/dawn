@@ -892,6 +892,19 @@
                                   # Env: DAWN_SFX_SOUND_PATH
 
 # =============================================================================
+# Home Assistant (smart home control)
+# =============================================================================
+# REST + WebSocket client for Home Assistant Core/OS. See docs/HOMEASSISTANT_SETUP.md
+# for a bare-metal HA Core install guide (e.g. running alongside DAWN on the same
+# Jetson). Long-lived access token lives in secrets.toml under [secrets.home_assistant].
+
+[home_assistant]
+# enabled = true                   # Enable the Home Assistant tool
+# url = "http://homeassistant.local:8123/"  # Base URL of the HA instance
+# led_hue_correction = 20          # Degrees to shift magenta region toward red (0-60),
+                                    # for RGB light color-name matching
+
+# =============================================================================
 # Calendar (CalDAV)
 # =============================================================================
 

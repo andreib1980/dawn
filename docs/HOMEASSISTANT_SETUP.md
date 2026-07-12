@@ -1,9 +1,9 @@
 # Home Assistant Core: Bare Metal Setup on Jetson Orin
 
 **Status:** Deployed and verified on Jetson AGX Orin hardware
-**Date:** March 2026
+**Date:** March 2026 (Python/version details re-verified July 2026 against a fresh install)
 **Platform:** Jetson Orin NX/AGX, JetPack 6.x (L4T R36.x), Ubuntu 22.04 Jammy aarch64
-**HA Version:** 2026.2.3+
+**HA Version:** 2026.7.2+ (HA moved its minimum Python to 3.14 as of the 2026.3 release)
 **DAWN Integration:** `src/tools/homeassistant_service.c`, `src/tools/homeassistant_tool.c`
 
 ---
@@ -45,7 +45,7 @@ HA Core bare-metal installation was deprecated in May 2025 (HA 2025.6). Official
 | JetPack | 6.x (L4T R36.x) |
 | OS | Ubuntu 22.04 LTS (Jammy) — aarch64 |
 | System Python | 3.10 (too old for HA) |
-| Required Python | 3.13 (HA Core 2025.2+) |
+| Required Python | 3.14 (HA Core 2026.3+) |
 | HA interface | REST API + WebSocket |
 
 ---
@@ -73,20 +73,22 @@ sudo apt-get install -y \
 
 ---
 
-## 4. Python 3.13 via deadsnakes PPA
+## 4. Python 3.14 via deadsnakes PPA
 
-Ubuntu 22.04 ships Python 3.10. Install 3.13 from the deadsnakes PPA (publishes aarch64 packages for Jammy):
+Ubuntu 22.04 ships Python 3.10. Install 3.14 from the deadsnakes PPA (publishes aarch64 packages for Jammy — confirmed available as `3.14.6-1+jammy1`, built June 2026):
 
 ```bash
 sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt-get update
-sudo apt-get install -y python3.13 python3.13-dev python3.13-venv
-python3.13 --version
+sudo apt-get install -y python3.14 python3.14-dev python3.14-venv
+python3.14 --version
 ```
 
-> Never replace the system `python3` symlink. Ubuntu 22.04 uses `python3.10` internally for apt hooks. Always invoke explicitly as `python3.13`.
+> Never replace the system `python3` symlink. Ubuntu 22.04 uses `python3.10` internally for apt hooks. Always invoke explicitly as `python3.14`.
 
-> Do not install `python3.13-distutils` — it conflicts on Jammy.
+> Do not install `python3.14-distutils` — it conflicts on Jammy.
+
+> **Version drifts roughly yearly** (Section 13 covers the rebuild). This guide previously pinned Python 3.13 for HA 2025.2+; HA 2026.3 bumped its minimum to 3.14. Check `https://www.home-assistant.io/blog/` for the current requirement before a fresh install.
 
 ---
 
@@ -106,7 +108,7 @@ sudo useradd -r -m -s /bin/bash -G dialout,tty homeassistant
 sudo mkdir -p /srv/homeassistant
 sudo chown homeassistant:homeassistant /srv/homeassistant
 
-sudo -u homeassistant python3.13 -m venv /srv/homeassistant
+sudo -u homeassistant python3.14 -m venv /srv/homeassistant
 sudo -u homeassistant /srv/homeassistant/bin/pip install --upgrade pip wheel
 sudo -u homeassistant /srv/homeassistant/bin/pip install homeassistant
 
@@ -249,11 +251,19 @@ The owner account is permanent and cannot be deleted.
 2. Click username (bottom-left) → **Long-Lived Access Tokens** → **Create Token**
 3. Name it `DAWN`, copy immediately (shown only once)
 
-Store in DAWN's `secrets.toml`:
+Store in DAWN's `secrets.toml` (note the underscore — `home_assistant`, not `homeassistant`; the parser looks for this exact nested table and silently ignores anything else):
 
 ```toml
-[secrets.homeassistant]
+[secrets.home_assistant]
 token = "<your-token>"
+```
+
+And point DAWN at the instance in `dawn.toml`:
+
+```toml
+[home_assistant]
+enabled = true
+url = "http://<orin-ip>:8123/"   # or "http://localhost:8123/" when HA runs on the same box as DAWN
 ```
 
 ---
@@ -273,7 +283,40 @@ DAWN handles WebSocket communication with HA automatically — no manual verific
 
 ---
 
-## 12. Maintenance
+## 12. Zigbee / Z-Wave USB Radios (ZHA / Z-Wave)
+
+Combo sticks such as the Nortek/GoControl HUSBZB-1 (`lsusb` ID `10c4:8a2a`, reports as
+"Silicon Labs HubZ Smart Home Controller") expose Zigbee and Z-Wave as two separate serial
+interfaces on one physical device. Identify them via the stable by-id paths, not
+`/dev/ttyUSBn` — USB enumeration order can reassign those numbers across reboots:
+
+```bash
+ls -la /dev/serial/by-id/
+# usb-Silicon_Labs_HubZ_Smart_Home_Controller_<serial>-if00-port0 -> ../../ttyUSBn  (Zigbee)
+# usb-Silicon_Labs_HubZ_Smart_Home_Controller_<serial>-if01-port0 -> ../../ttyUSBm  (Z-Wave)
+```
+
+The `homeassistant` system user's `dialout` group membership (Section 5) already grants
+read/write on `/dev/ttyUSB*` — no udev rules or permission changes needed on a fresh install.
+Verified by checking the live `hass` process's supplementary groups
+(`grep Groups /proc/<hass-pid>/status`) includes `dialout`'s gid.
+
+### Adding ZHA (Zigbee)
+
+Settings → Devices & Services → Add Integration → **ZHA**, then point it at the Zigbee
+interface's by-id path. Radio type auto-detects. If setup fails to handshake, the two
+interfaces on a combo stick may be swapped from what's documented above — try the other one.
+
+### Adding Z-Wave
+
+HA's Z-Wave integration expects a `zwave-js-server` WebSocket endpoint. On HAOS/Supervised
+installs this ships as an add-on; **bare-metal Core has no Supervisor**, so
+`zwave-js-server` (Node.js) must be run as a separate standalone service pointed at the
+Z-Wave interface. Not covered by this guide — set up only if the deployment needs Z-Wave.
+
+---
+
+## 13. Maintenance
 
 ### Update HA Core
 
@@ -313,7 +356,7 @@ sudo rm -rf /srv/homeassistant.bak
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -327,10 +370,11 @@ sudo rm -rf /srv/homeassistant.bak
 | Auth token rejected | Token copied incorrectly | Regenerate in UI, check for trailing whitespace |
 | WebSocket drops | Network instability or HA restart | DAWN service module handles reconnection automatically |
 | Python version mismatch on pip | Wrong pip invoked | Always use full path: `/srv/homeassistant/bin/pip` |
+| `Config flow could not be loaded: Failed dependencies homeassistant_hardware` (adding ZHA) | `zha` → `homeassistant_hardware` → `usb` component's ESPHome serial-proxy module imports `aioesphomeapi`, which `pip install homeassistant` doesn't pull in (confirmed on HA 2026.7.2) | `sudo -u homeassistant /srv/homeassistant/bin/pip install aioesphomeapi && sudo systemctl restart homeassistant` |
 
 ---
 
-## 14. Quick Reference
+## 15. Quick Reference
 
 | Item | Value |
 |---|---|
@@ -342,9 +386,9 @@ sudo rm -rf /srv/homeassistant.bak
 | WebSocket | `ws://<orin-ip>:8123/api/websocket` |
 | Logs | `journalctl -u homeassistant -f` |
 | System user | `homeassistant` |
-| Python | `/usr/bin/python3.13` |
+| Python | `/usr/bin/python3.14` |
 | pip | `/srv/homeassistant/bin/pip` |
-| DAWN config | `[homeassistant]` section in `dawn.toml` + `secrets.toml` |
+| DAWN config | `[home_assistant]` section in `dawn.toml` + `[secrets.home_assistant]` in `secrets.toml` |
 
 ---
 
