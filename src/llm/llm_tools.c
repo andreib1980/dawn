@@ -47,6 +47,7 @@
 #include "core/worker_pool.h"
 #include "dawn.h"
 #include "dawn_error.h"
+#include "llm/llm_claude_format.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
@@ -433,6 +434,24 @@ static bool extract_vision_image(const char *data,
          return false;
       }
       OLOG_INFO("Image file encoded: %zu bytes base64", strlen(base64_image));
+   }
+
+   /* Defense-in-depth: MQTT-sourced captures (e.g. the `viewing` camera tool) have
+    * no upstream size cap the way WebUI uploads do — MIRAGE (or a device
+    * impersonating it, if the broker is compromised) fully controls these bytes.
+    * Reuse the existing upload cap so a captured image can't grow the persisted
+    * conversation_history entry (see llm_tools_add_results_openai/claude)
+    * without bound. */
+   size_t max_bytes = (size_t)g_config.vision.max_image_size_kb * 1024;
+   if (strlen(base64_image) > max_bytes) {
+      OLOG_WARNING("Vision image exceeds max_image_size_kb (%d KB, %zu bytes received) — rejecting",
+                   g_config.vision.max_image_size_kb, strlen(base64_image));
+      free(base64_image);
+      if (error_buf) {
+         snprintf(error_buf, error_len, "Error: Image exceeds maximum size (%d KB)",
+                  g_config.vision.max_image_size_kb);
+      }
+      return false;
    }
 
    *image_out = base64_image;
@@ -1792,6 +1811,148 @@ char *llm_tools_get_direct_response(const tool_result_list_t *results) {
  * Tool Result Formatting for Conversation History
  * ============================================================================= */
 
+/**
+ * @brief Build a standalone user message holding exactly one captured-vision image
+ *
+ * OpenAI-shape: {"role":"user","content":[{"type":"image_url","image_url":{"url":...}}]}
+ * No accompanying text. Persists a tool-captured image (e.g. the `viewing`
+ * camera tool) into conversation history so follow-up turns can still see
+ * it, instead of the image only being visible for the single turn it was
+ * captured in. is_capture_image_message() recognizes this exact
+ * single-part shape for retention pruning.
+ */
+static struct json_object *build_openai_capture_image_message(const char *base64_data) {
+   const char *media_type = llm_claude_detect_image_mime_type(base64_data);
+   const char *prefix_fmt = "data:%s;base64,";
+   size_t data_uri_len = strlen(prefix_fmt) + strlen(media_type) + strlen(base64_data) + 1;
+   char *data_uri = malloc(data_uri_len);
+   if (!data_uri) {
+      OLOG_ERROR("Failed to allocate data URI for captured image (%zu bytes) — skipping persist",
+                 data_uri_len);
+      return NULL;
+   }
+   snprintf(data_uri, data_uri_len, "data:%s;base64,%s", media_type, base64_data);
+
+   struct json_object *image_url_obj = json_object_new_object();
+   json_object_object_add(image_url_obj, "url", json_object_new_string(data_uri));
+   free(data_uri);
+
+   struct json_object *image_obj = json_object_new_object();
+   json_object_object_add(image_obj, "type", json_object_new_string("image_url"));
+   json_object_object_add(image_obj, "image_url", image_url_obj);
+
+   struct json_object *content_array = json_object_new_array();
+   json_object_array_add(content_array, image_obj);
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "role", json_object_new_string("user"));
+   json_object_object_add(msg, "content", content_array);
+   return msg;
+}
+
+/**
+ * @brief Build a standalone user message holding exactly one captured-vision image (Claude shape)
+ *
+ * Mirrors build_openai_capture_image_message() but wraps the image with
+ * llm_claude_create_image_block(), matching what convert_to_claude_format()
+ * already produces ephemerally for a caller-supplied vision image.
+ */
+static struct json_object *build_claude_capture_image_message(const char *base64_data) {
+   struct json_object *content_array = json_object_new_array();
+   json_object_array_add(content_array, llm_claude_create_image_block(base64_data));
+
+   struct json_object *msg = json_object_new_object();
+   json_object_object_add(msg, "role", json_object_new_string("user"));
+   json_object_object_add(msg, "content", content_array);
+   return msg;
+}
+
+/**
+ * @brief True if msg is a lone captured-vision-image message
+ *
+ * Recognizes the exact shape built above: a "user" message whose content is
+ * a single-element array containing only an image part ("image_url" for
+ * OpenAI shape, "image" for Claude shape). This is distinct from a
+ * WebUI-uploaded image (session_add_message_with_images() always pairs an
+ * image with a text part, so its content array has length >= 2), so
+ * retention pruning only ever touches ambient tool captures, never images
+ * the user deliberately attached to a message.
+ */
+static bool is_capture_image_message(struct json_object *msg) {
+   struct json_object *role_obj = NULL;
+   struct json_object *content_obj = NULL;
+
+   if (!msg || !json_object_object_get_ex(msg, "role", &role_obj) ||
+       strcmp(json_object_get_string(role_obj), "user") != 0) {
+      return false;
+   }
+   if (!json_object_object_get_ex(msg, "content", &content_obj) ||
+       !json_object_is_type(content_obj, json_type_array) ||
+       json_object_array_length(content_obj) != 1) {
+      return false;
+   }
+
+   struct json_object *part = json_object_array_get_idx(content_obj, 0);
+   struct json_object *type_obj = NULL;
+   if (!part || !json_object_object_get_ex(part, "type", &type_obj)) {
+      return false;
+   }
+
+   const char *type = json_object_get_string(type_obj);
+   return type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0);
+}
+
+/**
+ * @brief Keep only the most recent N tool-captured images in history
+ *
+ * Scans newest-to-oldest; the first retention_count capture-image messages
+ * found are left intact, anything older is collapsed to a short text
+ * placeholder. retention_count <= 0 means unlimited (no-op) — bounding is
+ * then left entirely to normal context compaction.
+ */
+static void evict_old_capture_images(struct json_object *history, int retention_count) {
+   if (!history || retention_count <= 0) {
+      return;
+   }
+
+   int live = 0;
+   for (int i = json_object_array_length(history) - 1; i >= 0; i--) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      if (!is_capture_image_message(msg)) {
+         continue;
+      }
+      live++;
+      if (live > retention_count) {
+         json_object_object_add(msg, "content",
+                                json_object_new_string(
+                                    "[earlier camera capture - image no longer retained]"));
+      }
+   }
+}
+
+/**
+ * @brief Persist the first tool result carrying a captured image, if any
+ *
+ * Appends an image-only message via the given builder and prunes older
+ * captures per [vision] capture_history_count. Matches the prior ephemeral
+ * behavior of surfacing at most one captured image per tool iteration.
+ */
+static void persist_capture_image_if_present(struct json_object *history,
+                                             const tool_result_list_t *results,
+                                             struct json_object *(*build_message)(const char *)) {
+   for (int i = 0; i < results->count; i++) {
+      const tool_result_t *r = &results->results[i];
+      if (r->vision_image && r->vision_image_size > 0) {
+         struct json_object *msg = build_message(r->vision_image);
+         if (msg) {
+            json_object_array_add(history, msg);
+            evict_old_capture_images(history, g_config.vision.capture_history_count);
+         }
+         return;
+      }
+   }
+}
+
 int llm_tools_add_results_openai(struct json_object *history, const tool_result_list_t *results) {
    if (!history || !results) {
       return 1;
@@ -1815,6 +1976,11 @@ int llm_tools_add_results_openai(struct json_object *history, const tool_result_
 
       json_object_array_add(history, msg);
    }
+
+   /* A tool that returned a captured image (e.g. `viewing`) only shows the
+    * model that image for the turn it was captured in unless we persist it
+    * here — see docs/arch/subsystems/llm.md vision notes. */
+   persist_capture_image_if_present(history, results, build_openai_capture_image_message);
 
    return 0;
 }
@@ -1855,6 +2021,8 @@ int llm_tools_add_results_claude(struct json_object *history, const tool_result_
    json_object_object_add(msg, "content", content_array);
 
    json_object_array_add(history, msg);
+
+   persist_capture_image_if_present(history, results, build_claude_capture_image_message);
 
    return 0;
 }
@@ -2314,6 +2482,117 @@ struct json_object *llm_history_strip_provider_state(struct json_object *history
       }
    }
    return copy;
+}
+
+#define VISION_STRIP_TEXT_BUF_MAX 8192
+
+static bool is_vision_content_block(struct json_object *block) {
+   struct json_object *type_obj;
+   if (!json_object_object_get_ex(block, "type", &type_obj)) {
+      return false;
+   }
+   const char *type_str = json_object_get_string(type_obj);
+   return (strcmp(type_str, "image_url") == 0 || strcmp(type_str, "image") == 0);
+}
+
+struct json_object *llm_history_strip_vision_content(struct json_object *history) {
+   if (!history || json_object_get_type(history) != json_type_array) {
+      return NULL;
+   }
+
+   int len = json_object_array_length(history);
+
+   bool has_vision = false;
+   for (int i = 0; i < len && !has_vision; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      struct json_object *content_obj;
+      if (json_object_object_get_ex(msg, "content", &content_obj) &&
+          json_object_get_type(content_obj) == json_type_array) {
+         int arr_len = json_object_array_length(content_obj);
+         for (int j = 0; j < arr_len; j++) {
+            struct json_object *elem = json_object_array_get_idx(content_obj, j);
+            if (is_vision_content_block(elem)) {
+               has_vision = true;
+               break;
+            }
+         }
+      }
+   }
+
+   if (!has_vision) {
+      return json_object_get(history);
+   }
+
+   OLOG_INFO("Stripping vision content from history");
+
+   struct json_object *sanitized = json_object_new_array();
+
+   for (int i = 0; i < len; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      struct json_object *content_obj;
+
+      if (json_object_object_get_ex(msg, "content", &content_obj) &&
+          json_object_get_type(content_obj) == json_type_array) {
+         int arr_len = json_object_array_length(content_obj);
+         char text_buffer[VISION_STRIP_TEXT_BUF_MAX] = "";
+         size_t text_len = 0;
+         bool found_image = false;
+
+         for (int j = 0; j < arr_len; j++) {
+            struct json_object *elem = json_object_array_get_idx(content_obj, j);
+            struct json_object *type_obj;
+            if (json_object_object_get_ex(elem, "type", &type_obj)) {
+               const char *type_str = json_object_get_string(type_obj);
+               if (strcmp(type_str, "text") == 0) {
+                  struct json_object *text_obj;
+                  if (json_object_object_get_ex(elem, "text", &text_obj)) {
+                     const char *text = json_object_get_string(text_obj);
+                     if (text && text_len < sizeof(text_buffer) - 1) {
+                        if (text_len > 0) {
+                           text_buffer[text_len++] = ' ';
+                        }
+                        size_t copy_len = strlen(text);
+                        if (text_len + copy_len >= sizeof(text_buffer)) {
+                           copy_len = sizeof(text_buffer) - text_len - 1;
+                        }
+                        memcpy(text_buffer + text_len, text, copy_len);
+                        text_len += copy_len;
+                        text_buffer[text_len] = '\0';
+                     }
+                  }
+               } else if (is_vision_content_block(elem)) {
+                  found_image = true;
+               }
+            }
+         }
+
+         struct json_object *new_msg = json_object_new_object();
+         struct json_object *role_obj;
+         if (json_object_object_get_ex(msg, "role", &role_obj)) {
+            json_object_object_add(new_msg, "role", json_object_get(role_obj));
+         }
+
+         if (found_image) {
+            if (text_len > 0) {
+               char combined[VISION_STRIP_TEXT_BUF_MAX + 128];
+               snprintf(combined, sizeof(combined), "%s [An image was shared earlier]",
+                        text_buffer);
+               json_object_object_add(new_msg, "content", json_object_new_string(combined));
+            } else {
+               json_object_object_add(new_msg, "content",
+                                      json_object_new_string("[An image was shared here]"));
+            }
+         } else {
+            json_object_object_add(new_msg, "content", json_object_new_string(text_buffer));
+         }
+
+         json_object_array_add(sanitized, new_msg);
+      } else {
+         json_object_array_add(sanitized, json_object_get(msg));
+      }
+   }
+
+   return sanitized;
 }
 
 void llm_tool_response_free(llm_tool_response_t *response) {

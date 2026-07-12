@@ -301,7 +301,7 @@ bool claude_history_has_thinking_blocks(struct json_object *conversation) {
  * @param base64_data Base64-encoded image data
  * @return MIME type string (static, do not free)
  */
-static const char *detect_image_mime_type(const char *base64_data) {
+const char *llm_claude_detect_image_mime_type(const char *base64_data) {
    if (!base64_data || strlen(base64_data) < 8) {
       return "image/jpeg"; /* Default fallback */
    }
@@ -334,12 +334,12 @@ static const char *detect_image_mime_type(const char *base64_data) {
  *
  * Automatically detects the image MIME type from the base64 data.
  */
-static json_object *create_claude_image_block(const char *vision_image) {
+json_object *llm_claude_create_image_block(const char *vision_image) {
    json_object *image_obj = json_object_new_object();
    json_object_object_add(image_obj, "type", json_object_new_string("image"));
 
    /* Detect actual MIME type from base64 data */
-   const char *media_type = detect_image_mime_type(vision_image);
+   const char *media_type = llm_claude_detect_image_mime_type(vision_image);
 
    json_object *source_obj = json_object_new_object();
    json_object_object_add(source_obj, "type", json_object_new_string("base64"));
@@ -504,7 +504,7 @@ static void add_vision_to_claude_messages(json_object *messages_array,
       // Add all images
       for (int i = 0; i < vision_image_count; i++) {
          if (vision_images[i]) {
-            json_object_array_add(content_array, create_claude_image_block(vision_images[i]));
+            json_object_array_add(content_array, llm_claude_create_image_block(vision_images[i]));
          }
       }
       json_object_object_add(last_msg, "content", content_array);
@@ -527,7 +527,7 @@ static void add_vision_to_claude_messages(json_object *messages_array,
       // Add all images
       for (int i = 0; i < vision_image_count; i++) {
          if (vision_images[i]) {
-            json_object_array_add(content_array, create_claude_image_block(vision_images[i]));
+            json_object_array_add(content_array, llm_claude_create_image_block(vision_images[i]));
          }
       }
       json_object_object_add(new_user_msg, "content", content_array);

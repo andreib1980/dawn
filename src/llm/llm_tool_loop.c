@@ -147,7 +147,22 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
  * message (NULL if none).  It attaches to the single assistant row this iteration
  * appended — guaranteed unique because convert_claude_tool_to_openai() and
  * append_openai_tool_history() collapse text + all tool_use into exactly one assistant
- * row and fan out only role:tool result rows. */
+ * row and fan out only role:tool result rows.
+ *
+ * A persisted capture-image message (see llm_tools_add_results_openai/claude,
+ * llm_tools.c) is DELIBERATELY excluded here: it carries neither tool_calls
+ * nor tool_call_id, so it's dropped by both loops below regardless of
+ * provider — Claude's convert_claude_tool_to_openai() returns 0 for it
+ * (no tool_use/tool_result blocks) and OpenAI's plain passthrough still fails
+ * the tool_calls/tool_call_id gate in the second loop.  This is intentional,
+ * not a gap: conv_db reload expects images as `[IMAGE:id]` markers pointing
+ * at the image store (see webui_image_rehydrate.c), not raw embedded base64
+ * in a message row — writing the base64 JSON verbatim here would produce a
+ * row the reload path can't parse back into a real image.  Wiring captures
+ * through the image store's marker system is a real follow-up, not a
+ * same-diff fix.  Net effect: tool-captured images stay visible for the
+ * live session (in-memory conversation_history) but don't survive a WebUI
+ * reconnect/reload — same as before this feature existed. */
 static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
                                        int before_len,
                                        const char *reasoning_json) {
@@ -465,14 +480,6 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
    s_did_skip_followup = false;
    char *final_response = NULL;
 
-   /* Persistent vision state across iterations.
-    * When a tool produces vision data, we take ownership of it here
-    * so it survives across loop iterations (stack arrays would go out of scope). */
-   char *loop_vision_image = NULL;
-   size_t loop_vision_size = 0;
-   const char *loop_vision_arr[1] = { NULL };
-   size_t loop_vision_size_arr[1] = { 0 };
-
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
       /* Step 0: Merge any completed async compaction (invisible to user) */
       session_t *loop_session = session_get(params->session_id);
@@ -771,38 +778,18 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
             final_text = strdup(result.text);
          }
          llm_tool_response_free(&result);
-         free(loop_vision_image);
          return final_text;
       }
 
-      /* Step 10: Extract vision data from tool results (take ownership) */
-      free(loop_vision_image); /* Free previous iteration's vision */
-      loop_vision_image = NULL;
-      loop_vision_size = 0;
-
-      for (int i = 0; i < results->count; i++) {
-         if (results->results[i].vision_image && results->results[i].vision_image_size > 0) {
-            /* Take ownership: steal the pointer so free_tool_result_vision won't free it */
-            loop_vision_image = results->results[i].vision_image;
-            loop_vision_size = results->results[i].vision_image_size;
-            results->results[i].vision_image = NULL; /* Prevent double-free */
-            OLOG_INFO("Tool loop: Including vision from tool result (%zu bytes)", loop_vision_size);
-            break;
-         }
-      }
-
-      /* Update params to point to persistent vision state for next iteration */
-      if (loop_vision_image) {
-         loop_vision_arr[0] = loop_vision_image;
-         loop_vision_size_arr[0] = loop_vision_size;
-         params->vision_images = loop_vision_arr;
-         params->vision_image_sizes = loop_vision_size_arr;
-         params->vision_image_count = 1;
-      } else {
-         params->vision_images = NULL;
-         params->vision_image_sizes = NULL;
-         params->vision_image_count = 0;
-      }
+      /* Step 10: Vision images from a tool result (e.g. the `viewing` camera tool) are
+       * now persisted directly into conversation_history by
+       * llm_tools_add_results_openai/claude (Step 8), so they flow through normal
+       * history serialization on this and every future request instead of a
+       * one-shot injection. Clear the ephemeral params so a caller-supplied turn-0
+       * image (e.g. a WebUI upload) isn't resent on iteration 2+. */
+      params->vision_images = NULL;
+      params->vision_image_sizes = NULL;
+      params->vision_image_count = 0;
 
       /* Step 11: Check interrupt */
       if (llm_is_interrupt_requested()) {
@@ -810,7 +797,6 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          free_tool_result_resources(results);
          free(results);
          llm_tool_response_free(&result);
-         free(loop_vision_image);
          return NULL;
       }
 
@@ -828,6 +814,5 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
 
    /* Should not reach here (loop exits via returns) */
    OLOG_ERROR("Tool loop: Fell through iteration loop unexpectedly");
-   free(loop_vision_image);
    return NULL;
 }

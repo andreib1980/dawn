@@ -61,7 +61,11 @@ static const tool_metadata_t viewing_metadata = {
    .alias_count = 2,
 
    .description = "Analyze what the camera sees. Takes a photo and describes the scene, identifies "
-                  "objects, reads text, or answers questions about the view.",
+                  "objects, reads text, or answers questions about the view. The captured image "
+                  "stays visible in conversation history for a bounded number of follow-up turns "
+                  "(older captures are automatically replaced by newer ones). If no image is "
+                  "attached in your current context, say so plainly instead of guessing or "
+                  "claiming a capture happened — call this tool again for a fresh look.",
    .params = viewing_params,
    .param_count = 1,
 

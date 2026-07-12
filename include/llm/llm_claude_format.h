@@ -100,4 +100,28 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *model,
                                       int iteration);
 
+/**
+ * @brief Detect an image's MIME type from its base64-encoded magic bytes
+ *
+ * Checks the leading base64 characters against known PNG/JPEG/GIF/WebP
+ * signatures. Falls back to "image/jpeg" when the data is too short or
+ * unrecognized.
+ *
+ * @param base64_data Base64-encoded image data
+ * @return MIME type string (static, do not free)
+ */
+const char *llm_claude_detect_image_mime_type(const char *base64_data);
+
+/**
+ * @brief Build a Claude-format image content block
+ *
+ * Wraps base64 image data as {"type":"image","source":{"type":"base64",
+ * "media_type":<detected>,"data":<base64_data>}}. MIME type is
+ * auto-detected via llm_claude_detect_image_mime_type().
+ *
+ * @param vision_image Base64-encoded image data
+ * @return json_object owned by the caller (json_object_put() when done)
+ */
+json_object *llm_claude_create_image_block(const char *vision_image);
+
 #endif  // LLM_CLAUDE_FORMAT_H

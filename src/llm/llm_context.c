@@ -1079,6 +1079,19 @@ static int calculate_compaction_target(int context_size, float threshold) {
    return (int)(context_size * target_ratio);
 }
 
+/* Flat per-image token estimate for compaction accounting, expressed in the
+ * "chars" unit this function accumulates (divided by 4 into tokens below).
+ * Deliberately NOT scaled by base64 payload length: providers tokenize
+ * images by pixel-tile count, not encoded byte size, so a large
+ * low-resolution capture and a small high-resolution one cost similar real
+ * tokens — scaling with base64 length over-counts a real multi-hundred-KB
+ * capture by 1-2 orders of magnitude (review finding), which would trigger
+ * spurious compaction and false context-overflow guards every turn a
+ * persisted capture (see llm_tools_add_results_openai/claude) sits in
+ * history. 8000 chars (~2000 tokens) is a generous flat upper bound for a
+ * single real capture at typical camera resolutions. */
+#define VISION_IMAGE_TOKEN_ESTIMATE_CHARS 8000
+
 static int estimate_tokens_range(struct json_object *history, int start_idx, int end_idx) {
    if (!history || !json_object_is_type(history, json_type_array))
       return 0;
@@ -1140,8 +1153,9 @@ static int estimate_tokens_range(struct json_object *history, int start_idx, int
                struct json_object *type_obj = NULL;
                if (json_object_object_get_ex(part, "type", &type_obj)) {
                   const char *type = json_object_get_string(type_obj);
-                  if (type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0))
-                     total_chars += 3000;
+                  if (type && (strcmp(type, "image_url") == 0 || strcmp(type, "image") == 0)) {
+                     total_chars += VISION_IMAGE_TOKEN_ESTIMATE_CHARS;
+                  }
                }
             }
          }
@@ -1213,6 +1227,16 @@ static char *compact_with_llm(struct json_object *to_summarize,
                               cloud_provider_t provider,
                               const char *model) {
    struct json_object *clean = llm_history_strip_provider_state(to_summarize);
+   /* Persisted tool-captured images (see llm_tools_add_results_openai/claude)
+    * would otherwise get JSON-serialized whole below — hundreds of KB of
+    * base64 shipped as literal prompt text to the summarizer for zero
+    * summarization value. */
+   struct json_object *no_vision = llm_history_strip_vision_content(clean ? clean : to_summarize);
+   if (no_vision) {
+      if (clean)
+         json_object_put(clean);
+      clean = no_vision;
+   }
    const char *json_str = json_object_to_json_string(clean ? clean : to_summarize);
    size_t json_len = strlen(json_str);
 
@@ -1301,9 +1325,40 @@ static char *compact_deterministic(struct json_object *to_summarize, int token_b
 
       struct json_object *content_obj = NULL;
       const char *content = NULL;
-      if (json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_is_type(content_obj, json_type_string)) {
-         content = json_object_get_string(content_obj);
+      char array_content_buf[COMPACT_DET_SNIPPET + 32];
+      if (json_object_object_get_ex(msg, "content", &content_obj)) {
+         if (json_object_is_type(content_obj, json_type_string)) {
+            content = json_object_get_string(content_obj);
+         } else if (json_object_is_type(content_obj, json_type_array)) {
+            /* Multi-part content (tool_result / vision) — pull a short text
+             * snippet if present and note when an image was attached, so the
+             * summary doesn't silently drop all trace of what happened here
+             * (e.g. a persisted `viewing` tool capture, see
+             * llm_tools_add_results_openai/claude). */
+            const char *text_part = NULL;
+            bool has_image = false;
+            int clen = json_object_array_length(content_obj);
+            for (int j = 0; j < clen; j++) {
+               struct json_object *part = json_object_array_get_idx(content_obj, j);
+               struct json_object *type_obj = NULL;
+               if (!part || !json_object_object_get_ex(part, "type", &type_obj))
+                  continue;
+               const char *ptype = json_object_get_string(type_obj);
+               if (!text_part && ptype && strcmp(ptype, "text") == 0) {
+                  struct json_object *text_obj = NULL;
+                  if (json_object_object_get_ex(part, "text", &text_obj))
+                     text_part = json_object_get_string(text_obj);
+               } else if (ptype &&
+                          (strcmp(ptype, "image_url") == 0 || strcmp(ptype, "image") == 0)) {
+                  has_image = true;
+               }
+            }
+            if (has_image || text_part) {
+               snprintf(array_content_buf, sizeof(array_content_buf), "%s%s",
+                        has_image ? "[image] " : "", text_part ? text_part : "");
+               content = array_content_buf;
+            }
+         }
       }
       if (!content || content[0] == '\0')
          continue;

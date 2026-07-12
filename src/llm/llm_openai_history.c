@@ -17,9 +17,10 @@
  * the project author(s).
  *
  * Conversation history conversion for the OpenAI chat-completions path.
- * Converts Claude-format tool/image blocks to OpenAI format, filters
- * orphaned tool messages from restored conversations, and strips vision
- * content when the target LLM lacks vision support.
+ * Converts Claude-format tool/image blocks to OpenAI format and filters
+ * orphaned tool messages from restored conversations. Vision stripping for
+ * models that lack vision support delegates to the shared
+ * llm_history_strip_vision_content() (llm_tools.c).
  */
 
 #include <json-c/json.h>
@@ -30,11 +31,12 @@
 
 #include "llm/llm_command_parser.h"
 #include "llm/llm_openai_internal.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 
-/* Stack buffer for accumulating concatenated Claude text blocks during conversion.
- * Sized generously for a single assistant turn's text; the two converters below
- * (convert_claude_tool_to_openai and the vision-strip pass) must stay in sync. */
+/* Stack buffer for accumulating concatenated Claude text blocks during
+ * convert_claude_tool_to_openai() below. Sized generously for a single
+ * assistant turn's text. */
 #define CLAUDE_TOOL_TEXT_BUF_MAX 8192
 
 /* ── Content block helpers ──────────────────────────────────────────────── */
@@ -235,15 +237,6 @@ static struct json_object *convert_content_block_to_openai(struct json_object *b
 
    OLOG_INFO("OpenAI: Converted Claude image to OpenAI image_url (media_type=%s)", media_type);
    return image_obj;
-}
-
-static bool is_vision_content_block(struct json_object *block) {
-   struct json_object *type_obj;
-   if (!json_object_object_get_ex(block, "type", &type_obj)) {
-      return false;
-   }
-   const char *type_str = json_object_get_string(type_obj);
-   return (strcmp(type_str, "image_url") == 0 || strcmp(type_str, "image") == 0);
 }
 
 static bool is_claude_image_block(struct json_object *block) {
@@ -559,102 +552,6 @@ static struct json_object *convert_claude_tool_messages(struct json_object *hist
    return converted;
 }
 
-static struct json_object *strip_vision_content(struct json_object *history) {
-   int len = json_object_array_length(history);
-
-   bool has_vision = false;
-   for (int i = 0; i < len && !has_vision; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *content_obj;
-      if (json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_get_type(content_obj) == json_type_array) {
-         int arr_len = json_object_array_length(content_obj);
-         for (int j = 0; j < arr_len; j++) {
-            struct json_object *elem = json_object_array_get_idx(content_obj, j);
-            if (is_vision_content_block(elem)) {
-               has_vision = true;
-               break;
-            }
-         }
-      }
-   }
-
-   if (!has_vision) {
-      return json_object_get(history);
-   }
-
-   OLOG_INFO("Stripping vision content from history (target LLM doesn't support vision)");
-
-   struct json_object *sanitized = json_object_new_array();
-
-   for (int i = 0; i < len; i++) {
-      struct json_object *msg = json_object_array_get_idx(history, i);
-      struct json_object *content_obj;
-
-      if (json_object_object_get_ex(msg, "content", &content_obj) &&
-          json_object_get_type(content_obj) == json_type_array) {
-         int arr_len = json_object_array_length(content_obj);
-         char text_buffer[CLAUDE_TOOL_TEXT_BUF_MAX] = "";
-         size_t text_len = 0;
-         bool found_image = false;
-
-         for (int j = 0; j < arr_len; j++) {
-            struct json_object *elem = json_object_array_get_idx(content_obj, j);
-            struct json_object *type_obj;
-            if (json_object_object_get_ex(elem, "type", &type_obj)) {
-               const char *type_str = json_object_get_string(type_obj);
-               if (strcmp(type_str, "text") == 0) {
-                  struct json_object *text_obj;
-                  if (json_object_object_get_ex(elem, "text", &text_obj)) {
-                     const char *text = json_object_get_string(text_obj);
-                     if (text && text_len < sizeof(text_buffer) - 1) {
-                        if (text_len > 0) {
-                           text_buffer[text_len++] = ' ';
-                        }
-                        size_t copy_len = strlen(text);
-                        if (text_len + copy_len >= sizeof(text_buffer)) {
-                           copy_len = sizeof(text_buffer) - text_len - 1;
-                        }
-                        memcpy(text_buffer + text_len, text, copy_len);
-                        text_len += copy_len;
-                        text_buffer[text_len] = '\0';
-                     }
-                  }
-               } else if (is_vision_content_block(elem)) {
-                  found_image = true;
-               }
-            }
-         }
-
-         struct json_object *new_msg = json_object_new_object();
-         struct json_object *role_obj;
-         if (json_object_object_get_ex(msg, "role", &role_obj)) {
-            json_object_object_add(new_msg, "role", json_object_get(role_obj));
-         }
-
-         if (found_image) {
-            if (text_len > 0) {
-               char combined[8300];
-               snprintf(combined, sizeof(combined), "%s [An image was shared earlier]",
-                        text_buffer);
-               json_object_object_add(new_msg, "content", json_object_new_string(combined));
-            } else {
-               json_object_object_add(new_msg, "content",
-                                      json_object_new_string("[An image was shared here]"));
-            }
-         } else {
-            json_object_object_add(new_msg, "content", json_object_new_string(text_buffer));
-         }
-
-         json_object_array_add(sanitized, new_msg);
-      } else {
-         json_object_array_add(sanitized, json_object_get(msg));
-      }
-   }
-
-   return sanitized;
-}
-
 /* ── Public entry point ─────────────────────────────────────────────────── */
 
 json_object *llm_openai_prepare_chat_history(struct json_object *conversation_history) {
@@ -663,7 +560,7 @@ json_object *llm_openai_prepare_chat_history(struct json_object *conversation_hi
    json_object_put(filtered);
 
    if (!is_vision_enabled_for_current_llm()) {
-      json_object *sanitized = strip_vision_content(converted);
+      json_object *sanitized = llm_history_strip_vision_content(converted);
       json_object_put(converted);
       converted = sanitized;
    }

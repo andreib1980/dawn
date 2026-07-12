@@ -26,6 +26,7 @@
  * ever called.
  */
 
+#include <json-c/json.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -71,6 +72,17 @@ int llm_context_get_size(void) {
 }
 int llm_get_type(void) {
    return 0;
+}
+/* Pulled in by the new capture-image persistence helpers in llm_tools.c
+ * (build_openai_capture_image_message/build_claude_capture_image_message) —
+ * not on the dup-check path under test. */
+const char *llm_claude_detect_image_mime_type(const char *base64_data) {
+   (void)base64_data;
+   return "image/jpeg";
+}
+json_object *llm_claude_create_image_block(const char *vision_image) {
+   (void)vision_image;
+   return NULL;
 }
 char *ocp_base64_encode(void) {
    return NULL;

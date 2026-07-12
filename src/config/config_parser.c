@@ -1152,7 +1152,7 @@ static void parse_vision(toml_table_t *table, vision_config_t *config) {
       return;
 
    static const char *const known_keys[] = { "max_image_size_kb", "max_dimension", "max_images",
-                                             NULL };
+                                             "capture_history_count", NULL };
    warn_unknown_keys(table, "vision", known_keys);
 
    PARSE_INT(table, "max_image_size_kb", config->max_image_size_kb);
@@ -1163,6 +1163,9 @@ static void parse_vision(toml_table_t *table, vision_config_t *config) {
 
    PARSE_INT(table, "max_images", config->max_images);
    CONFIG_CLAMP(config->max_images, 1, 10);
+
+   PARSE_INT(table, "capture_history_count", config->capture_history_count);
+   CONFIG_CLAMP(config->capture_history_count, 0, 50);
 }
 
 static void parse_memory(toml_table_t *table, memory_config_t *config) {

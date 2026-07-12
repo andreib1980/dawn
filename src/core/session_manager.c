@@ -1298,7 +1298,13 @@ void session_add_message_with_images(session_t *session,
       return;
    }
 
-   /* Add text part first */
+   /* Add text part first.  INVARIANT: this text part must always precede any
+    * image part, so a user-attached image message never collapses to a
+    * lone-image content array — llm_tools.c's is_capture_image_message()
+    * relies on that shape (single-element array, image-only) to distinguish
+    * ambient tool captures (eviction-eligible) from images the user
+    * deliberately attached (never evicted). Keep this ordering if this
+    * function is ever changed to allow an empty/absent text argument. */
    struct json_object *text_part = json_object_new_object();
    json_object_object_add(text_part, "type", json_object_new_string("text"));
    json_object_object_add(text_part, "text", json_object_new_string(text));

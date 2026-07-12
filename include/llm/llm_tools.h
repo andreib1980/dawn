@@ -684,6 +684,25 @@ void llm_tool_response_free(llm_tool_response_t *response);
 struct json_object *llm_history_strip_provider_state(struct json_object *history);
 
 /**
+ * @brief Strip image content blocks from conversation history
+ *
+ * Replaces `image_url` (OpenAI shape) / `image` (Claude shape) content parts
+ * with a short text placeholder, preserving any sibling text in the same
+ * message. Two callers: llm_openai_prepare_chat_history() strips vision
+ * content when the active model doesn't support it; llm_context.c's
+ * LLM-summarization compaction path strips it so a persisted tool-captured
+ * image (see llm_tools_add_results_openai/claude) doesn't get JSON-serialized
+ * whole into the summarizer prompt as literal base64 text.
+ *
+ * If history has no vision content, returns a new reference to the same
+ * array (json_object_get) rather than copying — cheap no-op path.
+ *
+ * @param history JSON array of messages.
+ * @return New array (caller json_object_put), or NULL on error.
+ */
+struct json_object *llm_history_strip_vision_content(struct json_object *history);
+
+/**
  * @brief Check if a tool call is a duplicate of a previous call in conversation history
  *
  * Prevents infinite loops where the LLM keeps making the same tool call repeatedly.
