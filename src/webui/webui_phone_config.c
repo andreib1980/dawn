@@ -25,11 +25,13 @@
 #include "webui/webui_phone_config.h"
 
 #include <json-c/json.h>
+#include <stdio.h>
 
 #include "audio/phone_apm.h"
 #include "logging.h"
 #include "tools/phone_audio_bridge.h"
 #include "tools/phone_audio_config.h"
+#include "tools/phone_service.h" /* PHONE_PCM_PORT_DEFAULT */
 #include "tools/phone_tool.h"
 #include "webui/webui_internal.h"
 
@@ -81,10 +83,11 @@ static void apm_from_json(struct json_object *sub, phone_apm_config_t *out, bool
    }
 }
 
-void handle_phone_audio_config_get(ws_connection_t *conn) {
-   if (!conn_require_admin(conn)) {
-      return;
-   }
+/* Build + send the current config to @conn.  @error (or NULL) surfaces a
+ * rejected save (e.g. a bad pcm_port) in the panel's status line while the rest
+ * of the payload lets the panel revert the offending field to the stored value.
+ * Caller must have already established admin. */
+static void send_phone_audio_config(ws_connection_t *conn, const char *error) {
    phone_audio_config_t cfg;
    phone_tool_get_audio_config(&cfg);
 
@@ -96,24 +99,64 @@ void handle_phone_audio_config_get(ws_connection_t *conn) {
     * should disable/annotate them). bridge_active: whether a call is live now. */
    json_object_object_add(p, "webrtc_available", json_object_new_boolean(phone_apm_available()));
    json_object_object_add(p, "bridge_active", json_object_new_boolean(phone_bridge_is_active()));
+   /* pcm_port: the stored override (empty -> using the compiled default). The
+    * default is sent alongside so the panel can show it as a placeholder. */
+   json_object_object_add(p, "pcm_port", json_object_new_string(cfg.pcm_port));
+   json_object_object_add(p, "pcm_port_default", json_object_new_string(PHONE_PCM_PORT_DEFAULT));
    json_object_object_add(p, "uplink", apm_to_json(&cfg.uplink, true));
    json_object_object_add(p, "downlink", apm_to_json(&cfg.downlink, false));
    json_object_object_add(p, "downlink_apm", json_object_new_boolean(cfg.downlink_use_apm));
    json_object_object_add(p, "downlink_gain", json_object_new_double(cfg.downlink_gain));
+   if (error) {
+      json_object_object_add(p, "error", json_object_new_string(error));
+   }
 
    json_object_object_add(response, "payload", p);
    send_json_response(conn, response);
    json_object_put(response);
 }
 
+void handle_phone_audio_config_get(ws_connection_t *conn) {
+   if (!conn_require_admin(conn)) {
+      return;
+   }
+   send_phone_audio_config(conn, NULL);
+}
+
 void webui_phone_apply_config(ws_connection_t *conn, struct json_object *phone_section) {
    if (!phone_section) {
       return;
    }
-   /* Start from the current config so unspecified fields (and pcm_port, which the
-    * panel never sends) are preserved, then overlay the payload. */
+   /* Start from the current config so unspecified fields are preserved, then
+    * overlay the payload. */
    phone_audio_config_t cfg;
    phone_tool_get_audio_config(&cfg);
+
+   /* pcm_port is untrusted free text — validate BEFORE storing so a bad path is
+    * rejected here (surfaced in the panel) instead of persisting to dawn.toml and
+    * silently failing at the next call's open ("no audio days later"). An empty
+    * string clears the override (falls back to the compiled default). */
+   struct json_object *pv;
+   if (json_object_object_get_ex(phone_section, "pcm_port", &pv)) {
+      const char *pcm = json_object_get_string(pv);
+      /* Reject over-length before storing (mirrors the parser) — a valid-syntax
+       * but too-long alias would otherwise be silently truncated by snprintf. */
+      if (pcm && strlen(pcm) >= sizeof(cfg.pcm_port)) {
+         OLOG_WARNING("WebUI: rejecting pcm_port longer than %zu chars", sizeof(cfg.pcm_port) - 1);
+         send_phone_audio_config(conn,
+                                 "PCM port path is too long — other changes were not applied.");
+         return;
+      }
+      if (pcm && pcm[0] && !phone_pcm_port_validate(pcm)) {
+         OLOG_WARNING("WebUI: rejecting invalid pcm_port '%s'", pcm);
+         send_phone_audio_config(conn,
+                                 "Invalid PCM port — use /dev/ttyUSB<n>, /dev/ttyACM<n>, or a "
+                                 "/dev/serial/by-id (or by-path) alias. Other changes were not "
+                                 "applied.");
+         return;
+      }
+      snprintf(cfg.pcm_port, sizeof(cfg.pcm_port), "%s", pcm ? pcm : "");
+   }
 
    struct json_object *sub;
    if (json_object_object_get_ex(phone_section, "uplink", &sub)) {

@@ -1048,7 +1048,12 @@
 # all level control is host-side.  The uplink (local mic -> far end) is cleaned by
 # a WebRTC near-end chain (high-pass -> noise-suppression -> AGC2), which fixes
 # "microphone-y / threshold-y / pumping" audio.  Tune these on a live 2-party call.
-# pcm_port = "/dev/ttyUSB4"          # modem USB audio device node
+# pcm_port: modem USB audio device node (if06 on the SIM7600G-H). Prefer a stable
+# /dev/serial/by-id/ alias over a raw /dev/ttyUSBn — raw numbers reshuffle when
+# another USB-serial device is added at boot (find yours: ls -l /dev/serial/by-id/).
+# A /dev/serial/by-path/ alias also works (topology-keyed; use it if you ever run a
+# second device with the SIM7600's default serial 0123456789ABCDEF). Blank = default.
+# pcm_port = "/dev/serial/by-id/usb-SimTech__Incorporated_SimTech__Incorporated_0123456789ABCDEF-if06-port0"
 # uplink_agc = true                  # AGC2 per-frame VAD-gated digital gain
 # uplink_fixed_gain_db = 1.0         # static pre-gain, dB (clamped 0..49; >=50 disables AGC2)
 # uplink_agc_ramp_db_per_s = 3.0     # AGC ramp rate; lower = less pumping

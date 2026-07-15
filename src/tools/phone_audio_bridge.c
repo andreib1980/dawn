@@ -39,6 +39,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <poll.h>
 #include <pthread.h>
@@ -55,6 +56,7 @@
 #include "dawn.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "tools/phone_audio_config.h"
 
 /* Modem USB PCM format (see docs/PHONE_SMS_DESIGN.md Hardware Notes). */
 #define PHONE_PCM_RATE 16000
@@ -136,46 +138,51 @@ static atomic_bool s_cfg_dirty = false;
 
 /* Open the modem PCM serial node in raw, non-blocking binary mode. Returns fd or -1. */
 static int open_pcm_port(const char *port) {
-   /* This is only ever a modem serial node.  Require exactly
-    * /dev/ttyUSB<digits> or /dev/ttyACM<digits> — an unanchored prefix would
-    * also accept /dev/ttyUSBfoo or a path with trailing junk, letting a bad or
-    * hostile config value aim open(O_RDWR) at an unintended device. */
-   bool path_ok = false;
-   if (strncmp(port, "/dev/ttyUSB", 11) == 0 || strncmp(port, "/dev/ttyACM", 11) == 0) {
-      const char *p = port + 11;
-      path_ok = (*p != '\0');
-      for (; *p; p++) {
-         if (*p < '0' || *p > '9') {
-            path_ok = false;
-            break;
-         }
-      }
-   }
-   if (!path_ok) {
-      OLOG_ERROR("phone_bridge: refusing PCM port '%s' (must be /dev/ttyUSB<n> or /dev/ttyACM<n>)",
+   /* This is only ever a modem serial node.  Validate + resolve to the concrete
+    * /dev/ttyUSB<n> / /dev/ttyACM<n> node: a raw path resolves to itself, a
+    * /dev/serial/by-id|by-path alias resolves through its symlink, and either
+    * way the resolved target must be a raw tty node (so a bad or hostile config
+    * value can't aim open(O_RDWR) at an unintended device).  We open the
+    * RESOLVED path, so the by-id indirection is honored while O_NOFOLLOW below
+    * stays meaningful — the resolved node is itself not a symlink.  Buffer must
+    * be >= PATH_MAX for realpath() inside the resolver; don't shrink it. */
+   char resolved[PATH_MAX];
+   if (!phone_pcm_port_validate(port)) {
+      OLOG_ERROR("phone_bridge: refusing PCM port '%s' (need /dev/ttyUSB<n>, /dev/ttyACM<n>, or "
+                 "a /dev/serial/by-id|by-path alias)",
                  port);
       return -1;
+   }
+   if (!phone_pcm_port_resolve(port, resolved, sizeof(resolved))) {
+      /* Syntax is valid but it didn't resolve to a real tty node — the modem is
+       * likely absent / mid-re-enumeration, not a config error. */
+      OLOG_ERROR("phone_bridge: PCM port '%s' did not resolve to a tty node (device absent?): %s",
+                 port, strerror(errno));
+      return -1;
+   }
+   if (strcmp(resolved, port) != 0) {
+      OLOG_INFO("phone_bridge: PCM port '%s' -> '%s'", port, resolved);
    }
 
    /* O_NONBLOCK: never block in open() on carrier, and drive both directions via
     * poll() for a structurally-bounded teardown.  O_NOFOLLOW: don't traverse a
-    * symlink swapped in at the final path component. */
-   int fd = open(port, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    * symlink swapped in at the (resolved, non-symlink) final path component. */
+   int fd = open(resolved, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
    if (fd < 0) {
-      OLOG_ERROR("phone_bridge: open %s failed: %s", port, strerror(errno));
+      OLOG_ERROR("phone_bridge: open %s failed: %s", resolved, strerror(errno));
       return -1;
    }
 
    struct stat st;
    if (fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
-      OLOG_ERROR("phone_bridge: %s is not a character device", port);
+      OLOG_ERROR("phone_bridge: %s is not a character device", resolved);
       close(fd);
       return -1;
    }
 
    struct termios tio;
    if (tcgetattr(fd, &tio) != 0) {
-      OLOG_ERROR("phone_bridge: tcgetattr %s failed: %s", port, strerror(errno));
+      OLOG_ERROR("phone_bridge: tcgetattr %s failed: %s", resolved, strerror(errno));
       close(fd);
       return -1;
    }
@@ -190,7 +197,7 @@ static int open_pcm_port(const char *port) {
    cfsetospeed(&tio, B115200);
 
    if (tcsetattr(fd, TCSANOW, &tio) != 0) {
-      OLOG_ERROR("phone_bridge: tcsetattr %s failed: %s", port, strerror(errno));
+      OLOG_ERROR("phone_bridge: tcsetattr %s failed: %s", resolved, strerror(errno));
       close(fd);
       return -1;
    }

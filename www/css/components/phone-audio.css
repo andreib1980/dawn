@@ -83,7 +83,8 @@
  * spinner reset so number fields don't show OS spin buttons (the toggle uses the
  * shared .dawn-toggle primitive from components.css). */
 .phone-audio-number,
-.phone-audio-select {
+.phone-audio-select,
+.phone-audio-text {
    background: var(--bg-secondary);
    color: var(--text-primary);
    border: 1px solid var(--border-color);
@@ -100,6 +101,22 @@
    appearance: textfield;
 }
 
+/* Device-path field is long (a /dev/serial/by-id alias is ~90 chars), so give it
+ * room while staying inside the panel on narrow screens. It's the only control
+ * wide enough to need to shrink, so its wrapper (below) grows/shrinks and
+ * max-width caps it — width:22rem + flex:0 0 auto would overflow on mobile. */
+.phone-audio-text {
+   width: 100%;
+   max-width: 22rem;
+   min-width: 8rem;
+   font-family: var(--font-mono, 'IBM Plex Mono', monospace);
+}
+
+.phone-audio-control:has(.phone-audio-text) {
+   flex: 1 1 auto;
+   min-width: 0;
+}
+
 .phone-audio-number::-webkit-inner-spin-button,
 .phone-audio-number::-webkit-outer-spin-button {
    -webkit-appearance: none;
@@ -107,20 +124,23 @@
 }
 
 .phone-audio-number:focus-visible,
-.phone-audio-select:focus-visible {
+.phone-audio-select:focus-visible,
+.phone-audio-text:focus-visible {
    outline: 2px solid var(--accent);
    outline-offset: 1px;
    border-color: var(--accent);
 }
 
 .phone-audio-number:disabled,
-.phone-audio-select:disabled {
+.phone-audio-select:disabled,
+.phone-audio-text:disabled {
    opacity: 0.5;
    cursor: not-allowed;
 }
 
 .phone-audio-field:has(.dawn-toggle:disabled) .phone-audio-label,
 .phone-audio-field:has(.phone-audio-number:disabled) .phone-audio-label,
-.phone-audio-field:has(.phone-audio-select:disabled) .phone-audio-label {
+.phone-audio-field:has(.phone-audio-select:disabled) .phone-audio-label,
+.phone-audio-field:has(.phone-audio-text:disabled) .phone-audio-label {
    color: var(--text-tertiary);
 }

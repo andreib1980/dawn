@@ -983,6 +983,7 @@ dawn_add_unit_test(test_phone_audio_config
            ${SRC_ROOT}/src/tools/phone_audio_config.c
            ${SRC_ROOT}/src/tools/toml.c
            ${SRC_ROOT}/src/audio/phone_apm.cpp
+           ${SRC_ROOT}/common/src/logging.c
    LIBS    unity
    LABEL   ci)
 

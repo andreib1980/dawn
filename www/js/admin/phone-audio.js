@@ -82,6 +82,7 @@
    ];
 
    let els = { section: null, controls: null, status: null };
+   let pcmPortInput = null; // modem PCM device-path text field (rebuilt each render)
    let webrtcAvailable = true;
    let suppressSend = false; // true while populating from a server response
    let saveTimer = null;
@@ -162,14 +163,51 @@
       return el('div', { class: 'phone-audio-group' }, [header, body]);
    }
 
+   // Build the "Device" group: a single free-text field for the modem PCM port.
+   // Not an APM knob, so it lives outside the inputs registry and is populated /
+   // collected explicitly.
+   function buildDeviceGroup() {
+      const input = el('input', {
+         type: 'text',
+         id: 'phone-pcm-port',
+         class: 'phone-audio-text',
+         spellcheck: 'false',
+         autocapitalize: 'none',
+         autocomplete: 'off',
+         'aria-describedby': 'phone-pcm-port-hint',
+      });
+      input.addEventListener('change', scheduleSave);
+      pcmPortInput = input;
+
+      const label = el('label', {
+         class: 'phone-audio-label',
+         for: 'phone-pcm-port',
+         text: 'Modem PCM port',
+      });
+      const hint = el('div', {
+         class: 'phone-audio-hint',
+         id: 'phone-pcm-port-hint',
+         text: 'Modem USB audio node — prefer a stable /dev/serial/by-id/…-if06-port0 alias over a raw /dev/ttyUSBn. Blank uses the built-in default. Applies to the next call, not one in progress.',
+      });
+      const control = el('div', { class: 'phone-audio-control' }, [input]);
+      const row = el('div', { class: 'phone-audio-row' }, [label, control]);
+      const field = el('div', { class: 'phone-audio-field' }, [row, hint]);
+      const header = el('h4', { class: 'phone-audio-group-title', text: 'Device' });
+      return el('div', { class: 'phone-audio-group' }, [header, field]);
+   }
+
    function render() {
       if (!els.controls) {
          return;
       }
       els.controls.textContent = '';
+      pcmPortInput = null;
       Object.keys(inputs).forEach(function (k) {
          delete inputs[k];
       });
+
+      // Device (PCM port) group first — it's the "which hardware" setting.
+      els.controls.appendChild(buildDeviceGroup());
 
       // Uplink group.
       els.controls.appendChild(
@@ -263,6 +301,33 @@
       suppressSend = true;
       webrtcAvailable = payload.webrtc_available !== false;
 
+      if (pcmPortInput && payload.pcm_port_default) {
+         pcmPortInput.placeholder = payload.pcm_port_default;
+      }
+
+      // A rejected save (e.g. a bad PCM port) echoes the stored config plus an
+      // error. KEEP the user's typed text (don't revert) so they can fix a typo
+      // in a long device path, mark the field invalid, and surface the message.
+      if (payload.error) {
+         if (pcmPortInput) {
+            pcmPortInput.setAttribute('aria-invalid', 'true');
+         }
+         pendingUserSave = false;
+         setStatus(payload.error, true);
+         suppressSend = false;
+         return;
+      }
+
+      // Accepted: reflect the stored value and clear any prior invalid state.
+      // Don't clobber a value the user is mid-editing — a long path only commits
+      // on blur, so a debounced echo from another control could otherwise wipe it.
+      if (pcmPortInput) {
+         if (document.activeElement !== pcmPortInput) {
+            pcmPortInput.value = payload.pcm_port || '';
+         }
+         pcmPortInput.removeAttribute('aria-invalid');
+      }
+
       apmFromPayload('uplink', payload.uplink);
       apmFromPayload('downlink', payload.downlink);
       if (inputs['downlink.apm']) {
@@ -296,7 +361,12 @@
       if (!webrtcAvailable) {
          setStatus('WebRTC audio processing not built — only the soft-limiter gain is used.', true);
       } else if (lastBridgeActive) {
-         setStatus('Call in progress — changes apply live.', false);
+         // Audio knobs apply live; the PCM port only binds at the next call start,
+         // so word this so it doesn't contradict the port field's own hint.
+         setStatus(
+            'Call in progress — audio changes apply live (PCM port on the next call).',
+            false
+         );
       } else {
          setStatus('No active call — changes apply to the next call.', false);
       }
@@ -367,6 +437,11 @@
          if (Number.isFinite(g)) {
             out.downlink_gain = g;
          }
+      }
+      // Always send pcm_port (empty string clears the override). The field is
+      // populated from the server on load, so it reflects the stored value.
+      if (pcmPortInput) {
+         out.pcm_port = pcmPortInput.value.trim();
       }
       return out;
    }

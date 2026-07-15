@@ -108,6 +108,41 @@ static void test_nondefault_round_trip(void) {
    assert_equal(&in, &out);
 }
 
+/* A full-length /dev/serial/by-id alias (93 chars) round-trips — pins the
+ * PHONE_PCM_PORT_MAX buffer growth (a 64-byte buffer would truncate it). */
+static void test_by_id_pcm_port_round_trip(void) {
+   phone_audio_config_t in = phone_audio_config_default();
+   const char *by_id =
+       "/dev/serial/by-id/"
+       "usb-SimTech__Incorporated_SimTech__Incorporated_0123456789ABCDEF-if06-port0";
+   TEST_ASSERT_LESS_THAN_UINT(sizeof(in.pcm_port), strlen(by_id) + 1); /* must fit */
+   snprintf(in.pcm_port, sizeof(in.pcm_port), "%s", by_id);
+   phone_audio_config_t out = round_trip(&in);
+   TEST_ASSERT_EQUAL_STRING(by_id, out.pcm_port);
+}
+
+/* phone_pcm_port_validate: pure syntax accept/reject (no device needed). */
+static void test_pcm_port_validate_accept(void) {
+   TEST_ASSERT_TRUE(phone_pcm_port_validate("/dev/ttyUSB0"));
+   TEST_ASSERT_TRUE(phone_pcm_port_validate("/dev/ttyUSB100"));
+   TEST_ASSERT_TRUE(phone_pcm_port_validate("/dev/ttyACM2"));
+   TEST_ASSERT_TRUE(phone_pcm_port_validate(
+       "/dev/serial/by-id/usb-SimTech__Incorporated_0123456789ABCDEF-if06-port0"));
+   TEST_ASSERT_TRUE(phone_pcm_port_validate("/dev/serial/by-path/platform-xhci-usb-0:2.1:1.5"));
+}
+
+static void test_pcm_port_validate_reject(void) {
+   TEST_ASSERT_FALSE(phone_pcm_port_validate(NULL));
+   TEST_ASSERT_FALSE(phone_pcm_port_validate(""));
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/dev/ttyUSB"));           /* no digits */
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/dev/ttyUSBfoo"));        /* non-digit */
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/dev/ttyUSB1234"));       /* > 3 digits */
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/etc/passwd"));           /* wrong prefix */
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/dev/serial/by-id/"));    /* empty name */
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/dev/serial/by-id/a/b")); /* nested */
+   TEST_ASSERT_FALSE(phone_pcm_port_validate("/dev/serial/by-id/../../etc/passwd"));
+}
+
 /* Each NS enum value survives the string<->enum mapping. */
 static void test_ns_level_round_trip(void) {
    const phone_ns_level_t levels[] = { PHONE_NS_OFF, PHONE_NS_LOW, PHONE_NS_MODERATE, PHONE_NS_HIGH,
@@ -124,6 +159,9 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_defaults_round_trip);
    RUN_TEST(test_nondefault_round_trip);
+   RUN_TEST(test_by_id_pcm_port_round_trip);
+   RUN_TEST(test_pcm_port_validate_accept);
+   RUN_TEST(test_pcm_port_validate_reject);
    RUN_TEST(test_ns_level_round_trip);
    return UNITY_END();
 }
