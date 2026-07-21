@@ -194,20 +194,23 @@ static const treg_param_t doc_manage_params[] = {
            "confirm), 'confirm_delete' (carry out the deletion the user just approved), "
            "'list_deleted' (show recently-deleted notes/documents that can still be recovered), "
            "'recover' (UNDO — restore the previous version of an existing note/document, or bring "
-           "back a recently-deleted one, by its label). Prefer "
+           "back a recently-deleted one, by its label), 'rename' (change the name/label of an "
+           "existing note or document WITHOUT changing its content — give the current name (or id) "
+           "and the 'new_name'). Prefer "
            "'edit'/'append' over re-saving when updating living text the user keeps current.",
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "save_note", "save_text", "edit", "append", "list", "delete",
-                        "confirm_delete", "list_deleted", "recover" },
-       .enum_count = 9,
+                        "confirm_delete", "list_deleted", "recover", "rename" },
+       .enum_count = 10,
    },
    {
        .name = "label",
        .description = "For save_note: the label/name to file the text under (e.g. 'Public Bio'). "
-                      "For save_text: the document title. For delete: the exact label/name of the "
-                      "note or document to delete. Not used by list / confirm_delete.",
+                      "For save_text: the document title. For edit / append / delete / rename / "
+                      "recover: the exact current label/name of the note or document to act on "
+                      "(or give its 'id' instead). Not used by list / confirm_delete.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_VALUE,
@@ -215,11 +218,21 @@ static const treg_param_t doc_manage_params[] = {
    {
        .name = "id",
        .description = "Optional numeric document id (from a 'list' result) — an alternative to "
-                      "'label' when deleting. Only used by 'delete'.",
+                      "'label' for identifying the target of edit / append / delete / rename / "
+                      "recover. Prefer it when a name is ambiguous or the user gave you an id.",
        .type = TOOL_PARAM_TYPE_INT,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "id",
+   },
+   {
+       .name = "new_name",
+       .description = "Required by 'rename': the new name/label to give the note or document. "
+                      "The content is unchanged — only the name changes.",
+       .type = TOOL_PARAM_TYPE_STRING,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "new_name",
    },
    {
        .name = "text",
@@ -255,7 +268,8 @@ static const tool_metadata_t doc_manage_metadata = {
        "file exact reference text (a bio, an elevator pitch, an address, a saved answer) under a "
        "label the user can ask for later by name; 'save_text' for longer documents; 'edit' / "
        "'append' to update an existing note OR document in place WITHOUT resending the whole "
-       "thing; 'list' to see what's stored; and 'delete' to remove something (which always asks "
+       "thing; 'list' to see what's stored; 'rename' to change a note/document's name without "
+       "touching its content; and 'delete' to remove something (which always asks "
        "the user to confirm first). This is the home for verbatim, living text the user maintains "
        "and retrieves exactly — when such a value changes, EDIT it rather than storing the new "
        "value as a memory (memory is for facts learned in passing, not authored reference text). "
@@ -265,7 +279,7 @@ static const tool_metadata_t doc_manage_metadata = {
        "the WebUI). To READ or SEARCH stored content, use document_read / document_search "
        "instead.",
    .params = doc_manage_params,
-   .param_count = 5,
+   .param_count = 6,
    .device_type = TOOL_DEVICE_TYPE_TRIGGER,
    .capabilities = TOOL_CAP_DANGEROUS, /* mutates + deletes user data */
    .is_getter = false,
@@ -383,28 +397,43 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
    return strdup(msg);
 }
 
-/* Resolve an editable note OR document the caller owns, by exact label.  Loads
- * its current text into *text_out (heap, caller frees) and sets *is_note:
+/* Resolve a note/document the caller OWNS, by numeric id (preferred when id > 0)
+ * or exact label.  Both document_db_get and find_by_label_exact can return GLOBAL
+ * items (no ownership filter), so the explicit user_id check is what keeps a user
+ * from acting on someone else's / an admin-published doc.  SUCCESS → *out filled. */
+static int resolve_owned_doc(int user_id, const char *label, int64_t id, document_t *out) {
+   if (id > 0)
+      return (document_db_get(id, out) == SUCCESS && out->user_id == user_id) ? SUCCESS : FAILURE;
+   if (label && label[0])
+      return (document_db_find_by_label_exact(user_id, label, false, out) == SUCCESS &&
+              out->user_id == user_id)
+                 ? SUCCESS
+                 : FAILURE;
+   return FAILURE;
+}
+
+/* Resolve an editable note OR document the caller owns, by id (preferred) or exact
+ * label.  Loads its current text into *text_out (heap, caller frees) and sets
+ * *is_note:
  *   - single-chunk note → in-place note update (filetype "note", num_chunks 1);
  *   - else a multi-chunk document with stored full text (v63) → in-place replace.
  * FAILURE with *err for: not found / not owned / global / a multi-chunk doc that
  * predates full-text storage (must be re-saved). */
 static int load_editable_text(int user_id,
                               const char *label,
+                              int64_t id,
                               document_t *doc_out,
                               char **text_out,
                               bool *is_note,
                               const char **err) {
    *text_out = NULL;
    *is_note = false;
-   if (!label || !label[0]) {
-      *err = "Tell me which note or document (its label/name).";
+   if (id <= 0 && (!label || !label[0])) {
+      *err = "Tell me which note or document (its label/name, or its id).";
       return FAILURE;
    }
-   /* Owner-scoped: find_by_label_exact also matches GLOBAL items (not ours). */
-   if (document_db_find_by_label_exact(user_id, label, false, doc_out) != SUCCESS ||
-       doc_out->user_id != user_id) {
-      *err = "No editable note or document by that name was found (it may be global or not yours).";
+   if (resolve_owned_doc(user_id, label, id, doc_out) != SUCCESS) {
+      *err = "No editable note or document was found (it may be global or not yours).";
       return FAILURE;
    }
 
@@ -457,7 +486,7 @@ static char *commit_edit(int user_id,
  * {"find": "...", "replace": "..."}.  Carried as the terminal tail param so its
  * content (incl. "::", newlines) survives the ::field::value flattening intact —
  * the JSON escaping is what makes find/replace safe regardless of content. */
-static char *do_edit(int user_id, const char *label, const char *change_json) {
+static char *do_edit(int user_id, const char *label, int64_t id, const char *change_json) {
    if (!change_json || !change_json[0])
       return strdup("To edit, provide 'change' as {\"find\": \"...\", \"replace\": \"...\"}.");
 
@@ -486,7 +515,7 @@ static char *do_edit(int user_id, const char *label, const char *change_json) {
    char *old = NULL;
    bool is_note = false;
    const char *err = NULL;
-   if (load_editable_text(user_id, label, &doc, &old, &is_note, &err) != SUCCESS) {
+   if (load_editable_text(user_id, label, id, &doc, &old, &is_note, &err) != SUCCESS) {
       result = strdup(err);
    } else {
       /* Unique-match contract (mirrors str_replace): 0 / >1 are errors that leave
@@ -518,7 +547,7 @@ static char *do_edit(int user_id, const char *label, const char *change_json) {
 }
 
 /* append: add text to the end of an existing note or document (newline-joined). */
-static char *do_append(int user_id, const char *label, const char *text) {
+static char *do_append(int user_id, const char *label, int64_t id, const char *text) {
    if (!text || !text[0])
       return strdup("To append, provide the text to add.");
 
@@ -529,7 +558,7 @@ static char *do_append(int user_id, const char *label, const char *text) {
    char *old = NULL;
    bool is_note = false;
    const char *err = NULL;
-   if (load_editable_text(user_id, label, &doc, &old, &is_note, &err) != SUCCESS) {
+   if (load_editable_text(user_id, label, id, &doc, &old, &is_note, &err) != SUCCESS) {
       result = strdup(err); /* nonexistent target → error, never auto-create */
    } else {
       char *new_text = docmgmt_append_text(old, text);
@@ -602,14 +631,14 @@ static char *do_list_deleted(int user_id) {
  *     'recover' toggles between the two most-recent states (undo / redo).
  *   - If the item was DELETED, re-create it from its surviving snapshot (as a
  *     note, or a document if the snapshot is too long for one note). */
-static char *do_recover(int user_id, const char *label) {
-   if (!label || !label[0])
-      return strdup("Which item should I undo or recover? Give its name (use 'list_deleted').");
+static char *do_recover(int user_id, const char *label, int64_t id) {
+   if (id <= 0 && (!label || !label[0]))
+      return strdup(
+          "Which item should I undo or recover? Give its name or id (use 'list_deleted').");
 
    /* Existing item → undo its last change by restoring the newest version. */
    document_t doc;
-   if (document_db_find_by_label_exact(user_id, label, false, &doc) == SUCCESS &&
-       doc.user_id == user_id) {
+   if (resolve_owned_doc(user_id, label, id, &doc) == SUCCESS) {
       document_version_meta_t ev[DOC_VERSION_MAX_LIST];
       int en = 0;
       document_db_version_list(user_id, doc.id, ev, DOC_VERSION_MAX_LIST, &en);
@@ -631,7 +660,13 @@ static char *do_recover(int user_id, const char *label) {
       return result;
    }
 
-   /* Otherwise the item was deleted — re-create it from its surviving snapshot. */
+   /* Otherwise the item was deleted — re-create it from its surviving snapshot.
+    * A deleted item has no live id, so recovery is by name; an id-only request
+    * that didn't resolve to a live doc can't reach a deleted snapshot. */
+   if (!label || !label[0])
+      return strdup("That id isn't a live note or document. To bring back a deleted one, give its "
+                    "name (use 'list_deleted').");
+
    document_version_meta_t v[DOC_VERSION_MAX_LIST];
    int n = 0;
    document_db_version_list_deleted(user_id, v, DOC_VERSION_MAX_LIST, &n);
@@ -684,20 +719,15 @@ static char *do_recover(int user_id, const char *label) {
 /* delete: resolve the target and STAGE it — never deletes here.  The user must
  * approve, after which the model calls confirm_delete. */
 static char *do_delete_request(int user_id, const char *label, int64_t id) {
-   document_t doc;
-   bool found = false;
-   if (id > 0) {
-      found = (document_db_get(id, &doc) == SUCCESS && doc.user_id == user_id);
-   } else if (label && label[0]) {
-      /* Owner-scoped: find_by_label_exact also matches GLOBAL docs, so without
-       * this ownership check a user could delete an admin-published global doc
-       * by its label (IDOR — delete_indexed performs no ownership check). */
-      found = (document_db_find_by_label_exact(user_id, label, false, &doc) == SUCCESS &&
-               doc.user_id == user_id);
-   } else {
+   if (id <= 0 && (!label || !label[0]))
       return strdup("To delete, give the exact label/name (or the id from 'list').");
-   }
-   if (!found)
+
+   /* Owner-scoped resolve: document_db_get / find_by_label_exact also match GLOBAL
+    * docs, so without the ownership check inside resolve_owned_doc a user could
+    * stage an admin-published global doc for deletion (IDOR — delete_indexed
+    * performs no ownership check of its own). */
+   document_t doc;
+   if (resolve_owned_doc(user_id, label, id, &doc) != SUCCESS)
       return strdup("No note or document by that name was found (it may not be yours).");
 
    bool is_note = (strcmp(doc.filetype, "note") == 0);
@@ -743,6 +773,55 @@ static char *do_confirm_delete(int user_id) {
    return strdup(msg);
 }
 
+/* rename: change a note/document's name in place — content untouched.  Target is
+ * identified by id (preferred) or current label; a same-name request is a no-op
+ * and a name already in use by another of the user's items is rejected. */
+static char *do_rename(int user_id, const char *label, int64_t id, const char *new_name) {
+   if (!new_name || !new_name[0])
+      return strdup("To rename, give the new name in 'new_name'.");
+   if (id <= 0 && (!label || !label[0]))
+      return strdup("Tell me which note or document to rename (its current name or id).");
+
+   document_t doc;
+   if (resolve_owned_doc(user_id, label, id, &doc) != SUCCESS)
+      return strdup("No note or document by that name was found (it may not be yours).");
+
+   if (strcmp(doc.filename, new_name) == 0) {
+      char msg[DOCMGMT_CONFIRM_MSG_MAX];
+      snprintf(msg, sizeof(msg), "It's already named '%s' — nothing to rename.", doc.filename);
+      return strdup(msg);
+   }
+
+   /* Reject a collision with another of the user's own items (mirrors the WebUI
+    * note-save guard).  find_by_label_exact also matches GLOBAL items — a clash
+    * with one of those is caught here too, since the new name still wouldn't be
+    * unambiguously the user's. */
+   document_t other;
+   if (document_db_find_by_label_exact(user_id, new_name, false, &other) == SUCCESS &&
+       other.id != doc.id) {
+      char msg[DOC_FILENAME_MAX + 96];
+      snprintf(msg, sizeof(msg),
+               "You already have a note or document called '%s' — pick a different name.",
+               new_name);
+      return strdup(msg);
+   }
+
+   bool is_note = (strcmp(doc.filetype, "note") == 0);
+   if (document_db_rename(user_id, doc.id, new_name) != SUCCESS)
+      return strdup("Couldn't rename it — please try again.");
+
+   /* Memory→note bridge (v61): the gloss maps note_doc_id → label, so a rename
+    * must refresh it or fuzzy recall keeps routing to the old name.  Best-effort;
+    * harmless for non-note docs (no gloss exists). */
+   if (is_note)
+      (void)memory_note_bridge_upsert_gloss(user_id, doc.id, new_name);
+
+   OLOG_INFO("document_manage rename: %s id=%lld", is_note ? "note" : "doc", (long long)doc.id);
+   char msg[DOC_FILENAME_MAX * 2 + 64];
+   snprintf(msg, sizeof(msg), "Renamed the %s to '%s'.", is_note ? "note" : "document", new_name);
+   return strdup(msg);
+}
+
 /* =============================================================================
  * Callback + registration
  * ============================================================================= */
@@ -763,19 +842,27 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
    if (strcmp(act, "list_deleted") == 0)
       return do_list_deleted(user_id);
 
-   /* The remaining actions read a label (base) and possibly id / text (custom). */
+   /* The remaining actions read a label (base) and possibly id / text (custom).
+    * The numeric id is an alternative target selector for edit / append / delete /
+    * rename / recover (see resolve_owned_doc). */
    char label[DOC_FILENAME_MAX] = "";
    tool_param_extract_base(value, label, sizeof(label));
 
-   if (strcmp(act, "recover") == 0)
-      return do_recover(user_id, label);
+   char id_str[24] = "";
+   int64_t id = 0;
+   if (tool_param_extract_custom(value, "id", id_str, sizeof(id_str)) && id_str[0])
+      id = (int64_t)strtoll(id_str, NULL, 10);
 
-   if (strcmp(act, "delete") == 0) {
-      char id_str[24] = "";
-      int64_t id = 0;
-      if (tool_param_extract_custom(value, "id", id_str, sizeof(id_str)) && id_str[0])
-         id = (int64_t)strtoll(id_str, NULL, 10);
+   if (strcmp(act, "recover") == 0)
+      return do_recover(user_id, label, id);
+
+   if (strcmp(act, "delete") == 0)
       return do_delete_request(user_id, label, id);
+
+   if (strcmp(act, "rename") == 0) {
+      char new_name[DOC_FILENAME_MAX] = "";
+      tool_param_extract_custom(value, "new_name", new_name, sizeof(new_name));
+      return do_rename(user_id, label, id, new_name);
    }
 
    /* edit: the JSON 'change' object is the terminal (tail) param. */
@@ -785,7 +872,7 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
          return strdup("Out of memory.");
       change[0] = '\0';
       tool_param_extract_custom_tail(value, "change", change, DOCMGMT_SAVE_TEXT_MAX);
-      char *result = do_edit(user_id, label, change);
+      char *result = do_edit(user_id, label, id, change);
       free(change);
       return result;
    }
@@ -805,7 +892,7 @@ static char *doc_manage_callback(const char *action, char *value, int *should_re
    else if (strcmp(act, "save_text") == 0)
       result = do_save_text(user_id, label, text);
    else if (strcmp(act, "append") == 0)
-      result = do_append(user_id, label, text);
+      result = do_append(user_id, label, id, text);
    else
       result = strdup("Unknown document_manage action.");
 

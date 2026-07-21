@@ -1699,6 +1699,165 @@ int document_db_note_update(int user_id,
    return result;
 }
 
+/* Rename any note/document in place (content untouched).  See header for the
+ * contract.  The only non-trivial part is the contentless FTS5 index: each chunk
+ * row stores (label_stems, body_stems), so changing the label means re-stemming
+ * the label on EVERY chunk while keeping that chunk's body-stems intact — the
+ * same delete-old/insert-new dance document_db_doc_replace / delete_indexed use.
+ * Chunk rows are read dynamically (grow-by-realloc, NOT capped by num_chunks) so
+ * a stale count can never leave surplus chunks carrying orphaned old-label stems. */
+int document_db_rename(int user_id, int64_t doc_id, const char *new_label) {
+   if (!new_label || !new_label[0])
+      return FAILURE;
+
+   /* --- Phase 1 (locked): verify ownership; snapshot old filename/filepath and
+    * every chunk (id, text) so we can rebuild the label stems outside the lock. --- */
+   char old_filename[DOC_FILENAME_MAX] = "";
+   char old_filepath[DOC_FILEPATH_MAX] = "";
+   int64_t *chunk_ids = NULL;
+   char **chunk_texts = NULL;
+   int n_chunks = 0;
+   int cap = 0;
+   bool oom = false;
+   int gate = FAILURE;
+
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *g = s_db.stmt_doc_get;
+   sqlite3_reset(g);
+   sqlite3_bind_int64(g, 1, doc_id);
+   if (sqlite3_step(g) == SQLITE_ROW) {
+      document_t doc;
+      row_to_document(g, &doc);
+      if (doc.user_id == user_id) {
+         snprintf(old_filename, sizeof(old_filename), "%s", doc.filename);
+         snprintf(old_filepath, sizeof(old_filepath), "%s", doc.filepath);
+         gate = SUCCESS;
+      }
+   }
+   sqlite3_reset(g);
+
+   if (gate == SUCCESS) {
+      sqlite3_stmt *cs = NULL;
+      if (sqlite3_prepare_v2(s_db.db,
+                             "SELECT id, text FROM document_chunks WHERE document_id = ? "
+                             "ORDER BY chunk_index",
+                             -1, &cs, NULL) == SQLITE_OK) {
+         sqlite3_bind_int64(cs, 1, doc_id);
+         while (!oom && sqlite3_step(cs) == SQLITE_ROW) {
+            if (n_chunks == cap) {
+               int ncap = cap ? cap * 2 : 8;
+               int64_t *nids = realloc(chunk_ids, (size_t)ncap * sizeof(*nids));
+               char **ntexts = realloc(chunk_texts, (size_t)ncap * sizeof(*ntexts));
+               if (nids)
+                  chunk_ids = nids;
+               if (ntexts)
+                  chunk_texts = ntexts;
+               if (!nids || !ntexts) {
+                  oom = true;
+                  break;
+               }
+               cap = ncap;
+            }
+            chunk_ids[n_chunks] = sqlite3_column_int64(cs, 0);
+            const unsigned char *t = sqlite3_column_text(cs, 1);
+            chunk_texts[n_chunks] = strdup(t ? (const char *)t : "");
+            if (!chunk_texts[n_chunks]) {
+               oom = true;
+               break;
+            }
+            n_chunks++;
+         }
+      } else {
+         gate = FAILURE;
+      }
+      if (cs)
+         sqlite3_finalize(cs);
+   }
+   AUTH_DB_UNLOCK();
+
+   if (gate != SUCCESS || oom) {
+      for (int i = 0; i < n_chunks; i++)
+         free(chunk_texts[i]);
+      free(chunk_texts);
+      free(chunk_ids);
+      return FAILURE;
+   }
+
+   /* --- Phase 2 (unlocked): stem old + new label once, and each chunk's body
+    * (leaf-lock rule: the stemmer runs outside the DB lock).  A zero-chunk doc
+    * (pathological — notes/uploads always have >= 1) just renames with no FTS
+    * work: the loops below are no-ops and only the filename UPDATE runs. --- */
+   char old_label_stems[MEMORY_FACT_STEMS_MAX], new_label_stems[MEMORY_FACT_STEMS_MAX];
+   (void)memory_stem_string(old_filename, old_label_stems, sizeof(old_label_stems));
+   (void)memory_stem_string(new_label, new_label_stems, sizeof(new_label_stems));
+
+   char **body_stems = (n_chunks > 0) ? calloc((size_t)n_chunks, sizeof(char *)) : NULL;
+   bool stem_oom = (n_chunks > 0 && !body_stems);
+   for (int i = 0; i < n_chunks && !stem_oom; i++) {
+      body_stems[i] = malloc(MEMORY_FACT_STEMS_MAX);
+      if (!body_stems[i]) {
+         stem_oom = true;
+         break;
+      }
+      (void)memory_stem_string(chunk_texts[i], body_stems[i], MEMORY_FACT_STEMS_MAX);
+   }
+
+   /* --- Phase 3 (locked): FTS label re-stem across all chunks + filename update,
+    * one transaction.  filepath is only rewritten when it's synthetic (== the old
+    * filename), so a real upload's on-disk path is preserved. --- */
+   const char *new_filepath = (strcmp(old_filepath, old_filename) == 0) ? new_label : old_filepath;
+   int result = FAILURE;
+
+   if (!stem_oom) {
+      pthread_mutex_lock(&s_db.mutex);
+      if (s_db.initialized) {
+         (void)sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+         bool ok = true;
+
+         for (int i = 0; i < n_chunks; i++) {
+            (void)fts5_delete_chunk_stems_locked(chunk_ids[i], old_label_stems, body_stems[i]);
+            (void)fts5_insert_chunk_stems_locked(chunk_ids[i], new_label_stems, body_stems[i]);
+         }
+
+         sqlite3_stmt *du = NULL;
+         if (sqlite3_prepare_v2(s_db.db,
+                                "UPDATE documents SET filename = ?, filepath = ? "
+                                "WHERE id = ? AND user_id = ?",
+                                -1, &du, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(du, 1, new_label, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(du, 2, new_filepath, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(du, 3, doc_id);
+            sqlite3_bind_int(du, 4, user_id);
+            if (sqlite3_step(du) != SQLITE_DONE || sqlite3_changes(s_db.db) == 0)
+               ok = false;
+         } else {
+            ok = false;
+         }
+         if (du)
+            sqlite3_finalize(du);
+
+         if (ok) {
+            (void)sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL);
+            result = SUCCESS;
+         } else {
+            (void)sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+            OLOG_ERROR("document_db: rename (doc %lld) failed — rolled back", (long long)doc_id);
+         }
+      }
+      AUTH_DB_UNLOCK();
+   }
+
+   for (int i = 0; i < n_chunks; i++) {
+      free(chunk_texts[i]);
+      if (body_stems)
+         free(body_stems[i]);
+   }
+   free(body_stems);
+   free(chunk_texts);
+   free(chunk_ids);
+   return result;
+}
+
 /* Exact-label lookup (v61): find a document whose filename equals `label`
  * case-insensitively.  Unlike document_db_find_by_name (substring LIKE), this is
  * EXACT — used for note overwrite routing and delete-by-label so "Bio" never

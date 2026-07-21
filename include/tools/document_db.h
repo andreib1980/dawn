@@ -398,6 +398,28 @@ int document_db_note_update(int user_id,
                             const char *new_hash);
 
 /**
+ * @brief Rename a note OR document in place, without touching its content.
+ *
+ * Works on any document kind (note, save_text, or uploaded file).  Owner-checked:
+ * a forged doc_id/user_id mismatch is a no-op FAILURE.  Updates the document's
+ * filename, and its filepath only when the filepath is synthetic (equals the old
+ * filename — true for notes and save_text docs), so a real upload's on-disk path
+ * is never rewritten.  Re-stems the LABEL across every chunk's contentless FTS5
+ * row (delete old label-stems + re-insert new, each chunk's body-stems preserved)
+ * so BM25 label lookups follow the new name.  All in one transaction; content /
+ * embeddings / doc_id / is_global stay stable.
+ *
+ * Caller (tool/WebUI layer) is responsible for collision checks and refreshing
+ * the memory→note bridge gloss — this only touches the document store.
+ *
+ * @param user_id   Owner (gate)
+ * @param doc_id    Document/note id to rename
+ * @param new_label New filename/label
+ * @return SUCCESS (0) on success, FAILURE (1) if not owned / not found / error
+ */
+int document_db_rename(int user_id, int64_t doc_id, const char *new_label);
+
+/**
  * @brief Find a document by EXACT (case-insensitive) label/filename (v61).
  *
  * Unlike document_db_find_by_name (substring LIKE), this matches the whole name

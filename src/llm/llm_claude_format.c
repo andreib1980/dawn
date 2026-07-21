@@ -708,17 +708,29 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    json_object *last_message = NULL;
 
    // Pre-scan to collect tool result IDs for orphaned tool_use filtering.
-   // Only needed on iteration 0 (initial call). On follow-up calls after tool execution,
-   // we just added the tool_use and tool_result ourselves, so they're guaranteed paired.
+   //
+   // Runs on EVERY iteration, not just iteration 0.  The history can contain
+   // orphaned tool_use blocks left over from an interrupted earlier turn (a
+   // tool_use whose tool_result never landed — e.g. wake-word interrupt / rolled
+   // back call).  Those orphans persist in conversation_history and must be
+   // filtered out of every request, or Claude rejects the follow-up call with
+   // "tool_use ids were found without tool_result blocks" (HTTP 400).  Filtering
+   // is safe on follow-up iterations too: by the time each call is built, every
+   // legitimate tool_use already has its paired tool_result appended, so only the
+   // true orphans get dropped.
    //
    // Two-pass approach (count then allocate) is preferred over a growing array:
    // - Single exact-size malloc avoids fragmentation and realloc overhead
    // - Memory footprint is predictable (typically 64-320 bytes)
-   // - CPU cost is acceptable since this runs once per user message, not in audio loops
+   // - CPU cost is acceptable since this runs once per provider call, not in audio loops
+   //
+   // `iteration` is no longer read (request-building is iteration-independent now
+   // that filtering is unconditional); kept in the signature for caller stability.
+   (void)iteration;
    char(*tool_result_ids)[LLM_TOOLS_ID_LEN] = NULL;
    int tool_result_count = 0;
 
-   if (iteration == 0) {
+   {
       // Count tool results first, then allocate exact size needed
       int result_count = count_tool_results(openai_conversation);
 
@@ -769,11 +781,11 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
             const char *block_type = json_object_get_string(type_obj);
 
             if (strcmp(block_type, "tool_use") == 0) {
-               // Check if this tool_use has a matching result (only filter on iteration 0)
+               // Drop this tool_use if the history has no matching tool_result (orphan)
                json_object *id_obj;
                if (json_object_object_get_ex(block, "id", &id_obj)) {
                   const char *tool_id = json_object_get_string(id_obj);
-                  // If no filter active (iteration > 0), include all tool_use blocks
+                  // tool_result_ids is NULL only when there are no results at all
                   if (!tool_result_ids ||
                       has_matching_tool_result(tool_id, tool_result_ids, tool_result_count)) {
                      json_object_array_add(filtered_content, json_object_get(block));
@@ -833,7 +845,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                call_id = json_object_get_string(id_obj);
             }
 
-            // Check if this tool call has a matching result (only filter on iteration 0)
+            // Skip this tool call if the history has no matching result (orphan)
             if (tool_result_ids &&
                 !has_matching_tool_result(call_id, tool_result_ids, tool_result_count)) {
                OLOG_WARNING("Claude: Skipping tool_use %s (no matching tool_result)", call_id);
