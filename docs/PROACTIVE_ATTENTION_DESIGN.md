@@ -3,13 +3,13 @@
 **Status**: **PRE + P0 + WebUI Watches panel SHIPPED — PAUSED here (2026-07-10).** PRE
 (2026-07-06) and P0 (2026-07-10, commit `805bc22`) are done and live-verified on real hardware;
 the one deferred P0 surface, the **WebUI Watches panel**, is built + reviewed + live-verified
-(pending its own commit). **SAGE work is now deliberately paused at the end of P0** — the
+and committed (`ee84e14`). **SAGE work is now deliberately paused at the end of P0** — the
 proactive layer is functional end-to-end (voice- and WebUI-managed watches → gate → real-time
 spoken/banner alerts → `attention_log`); **P1 onward remain PROPOSED** and resume on the trigger
-in §11 (P0 has run in the field, precision reviewed). Implementation is in flight, so per the
-design-doc commit policy this file is committable. Shipped commits: dawn `d495feb`/`805bc22`,
-mirage `4342147`, aura `1463ecd`. See "PRE — as-built" (§11.1) and "P0 — as-built" (§11.2) for
-what was actually built and the deviations.
+in §11 (P0 has run in the field, precision reviewed). Per the design-doc commit policy this file
+is committable. Shipped commits: dawn `d495feb`/`805bc22`/`ee84e14`, mirage `4342147`, aura
+`1463ecd`. See "PRE — as-built" (§11.1) and "P0 — as-built" (§11.2) for what was actually built
+and the deviations.
 **Date**: 2026-07-03 (design); PRE implemented 2026-07-06
 **Provenance**: Deep-research session (Claude Fable 5): survey of proactive-LLM papers,
 open-source, and commercial systems, followed by architecture synthesis. Claim verification
@@ -561,7 +561,7 @@ expiry rate, judge-invocation count.
 | Phase | Scope | Ships when | Effort |
 |---|---|---|---|
 | **PRE** ✅ **SHIPPED 2026-07-06** | Option A (DECIDED §9.2): MIRAGE `helmet/telemetry` + `armor/telemetry` republish, then `suit_service.c` AURA/SPARK ingest + `suit_status` tool in DAWN | ~~standalone value: "Friday, what's my helmet CO2?"~~ **DONE — live-verified on hardware** (dawn `d495feb`, mirage `4342147`, aura `1463ecd`) | done |
-| **P0** ✅ **SHIPPED 2026-07-10** (pending commit) | Event schema + poll ingest (STAT/suit/component) + rules gate + hysteresis/backoff/TTL + **conversationally-managed DB watches** + real-time **spoken/banner delivery** + `attention_log` + metrics. **Two deliberate reframes from this row**: watches are DB-backed + voice/WebUI-managed (NOT static config), and delivery is real-time "now" alerts (NOT digest-only — no regular briefing exists in this deployment). See §11.2. | ~~zero interruption risk; digest-only~~ **DONE — live-verified on the suit** ("watch the CO2", spoken ATTENTION alerts, silent banners, `list`/`ignore`/`set` all working). **WebUI Watches panel** (the one deferred P0 surface) also shipped + live-verified 2026-07-10 (see §11.2). | done |
+| **P0** ✅ **SHIPPED 2026-07-10** (`805bc22` + `ee84e14`) | Event schema + poll ingest (STAT/suit/component) + rules gate + hysteresis/backoff/TTL + **conversationally-managed DB watches** + real-time **spoken/banner delivery** + `attention_log` + metrics. **Two deliberate reframes from this row**: watches are DB-backed + voice/WebUI-managed (NOT static config), and delivery is real-time "now" alerts (NOT digest-only — no regular briefing exists in this deployment). See §11.2. | ~~zero interruption risk; digest-only~~ **DONE — live-verified on the suit** ("watch the CO2", spoken ATTENTION alerts, silent banners, `list`/`ignore`/`set` all working). **WebUI Watches panel** (the one deferred P0 surface) also shipped + live-verified 2026-07-10 (see §11.2). | done |
 | **P1** ← **PAUSED (next when resumed)** | Urgency taxonomy + BREAKPOINT/AMBIENT/INTERRUPT delivery + budgets/quiet-hours + outcome capture + "stop telling me about X" tool | P0 ran ≥2 weeks; per-category precision on digest items reviewed; start with 2-3 rule categories only | agent ~2-3 days · api $0 · 3 ckpt |
 | **P2** | LLM judge (rubric, context pack incl. memory info-gap) + judge bench fixtures | P1 FTR/precision acceptable; judge must beat rules-only on the fixture bench before going live | agent ~2-3 days · api ~$5-15 (bench) · 3 ckpt |
 | **P2.5 (optional, training-free)** | PRIME-style [R11] experience retrieval: feed the judge k past interjection outcomes (accepted/dismissed exemplars for this category) retrieved from `attention_log` into its prompt — personalization without any training | P2 live; log has ≥ dozens of outcomes | agent ~2-3h · api $0 · 1 ckpt |
@@ -667,7 +667,7 @@ single-source-of-truth cleanup; a `STAT=OFF/SUIT=ON` CI matrix leg.
 **What P0 inherits:** the suit is now a ready event source. P0's ingest has five feeds
 available immediately — STAT, ECHO, scheduler, component-status, and suit.
 
-### 11.2 P0 — as-built (shipped 2026-07-10 as `805bc22`; Watches panel live-verified, pending commit) — PAUSED here
+### 11.2 P0 — as-built (shipped 2026-07-10: core `805bc22` + Watches panel `ee84e14`, both live-verified) — PAUSED here
 
 Live-verified on the real suit (set watches by voice, spoken ATTENTION alerts fired on
 threshold crossings, silent banners for ambient watches, `list`/`ignore`/`set` all working).
@@ -722,7 +722,7 @@ reuse-pattern-reviewer on the delivery channel) — all findings applied.
   watch/set confirmations append the real value (+ "already past the threshold") from the live
   snapshot.
 
-**Deferred P0 follow-ups (none blocking):** ~~WebUI Watches panel~~ **SHIPPED 2026-07-10 (live-verified, pending commit)** — added as a 2nd tab inside the Scheduler popover (renamed "Scheduler & Watches", widened to 504px, tabs wrap to two rows). Live-verified: create/fire/edit/pause/remove + live metric display all confirmed. `src/webui/webui_attention.c` (WS `watch_list/add/update/set_enabled/remove`, user-scoped, driving the same `attention_watch_*` core) + `www/js/ui/watches.js` (`DawnWatches`) + `www/css/components/watches.css`; list/toggle/edit/delete/add + live values + a "master switch off" note. Enum↔string serialization + `clamp_seconds` extracted to the attention core (`sage_*_to_str`/`_from_str`/`attention_clamp_seconds`) so the tool + panel can't drift on the wire vocab. 5-agent review applied (sec 0 findings; fixed modal-vs-outside-click, Remove-button styling, add-dropdown clobber, a11y). Deferred within the panel: threshold reset-to-default (needs a server sentinel), and two efficiency LOWs (per-watch snapshot + full re-render on the 5s poll) with triggers. Still open: §9.9 per-source
+**Deferred P0 follow-ups (none blocking):** ~~WebUI Watches panel~~ **SHIPPED 2026-07-10 (`ee84e14`, live-verified)** — added as a 2nd tab inside the Scheduler popover (renamed "Scheduler & Watches", widened to 504px, tabs wrap to two rows). Live-verified: create/fire/edit/pause/remove + live metric display all confirmed. `src/webui/webui_attention.c` (WS `watch_list/add/update/set_enabled/remove`, user-scoped, driving the same `attention_watch_*` core) + `www/js/ui/watches.js` (`DawnWatches`) + `www/css/components/watches.css`; list/toggle/edit/delete/add + live values + a "master switch off" note. Enum↔string serialization + `clamp_seconds` extracted to the attention core (`sage_*_to_str`/`_from_str`/`attention_clamp_seconds`) so the tool + panel can't drift on the wire vocab. 5-agent review applied (sec 0 findings; fixed modal-vs-outside-click, Remove-button styling, add-dropdown clobber, a11y). Deferred within the panel: threshold reset-to-default (needs a server sentinel), and two efficiency LOWs (per-watch snapshot + full re-render on the 5s poll) with triggers. Still open: §9.9 per-source
 liveness self-monitoring (counters exist, the "silent source" warn is deferred); `broadcast_json_to_user`
 already extracted (8 fan-out broadcasters de-duplicated) during review; slope-rate can't yet be set
 via the tool (no slope metric in the catalog — latent until one is added); `STAT=OFF/SUIT=ON` CI leg.
@@ -811,7 +811,7 @@ interleave. Effort in agent terms per project convention.
 | Step | What | Gate |
 |---|---|---|
 | A1 (PRE) ✅ | Option A (DECIDED 2026-07-03): MIRAGE `helmet/telemetry`/`armor/telemetry` republish + `suit_service.c` + `suit_status` tool | ~~ready to start~~ **SHIPPED 2026-07-06** (see §11.1) |
-| A2 (P0) ✅ | Event schema, poll ingest (STAT/suit/component), rules gate, **conversationally-managed DB watches + real-time spoken/banner delivery** (reframed from digest-only), `attention_log`, metrics, **+ WebUI Watches panel** | ~~A1 shipped~~ **SHIPPED 2026-07-10** (`805bc22` + panel; see §11.2) |
+| A2 (P0) ✅ | Event schema, poll ingest (STAT/suit/component), rules gate, **conversationally-managed DB watches + real-time spoken/banner delivery** (reframed from digest-only), `attention_log`, metrics, **+ WebUI Watches panel** | ~~A1 shipped~~ **SHIPPED 2026-07-10** (`805bc22` + `ee84e14`; see §11.2) |
 | A3 (P1) ← **PAUSED (resume next)** | Urgency tiers + bounded deferral, budgets, privacy gating, outcome capture, "stop telling me about X"; ECHO discrete-event push ingest | Track A **paused after P0** (2026-07-10) — resume when P0 has run in the field ≥2 weeks and per-category precision from `attention_log` is reviewed, or a noisy-watch / permanent-mute need surfaces |
 | A4 (P2) | LLM judge (Inner-Thoughts rubric + memory info-gap), fixture bench seeded from ProactiveBench | P1 FTR acceptable; judge beats rules on fixtures |
 | A5 (P2.5) | Training-free personalization: feedback-log exemplar retrieval into judge prompt | P2 live, ≥dozens of outcomes |
