@@ -55,7 +55,6 @@
 
    let callbacks = {
       trapFocus: null,
-      showConfirmModal: null,
    };
 
    // Focus management state
@@ -71,7 +70,6 @@
    function init(options) {
       if (options) {
          if (options.trapFocus) callbacks.trapFocus = options.trapFocus;
-         if (options.showConfirmModal) callbacks.showConfirmModal = options.showConfirmModal;
       }
       el.btn = document.getElementById('doc-library-btn');
       el.popover = document.getElementById('doc-library-popover');
@@ -269,14 +267,18 @@
     * Tabs + search
     * ============================================================================= */
 
-   function setScope(scope) {
+   async function setScope(scope) {
       if (scope !== 'documents' && scope !== 'notes') return;
       // Guard an unsaved editor before navigating away (consistent with Cancel/ESC)
-      if (state.editorDirty && callbacks.showConfirmModal) {
-         callbacks.showConfirmModal('Discard changes to this note?', () => applyScope(scope), {
-            title: 'Discard note',
-            okText: 'Discard',
-         });
+      if (state.editorDirty) {
+         if (
+            await DawnDialog.confirm('Discard changes to this note?', {
+               title: 'Discard note',
+               okText: 'Discard',
+            })
+         ) {
+            applyScope(scope);
+         }
          return;
       }
       applyScope(scope);
@@ -600,12 +602,16 @@
    }
 
    // Guard an unsaved edit before opening a different item (name click / pencil)
-   function requestOpenDetail(item, pane) {
-      if (state.editorDirty && callbacks.showConfirmModal) {
-         callbacks.showConfirmModal('Discard changes to this note?', () => openDetail(item, pane), {
-            title: 'Discard note',
-            okText: 'Discard',
-         });
+   async function requestOpenDetail(item, pane) {
+      if (state.editorDirty) {
+         if (
+            await DawnDialog.confirm('Discard changes to this note?', {
+               title: 'Discard note',
+               okText: 'Discard',
+            })
+         ) {
+            openDetail(item, pane);
+         }
          return;
       }
       openDetail(item, pane);
@@ -631,12 +637,16 @@
    }
 
    // Close button / ESC: confirm if there are unsaved edits
-   function requestCloseDetail() {
-      if (state.editorDirty && callbacks.showConfirmModal) {
-         callbacks.showConfirmModal('Discard changes to this note?', () => closeDetail(true), {
-            title: 'Discard note',
-            okText: 'Discard',
-         });
+   async function requestCloseDetail() {
+      if (state.editorDirty) {
+         if (
+            await DawnDialog.confirm('Discard changes to this note?', {
+               title: 'Discard note',
+               okText: 'Discard',
+            })
+         ) {
+            closeDetail(true);
+         }
       } else {
          closeDetail(true);
       }
@@ -690,7 +700,7 @@
 
    // Cancel in the Edit form: existing note → back to Read (discard-guarded);
    // create mode → close the detail.
-   function onCancelEdit() {
+   async function onCancelEdit() {
       const revert = () => {
          if (state.detailId != null) {
             const item = state.documents.find((d) => d.id === state.detailId);
@@ -705,11 +715,15 @@
             closeDetail(true);
          }
       };
-      if (state.editorDirty && callbacks.showConfirmModal) {
-         callbacks.showConfirmModal('Discard changes to this note?', revert, {
-            title: 'Discard note',
-            okText: 'Discard',
-         });
+      if (state.editorDirty) {
+         if (
+            await DawnDialog.confirm('Discard changes to this note?', {
+               title: 'Discard note',
+               okText: 'Discard',
+            })
+         ) {
+            revert();
+         }
       } else {
          revert();
       }
@@ -760,15 +774,14 @@
          .join('');
       el.versions.innerHTML = `<div class="note-versions-title">Version history</div>${rows}`;
       el.versions.querySelectorAll('.note-version-restore').forEach((btn) => {
-         btn.addEventListener('click', () => {
+         btn.addEventListener('click', async () => {
             const vid = parseInt(btn.dataset.versionId, 10);
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(
+            if (
+               await DawnDialog.confirm(
                   'Restore this version? The current text is saved to history first, so you can undo.',
-                  () => requestVersionRestore(vid),
                   { title: 'Restore version', okText: 'Restore' }
-               );
-            } else {
+               )
+            ) {
                requestVersionRestore(vid);
             }
          });
@@ -1050,18 +1063,21 @@
       });
    }
 
-   function confirmDelete(id) {
+   async function confirmDelete(id) {
       const doc = state.documents.find((d) => d.id === id);
       const isNote = doc && (doc.is_note || doc.filetype === 'note');
       const name = doc ? doc.filename : isNote ? 'this note' : 'this document';
       const noun = isNote ? 'note' : 'document';
-      if (callbacks.showConfirmModal) {
-         callbacks.showConfirmModal(
+      if (
+         await DawnDialog.confirm(
             `Delete "${name}"? You can restore it from "Recently deleted" for a short window.`,
-            () => requestDelete(id),
-            { title: `Delete ${noun.charAt(0).toUpperCase() + noun.slice(1)}`, okText: 'Delete' }
-         );
-      } else {
+            {
+               title: `Delete ${noun.charAt(0).toUpperCase() + noun.slice(1)}`,
+               okText: 'Delete',
+               danger: true,
+            }
+         )
+      ) {
          requestDelete(id);
       }
    }

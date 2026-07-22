@@ -341,26 +341,40 @@
       const toolsHelpPopup = document.getElementById('tools-help-popup');
 
       if (toolsHelpBtn && toolsHelpPopup) {
+         // Escape close goes through DawnEscStack (registered while shown) so it
+         // stacks correctly under any layer opened above the popup.
+         let escToken = null;
+         const closePopup = () => {
+            toolsHelpPopup.classList.add('hidden');
+            if (escToken !== null) {
+               DawnEscStack.unregister(escToken);
+               escToken = null;
+            }
+         };
+         const openPopup = () => {
+            toolsHelpPopup.classList.remove('hidden');
+            if (escToken === null) {
+               escToken = DawnEscStack.register(() => {
+                  closePopup();
+                  return true;
+               });
+            }
+         };
+
          // Toggle popup on button click
          toolsHelpBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            toolsHelpPopup.classList.toggle('hidden');
+            if (toolsHelpPopup.classList.contains('hidden')) openPopup();
+            else closePopup();
          });
 
-         // Close popup when clicking outside
-         // NOTE: These document-level listeners are intentionally not removed.
-         // The popup is a singleton that lives for the entire session, so cleanup
-         // is not necessary and the handlers have negligible overhead when inactive.
+         // Close popup when clicking outside.
+         // NOTE: This document-level listener is intentionally not removed — the
+         // popup is a session-lived singleton; closePopup is a safe no-op when
+         // already hidden.
          document.addEventListener('click', (e) => {
             if (!toolsHelpPopup.contains(e.target) && e.target !== toolsHelpBtn) {
-               toolsHelpPopup.classList.add('hidden');
-            }
-         });
-
-         // Close popup on Escape key
-         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !toolsHelpPopup.classList.contains('hidden')) {
-               toolsHelpPopup.classList.add('hidden');
+               closePopup();
             }
          });
       }
@@ -403,26 +417,19 @@
    /**
     * Show confirmation modal before turning off privacy
     */
-   function showPrivacyConfirmation() {
-      if (typeof DawnModal !== 'undefined' && DawnModal.confirm) {
-         DawnModal.confirm({
+   async function showPrivacyConfirmation() {
+      const confirmed = await DawnDialog.confirm(
+         'Future messages in this conversation may be analyzed to extract memories and preferences. ' +
+            'Messages already sent while private will remain unanalyzed.',
+         {
             title: 'Disable Private Mode?',
-            message:
-               'Future messages in this conversation may be analyzed to extract memories and preferences. ' +
-               'Messages already sent while private will remain unanalyzed.',
-            confirmText: 'Disable Privacy',
+            okText: 'Disable Privacy',
             cancelText: 'Keep Private',
-            onConfirm: () => setPrivacy(false),
-         });
-      } else {
-         // Fallback to browser confirm
-         const confirmed = confirm(
-            'Disable Private Mode?\n\n' +
-               'Future messages in this conversation may be analyzed to extract memories and preferences.'
-         );
-         if (confirmed) {
-            setPrivacy(false);
+            danger: true,
          }
+      );
+      if (confirmed) {
+         setPrivacy(false);
       }
    }
 

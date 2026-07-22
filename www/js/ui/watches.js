@@ -33,7 +33,6 @@
       attentionEnabled: true,
       active: false /* true while the Watches tab is the visible pane */,
       pollTimer: null,
-      callbacks: {},
    };
 
    /* Live-value refresh cadence while the pane is open (ms).  Matches the
@@ -256,7 +255,7 @@
     * Event delegation
     * ========================================================================= */
 
-   function handleListClick(e) {
+   async function handleListClick(e) {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
       const action = btn.dataset.action;
@@ -268,13 +267,9 @@
          const w = state.watches.find((x) => x.id === id);
          const name = w ? w.label || w.metric : 'this watch';
          const msg = 'Stop watching ' + name + '?';
-         if (state.callbacks.showConfirmModal) {
-            state.callbacks.showConfirmModal(msg, () => requestRemove(id), {
-               title: 'Remove Watch',
-               okText: 'Remove',
-               danger: true,
-            });
-         } else if (confirm(msg)) {
+         if (
+            await DawnDialog.confirm(msg, { title: 'Remove Watch', okText: 'Remove', danger: true })
+         ) {
             requestRemove(id);
          }
       }
@@ -294,12 +289,21 @@
 
    let modalEl = null;
    let previousFocusEl = null;
+   let escToken = null; // DawnEscStack registration while the modal is shown
+
+   // Reveal the modal and register its Escape-dismiss on the global stack (the
+   // focus trap below stays element-scoped on modalEl).
+   function revealModal() {
+      modalEl.classList.remove('hidden');
+      if (escToken === null) {
+         escToken = DawnEscStack.register(() => {
+            hideModal();
+            return true;
+         });
+      }
+   }
 
    function handleModalKeydown(e) {
-      if (e.key === 'Escape') {
-         hideModal();
-         return;
-      }
       if (e.key === 'Tab' && modalEl) {
          const focusable = Array.from(
             modalEl.querySelectorAll(
@@ -338,6 +342,10 @@
 
    function hideModal() {
       if (modalEl) modalEl.classList.add('hidden');
+      if (escToken !== null) {
+         DawnEscStack.unregister(escToken);
+         escToken = null;
+      }
       if (previousFocusEl) {
          previousFocusEl.focus();
          previousFocusEl = null;
@@ -450,7 +458,7 @@
       html += '</div>';
       content.innerHTML = html;
 
-      modalEl.classList.remove('hidden');
+      revealModal();
       document.getElementById('watch-cancel-btn').addEventListener('click', hideModal);
       document.getElementById('watch-save-btn').addEventListener('click', submitAdd);
       const first = modalEl.querySelector('select, input, button');
@@ -478,7 +486,7 @@
       html += '</div>';
       content.innerHTML = html;
 
-      modalEl.classList.remove('hidden');
+      revealModal();
       document.getElementById('watch-cancel-btn').addEventListener('click', hideModal);
       document
          .getElementById('watch-update-btn')
@@ -567,17 +575,12 @@
       if (addBtn) addBtn.addEventListener('click', showAddModal);
    }
 
-   function setCallbacks(cbs) {
-      state.callbacks = cbs || {};
-   }
-
    /* =========================================================================
     * Export
     * ========================================================================= */
 
    window.DawnWatches = {
       init: init,
-      setCallbacks: setCallbacks,
       activate: activate,
       deactivate: deactivate,
       handleListResponse: handleListResponse,

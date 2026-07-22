@@ -4,11 +4,41 @@
       <meta charset="UTF-8" />
       <!-- CSP is set via HTTP header (webui_add_security_headers) -->
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <meta name="theme-color" content="#22d3ee" />
+      <meta name="theme-color" content="#2dd4bf" />
       <meta name="description" content="DAWN - Voice-controlled AI assistant" />
       <title>DAWN - Voice Assistant</title>
       <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
       <link rel="manifest" href="/manifest.json" />
+      <!-- Pre-paint theme bootstrap: apply the saved accent theme BEFORE first
+           paint so non-default users (dramatically `terminal`) don't flash the
+           default theme.  Runs inline before any module, so it reads
+           localStorage['dawn_theme'] directly (DawnStore isn't loaded yet).
+           KEEP IN SYNC: js/ui/theme.js THEMES/THEME_COLORS + js/core/storage.js
+           KEYS.THEME + the identical block in login.html.  Add a theme → update
+           all four. -->
+      <script>
+         (function () {
+            var COLORS = {
+               cyan: '#2dd4bf',
+               purple: '#a855f7',
+               green: '#22c55e',
+               orange: '#f97316',
+               red: '#f87171',
+               blue: '#3b82f6',
+               terminal: '#7fff7f',
+            };
+            var theme;
+            try {
+               theme = localStorage.getItem('dawn_theme');
+            } catch (e) {
+               theme = null;
+            }
+            if (!Object.prototype.hasOwnProperty.call(COLORS, theme)) theme = 'cyan';
+            if (theme !== 'cyan') document.documentElement.setAttribute('data-theme', theme);
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', COLORS[theme]);
+         })();
+      </script>
       <link rel="stylesheet" href="/css/main.css" />
    </head>
    <body>
@@ -3213,7 +3243,7 @@ token = "eyJ..."</pre
          role="alertdialog"
          aria-modal="true"
          aria-labelledby="confirm-modal-title"
-         aria-describedby="confirm-modal-message"
+         aria-describedby="confirm-modal-message confirm-modal-detail"
       >
          <div class="modal-content confirm-modal-content">
             <h3 id="confirm-modal-title">Confirm Action</h3>
@@ -3235,6 +3265,7 @@ token = "eyJ..."</pre
          role="dialog"
          aria-modal="true"
          aria-labelledby="input-modal-title"
+         aria-describedby="input-modal-message"
       >
          <div class="modal-content input-modal-content">
             <h3 id="input-modal-title">Enter Value</h3>
@@ -3371,6 +3402,12 @@ token = "eyJ..."</pre
       <!-- DAWN modules -->
       <script defer src="/js/dawn-events.js"></script>
       <script defer src="/js/core/constants.js"></script>
+      <!-- storage.js must load before any consumer of DawnStore (state.js reads
+           at load-time; theme/tts follow). -->
+      <script defer src="/js/core/storage.js"></script>
+      <!-- escstack.js (global Escape/dismiss LIFO) must load before any overlay
+           module that registers into it. -->
+      <script defer src="/js/core/escstack.js"></script>
       <script defer src="/js/core/elements.js"></script>
       <script defer src="/js/core/state.js"></script>
       <script defer src="/js/core/websocket.js"></script>
@@ -3424,6 +3461,10 @@ token = "eyJ..."</pre
       <!-- Settings sub-modules (order matters) -->
       <script defer src="/js/ui/settings/utils.js"></script>
       <script defer src="/js/ui/settings/modals.js"></script>
+      <!-- DawnDialog (Promise confirm/prompt/alert) wraps settings/modals.js —
+           must load after it; consumers call at runtime so their earlier load
+           position is fine. -->
+      <script defer src="/js/ui/dialog.js"></script>
       <script defer src="/js/ui/settings/audio.js"></script>
       <script defer src="/js/ui/settings/config.js"></script>
       <script defer src="/js/ui/settings/search.js"></script>

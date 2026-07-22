@@ -16,7 +16,6 @@
    let channels = [];
    let refreshInterval = null;
    let codeCountdownTimer = null;
-   const callbacks = { showConfirmModal: null };
 
    const REFRESH_INTERVAL_MS = 30000;
 
@@ -362,7 +361,7 @@
       });
 
       document.querySelectorAll('.channel-unlink-btn').forEach((btn) => {
-         btn.addEventListener('click', function () {
+         btn.addEventListener('click', async function () {
             const id = parseInt(this.dataset.id, 10);
             const name = this.dataset.name;
             const msg =
@@ -370,13 +369,13 @@
                name +
                '"?\nIt will stop reaching the assistant. You can re-enable it ' +
                'later — the conversation history is preserved.';
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(msg, () => requestUnlink(id), {
+            if (
+               await DawnDialog.confirm(msg, {
                   title: 'Unlink Channel',
                   okText: 'Unlink',
                   danger: true,
-               });
-            } else if (confirm(msg)) {
+               })
+            ) {
                requestUnlink(id);
             }
          });
@@ -583,8 +582,5 @@
       },
       refresh: requestList,
       stopAutoRefresh: stopAutoRefresh,
-      setCallbacks: function (cbs) {
-         if (cbs && cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
-      },
    };
 })();

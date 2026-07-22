@@ -57,7 +57,7 @@
                // Session was revoked - force immediate logout
                console.warn('Force logout received:', msg.payload.reason);
                DawnToast.show(msg.payload.reason || 'Session revoked', 'error');
-               localStorage.removeItem('dawn_session_token');
+               DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
                sessionStorage.removeItem('dawn_active_conversation');
                DawnWS.disconnect();
                setTimeout(() => {
@@ -209,7 +209,7 @@
                   // Session expired or revoked - stop everything and redirect to login
                   DawnToast.show(msg.payload.message, 'error');
                   // Clear session data
-                  localStorage.removeItem('dawn_session_token');
+                  DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
                   sessionStorage.removeItem('dawn_active_conversation');
                   // Disconnect WebSocket immediately to prevent further processing
                   DawnWS.disconnect();
@@ -238,7 +238,7 @@
                break;
             case 'session':
                console.log('Session token received');
-               localStorage.setItem('dawn_session_token', msg.payload.token);
+               DawnStore.set(DawnStore.KEYS.SESSION_TOKEN, msg.payload.token);
                // Server has processed our init/reconnect with capabilities
                DawnWS.setCapabilitiesSynced(true);
                // Reconnect music stream with fresh token (fixes stale-token failures)
@@ -1381,10 +1381,69 @@
    // =============================================================================
    // Event Handlers
    // =============================================================================
+   // Composer recall: ArrowUp/ArrowDown cycle the CURRENT conversation's user
+   // turns, read live from the transcript DOM — the single client-side source of
+   // truth (there is no in-memory message model).  Switching conversations
+   // rebuilds that DOM, so recall always matches the conversation on screen; no
+   // separate/persisted history is kept.  historyNavIndex === null means "not
+   // navigating" (the composer holds the user's live draft); recallSnapshot is
+   // the user-turn list captured at the start of a navigation session and held
+   // stable while cycling.
+   let recallSnapshot = [];
+   let historyNavIndex = null;
+
+   // Ordered (oldest→newest) user-turn texts of the current conversation, read
+   // from the transcript DOM.  Uses the un-rendered `data-raw-text` source and
+   // skips image-only / document-only turns (empty raw text).
+   // ASSUMPTION: the full conversation is rendered in the DOM.  If transcript
+   // rendering ever windows/virtualizes long conversations, recall would silently
+   // miss the un-rendered older turns — revisit this reader if that lands.
+   function getConversationUserMessages() {
+      const transcript = DawnElements.transcript || document.getElementById('transcript');
+      if (!transcript) return [];
+      const out = [];
+      transcript.querySelectorAll('.transcript-entry.user').forEach((entry) => {
+         let combined = '';
+         entry.querySelectorAll('.text').forEach((t) => {
+            const raw = t.getAttribute('data-raw-text') || '';
+            if (raw) combined += (combined ? '\n' : '') + raw;
+         });
+         combined = combined.trim();
+         if (combined) out.push(combined);
+      });
+      return out;
+   }
+
+   // Auto-grow the composer to fit its content.  Height only — shared by the
+   // input listener and history recall; callers handle text-override/focus/caret.
+   function resizeComposer(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 150) + 'px';
+      // Only show scrollbar when content exceeds max height
+      el.style.overflowY = el.scrollHeight > 150 ? 'auto' : 'hidden';
+   }
+
+   // Place a recalled entry into the composer: fill, resize, focus, caret-to-end,
+   // and sync the voice-mode "Send" override.  Programmatic .value assignment does
+   // NOT fire an 'input' event, so this never resets historyNavIndex itself.
+   function setComposerValue(text) {
+      const input = DawnElements.textInput;
+      input.value = text;
+      resizeComposer(input);
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      if (typeof DawnAlwaysOn !== 'undefined') {
+         DawnAlwaysOn.setTextOverride(input.value.trim().length > 0);
+      }
+   }
+
    function handleSend() {
       const text = DawnElements.textInput.value.trim();
       if (text) {
          if (sendTextMessage(text)) {
+            // Exit recall navigation; the sent turn re-enters the list via the
+            // server's transcript echo, so the next ArrowUp re-snapshots it.
+            historyNavIndex = null;
             DawnElements.textInput.value = '';
             DawnElements.textInput.style.height = 'auto';
             // Reset text override after sending
@@ -1396,9 +1455,60 @@
    }
 
    function handleKeydown(event) {
-      if (event.key === 'Enter' && !event.shiftKey) {
+      // Enter sends — but never mid-IME-composition (CJK etc.).
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
          event.preventDefault();
          handleSend();
+         return;
+      }
+
+      const plainKey =
+         !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing;
+
+      // ArrowUp walks OLDER through this conversation's user turns.  Navigation
+      // begins only from an empty composer (so it never fights caret movement in
+      // a live multi-line draft) and snapshots the turns at that moment; once
+      // navigating, each ArrowUp steps further back through the snapshot.
+      if (event.key === 'ArrowUp' && plainKey) {
+         const input = DawnElements.textInput;
+         if (historyNavIndex === null) {
+            if (input.value === '') {
+               recallSnapshot = getConversationUserMessages();
+               if (recallSnapshot.length > 0) {
+                  event.preventDefault();
+                  historyNavIndex = recallSnapshot.length - 1;
+                  setComposerValue(recallSnapshot[historyNavIndex]);
+               }
+            }
+         } else if (historyNavIndex > 0) {
+            event.preventDefault();
+            historyNavIndex--;
+            setComposerValue(recallSnapshot[historyNavIndex]);
+         } else {
+            // Already at the oldest — swallow so the caret doesn't jump.
+            event.preventDefault();
+         }
+         return;
+      }
+
+      // ArrowDown walks NEWER while navigating; stepping past the newest clears
+      // the composer and exits navigation.
+      if (event.key === 'ArrowDown' && plainKey && historyNavIndex !== null) {
+         event.preventDefault();
+         if (historyNavIndex < recallSnapshot.length - 1) {
+            historyNavIndex++;
+            setComposerValue(recallSnapshot[historyNavIndex]);
+         } else {
+            historyNavIndex = null;
+            recallSnapshot = [];
+            const input = DawnElements.textInput;
+            input.value = '';
+            resizeComposer(input);
+            if (typeof DawnAlwaysOn !== 'undefined') {
+               DawnAlwaysOn.setTextOverride(false);
+            }
+         }
+         return;
       }
    }
 
@@ -1624,11 +1734,10 @@
 
       // Auto-resize textarea as user types + smart text override
       DawnElements.textInput.addEventListener('input', function () {
-         this.style.height = 'auto';
-         const newHeight = Math.min(this.scrollHeight, 150);
-         this.style.height = newHeight + 'px';
-         // Only show scrollbar when content exceeds max height
-         this.style.overflowY = this.scrollHeight > 150 ? 'auto' : 'hidden';
+         // Editing exits history navigation so further Arrow keys do caret nav,
+         // not recall (programmatic recall uses .value and doesn't fire 'input').
+         historyNavIndex = null;
+         resizeComposer(this);
 
          // Smart typing override: when text present in voice mode, show "Send"
          if (typeof DawnAlwaysOn !== 'undefined') {
@@ -1983,56 +2092,41 @@
       });
       DawnUsers.setCallbacks({
          trapFocus: DawnSettings.trapFocus,
-         showConfirmModal: DawnSettings.showConfirmModal,
          getAuthState: () => DawnState.authState,
       });
       DawnUsers.init();
       DawnSatellites.setCallbacks({
-         showConfirmModal: DawnSettings.showConfirmModal,
          trapFocus: DawnSettings.trapFocus,
       });
-      if (typeof DawnMessaging !== 'undefined') {
-         DawnMessaging.setCallbacks({
-            showConfirmModal: DawnSettings.showConfirmModal,
-         });
-      }
       DawnMySettings.setCallbacks({
-         showConfirmModal: DawnSettings.showConfirmModal,
          setTheme: DawnTheme.set,
          getAuthState: () => DawnState.authState,
       });
       DawnMySettings.init();
       DawnMySessions.setCallbacks({
-         showConfirmModal: DawnSettings.showConfirmModal,
          getAuthState: () => DawnState.authState,
       });
       DawnMySessions.init();
       if (typeof DawnCalendarAccounts !== 'undefined') {
          DawnCalendarAccounts.setCallbacks({
-            showConfirmModal: DawnSettings.showConfirmModal,
             getAuthState: () => DawnState.authState,
          });
          DawnCalendarAccounts.init();
       }
       if (typeof DawnEmailAccounts !== 'undefined') {
          DawnEmailAccounts.setCallbacks({
-            showConfirmModal: DawnSettings.showConfirmModal,
             getAuthState: () => DawnState.authState,
          });
          DawnEmailAccounts.init();
       }
       DawnHistory.setCallbacks({
          trapFocus: DawnSettings.trapFocus,
-         showConfirmModal: DawnSettings.showConfirmModal,
-         showInputModal: DawnSettings.showInputModal,
          getAuthState: () => DawnState.authState,
       });
       DawnHistory.init();
 
       // Initialize memory module (memory panel for viewing/managing user memories)
       DawnMemory.init({
-         showConfirmModal: DawnSettings.showConfirmModal,
-         showInputModal: DawnSettings.showInputModal,
          trapFocus: DawnSettings.trapFocus,
          getAuthState: () => DawnState.authState,
       });
@@ -2040,9 +2134,6 @@
       // Initialize watches panel (SAGE proactive attention — a tab inside the
       // scheduler popover, so init it before the scheduler queue below).
       if (typeof DawnWatches !== 'undefined') {
-         DawnWatches.setCallbacks({
-            showConfirmModal: DawnSettings.showConfirmModal,
-         });
          DawnWatches.init();
       }
 
@@ -2074,7 +2165,6 @@
       if (typeof DawnDocLibrary !== 'undefined') {
          DawnDocLibrary.init({
             trapFocus: DawnSettings.trapFocus,
-            showConfirmModal: DawnSettings.showConfirmModal,
          });
       }
 
@@ -2082,7 +2172,6 @@
       if (typeof DawnCodeProjects !== 'undefined') {
          DawnCodeProjects.init({
             trapFocus: DawnSettings.trapFocus,
-            showConfirmModal: DawnSettings.showConfirmModal,
          });
       }
 

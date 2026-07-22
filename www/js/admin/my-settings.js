@@ -10,10 +10,14 @@
     * ============================================================================= */
 
    let callbacks = {
-      showConfirmModal: null,
       setTheme: null,
       getAuthState: null,
    };
+
+   // Last saved/committed theme.  The theme buttons apply live (localStorage) as a
+   // PREVIEW, but only "Save" commits; an unsaved preview reverts to this when My
+   // Settings closes.  null until the panel has loaded once (nothing to revert to).
+   let savedTheme = null;
 
    /* =============================================================================
     * API Requests
@@ -93,9 +97,25 @@
       );
       if (unitsRadio) unitsRadio.checked = true;
 
-      // Set theme
+      // Set theme (the saved server value) and record it as the revert baseline
+      // for any unsaved preview the user makes while the panel is open.
       if (payload.theme && callbacks.setTheme) {
          callbacks.setTheme(payload.theme);
+      }
+      savedTheme =
+         typeof DawnTheme !== 'undefined' && DawnTheme.current
+            ? DawnTheme.current()
+            : payload.theme || 'cyan';
+   }
+
+   // Revert an unsaved theme PREVIEW back to the last saved value.  Called when My
+   // Settings closes (section collapse or Settings-panel close) so a previewed-
+   // but-unsaved theme doesn't silently stick.
+   function revertUnsavedTheme() {
+      if (savedTheme === null) return; // never loaded — nothing to revert to
+      if (typeof DawnTheme === 'undefined' || !DawnTheme.current) return;
+      if (DawnTheme.current() !== savedTheme) {
+         DawnTheme.set(savedTheme);
       }
    }
 
@@ -259,36 +279,40 @@
                   document.getElementById('my-preferred-address')?.value.trim() || '',
             };
             requestSetMySettings(settings);
+            // The previewed theme is now committed — make it the revert baseline.
+            savedTheme = settings.theme;
          });
       }
 
       // Reset to defaults
-      if (resetBtn && callbacks.showConfirmModal) {
-         resetBtn.addEventListener('click', () => {
-            callbacks.showConfirmModal(
-               'Reset all personal settings to defaults?',
-               () => {
-                  requestSetMySettings({
-                     persona_description: '',
-                     persona_mode: 'append',
-                     location: '',
-                     timezone: 'UTC',
-                     units: 'metric',
-                     theme: 'cyan',
-                     // v44 identity fields cleared on reset (NULLIF in SQL)
-                     real_name: '',
-                     identity_aliases: '',
-                     preferred_address: '',
-                  });
-                  // Apply theme immediately
-                  if (callbacks.setTheme) {
-                     callbacks.setTheme('cyan');
-                  }
-                  // Refresh form after a moment
-                  setTimeout(requestGetMySettings, 500);
-               },
-               { title: 'Reset Settings', okText: 'Reset' }
-            );
+      if (resetBtn) {
+         resetBtn.addEventListener('click', async () => {
+            if (
+               !(await DawnDialog.confirm('Reset all personal settings to defaults?', {
+                  title: 'Reset Settings',
+                  okText: 'Reset',
+               }))
+            ) {
+               return;
+            }
+            requestSetMySettings({
+               persona_description: '',
+               persona_mode: 'append',
+               location: '',
+               timezone: 'UTC',
+               units: 'metric',
+               theme: 'cyan',
+               // v44 identity fields cleared on reset (NULLIF in SQL)
+               real_name: '',
+               identity_aliases: '',
+               preferred_address: '',
+            });
+            // Apply theme immediately
+            if (callbacks.setTheme) {
+               callbacks.setTheme('cyan');
+            }
+            // Refresh form after a moment
+            setTimeout(requestGetMySettings, 500);
          });
       }
 
@@ -299,7 +323,10 @@
             header.addEventListener('click', () => {
                setTimeout(() => {
                   const authState = callbacks.getAuthState ? callbacks.getAuthState() : {};
-                  if (!section.classList.contains('collapsed') && authState.authenticated) {
+                  if (section.classList.contains('collapsed')) {
+                     // Collapsing discards an unsaved theme preview.
+                     revertUnsavedTheme();
+                  } else if (authState.authenticated) {
                      requestGetMySettings();
                   }
                }, 50);
@@ -312,7 +339,6 @@
     * Set callbacks for shared utilities
     */
    function setCallbacks(cbs) {
-      if (cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
       if (cbs.setTheme) callbacks.setTheme = cbs.setTheme;
       if (cbs.getAuthState) callbacks.getAuthState = cbs.getAuthState;
    }
@@ -328,5 +354,6 @@
       requestSet: requestSetMySettings,
       handleGetResponse: handleGetMySettingsResponse,
       handleSetResponse: handleSetMySettingsResponse,
+      revertUnsavedTheme: revertUnsavedTheme,
    };
 })();

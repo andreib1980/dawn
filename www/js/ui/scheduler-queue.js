@@ -1095,18 +1095,9 @@
    }
 
    function onListKeydown(e) {
-      if (e.key === 'Escape') {
-         if (state.menuOpenForId !== null) {
-            closeMenu();
-            e.stopPropagation();
-            return;
-         }
-         if (state.armedRowId !== null) {
-            clearArm();
-            e.stopPropagation();
-            return;
-         }
-      }
+      // Escape (staged menu → armed-row → close-panel) is handled by the
+      // DawnEscStack registration in open(); this handler owns only the
+      // row-level Delete/Backspace/Enter shortcuts.
       if (e.key === 'Delete' || e.key === 'Backspace' || e.key === 'Enter') {
          const row = e.target.closest('.sched-row');
          /* Enter on a child element (e.g. the trash button) already fires
@@ -1305,6 +1296,21 @@
       els.popover.classList.remove('hidden');
       if (els.btn) els.btn.setAttribute('aria-expanded', 'true');
       state.isOpen = true;
+      /* Staged Escape on the global stack: close an open row menu first, then an
+       * armed row, then the panel. */
+      if (state.escToken) DawnEscStack.unregister(state.escToken);
+      state.escToken = DawnEscStack.register(() => {
+         if (state.menuOpenForId !== null) {
+            closeMenu();
+            return true;
+         }
+         if (state.armedRowId !== null) {
+            clearArm();
+            return true;
+         }
+         close();
+         return true;
+      });
       sendList();
       startCountdown();
       /* Restore the correct pane (event list vs Watches) for the active tab —
@@ -1333,6 +1339,10 @@
       els.popover.classList.add('hidden');
       if (els.btn) els.btn.setAttribute('aria-expanded', 'false');
       state.isOpen = false;
+      if (state.escToken) {
+         DawnEscStack.unregister(state.escToken);
+         state.escToken = null;
+      }
       clearArm();
       disarmClearMissed();
       closeMenu();
@@ -1414,12 +1424,8 @@
          els.list.addEventListener('keydown', onListKeydown);
       }
 
-      /* Escape inside the popover closes it */
-      els.popover.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape' && state.armedRowId === null && state.menuOpenForId === null) {
-            close();
-         }
-      });
+      /* Escape (including the staged menu/armed-row cases) is handled via
+       * DawnEscStack — registered in open(), unregistered in close(). */
 
       state.docClickHandler = onDocClick;
       document.addEventListener('click', state.docClickHandler, true);

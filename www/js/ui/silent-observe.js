@@ -168,12 +168,20 @@
       }
    }
 
+   let peekEscToken = null; // DawnEscStack registration while the peek is visible
+
    function setPeekVisible(visible) {
       const peek = el('silent-observe-peek');
       const rail = el('silent-observe-rail');
       if (!peek) return;
       if (visible) {
          peek.classList.remove('hidden');
+         if (peekEscToken === null) {
+            peekEscToken = DawnEscStack.register(() => {
+               dismissPeek();
+               return true;
+            });
+         }
          if (rail) rail.setAttribute('aria-expanded', 'true');
          renderPeekList();
          renderWarningChip();
@@ -183,6 +191,10 @@
          if (closeBtn) closeBtn.focus();
       } else {
          peek.classList.add('hidden');
+         if (peekEscToken !== null) {
+            DawnEscStack.unregister(peekEscToken);
+            peekEscToken = null;
+         }
          if (rail) {
             rail.setAttribute('aria-expanded', 'false');
             // Restore focus to the rail button so the focus ring doesn't fall
@@ -270,13 +282,8 @@
             if (ev.key === 'Enter' || ev.key === ' ') dismissChip(ev);
          });
       }
-      // Esc dismisses the peek when visible.
-      document.addEventListener('keydown', (ev) => {
-         if (ev.key === 'Escape' && isPeekVisible()) {
-            ev.preventDefault();
-            dismissPeek();
-         }
-      });
+      // Esc dismiss is handled via DawnEscStack (register-on-show in
+      // setPeekVisible / unregister on hide).
       // Click outside the peek to dismiss (but ignore clicks on the rail
       // button itself — that toggle is already handled).
       document.addEventListener('click', (ev) => {

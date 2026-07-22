@@ -39,8 +39,6 @@
 
    // Callbacks for shared utilities
    let callbacks = {
-      showConfirmModal: null,
-      showInputModal: null,
       getAuthState: null,
       trapFocus: null,
    };
@@ -48,6 +46,7 @@
    // Focus management state
    let focusTrapCleanup = null;
    let triggerElement = null;
+   let memoryEscToken = null; // DawnEscStack registration while the panel is open
 
    /* Phase 2 entity-merge: one-shot flag so auto-route-to-Graph fires
     * on the FIRST open per page-load when proposals are pending, then
@@ -647,6 +646,7 @@
    }
 
    let sourceModalTrigger = null;
+   let sourceEscToken = null; // DawnEscStack registration while the source modal is open
 
    function openSourceModal(factId) {
       const modal = document.getElementById('memory-source-modal');
@@ -655,6 +655,12 @@
       sourceModalTrigger = document.activeElement;
       body.innerHTML = '<p class="memory-source-loading">Loading…</p>';
       modal.classList.remove('hidden');
+      if (sourceEscToken === null) {
+         sourceEscToken = DawnEscStack.register(() => {
+            closeSourceModal();
+            return true;
+         });
+      }
       const closeBtn = document.getElementById('memory-source-close');
       if (closeBtn) closeBtn.focus();
       if (typeof DawnWS !== 'undefined' && DawnWS.isConnected()) {
@@ -665,6 +671,10 @@
    function closeSourceModal() {
       const modal = document.getElementById('memory-source-modal');
       if (modal) modal.classList.add('hidden');
+      if (sourceEscToken !== null) {
+         DawnEscStack.unregister(sourceEscToken);
+         sourceEscToken = null;
+      }
       if (sourceModalTrigger && typeof sourceModalTrigger.focus === 'function') {
          sourceModalTrigger.focus();
          sourceModalTrigger = null;
@@ -988,7 +998,7 @@
       target.click();
    }
 
-   function handleListClick(e) {
+   async function handleListClick(e) {
       /* Phase 1 entity-merge dispatch — runs FIRST so that:
        *   (a) when merge mode is active, a click on any non-source entity
        *       card lands as the target even on its relation-target /
@@ -1057,60 +1067,35 @@
          const fact = memoryState.facts.find((f) => f.id === parseInt(factId, 10));
          const detail = fact ? fact.fact_text : null;
 
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal(
-               'Delete this fact?',
-               () => {
-                  requestDeleteFact(parseInt(factId, 10));
-               },
-               { detail: detail, danger: true }
-            );
-         } else {
+         if (await DawnDialog.confirm('Delete this fact?', { detail: detail, danger: true })) {
             requestDeleteFact(parseInt(factId, 10));
          }
       } else if (prefCategory) {
          const pref = memoryState.preferences.find((p) => p.category === prefCategory);
          const detail = pref ? `${pref.category}: ${pref.value}` : null;
 
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal(
-               'Delete this preference?',
-               () => {
-                  requestDeletePreference(prefCategory);
-               },
-               { detail: detail, danger: true }
-            );
-         } else {
+         if (
+            await DawnDialog.confirm('Delete this preference?', { detail: detail, danger: true })
+         ) {
             requestDeletePreference(prefCategory);
          }
       } else if (summaryId) {
          const summary = memoryState.summaries.find((s) => s.id === parseInt(summaryId, 10));
          const detail = summary ? summary.summary : null;
 
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal(
-               'Delete this summary?',
-               () => {
-                  requestDeleteSummary(parseInt(summaryId, 10));
-               },
-               { detail: detail, danger: true }
-            );
-         } else {
+         if (await DawnDialog.confirm('Delete this summary?', { detail: detail, danger: true })) {
             requestDeleteSummary(parseInt(summaryId, 10));
          }
       } else if (entityId) {
          const entity = memoryState.entities.find((e) => e.id === parseInt(entityId, 10));
          const detail = entity ? `${entity.name} (${entity.entity_type})` : null;
 
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal(
-               'Delete this entity and its relations?',
-               () => {
-                  requestDeleteEntity(parseInt(entityId, 10));
-               },
-               { detail: detail, danger: true }
-            );
-         } else {
+         if (
+            await DawnDialog.confirm('Delete this entity and its relations?', {
+               detail: detail,
+               danger: true,
+            })
+         ) {
             requestDeleteEntity(parseInt(entityId, 10));
          }
       }
@@ -1191,7 +1176,12 @@
 
       // Add click-outside listener
       document.addEventListener('click', handleClickOutside);
-      document.addEventListener('keydown', handleKeyDown);
+      if (memoryEscToken === null) {
+         memoryEscToken = DawnEscStack.register(() => {
+            close();
+            return true;
+         });
+      }
    }
 
    function close() {
@@ -1221,7 +1211,10 @@
 
       // Remove listeners
       document.removeEventListener('click', handleClickOutside);
-      document.removeEventListener('keydown', handleKeyDown);
+      if (memoryEscToken !== null) {
+         DawnEscStack.unregister(memoryEscToken);
+         memoryEscToken = null;
+      }
    }
 
    function toggle() {
@@ -1252,14 +1245,9 @@
       }
    }
 
-   function handleKeyDown(e) {
-      if (e.key === 'Escape') {
-         // Let the contact modal handle its own Escape
-         const contactModal = document.getElementById('contact-modal');
-         if (contactModal && !contactModal.classList.contains('hidden')) return;
-         close();
-      }
-   }
+   /* Escape close is handled via DawnEscStack (register-on-open in open() /
+    * unregister in close()).  A modal opened above the panel (contact, source)
+    * registers higher on the stack, so LIFO closes it first — no manual guard. */
 
    /* =============================================================================
     * Tab Handling
@@ -1361,24 +1349,18 @@
     * Forget All Handling
     * ============================================================================= */
 
-   function handleForgetAll() {
-      if (callbacks.showInputModal) {
-         callbacks.showInputModal(
-            'Type DELETE to confirm forgetting all memories.',
-            '',
-            (value) => {
-               if (value && value.toUpperCase() === 'DELETE') {
-                  requestDeleteAll();
-               } else if (value) {
-                  if (typeof DawnToast !== 'undefined') {
-                     DawnToast.show('You must type DELETE to confirm', 'error');
-                  }
-               }
-            },
-            { title: 'Forget Everything?', placeholder: 'DELETE' }
-         );
-      } else if (confirm('Are you sure you want to delete ALL memories? This cannot be undone.')) {
+   async function handleForgetAll() {
+      const value = await DawnDialog.prompt('Type DELETE to confirm forgetting all memories.', '', {
+         title: 'Forget Everything?',
+         placeholder: 'DELETE',
+      });
+      if (value == null) return; // cancelled
+      if (value.toUpperCase() === 'DELETE') {
          requestDeleteAll();
+      } else if (value) {
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show('You must type DELETE to confirm', 'error');
+         }
       }
    }
 
@@ -1475,8 +1457,6 @@
    function init(options) {
       // Store callbacks
       if (options) {
-         callbacks.showConfirmModal = options.showConfirmModal;
-         callbacks.showInputModal = options.showInputModal;
          callbacks.getAuthState = options.getAuthState;
          callbacks.trapFocus = options.trapFocus;
       }
@@ -1579,12 +1559,8 @@
          srcModal.addEventListener('click', (e) => {
             if (e.target === srcModal) closeSourceModal();
          });
-         srcModal.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-               e.stopPropagation();
-               closeSourceModal();
-            }
-         });
+         // Escape close is handled via DawnEscStack (register-on-open in
+         // openSourceModal / unregister in closeSourceModal).
       }
 
       // Initialize contacts module

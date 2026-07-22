@@ -6,7 +6,6 @@
    'use strict';
 
    let callbacks = {
-      showConfirmModal: null,
       getAuthState: null,
    };
 
@@ -428,7 +427,7 @@
       requestListCalendars(accountId);
    }
 
-   function removeAccount(id, name, authType, oauthKey) {
+   async function removeAccount(id, name, authType, oauthKey) {
       /* Check if the other service shares this OAuth connection */
       var emailShares = false;
       if (
@@ -452,24 +451,14 @@
          msg += ' OAuth tokens will be revoked.';
       }
 
-      if (callbacks.showConfirmModal) {
-         callbacks.showConfirmModal(
-            msg,
-            function () {
-               /* Only revoke OAuth if no other service uses it */
-               if (
-                  authType === 'oauth' &&
-                  oauthKey &&
-                  !emailShares &&
-                  typeof DawnOAuth !== 'undefined'
-               ) {
-                  DawnOAuth.disconnect('google', oauthKey);
-               }
-               requestRemoveAccount(id);
-            },
-            { title: 'Remove Calendar Account', okText: 'Remove', danger: true }
-         );
-      } else if (confirm(msg)) {
+      if (
+         await DawnDialog.confirm(msg, {
+            title: 'Remove Calendar Account',
+            okText: 'Remove',
+            danger: true,
+         })
+      ) {
+         /* Only revoke OAuth if no other service uses it */
          if (authType === 'oauth' && oauthKey && !emailShares && typeof DawnOAuth !== 'undefined') {
             DawnOAuth.disconnect('google', oauthKey);
          }
@@ -494,6 +483,7 @@
 
    let editModalTriggerElement = null;
    let editModalTrapCleanup = null;
+   let editEscToken = null; // DawnEscStack registration while the edit modal is open
 
    function showEditAccountModal(acct) {
       editModalTriggerElement = document.activeElement;
@@ -550,14 +540,9 @@
          modal.addEventListener('click', (e) => {
             if (e.target === modal) hideEditAccountModal();
          });
-         /* Escape closes the modal.  Tab/Shift+Tab cycling is owned
-          * by the shared DawnSettingsModals.trapFocus helper, wired
-          * at show-time (see showEditAccountModal below) so it
-          * re-queries focusables per keypress instead of caching
-          * stale references. */
-         modal.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') hideEditAccountModal();
-         });
+         /* Escape close is handled via DawnEscStack (register-on-show in
+          * showEditAccountModal / unregister in hideEditAccountModal).
+          * Tab/Shift+Tab cycling is owned by DawnSettingsModals.trapFocus. */
          document
             .getElementById('calendar-edit-form')
             .addEventListener('submit', handleEditFormSubmit);
@@ -580,6 +565,12 @@
       document.getElementById('cal-edit-password').value = '';
 
       modal.classList.remove('hidden');
+      if (editEscToken === null) {
+         editEscToken = DawnEscStack.register(() => {
+            hideEditAccountModal();
+            return true;
+         });
+      }
       document.getElementById('cal-edit-name').focus();
       /* Trap Tab within the modal.  skipInitialFocus because we
        * focused cal-edit-name above. */
@@ -592,6 +583,10 @@
    function hideEditAccountModal() {
       const modal = document.getElementById('calendar-edit-modal');
       if (modal) modal.classList.add('hidden');
+      if (editEscToken !== null) {
+         DawnEscStack.unregister(editEscToken);
+         editEscToken = null;
+      }
       if (editModalTrapCleanup) {
          editModalTrapCleanup();
          editModalTrapCleanup = null;
@@ -652,6 +647,7 @@
 
    let modalTriggerElement = null;
    let addModalTrapCleanup = null;
+   let addEscToken = null; // DawnEscStack registration while the add modal is open
 
    function showAddAccountModal() {
       modalTriggerElement = document.activeElement;
@@ -807,9 +803,8 @@
           * `.oauth-field-hidden` class sets display:none, which the
           * helper's getClientRects-based rendered-check filters out
           * for free — no separate carve-out needed. */
-         modal.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape') hideAddAccountModal();
-         });
+         /* Escape close is handled via DawnEscStack (register-on-show in
+          * showAddAccountModal / unregister in hideAddAccountModal). */
 
          /* Click outside to close */
          modal.addEventListener('click', function (e) {
@@ -825,6 +820,12 @@
       clearFormErrors();
       resetSubmitButton();
       modal.classList.remove('hidden');
+      if (addEscToken === null) {
+         addEscToken = DawnEscStack.register(() => {
+            hideAddAccountModal();
+            return true;
+         });
+      }
 
       /* Focus first input */
       setTimeout(function () {
@@ -844,6 +845,10 @@
       if (modal) modal.classList.add('hidden');
       resetSubmitButton();
       resetOAuthState();
+      if (addEscToken !== null) {
+         DawnEscStack.unregister(addEscToken);
+         addEscToken = null;
+      }
       if (addModalTrapCleanup) {
          addModalTrapCleanup();
          addModalTrapCleanup = null;
@@ -1166,7 +1171,6 @@
    }
 
    function setCallbacks(cbs) {
-      if (cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
       if (cbs.getAuthState) callbacks.getAuthState = cbs.getAuthState;
    }
 

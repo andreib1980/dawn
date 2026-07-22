@@ -11,7 +11,7 @@
    'use strict';
 
    // TTS state (persisted to localStorage)
-   let ttsEnabled = localStorage.getItem('ttsEnabled') === 'true';
+   let ttsEnabled = DawnStore.getBool(DawnStore.KEYS.TTS_ENABLED, false);
 
    /**
     * Check if TTS is currently enabled
@@ -32,7 +32,7 @@
       const { notifyServer = true, stopPlayback = true } = options;
 
       ttsEnabled = enabled;
-      localStorage.setItem('ttsEnabled', ttsEnabled);
+      DawnStore.setBool(DawnStore.KEYS.TTS_ENABLED, ttsEnabled);
       updateUI(ttsEnabled);
 
       // Stop any currently playing audio when disabling

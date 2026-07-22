@@ -10,7 +10,6 @@
     * ============================================================================= */
 
    let callbacks = {
-      showConfirmModal: null,
       getAuthState: null,
    };
 
@@ -100,14 +99,15 @@
 
       // Attach revoke handlers
       list.querySelectorAll('.btn-revoke').forEach((btn) => {
-         btn.addEventListener('click', () => {
+         btn.addEventListener('click', async () => {
             const prefix = btn.dataset.prefix;
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(
+            if (
+               await DawnDialog.confirm(
                   'Are you sure you want to revoke this session? The device will be logged out.',
-                  () => requestRevokeSession(prefix),
-                  { title: 'Revoke Session', okText: 'Revoke' }
-               );
+                  { title: 'Revoke Session', okText: 'Revoke', danger: true }
+               )
+            ) {
+               requestRevokeSession(prefix);
             }
          });
       });
@@ -215,7 +215,6 @@
     * Set callbacks for shared utilities
     */
    function setCallbacks(cbs) {
-      if (cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
       if (cbs.getAuthState) callbacks.getAuthState = cbs.getAuthState;
    }
 

@@ -15,6 +15,7 @@
    /* Cleanup fn returned by DawnSettingsModals.trapFocus when the
     * modal opens; null when closed. */
    let contactModalTrapCleanup = null;
+   let contactEscToken = null; // DawnEscStack registration while the modal is open
 
    let state = {
       contacts: [],
@@ -467,7 +468,10 @@
 
       updateValueInputType(typeSelect.value);
       modal.classList.remove('hidden');
-      document.addEventListener('keydown', handleModalKeydown);
+      contactEscToken = DawnEscStack.register(() => {
+         closeModal();
+         return true;
+      });
       if (!contact) {
          nameInput.focus();
       } else {
@@ -481,16 +485,16 @@
       }
    }
 
-   /* Escape closes the modal.  Tab cycling owned by
+   /* Escape close is handled via DawnEscStack (register-on-open in openModal /
+    * unregister-on-close here).  Tab cycling owned by
     * DawnSettingsModals.trapFocus wired in openModal. */
-   function handleModalKeydown(e) {
-      if (e.key === 'Escape') closeModal();
-   }
-
    function closeModal() {
       const modal = document.getElementById('contact-modal');
       if (modal) modal.classList.add('hidden');
-      document.removeEventListener('keydown', handleModalKeydown);
+      if (contactEscToken !== null) {
+         DawnEscStack.unregister(contactEscToken);
+         contactEscToken = null;
+      }
       if (contactModalTrapCleanup) {
          contactModalTrapCleanup();
          contactModalTrapCleanup = null;
@@ -969,7 +973,7 @@
     * Event Delegation
     * ============================================================================= */
 
-   function handleListClick(e) {
+   async function handleListClick(e) {
       const actionEl = e.target.closest('[data-action]');
       if (!actionEl) return;
 
@@ -986,7 +990,13 @@
             break;
          }
          case 'delete':
-            if (confirm('Delete this contact?')) {
+            if (
+               await DawnDialog.confirm('Delete this contact?', {
+                  title: 'Delete Contact',
+                  okText: 'Delete',
+                  danger: true,
+               })
+            ) {
                requestDelete(parseInt(contactId, 10));
             }
             break;

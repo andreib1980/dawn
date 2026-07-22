@@ -11,6 +11,14 @@
    let pendingConfirmCallback = null;
    let pendingInputCallback = null;
    let modalTriggerElement = null; // Track element to return focus to (M13)
+   // One-shot outcome callbacks used by the Promise wrapper (DawnDialog).  Fired
+   // exactly once on any close path (confirm/cancel/backdrop/Escape) then nulled.
+   let pendingConfirmOnClose = null;
+   let pendingInputOnClose = null;
+   // DawnEscStack tokens — registered while the modal is shown, unregistered on
+   // hide, so Escape closes the topmost layer without a standing document listener.
+   let confirmEscToken = null;
+   let inputEscToken = null;
 
    /**
     * Focus trap for modals — keeps Tab key cycling within the modal.
@@ -100,12 +108,18 @@
     * @param {string} options.cancelText - Cancel button text (default: "Cancel")
     * @param {boolean} options.danger - If true, styles OK button as danger/red
     * @param {string} options.detail - Optional detail text to show (e.g., item being deleted)
+    * @param {boolean} options.okOnly - If true, hide the Cancel button (alert-style)
+    * @param {Function} options.onClose - Called once with the boolean outcome on
+    *   any close path (confirm/cancel/backdrop/Escape).  Used by DawnDialog.
     */
    function showConfirmModal(message, onConfirm, options = {}) {
       const modal = document.getElementById('confirm-modal');
       if (!modal) {
-         // Fallback to native confirm if modal not found
-         if (confirm(message) && onConfirm) onConfirm();
+         // Fallback to native confirm if the modal DOM is absent (e.g. login page).
+         // Still resolve onClose so a Promise wrapper never hangs.
+         const result = confirm(message);
+         if (result && onConfirm) onConfirm();
+         if (typeof options.onClose === 'function') options.onClose(result);
          return;
       }
 
@@ -120,7 +134,11 @@
       if (titleEl) titleEl.textContent = options.title || 'Confirm';
       if (messageEl) messageEl.textContent = message;
       if (okBtn) okBtn.textContent = options.okText || 'OK';
-      if (cancelBtn) cancelBtn.textContent = options.cancelText || 'Cancel';
+      if (cancelBtn) {
+         cancelBtn.textContent = options.cancelText || 'Cancel';
+         // Alert-style: hide Cancel entirely (reuses the .hidden idiom).
+         cancelBtn.classList.toggle('hidden', !!options.okOnly);
+      }
 
       // Set detail text if provided
       if (detailEl) {
@@ -140,11 +158,19 @@
 
       // Store callback and trigger element for focus restoration (M13)
       pendingConfirmCallback = onConfirm;
+      pendingConfirmOnClose = typeof options.onClose === 'function' ? options.onClose : null;
       modalTriggerElement = document.activeElement;
 
       // Show modal
       modal.classList.remove('hidden');
       confirmModalCleanup = trapFocus(modal);
+      // Unregister any stale token first (defensive — a direct show while one is
+      // pending would otherwise orphan the prior registration on the stack).
+      if (confirmEscToken !== null) DawnEscStack.unregister(confirmEscToken);
+      confirmEscToken = DawnEscStack.register(() => {
+         hideConfirmModal(false);
+         return true;
+      });
    }
 
    /**
@@ -160,11 +186,22 @@
             confirmModalCleanup = null;
          }
       }
+      if (confirmEscToken !== null) {
+         DawnEscStack.unregister(confirmEscToken);
+         confirmEscToken = null;
+      }
 
       if (confirmed && pendingConfirmCallback) {
          pendingConfirmCallback();
       }
       pendingConfirmCallback = null;
+
+      // Fire the one-shot outcome callback (Promise wrapper) exactly once.
+      if (pendingConfirmOnClose) {
+         const cb = pendingConfirmOnClose;
+         pendingConfirmOnClose = null;
+         cb(confirmed);
+      }
 
       // Restore focus to trigger element (M13)
       if (modalTriggerElement && typeof modalTriggerElement.focus === 'function') {
@@ -195,12 +232,8 @@
          });
       }
 
-      // Close on Escape key
-      document.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
-            hideConfirmModal(false);
-         }
-      });
+      // Escape close is handled via DawnEscStack (register-on-show in
+      // showConfirmModal / unregister-on-hide in hideConfirmModal).
    }
 
    /**
@@ -213,13 +246,17 @@
     * @param {string} options.okText - OK button text (default: "OK")
     * @param {string} options.cancelText - Cancel button text (default: "Cancel")
     * @param {string} options.placeholder - Input placeholder text
+    * @param {Function} options.onClose - Called once with the entered string on
+    *   submit, or null on cancel/backdrop/Escape.  Used by DawnDialog.
     */
    function showInputModal(message, defaultValue, onSubmit, options = {}) {
       const modal = document.getElementById('input-modal');
       if (!modal) {
-         // Fallback to native prompt if modal not found
+         // Fallback to native prompt if the modal DOM is absent.  Still resolve
+         // onClose so a Promise wrapper never hangs.
          const result = prompt(message, defaultValue);
          if (result !== null && onSubmit) onSubmit(result);
+         if (typeof options.onClose === 'function') options.onClose(result);
          return;
       }
 
@@ -244,11 +281,17 @@
 
       // Store callback and trigger element for focus restoration (M13)
       pendingInputCallback = onSubmit;
+      pendingInputOnClose = typeof options.onClose === 'function' ? options.onClose : null;
       modalTriggerElement = document.activeElement;
 
       // Show modal and focus input
       modal.classList.remove('hidden');
       inputModalCleanup = trapFocus(modal);
+      if (inputEscToken !== null) DawnEscStack.unregister(inputEscToken);
+      inputEscToken = DawnEscStack.register(() => {
+         hideInputModal(false);
+         return true;
+      });
 
       // Focus and select input text
       if (inputEl) {
@@ -272,11 +315,24 @@
             inputModalCleanup = null;
          }
       }
+      if (inputEscToken !== null) {
+         DawnEscStack.unregister(inputEscToken);
+         inputEscToken = null;
+      }
 
+      const submittedValue = submitted && inputEl ? inputEl.value : null;
       if (submitted && pendingInputCallback && inputEl) {
          pendingInputCallback(inputEl.value);
       }
       pendingInputCallback = null;
+
+      // Fire the one-shot outcome callback (Promise wrapper): value on submit,
+      // null on cancel/backdrop/Escape.
+      if (pendingInputOnClose) {
+         const cb = pendingInputOnClose;
+         pendingInputOnClose = null;
+         cb(submittedValue);
+      }
 
       // Restore focus to trigger element (M13)
       if (modalTriggerElement && typeof modalTriggerElement.focus === 'function') {
@@ -318,12 +374,8 @@
          });
       }
 
-      // Close on Escape key
-      document.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
-            hideInputModal(false);
-         }
-      });
+      // Escape close is handled via DawnEscStack (register-on-show in
+      // showInputModal / unregister-on-hide in hideInputModal).
    }
 
    // Export for settings module

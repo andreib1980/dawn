@@ -10,9 +10,26 @@
     * ============================================================================= */
 
    let activeModalCleanup = null;
+   let activeModalEscToken = null; // DawnEscStack registration for the open user modal
+
+   // Register the open modal's Escape-dismiss on the global stack (single slot —
+   // only one user modal is open at a time, mirroring activeModalCleanup).
+   function registerModalEsc(hideFn) {
+      if (activeModalEscToken !== null) DawnEscStack.unregister(activeModalEscToken);
+      activeModalEscToken = DawnEscStack.register(() => {
+         hideFn();
+         return true;
+      });
+   }
+
+   function unregisterModalEsc() {
+      if (activeModalEscToken !== null) {
+         DawnEscStack.unregister(activeModalEscToken);
+         activeModalEscToken = null;
+      }
+   }
    let callbacks = {
       trapFocus: null,
-      showConfirmModal: null,
       getAuthState: null,
    };
 
@@ -143,15 +160,14 @@
             unlockBtn.title = 'Unlock user';
             unlockBtn.innerHTML =
                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.83-1.17"/><circle cx="12" cy="15" r="1.5"/><path d="M12 16.5V18"/></svg>';
-            unlockBtn.addEventListener('click', () => {
-               if (callbacks.showConfirmModal) {
-                  callbacks.showConfirmModal(
-                     'Unlock user "' + user.username + '"?',
-                     () => {
-                        requestUnlockUser(user.username);
-                     },
-                     { title: 'Unlock User', okText: 'Unlock' }
-                  );
+            unlockBtn.addEventListener('click', async () => {
+               if (
+                  await DawnDialog.confirm('Unlock user "' + user.username + '"?', {
+                     title: 'Unlock User',
+                     okText: 'Unlock',
+                  })
+               ) {
+                  requestUnlockUser(user.username);
                }
             });
             actions.appendChild(unlockBtn);
@@ -164,15 +180,14 @@
             deleteBtn.title = 'Delete user';
             deleteBtn.innerHTML =
                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 3h4"/><path d="M6 7l1.5 13a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1L18 7"/><path d="M10 11v6" opacity="0.6"/><path d="M14 11v6" opacity="0.6"/></svg>';
-            deleteBtn.addEventListener('click', () => {
-               if (callbacks.showConfirmModal) {
-                  callbacks.showConfirmModal(
+            deleteBtn.addEventListener('click', async () => {
+               if (
+                  await DawnDialog.confirm(
                      'Delete user "' + user.username + '"?\n\nThis action cannot be undone.',
-                     () => {
-                        requestDeleteUser(user.username);
-                     },
                      { title: 'Delete User', okText: 'Delete', danger: true }
-                  );
+                  )
+               ) {
+                  requestDeleteUser(user.username);
                }
             });
             actions.appendChild(deleteBtn);
@@ -270,6 +285,7 @@
       const modal = document.getElementById('add-user-modal');
       if (modal) {
          modal.classList.remove('hidden');
+         registerModalEsc(hideAddUserModal);
          const form = document.getElementById('add-user-form');
          if (form) form.reset();
          if (callbacks.trapFocus) {
@@ -282,6 +298,7 @@
       const modal = document.getElementById('add-user-modal');
       if (modal) {
          modal.classList.add('hidden');
+         unregisterModalEsc();
          if (activeModalCleanup) {
             activeModalCleanup();
             activeModalCleanup = null;
@@ -293,6 +310,7 @@
       const modal = document.getElementById('reset-password-modal');
       if (modal) {
          modal.classList.remove('hidden');
+         registerModalEsc(hideResetPasswordModal);
          const usernameField = document.getElementById('reset-password-username');
          if (usernameField) usernameField.value = username;
          const passwordField = document.getElementById('reset-password-new');
@@ -307,6 +325,7 @@
       const modal = document.getElementById('reset-password-modal');
       if (modal) {
          modal.classList.add('hidden');
+         unregisterModalEsc();
          if (activeModalCleanup) {
             activeModalCleanup();
             activeModalCleanup = null;
@@ -403,14 +422,9 @@
          });
       });
 
-      // Escape key to close modals
-      document.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape') {
-            document.querySelectorAll('.modal:not(.hidden)').forEach((modal) => {
-               modal.classList.add('hidden');
-            });
-         }
-      });
+      // Escape close is handled per-modal via DawnEscStack (registerModalEsc on
+      // show / unregisterModalEsc on hide), so it stacks correctly under any
+      // layer opened above a user modal.
    }
 
    /**
@@ -418,7 +432,6 @@
     */
    function setCallbacks(cbs) {
       if (cbs.trapFocus) callbacks.trapFocus = cbs.trapFocus;
-      if (cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
       if (cbs.getAuthState) callbacks.getAuthState = cbs.getAuthState;
    }
 

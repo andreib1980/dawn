@@ -16,13 +16,7 @@
    // =============================================================================
    let currentState = 'idle';
    // Persisted across hard refreshes (localStorage); see setDebugMode.
-   let debugMode = (() => {
-      try {
-         return localStorage.getItem('dawn_debug_mode') === 'true';
-      } catch (e) {
-         return false;
-      }
-   })();
+   let debugMode = DawnStore.getBool(DawnStore.KEYS.DEBUG_MODE, false);
    let isRecording = false;
    let audioSupported = false;
 
@@ -146,11 +140,7 @@
       getDebugMode: () => debugMode,
       setDebugMode: (mode) => {
          debugMode = mode;
-         try {
-            localStorage.setItem('dawn_debug_mode', mode ? 'true' : 'false');
-         } catch (e) {
-            /* localStorage unavailable — keep in-memory only */
-         }
+         DawnStore.setBool(DawnStore.KEYS.DEBUG_MODE, mode);
       },
 
       getIsRecording: () => isRecording,

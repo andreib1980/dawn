@@ -13,10 +13,11 @@
    let isOpen = false;
    let triggerElement = null;
    let focusTrapCleanup = null;
+   let escToken = null; /* DawnEscStack registration while the popover is open */
    let featureEnabled = false; /* [code_projects].enabled from server config */
    let activeTab = 'import'; /* 'import' | 'link' — creation-path tab */
    let tablist = null; /* DawnTablist binding (arrow-key/roving-tabindex a11y) */
-   const callbacks = { trapFocus: null, showConfirmModal: null };
+   const callbacks = { trapFocus: null };
 
    /* ---- escaping -------------------------------------------------------- */
    function escapeHtml(str) {
@@ -65,6 +66,10 @@
          el.btn.setAttribute('aria-expanded', 'true');
       }
       isOpen = true;
+      escToken = DawnEscStack.register(() => {
+         close();
+         return true;
+      });
       if (callbacks.trapFocus) {
          focusTrapCleanup = callbacks.trapFocus(el.popover);
       }
@@ -79,6 +84,10 @@
          el.btn.setAttribute('aria-expanded', 'false');
       }
       isOpen = false;
+      if (escToken !== null) {
+         DawnEscStack.unregister(escToken);
+         escToken = null;
+      }
       if (focusTrapCleanup) {
          focusTrapCleanup();
          focusTrapCleanup = null;
@@ -169,27 +178,34 @@
       DawnWS.send({ type: 'code_projects_rebuild', payload: { name: name } });
    }
 
-   function setBranchProject(name, currentBranch) {
+   async function setBranchProject(name, currentBranch) {
       if (!wsReady() || !name) return;
-      /* TODO: replace with styledPrompt() when that themed/focus-trapped primitive
-       * ships (Odysseus Tier-0 quick-win); native prompt breaks the panel's chrome. */
-      const branch = window.prompt('Branch to track for "' + name + '":', currentBranch || '');
+      const branch = await DawnDialog.prompt(
+         'Branch to track for "' + name + '":',
+         currentBranch || '',
+         {
+            title: 'Set Branch',
+         }
+      );
       if (branch == null) return; /* cancelled */
       const trimmed = branch.trim();
       if (!trimmed) return;
       DawnWS.send({ type: 'code_projects_set_branch', payload: { name: name, branch: trimmed } });
    }
 
-   function deleteProject(name) {
+   async function deleteProject(name) {
       if (!wsReady() || !name) return;
-      const go = () => DawnWS.send({ type: 'code_projects_delete', payload: { name: name } });
       const message = 'Delete project "' + name + '"? This removes the clone and its index.';
       /* Project names are charset-limited ([a-z0-9_-]) so the textContent modal
        * renders them verbatim. */
-      if (callbacks.showConfirmModal) {
-         callbacks.showConfirmModal(message, go, { title: 'Delete project', okText: 'Delete' });
-      } else if (window.confirm(message)) {
-         go();
+      if (
+         await DawnDialog.confirm(message, {
+            title: 'Delete project',
+            okText: 'Delete',
+            danger: true,
+         })
+      ) {
+         DawnWS.send({ type: 'code_projects_delete', payload: { name: name } });
       }
    }
 
@@ -379,7 +395,6 @@
    function init(options) {
       if (options) {
          if (options.trapFocus) callbacks.trapFocus = options.trapFocus;
-         if (options.showConfirmModal) callbacks.showConfirmModal = options.showConfirmModal;
       }
       el.btn = document.getElementById('coding-btn');
       el.popover = document.getElementById('code-projects-popover');
@@ -418,9 +433,8 @@
          });
          tablist.sync();
       }
-      document.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape' && isOpen) close();
-      });
+      // Escape close is handled via DawnEscStack (register-on-open in open() /
+      // unregister-on-close in close()).
 
       updateVisibility();
    }

@@ -14,6 +14,9 @@
 
    const THEMES = ['cyan', 'purple', 'green', 'orange', 'red', 'blue', 'terminal'];
 
+   // KEEP IN SYNC: the pre-paint theme bootstrap COLORS maps in index.html and
+   // login.html (<head>) + js/core/storage.js KEYS.THEME.  Add/rename a theme →
+   // update all four.
    const THEME_COLORS = {
       cyan: '#2dd4bf',
       purple: '#a855f7',
@@ -45,7 +48,7 @@
       }
 
       // Persist to localStorage
-      localStorage.setItem('dawn_theme', theme);
+      DawnStore.set(DawnStore.KEYS.THEME, theme);
 
       // Update active button
       document.querySelectorAll('.theme-btn').forEach((btn) => {
@@ -63,7 +66,7 @@
     * Initialize theme from localStorage and bind button handlers
     */
    function initTheme() {
-      const saved = localStorage.getItem('dawn_theme');
+      const saved = DawnStore.get(DawnStore.KEYS.THEME, null);
       setTheme(saved || 'cyan');
 
       // Add click handlers to theme buttons

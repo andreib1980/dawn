@@ -111,12 +111,9 @@
          }
       });
 
-      // Keyboard navigation
+      // Keyboard navigation (Escape close handled via DawnEscStack in open/close)
       dropdownBtn.addEventListener('keydown', function (e) {
-         if (e.key === 'Escape') {
-            closeDropdown();
-            dropdownBtn.focus();
-         } else if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+         if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             if (dropdown.classList.contains('hidden')) {
                openDropdown();
@@ -140,9 +137,6 @@
             e.preventDefault();
             var prev = items[(idx - 1 + items.length) % items.length];
             if (prev) prev.focus();
-         } else if (e.key === 'Escape') {
-            closeDropdown();
-            dropdownBtn.focus();
          } else if (e.key === 'Home') {
             e.preventDefault();
             if (items[0]) items[0].focus();
@@ -153,11 +147,17 @@
       });
    }
 
+   var alwaysOnEscToken = null; // DawnEscStack registration while the menu is open
+
    function closeDropdown() {
       var dropdown = document.getElementById('action-dropdown');
       var btn = document.getElementById('action-dropdown-btn');
       if (dropdown) dropdown.classList.add('hidden');
       if (btn) btn.setAttribute('aria-expanded', 'false');
+      if (alwaysOnEscToken !== null) {
+         DawnEscStack.unregister(alwaysOnEscToken);
+         alwaysOnEscToken = null;
+      }
    }
 
    function openDropdown() {
@@ -165,6 +165,14 @@
       var btn = document.getElementById('action-dropdown-btn');
       if (dropdown) dropdown.classList.remove('hidden');
       if (btn) btn.setAttribute('aria-expanded', 'true');
+      if (alwaysOnEscToken === null) {
+         alwaysOnEscToken = DawnEscStack.register(function () {
+            closeDropdown();
+            var b = document.getElementById('action-dropdown-btn');
+            if (b) b.focus();
+            return true;
+         });
+      }
    }
 
    /**

@@ -75,13 +75,13 @@
             audio_codecs: opusReady ? ['opus', 'pcm'] : ['pcm'],
          };
 
-         // Get TTS preference from callback or localStorage
+         // Get TTS preference from callback or storage
          const ttsEnabled = callbacks.getTtsEnabled
             ? callbacks.getTtsEnabled()
-            : localStorage.getItem('ttsEnabled') === 'true';
+            : DawnStore.getBool(DawnStore.KEYS.TTS_ENABLED, false);
 
          // Try to reconnect with existing session token, or request new session
-         const savedToken = localStorage.getItem('dawn_session_token');
+         const savedToken = DawnStore.get(DawnStore.KEYS.SESSION_TOKEN, null);
          if (savedToken) {
             console.log('Attempting session reconnect with saved token');
             ws.send(
@@ -255,7 +255,7 @@
     * @returns {string|null} Session token or null if not available
     */
    function getSessionToken() {
-      return localStorage.getItem('dawn_session_token');
+      return DawnStore.get(DawnStore.KEYS.SESSION_TOKEN, null);
    }
 
    // Expose globally

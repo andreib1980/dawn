@@ -78,6 +78,7 @@
 
    /* Modal trigger restoration (focus return on close). */
    let modalTrigger = null;
+   let ciEscToken = null; // DawnEscStack registration while the info modal is open
 
    /* =============================================================================
     * Sanitization
@@ -479,6 +480,12 @@
       }
 
       modal.classList.remove('hidden');
+      if (ciEscToken === null) {
+         ciEscToken = DawnEscStack.register(() => {
+            closeInfoModal();
+            return true;
+         });
+      }
       const closeBtn = document.getElementById('context-injection-modal-close');
       if (closeBtn) closeBtn.focus();
    }
@@ -486,6 +493,10 @@
    function closeInfoModal() {
       const modal = document.getElementById('context-injection-modal');
       if (modal) modal.classList.add('hidden');
+      if (ciEscToken !== null) {
+         DawnEscStack.unregister(ciEscToken);
+         ciEscToken = null;
+      }
       /* M13: trigger element may have been removed by a conversation switch
        * or transcript clear while the modal was open — the focus call
        * would otherwise throw, leaving us in an inconsistent state. */
@@ -624,16 +635,9 @@
          modal.addEventListener('keydown', (ev) => handleModalTabTrap(modal, ev));
       }
 
-      /* C1: Esc bound at document level so it fires regardless of focus
-       * location.  Mirror silent-observe.js:274 — only closes when the modal
-       * is actually visible. */
-      document.addEventListener('keydown', (ev) => {
-         if (ev.key === 'Escape' && isModalOpen()) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            closeInfoModal();
-         }
-      });
+      /* Escape close is handled via DawnEscStack (register-on-open in
+       * openInfoModal / unregister in closeInfoModal), so it stacks under any
+       * layer opened above it. */
    }
 
    if (document.readyState === 'loading') {

@@ -191,6 +191,9 @@
    font-size: 0.9rem;
    animation: toast-in 0.3s ease;
    cursor: pointer;
+   /* Horizontal swipe-to-dismiss is handled in JS; let the browser keep
+    * vertical scrolling so a swipe doesn't fight the page. */
+   touch-action: pan-y;
 }
 
 .toast:focus-visible {
@@ -253,6 +256,14 @@
 
 .toast-action:hover {
    background: rgba(255, 255, 255, 0.4);
+}
+
+/* Undo/action buttons are a primary keyboard target — give them an explicit
+ * focus ring (mirrors .toast:focus-visible) so it's not lost on the translucent
+ * toast surfaces. */
+.toast-action:focus-visible {
+   outline: 2px solid #fff;
+   outline-offset: 2px;
 }
 
 .toast-fade-out {

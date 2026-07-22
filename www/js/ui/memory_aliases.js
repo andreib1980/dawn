@@ -574,28 +574,23 @@
          }
       }
 
-      const showConfirm = ctx && ctx.callbacks ? ctx.callbacks.showConfirmModal : null;
-      if (showConfirm) {
-         showConfirm(
-            `Soft-link "${linkSrcEnt.name}" → "${linkTgtEnt.name}"?`,
-            () => {
-               /* Phase 1 entity-merge: WebUI two-click defaults to soft alias. */
-               requestEntityLink(linkSrc, linkTgt, 'webui-operator');
-            },
-            {
-               detail:
-                  `"${linkSrcEnt.name}" will be marked as a soft alias of "${linkTgtEnt.name}". ` +
-                  'Both rows are preserved and the link is reversible — you can split it ' +
-                  'later from the alias panel. Use "dawn-admin memory entity consolidate" ' +
-                  'to make a soft link permanent.' +
-                  swappedHint,
-               danger: false,
-               okText: 'Soft-link',
-            }
-         );
-      } else {
-         requestEntityLink(linkSrc, linkTgt, 'webui-operator');
-      }
+      /* Fire-and-forget (not awaited) so this handler stays synchronous — the
+       * confirm was already non-blocking under the old callback API. */
+      DawnDialog.confirm(`Soft-link "${linkSrcEnt.name}" → "${linkTgtEnt.name}"?`, {
+         detail:
+            `"${linkSrcEnt.name}" will be marked as a soft alias of "${linkTgtEnt.name}". ` +
+            'Both rows are preserved and the link is reversible — you can split it ' +
+            'later from the alias panel. Use "dawn-admin memory entity consolidate" ' +
+            'to make a soft link permanent.' +
+            swappedHint,
+         danger: false,
+         okText: 'Soft-link',
+      })
+         .then((ok) => {
+            /* Phase 1 entity-merge: WebUI two-click defaults to soft alias. */
+            if (ok) requestEntityLink(linkSrc, linkTgt, 'webui-operator');
+         })
+         .catch(() => {});
    }
 
    /**
@@ -675,18 +670,19 @@
       if (splitBtn) {
          e.stopPropagation();
          const linkId = parseInt(splitBtn.dataset.linkId, 10);
-         const showConfirm = ctx && ctx.callbacks ? ctx.callbacks.showConfirmModal : null;
-         if (showConfirm) {
-            showConfirm('Split this alias?', () => requestEntityUnlink(linkId), {
-               detail:
-                  'The alias will be unlinked and surface again as its own entity. ' +
-                  'You can re-link later via the merge button.',
-               danger: false,
-               okText: 'Split',
-            });
-         } else {
-            requestEntityUnlink(linkId);
-         }
+         /* Fire-and-forget so tryHandleClick stays synchronous (its boolean
+          * return is consumed by the caller). */
+         DawnDialog.confirm('Split this alias?', {
+            detail:
+               'The alias will be unlinked and surface again as its own entity. ' +
+               'You can re-link later via the merge button.',
+            danger: false,
+            okText: 'Split',
+         })
+            .then((ok) => {
+               if (ok) requestEntityUnlink(linkId);
+            })
+            .catch(() => {});
          return true;
       }
 

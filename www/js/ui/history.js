@@ -32,14 +32,14 @@
    // Callbacks for shared utilities
    let callbacks = {
       trapFocus: null,
-      showConfirmModal: null,
-      showInputModal: null,
       getAuthState: null,
    };
 
    // Cleanup function for focus trap
    let historyFocusTrapCleanup = null;
    let reassignFocusTrapCleanup = null;
+   let historyEscToken = null; // DawnEscStack registration while the history panel is open
+   let reassignEscToken = null; // DawnEscStack registration while the reassign modal is open
 
    // Track pending delete to clear UI if deleting active conversation
    let pendingDeleteId = null;
@@ -1210,34 +1210,33 @@
          }
 
          const renameBtn = item.querySelector('[data-action="rename"]');
-         if (renameBtn && callbacks.showInputModal) {
-            renameBtn.addEventListener('click', (e) => {
+         if (renameBtn) {
+            renameBtn.addEventListener('click', async (e) => {
                e.stopPropagation();
                const title = item.querySelector('.history-item-title').textContent;
-               callbacks.showInputModal(
-                  '',
-                  title,
-                  (newTitle) => {
-                     if (newTitle && newTitle.trim() && newTitle !== title) {
-                        requestRenameConversation(convId, newTitle.trim());
-                     }
-                  },
-                  { title: 'Rename Conversation', okText: 'Rename' }
-               );
+               const newTitle = await DawnDialog.prompt('', title, {
+                  title: 'Rename Conversation',
+                  okText: 'Rename',
+               });
+               if (newTitle && newTitle.trim() && newTitle !== title) {
+                  requestRenameConversation(convId, newTitle.trim());
+               }
             });
          }
 
          const deleteBtn = item.querySelector('[data-action="delete"]');
-         if (deleteBtn && callbacks.showConfirmModal) {
-            deleteBtn.addEventListener('click', (e) => {
+         if (deleteBtn) {
+            deleteBtn.addEventListener('click', async (e) => {
                e.stopPropagation();
-               callbacks.showConfirmModal(
-                  'Delete this conversation?',
-                  () => {
-                     requestDeleteConversation(convId);
-                  },
-                  { title: 'Delete Conversation', okText: 'Delete', danger: true }
-               );
+               if (
+                  await DawnDialog.confirm('Delete this conversation?', {
+                     title: 'Delete Conversation',
+                     okText: 'Delete',
+                     danger: true,
+                  })
+               ) {
+                  requestDeleteConversation(convId);
+               }
             });
          }
 
@@ -1354,18 +1353,20 @@
          historyFocusTrapCleanup = callbacks.trapFocus(historyElements.panel);
       }
 
-      historyElements.panel.addEventListener('keydown', handleHistoryEscape);
-   }
-
-   function handleHistoryEscape(e) {
-      if (e.key === 'Escape') {
-         e.preventDefault();
-         closeHistory();
+      if (historyEscToken === null) {
+         historyEscToken = DawnEscStack.register(() => {
+            closeHistory();
+            return true;
+         });
       }
    }
 
    function closeHistory() {
       if (!historyElements.panel) return;
+      if (historyEscToken !== null) {
+         DawnEscStack.unregister(historyEscToken);
+         historyEscToken = null;
+      }
 
       // Save scroll position before closing (M12)
       if (historyElements.list) {
@@ -1376,8 +1377,6 @@
          historyFocusTrapCleanup();
          historyFocusTrapCleanup = null;
       }
-
-      historyElements.panel.removeEventListener('keydown', handleHistoryEscape);
 
       historyElements.panel.classList.add('hidden');
       historyElements.overlay.classList.add('hidden');
@@ -1652,8 +1651,6 @@
 
    function setCallbacks(cbs) {
       if (cbs.trapFocus) callbacks.trapFocus = cbs.trapFocus;
-      if (cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
-      if (cbs.showInputModal) callbacks.showInputModal = cbs.showInputModal;
       if (cbs.getAuthState) callbacks.getAuthState = cbs.getAuthState;
    }
 
@@ -1920,12 +1917,13 @@
          }
       });
 
-      // Close on Escape
-      modal.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape') {
+      // Escape close via DawnEscStack (unregistered in closeReassignModal).
+      if (reassignEscToken === null) {
+         reassignEscToken = DawnEscStack.register(() => {
             closeReassignModal();
-         }
-      });
+            return true;
+         });
+      }
 
       // Focus the select and trap focus within modal
       select.focus();
@@ -1938,6 +1936,10 @@
     * Close the reassign modal
     */
    function closeReassignModal() {
+      if (reassignEscToken !== null) {
+         DawnEscStack.unregister(reassignEscToken);
+         reassignEscToken = null;
+      }
       if (reassignFocusTrapCleanup) {
          reassignFocusTrapCleanup();
          reassignFocusTrapCleanup = null;

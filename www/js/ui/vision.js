@@ -35,6 +35,9 @@
 
    // Camera elements
    let cameraModal = null;
+   let cameraEscToken = null; // DawnEscStack registration while the camera modal is open
+   let cameraTrapCleanup = null; // DawnSettingsModals.trapFocus cleanup while open
+   let cameraTriggerEl = null; // element to return focus to on close (M13)
    let cameraVideo = null;
    let cameraCanvas = null;
    let cameraPreviewImg = null;
@@ -131,32 +134,8 @@
          });
       }
 
-      // Keyboard handling: Escape to close, Tab trap for focus
-      cameraModal.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape') {
-            closeCamera();
-         } else if (e.key === 'Tab') {
-            // Focus trap: keep focus within modal
-            const focusableSelector =
-               'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-            const focusableElements = cameraModal.querySelectorAll(focusableSelector);
-            const visibleFocusable = Array.from(focusableElements).filter(
-               (el) => el.offsetParent !== null && !el.closest('.hidden')
-            );
-            if (visibleFocusable.length === 0) return;
-
-            const firstElement = visibleFocusable[0];
-            const lastElement = visibleFocusable[visibleFocusable.length - 1];
-
-            if (e.shiftKey && document.activeElement === firstElement) {
-               e.preventDefault();
-               lastElement.focus();
-            } else if (!e.shiftKey && document.activeElement === lastElement) {
-               e.preventDefault();
-               firstElement.focus();
-            }
-         }
-      });
+      // Tab focus-trap is provided by DawnSettingsModals.trapFocus (registered in
+      // openCamera / cleaned up in closeCamera); Escape close via DawnEscStack.
 
       // Close on backdrop click
       cameraModal.addEventListener('click', (e) => {
@@ -217,7 +196,25 @@
       }
 
       // Show modal
+      cameraTriggerEl = document.activeElement;
       cameraModal.classList.remove('hidden');
+      if (cameraEscToken === null) {
+         cameraEscToken = DawnEscStack.register(() => {
+            closeCamera();
+            return true;
+         });
+      }
+      // Reuse the shared focus trap (live per-keypress query) instead of an
+      // inline one.  skipInitialFocus: openCamera manages its own focus.
+      if (
+         cameraTrapCleanup === null &&
+         window.DawnSettingsModals &&
+         typeof window.DawnSettingsModals.trapFocus === 'function'
+      ) {
+         cameraTrapCleanup = window.DawnSettingsModals.trapFocus(cameraModal, {
+            skipInitialFocus: true,
+         });
+      }
       showCameraLiveControls();
       hideCameraError();
 
@@ -279,6 +276,19 @@
       if (cameraModal) {
          cameraModal.classList.add('hidden');
       }
+      if (cameraEscToken !== null) {
+         DawnEscStack.unregister(cameraEscToken);
+         cameraEscToken = null;
+      }
+      if (cameraTrapCleanup) {
+         cameraTrapCleanup();
+         cameraTrapCleanup = null;
+      }
+      // Return focus to whatever opened the camera (M13).
+      if (cameraTriggerEl && typeof cameraTriggerEl.focus === 'function') {
+         cameraTriggerEl.focus();
+      }
+      cameraTriggerEl = null;
 
       showCameraLiveControls();
    }
@@ -885,6 +895,11 @@
       const { pendingImages } = DawnState.visionState;
       if (index < 0 || index >= pendingImages.length) return;
 
+      // Capture for undo — pendingImages is purely client-side, pre-send state,
+      // so removal is fully reversible (re-insert at the same index).
+      const removedImage = pendingImages[index];
+      const removedIndex = index;
+
       // Remove from array
       pendingImages.splice(index, 1);
 
@@ -899,6 +914,18 @@
       } else {
          const max = DawnState.visionState.maxImages;
          announce(`Image removed. ${count} of ${max} images attached.`);
+      }
+
+      // Offer a quick Undo (client-side, fully reversible — see showUndo).
+      if (typeof DawnToast !== 'undefined' && DawnToast.showUndo) {
+         DawnToast.showUndo('Image removed. Undo.', {
+            onUndo: () => {
+               const imgs = DawnState.visionState.pendingImages;
+               imgs.splice(Math.min(removedIndex, imgs.length), 0, removedImage);
+               rebuildPreviews();
+               updateCounter();
+            },
+         });
       }
    }
 

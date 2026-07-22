@@ -18,6 +18,7 @@
    let isOpen = false;
    let activeTab = 'playing';
    let visualizerAnimationId = null;
+   let musicEscToken = null; /* DawnEscStack registration while the panel is open */
    /* Cleanup fn returned by Modals.trapFocus when the panel opens;
     * null when closed.  Keeps Tab/Shift+Tab cycling within the panel
     * instead of escaping to the rest of the page. */
@@ -349,7 +350,13 @@
 
       isOpen = true;
       elements.panel.classList.remove('hidden');
-      localStorage.setItem('dawn_music_panel_open', 'true');
+      DawnStore.setBool(DawnStore.KEYS.MUSIC_PANEL_OPEN, true);
+      if (musicEscToken === null) {
+         musicEscToken = DawnEscStack.register(() => {
+            close();
+            return true;
+         });
+      }
 
       // Update button state
       const musicBtn = document.getElementById('music-btn');
@@ -402,7 +409,11 @@
 
       isOpen = false;
       elements.panel.classList.add('hidden');
-      localStorage.setItem('dawn_music_panel_open', 'false');
+      DawnStore.setBool(DawnStore.KEYS.MUSIC_PANEL_OPEN, false);
+      if (musicEscToken !== null) {
+         DawnEscStack.unregister(musicEscToken);
+         musicEscToken = null;
+      }
 
       // Update button state
       const musicBtn = document.getElementById('music-btn');
@@ -616,9 +627,9 @@
             e.preventDefault();
             handlePlayPause();
             break;
-         case 'Escape':
-            close();
-            break;
+         /* Escape-to-close is handled via DawnEscStack (register-on-open in
+          * open() / unregister in close()) so it participates in the global
+          * layer stack regardless of where focus sits. */
          /* ArrowLeft / ArrowRight intentionally NOT bound — they're
           * reserved for tablist navigation (DawnTablist) when focus
           * is on the tab strip.  Binding them here would double-fire

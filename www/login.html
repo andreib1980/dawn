@@ -4,9 +4,35 @@
       <meta charset="UTF-8" />
       <!-- CSP is set via HTTP header (webui_add_security_headers) -->
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <meta name="theme-color" content="#22d3ee" />
+      <meta name="theme-color" content="#2dd4bf" />
       <title>DAWN - Login</title>
       <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+      <!-- Pre-paint theme bootstrap — see the identical block in index.html.
+           KEEP IN SYNC: js/ui/theme.js THEMES/THEME_COLORS + js/core/storage.js
+           KEYS.THEME + index.html's copy.  Add a theme → update all four. -->
+      <script>
+         (function () {
+            var COLORS = {
+               cyan: '#2dd4bf',
+               purple: '#a855f7',
+               green: '#22c55e',
+               orange: '#f97316',
+               red: '#f87171',
+               blue: '#3b82f6',
+               terminal: '#7fff7f',
+            };
+            var theme;
+            try {
+               theme = localStorage.getItem('dawn_theme');
+            } catch (e) {
+               theme = null;
+            }
+            if (!Object.prototype.hasOwnProperty.call(COLORS, theme)) theme = 'cyan';
+            if (theme !== 'cyan') document.documentElement.setAttribute('data-theme', theme);
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', COLORS[theme]);
+         })();
+      </script>
       <link rel="stylesheet" href="/css/main.css" />
       <link rel="stylesheet" href="/css/login.css" />
    </head>

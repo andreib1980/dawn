@@ -308,7 +308,9 @@
       } else {
          state.connected = false;
          updateStatusUI();
-         alert('Connection failed: ' + (payload.error || 'Unknown error'));
+         DawnDialog.alert('Connection failed: ' + (payload.error || 'Unknown error'), {
+            title: 'Home Assistant',
+         });
       }
    }
 

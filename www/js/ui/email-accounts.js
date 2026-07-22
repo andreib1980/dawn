@@ -328,7 +328,7 @@
     * Event Delegation
     * ========================================================================= */
 
-   function handleListClick(e) {
+   async function handleListClick(e) {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
 
@@ -373,18 +373,13 @@
             msg += ' OAuth tokens will be revoked.';
          }
 
-         if (callbacks.showConfirmModal) {
-            callbacks.showConfirmModal(
-               msg,
-               function () {
-                  if (isOAuth && oauthKey && !calShares && typeof DawnOAuth !== 'undefined') {
-                     DawnOAuth.disconnect('google', oauthKey);
-                  }
-                  requestRemoveAccount(id);
-               },
-               { title: 'Remove Email Account', okText: 'Remove', danger: true }
-            );
-         } else if (confirm(msg)) {
+         if (
+            await DawnDialog.confirm(msg, {
+               title: 'Remove Email Account',
+               okText: 'Remove',
+               danger: true,
+            })
+         ) {
             if (isOAuth && oauthKey && !calShares && typeof DawnOAuth !== 'undefined') {
                DawnOAuth.disconnect('google', oauthKey);
             }
@@ -415,12 +410,21 @@
    let modalEl = null;
 
    let previousFocusEl = null;
+   let escToken = null; // DawnEscStack registration while the modal is shown
+
+   // Reveal the modal and register its Escape-dismiss on the global stack (the
+   // focus trap below stays element-scoped on modalEl).
+   function revealModal() {
+      modalEl.classList.remove('hidden');
+      if (escToken === null) {
+         escToken = DawnEscStack.register(function () {
+            hideModal();
+            return true;
+         });
+      }
+   }
 
    function handleModalKeydown(e) {
-      if (e.key === 'Escape') {
-         hideModal();
-         return;
-      }
       /* Basic focus trap — exclude hidden elements */
       if (e.key === 'Tab' && modalEl) {
          const focusable = Array.from(
@@ -470,7 +474,7 @@
       const content = document.getElementById('email-modal-content');
 
       content.innerHTML = buildAddForm();
-      modal.classList.remove('hidden');
+      revealModal();
 
       setupFormListeners();
 
@@ -484,7 +488,7 @@
       const content = document.getElementById('email-modal-content');
 
       content.innerHTML = buildEditForm(acct);
-      modal.classList.remove('hidden');
+      revealModal();
 
       setupEditListeners(acct);
 
@@ -494,6 +498,10 @@
 
    function hideModal() {
       if (modalEl) modalEl.classList.add('hidden');
+      if (escToken !== null) {
+         DawnEscStack.unregister(escToken);
+         escToken = null;
+      }
       pendingOAuthAccountKey = '';
       if (previousFocusEl) {
          previousFocusEl.focus();

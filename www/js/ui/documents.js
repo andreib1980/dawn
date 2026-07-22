@@ -586,6 +586,8 @@
 
       modal.classList.remove('hidden');
 
+      let escToken = null; // DawnEscStack registration while this modal is open
+
       // Store the element that opened the modal for focus restoration
       const triggerEl = document.activeElement;
 
@@ -604,18 +606,19 @@
          // Remove event listeners
          modal.removeEventListener('click', handleBackdropClick);
          document.removeEventListener('keydown', handleKeydown);
+         if (escToken !== null) {
+            DawnEscStack.unregister(escToken);
+            escToken = null;
+         }
       }
 
       function handleBackdropClick(e) {
          if (e.target === modal) closeModal();
       }
 
+      // Escape close is handled via DawnEscStack (registered below); this handler
+      // keeps only the Tab focus-trap.
       function handleKeydown(e) {
-         if (e.key === 'Escape') {
-            e.preventDefault();
-            closeModal();
-            return;
-         }
          // Focus trap: Tab cycles between close button and body
          if (e.key === 'Tab' && body && closeBtn) {
             const focusable = [closeBtn, body];
@@ -638,6 +641,10 @@
       if (closeBtn) closeBtn.addEventListener('click', closeModal, { once: true });
       modal.addEventListener('click', handleBackdropClick);
       document.addEventListener('keydown', handleKeydown);
+      escToken = DawnEscStack.register(() => {
+         closeModal();
+         return true;
+      });
    }
 
    // --- Utilities ---

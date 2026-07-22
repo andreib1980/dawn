@@ -15,6 +15,7 @@
    let attachCounter = null;
    let dropdownBtn = null;
    let dropdownMenu = null;
+   let attachEscToken = null; // DawnEscStack registration while the menu is open
    let dropTarget = null;
 
    /**
@@ -87,11 +88,11 @@
          }
       });
 
+      // Escape close is handled via DawnEscStack (register-on-open in
+      // openDropdown / unregister in closeDropdown); this keeps only the
+      // arrow-key roving navigation.
       dropdownMenu.addEventListener('keydown', (e) => {
-         if (e.key === 'Escape') {
-            closeDropdown();
-            dropdownBtn.focus();
-         } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
             e.preventDefault();
             const items = Array.from(dropdownMenu.querySelectorAll('[role="menuitem"]'));
             const idx = items.indexOf(document.activeElement);
@@ -113,12 +114,23 @@
       if (!dropdownMenu || !dropdownBtn) return;
       dropdownMenu.classList.remove('hidden');
       dropdownBtn.setAttribute('aria-expanded', 'true');
+      if (attachEscToken === null) {
+         attachEscToken = DawnEscStack.register(() => {
+            closeDropdown();
+            dropdownBtn.focus();
+            return true;
+         });
+      }
    }
 
    function closeDropdown() {
       if (!dropdownMenu || !dropdownBtn) return;
       dropdownMenu.classList.add('hidden');
       dropdownBtn.setAttribute('aria-expanded', 'false');
+      if (attachEscToken !== null) {
+         DawnEscStack.unregister(attachEscToken);
+         attachEscToken = null;
+      }
    }
 
    /**

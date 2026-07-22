@@ -12,6 +12,7 @@
       openSection: null, // (sectionId: string) => void
       metricsToggle: null, // () => void
    };
+   let badgeEscToken = null; // DawnEscStack registration while the dropdown is open
 
    function init(cbs) {
       if (cbs) callbacks = cbs;
@@ -37,9 +38,8 @@
          if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             badge.click();
-         } else if (e.key === 'Escape') {
-            close();
          }
+         // Escape close is handled via DawnEscStack (open()/close()).
       });
 
       // Handle keyboard navigation in dropdown
@@ -48,10 +48,6 @@
          var currentIndex = items.indexOf(document.activeElement);
 
          switch (e.key) {
-            case 'Escape':
-               close();
-               badge.focus();
-               break;
             case 'ArrowDown':
                e.preventDefault();
                var nextIndex = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
@@ -112,6 +108,14 @@
 
       badge.setAttribute('aria-expanded', 'true');
       dropdown.classList.add('open');
+      if (badgeEscToken === null) {
+         badgeEscToken = DawnEscStack.register(function () {
+            close();
+            var b = document.getElementById('user-badge');
+            if (b) b.focus();
+            return true;
+         });
+      }
 
       // Focus first menu item for keyboard users
       var firstItem = dropdown.querySelector('.dropdown-item');
@@ -129,11 +133,15 @@
 
       badge.setAttribute('aria-expanded', 'false');
       dropdown.classList.remove('open');
+      if (badgeEscToken !== null) {
+         DawnEscStack.unregister(badgeEscToken);
+         badgeEscToken = null;
+      }
    }
 
    async function handleLogout() {
       // Clear WebSocket session token from localStorage
-      localStorage.removeItem('dawn_session_token');
+      DawnStore.remove(DawnStore.KEYS.SESSION_TOKEN);
 
       try {
          // Use GET - logout has no request body

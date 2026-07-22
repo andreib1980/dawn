@@ -62,14 +62,30 @@
     * Panel Open/Close
     * ============================================================================= */
 
+   // DawnEscStack token while the panel is open (staged: first Escape clears the
+   // search box, second closes the panel).
+   let settingsEscToken = null;
+
    function open() {
       if (!settingsElements.panel) return;
 
       settingsElements.panel.classList.remove('hidden');
       settingsElements.overlay.classList.remove('hidden');
 
+      if (settingsEscToken === null) {
+         settingsEscToken = DawnEscStack.register(() => {
+            const searchInput = document.getElementById('settings-search-input');
+            if (searchInput && searchInput.value.length > 0) {
+               if (Search) Search.clearSearch();
+               return true; // first Escape just clears the search
+            }
+            close();
+            return true;
+         });
+      }
+
       // Restore advanced toggle state from localStorage
-      const showAdvanced = localStorage.getItem('dawn-settings-show-advanced') === 'true';
+      const showAdvanced = DawnStore.getBool(DawnStore.KEYS.SETTINGS_SHOW_ADVANCED, false);
       const advancedToggle = document.getElementById('settings-advanced-toggle');
       const container = document.getElementById('settings-sections');
       if (advancedToggle) {
@@ -96,7 +112,7 @@
       }
    }
 
-   function close() {
+   async function close() {
       if (!settingsElements.panel) return;
 
       // Check for unsaved changes
@@ -108,23 +124,20 @@
       const totalUnsaved = configCount + (toolsUnsaved ? 1 : 0);
 
       if (totalUnsaved > 0) {
-         Modals.showConfirmModal(
-            'You have ' + totalUnsaved + ' unsaved change(s). Close without saving?',
-            function () {
-               // Discard: clear tracking and close
-               Config.clearChangedFields();
-               if (typeof DawnTools !== 'undefined' && DawnTools.clearUnsavedChanges) {
-                  DawnTools.clearUnsavedChanges();
-               }
-               clearUnsavedIndicators();
-               doClose();
-            },
-            {
-               title: 'Unsaved Changes',
-               okText: 'Discard',
-               cancelText: 'Go Back',
+         if (
+            await DawnDialog.confirm(
+               'You have ' + totalUnsaved + ' unsaved change(s). Close without saving?',
+               { title: 'Unsaved Changes', okText: 'Discard', cancelText: 'Go Back' }
+            )
+         ) {
+            // Discard: clear tracking and close
+            Config.clearChangedFields();
+            if (typeof DawnTools !== 'undefined' && DawnTools.clearUnsavedChanges) {
+               DawnTools.clearUnsavedChanges();
             }
-         );
+            clearUnsavedIndicators();
+            doClose();
+         }
          return;
       }
 
@@ -133,8 +146,16 @@
 
    function doClose() {
       if (!settingsElements.panel) return;
+      // Closing the panel discards an unsaved My Settings theme preview.
+      if (typeof DawnMySettings !== 'undefined' && DawnMySettings.revertUnsavedTheme) {
+         DawnMySettings.revertUnsavedTheme();
+      }
       settingsElements.panel.classList.add('hidden');
       settingsElements.overlay.classList.add('hidden');
+      if (settingsEscToken !== null) {
+         DawnEscStack.unregister(settingsEscToken);
+         settingsEscToken = null;
+      }
       if (Search) Search.clearSearch();
    }
 
@@ -316,7 +337,7 @@
     * Restart Confirmation
     * ============================================================================= */
 
-   function showRestartConfirmation(changedRestartFields) {
+   async function showRestartConfirmation(changedRestartFields) {
       const fieldList = changedRestartFields.map((f) => '  • ' + f).join('\n');
       const message =
          'Configuration saved successfully!\n\n' +
@@ -325,11 +346,15 @@
          '\n\n' +
          'Do you want to restart DAWN now?';
 
-      Modals.showConfirmModal(message, requestRestart, {
-         title: 'Restart Required',
-         okText: 'Restart Now',
-         cancelText: 'Later',
-      });
+      if (
+         await DawnDialog.confirm(message, {
+            title: 'Restart Required',
+            okText: 'Restart Now',
+            cancelText: 'Later',
+         })
+      ) {
+         requestRestart();
+      }
    }
 
    function requestRestart() {
@@ -483,15 +508,15 @@
 
       // Reset button
       if (settingsElements.resetBtn) {
-         settingsElements.resetBtn.addEventListener('click', () => {
-            Modals.showConfirmModal(
-               'Reset all settings to defaults?\n\nThis will reload the current configuration.',
-               Config.requestConfig,
-               {
-                  title: 'Reset Configuration',
-                  okText: 'Reset',
-               }
-            );
+         settingsElements.resetBtn.addEventListener('click', async () => {
+            if (
+               await DawnDialog.confirm(
+                  'Reset all settings to defaults?\n\nThis will reload the current configuration.',
+                  { title: 'Reset Configuration', okText: 'Reset' }
+               )
+            ) {
+               Config.requestConfig();
+            }
          });
       }
 
@@ -519,7 +544,9 @@
          });
       });
 
-      // Keyboard shortcuts when settings panel is open
+      // Ctrl+F / Cmd+F — focus search when the panel is open.  (Escape close is
+      // handled via DawnEscStack — register-on-open in open() / unregister in
+      // doClose() — so it stacks correctly under modals.)
       document.addEventListener('keydown', (e) => {
          if (!settingsElements.panel || settingsElements.panel.classList.contains('hidden')) return;
 
@@ -527,7 +554,6 @@
          const openModal = document.querySelector('.modal:not(.hidden)');
          if (openModal) return;
 
-         // Ctrl+F / Cmd+F — focus search
          if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
             const searchInput = document.getElementById('settings-search-input');
             if (searchInput) {
@@ -535,17 +561,6 @@
                searchInput.focus();
                searchInput.select();
             }
-            return;
-         }
-
-         // Escape — clear search first, then close panel
-         if (e.key === 'Escape') {
-            const searchInput = document.getElementById('settings-search-input');
-            if (searchInput && searchInput.value.length > 0) {
-               if (Search) Search.clearSearch();
-               return;
-            }
-            close();
          }
       });
 
@@ -559,7 +574,7 @@
             const isActive = advancedToggle.classList.toggle('active');
             container.classList.toggle('show-advanced', isActive);
             advancedToggle.title = isActive ? 'Hide advanced settings' : 'Show advanced settings';
-            localStorage.setItem('dawn-settings-show-advanced', isActive ? 'true' : 'false');
+            DawnStore.setBool(DawnStore.KEYS.SETTINGS_SHOW_ADVANCED, isActive);
 
             // Rebuild search index so it reflects current visibility
             if (Search) Search.buildIndex();
@@ -709,9 +724,7 @@
       getConversationLlmSettings: Llm.getConversationLlmSettings,
       isConversationLlmLocked: Llm.isConversationLlmLocked,
 
-      // Modals (delegated to Modals module)
-      showConfirmModal: Modals.showConfirmModal,
-      showInputModal: Modals.showInputModal,
+      // Modal focus-trap (styled confirm/prompt/alert now go through DawnDialog).
       trapFocus: Modals.trapFocus,
 
       // Auth visibility

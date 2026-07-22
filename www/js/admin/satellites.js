@@ -17,7 +17,6 @@
    let fleetStatusText = ''; // last rollout status line from the daemon
    let fleetPollTimer = null; // status poll while a rollout is in flight
    let callbacks = {
-      showConfirmModal: null,
       trapFocus: null,
    };
 
@@ -486,7 +485,7 @@
 
       // Delete buttons
       document.querySelectorAll('.satellite-delete-btn').forEach((btn) => {
-         btn.addEventListener('click', function () {
+         btn.addEventListener('click', async function () {
             const uuid = this.dataset.uuid;
             const name = this.dataset.name;
             const assignedUser = this.dataset.user;
@@ -495,15 +494,13 @@
                msg += "\nCurrently assigned to user '" + assignedUser + "'.";
             }
             msg += '\nThis satellite will need to re-register to appear again.';
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(
-                  msg,
-                  () => {
-                     requestDeleteSatellite(uuid);
-                  },
-                  { title: 'Delete Satellite', okText: 'Delete', danger: true }
-               );
-            } else if (confirm(msg)) {
+            if (
+               await DawnDialog.confirm(msg, {
+                  title: 'Delete Satellite',
+                  okText: 'Delete',
+                  danger: true,
+               })
+            ) {
                requestDeleteSatellite(uuid);
             }
          });
@@ -511,7 +508,7 @@
 
       // OTA push buttons
       document.querySelectorAll('.satellite-ota-push-btn').forEach((btn) => {
-         btn.addEventListener('click', function () {
+         btn.addEventListener('click', async function () {
             const uuid = this.dataset.uuid;
             const name = this.dataset.name;
             const card = this.closest('.satellite-card');
@@ -534,19 +531,14 @@
                this.disabled = true;
                requestOtaPush(uuid, version, allowDowngrade);
             };
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(msg, doPush, {
-                  title: 'Push OTA Update',
-                  okText: 'Push',
-               });
-            } else if (confirm(msg)) {
+            if (await DawnDialog.confirm(msg, { title: 'Push OTA Update', okText: 'Push' })) {
                doPush();
             }
          });
       });
 
       // Fleet rollout panel: type switch repopulates versions in place; Roll Out /
-      // Abort go through the shared confirm modal (confirm() fallback).
+      // Abort confirm via DawnDialog (Promise-based styled confirm).
       const fleetTypeSel = document.querySelector('.fleet-rollout-type');
       if (fleetTypeSel) {
          fleetTypeSel.addEventListener('change', function () {
@@ -564,7 +556,7 @@
 
       const fleetStartBtn = document.querySelector('.fleet-rollout-start-btn');
       if (fleetStartBtn) {
-         fleetStartBtn.addEventListener('click', function () {
+         fleetStartBtn.addEventListener('click', async function () {
             const typeSel = document.querySelector('.fleet-rollout-type');
             const verSel = document.querySelector('.fleet-rollout-version');
             const dgCb = document.querySelector('.fleet-rollout-allow-downgrade');
@@ -587,13 +579,13 @@
                fleetStartBtn.disabled = true;
                requestOtaPushAll(platform, version, allowDowngrade);
             };
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(msg, doRollout, {
+            if (
+               await DawnDialog.confirm(msg, {
                   title: 'Fleet Rollout',
                   okText: 'Roll Out',
                   danger: true, // whole-fleet action — render OK in the danger style
-               });
-            } else if (confirm(msg)) {
+               })
+            ) {
                doRollout();
             }
          });
@@ -606,18 +598,10 @@
 
       const fleetAbortBtn = document.querySelector('.fleet-rollout-abort-btn');
       if (fleetAbortBtn) {
-         fleetAbortBtn.addEventListener('click', function () {
+         fleetAbortBtn.addEventListener('click', async function () {
             const msg = 'Abort the in-progress rollout? Devices not yet offered are skipped.';
-            const doAbort = function () {
+            if (await DawnDialog.confirm(msg, { title: 'Abort Rollout', okText: 'Abort' })) {
                requestRolloutAbort();
-            };
-            if (callbacks.showConfirmModal) {
-               callbacks.showConfirmModal(msg, doAbort, {
-                  title: 'Abort Rollout',
-                  okText: 'Abort',
-               });
-            } else if (confirm(msg)) {
-               doAbort();
             }
          });
       }
@@ -978,7 +962,7 @@
        * The Copy URI button is the user's likely next action and has clearer
        * semantics when announced first — override after trapFocus runs. */
       if (pairEls.copyBtn) pairEls.copyBtn.focus();
-      pairState.keydownCleanup = wireEscapeToClose(pairEls.modal);
+      pairState.keydownCleanup = wireEscapeToClose();
       resetIdleTimer();
       requestRegistrationKey();
    }
@@ -1016,15 +1000,15 @@
       pairState.previousFocus = null;
    }
 
-   function wireEscapeToClose(modal) {
-      function handler(e) {
-         if (e.key === 'Escape') {
-            e.preventDefault();
-            closePairModal();
-         }
-      }
-      modal.addEventListener('keydown', handler);
-      return () => modal.removeEventListener('keydown', handler);
+   /* Escape close via the global DawnEscStack (LIFO — closes the topmost layer).
+    * Returns a cleanup that unregisters; the caller stores it and invokes it on
+    * every close path. */
+   function wireEscapeToClose() {
+      const token = DawnEscStack.register(() => {
+         closePairModal();
+         return true;
+      });
+      return () => DawnEscStack.unregister(token);
    }
 
    function handleRegistrationKeyResponse(payload) {
@@ -1178,7 +1162,6 @@
       refresh: requestListSatellites,
       stopAutoRefresh: stopAutoRefresh,
       setCallbacks: function (cbs) {
-         if (cbs && cbs.showConfirmModal) callbacks.showConfirmModal = cbs.showConfirmModal;
          if (cbs && cbs.trapFocus) callbacks.trapFocus = cbs.trapFocus;
       },
    };

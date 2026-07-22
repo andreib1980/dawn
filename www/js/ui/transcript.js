@@ -819,9 +819,14 @@
       var lightboxImg = lightbox.querySelector('img');
       var closeBtn = lightbox.querySelector('.image-lightbox-close');
       var previousFocus = null;
+      var lightboxEscToken = null; // DawnEscStack registration while the lightbox is visible
 
       function closeLightbox() {
          lightbox.classList.remove('visible');
+         if (lightboxEscToken !== null) {
+            DawnEscStack.unregister(lightboxEscToken);
+            lightboxEscToken = null;
+         }
          setTimeout(function () {
             lightbox.style.display = 'none';
          }, 200);
@@ -843,6 +848,12 @@
          /* Trigger reflow for transition */
          lightbox.offsetHeight;
          lightbox.classList.add('visible');
+         if (lightboxEscToken === null) {
+            lightboxEscToken = DawnEscStack.register(function () {
+               closeLightbox();
+               return true;
+            });
+         }
          closeBtn.focus();
       });
 
@@ -853,13 +864,12 @@
          }
       });
 
-      /* Keyboard: Escape to close, Tab trap within lightbox */
+      /* Tab trap within lightbox (Escape close is handled via DawnEscStack —
+       * register-on-open above / unregister in closeLightbox). */
       document.addEventListener('keydown', function (e) {
          if (!lightbox.classList.contains('visible')) return;
 
-         if (e.key === 'Escape') {
-            closeLightbox();
-         } else if (e.key === 'Tab') {
+         if (e.key === 'Tab') {
             /* Trap focus within lightbox — only focusable element is close button */
             e.preventDefault();
             closeBtn.focus();

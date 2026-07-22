@@ -147,7 +147,6 @@
       updateLlmControls: null,
       setAuthState: null,
       updateAuthVisibility: null,
-      showConfirmModal: null,
       showRestartConfirmation: null,
    };
 
