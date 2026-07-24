@@ -1000,6 +1000,20 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
       json_object_object_add(resp_payload, "message",
                              json_object_new_string("Conversation deleted"));
 
+      /* If the deleted conversation is the one currently loaded into this
+       * session, drop the in-memory copy and reset conversation tracking.
+       * Memory extraction mines session->conversation_history (not the DB), so
+       * without this a later trigger — session teardown (session_manager.c),
+       * or a switch/clear/new in this file — would still consolidate the
+       * just-deleted conversation from RAM.  Deleting must mean "forget it",
+       * so we clear the history and the active-id/private flags (mirrors
+       * handle_clear_session). */
+      if (conn->session && conn->active_conversation_id == conv_id) {
+         session_clear_history(conn->session);
+         conn->active_conversation_id = 0;
+         conn->active_conversation_private = false;
+      }
+
       char details[64];
       snprintf(details, sizeof(details), "Deleted conversation %lld", (long long)conv_id);
       auth_db_log_event("CONVERSATION_DELETED", conn->username, conn->client_ip, details);
