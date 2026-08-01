@@ -991,11 +991,19 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = {
-      "enabled",       "port",  "max_clients",   "audio_chunk_ms", "www_path",
-      "bind_address",  "https", "ssl_cert_path", "ssl_key_path",   "export_max_messages",
-      "export_format", NULL
-   };
+   static const char *const known_keys[] = { "enabled",
+                                             "port",
+                                             "max_clients",
+                                             "audio_chunk_ms",
+                                             "www_path",
+                                             "bind_address",
+                                             "https",
+                                             "ssl_cert_path",
+                                             "ssl_key_path",
+                                             "export_max_messages",
+                                             "export_format",
+                                             "allowed_origins",
+                                             NULL };
    warn_unknown_keys(table, "webui", known_keys);
 
    PARSE_BOOL(table, "enabled", config->enabled);
@@ -1011,6 +1019,7 @@ static void parse_webui(toml_table_t *table, webui_config_t *config) {
    if (config->export_max_messages < 0)
       config->export_max_messages = 0;
    PARSE_STRING(table, "export_format", config->export_format);
+   PARSE_STRING(table, "allowed_origins", config->allowed_origins);
    /* Validate export format */
    if (config->export_format[0] != '\0' && strcmp(config->export_format, "json") != 0 &&
        strcmp(config->export_format, "html") != 0) {

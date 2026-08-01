@@ -771,6 +771,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
       if (config->webui.export_max_messages < 0)
          config->webui.export_max_messages = 0;
       JSON_TO_CONFIG_STR(section, "export_format", config->webui.export_format);
+      JSON_TO_CONFIG_STR(section, "allowed_origins", config->webui.allowed_origins);
       /* Validate export format */
       if (config->webui.export_format[0] != '\0' &&
           strcmp(config->webui.export_format, "json") != 0 &&

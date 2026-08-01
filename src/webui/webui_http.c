@@ -835,6 +835,31 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
  *            i.e. during the HTTP request / WS handshake, not post-establish).
  * @return true if same-origin (or no Origin/Referer), false if cross-origin.
  */
+/* True if `origin` exactly matches an entry in the [webui] allowed_origins
+ * comma-separated allowlist (extra trusted front-ends beyond same-origin). */
+static bool origin_in_allowlist(const char *origin) {
+   const char *list = g_config.webui.allowed_origins;
+   if (!list[0] || !origin || !origin[0]) {
+      return false;
+   }
+   char buf[sizeof(g_config.webui.allowed_origins)];
+   snprintf(buf, sizeof(buf), "%s", list);
+   char *save = NULL;
+   for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+      while (*tok == ' ' || *tok == '\t') {
+         tok++;
+      }
+      size_t len = strlen(tok);
+      while (len > 0 && (tok[len - 1] == ' ' || tok[len - 1] == '\t')) {
+         tok[--len] = '\0';
+      }
+      if (tok[0] && strcmp(origin, tok) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 bool webui_is_same_origin_request(struct lws *wsi) {
    char host[256] = { 0 };
    char origin[256] = { 0 };
@@ -876,6 +901,11 @@ bool webui_is_same_origin_request(struct lws *wsi) {
       snprintf(expected_https, sizeof(expected_https), "https://%s", host);
       snprintf(expected_http, sizeof(expected_http), "http://%s", host);
       if (strcmp(origin, expected_https) == 0 || strcmp(origin, expected_http) == 0) {
+         return true;
+      }
+      /* Not our own origin — allow only if explicitly whitelisted (a
+       * separately-hosted front-end / HUD / dev server). */
+      if (origin_in_allowlist(origin)) {
          return true;
       }
       OLOG_WARNING("CSRF: Origin mismatch - expected host %s, got %s", host, origin);

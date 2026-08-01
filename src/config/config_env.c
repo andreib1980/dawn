@@ -1441,6 +1441,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->webui.export_max_messages));
    json_object_object_add(webui, "export_format",
                           json_object_new_string(config->webui.export_format));
+   json_object_object_add(webui, "allowed_origins",
+                          json_object_new_string(config->webui.allowed_origins));
    json_object_object_add(root, "webui", webui);
 
    /* [memory] */
@@ -2379,6 +2381,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    /* Validate at write time to prevent TOML injection */
    const char *exp_fmt = (strcmp(config->webui.export_format, "html") == 0) ? "html" : "json";
    write_toml_string(fp, "export_format", exp_fmt);
+   write_toml_string(fp, "allowed_origins", config->webui.allowed_origins);
 
    fprintf(fp, "\n[memory]\n");
    fprintf(fp, "enabled = %s\n", config->memory.enabled ? "true" : "false");

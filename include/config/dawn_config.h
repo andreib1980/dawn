@@ -474,6 +474,11 @@ typedef struct {
    int export_max_messages;             /* Max messages per export (0 = unlimited, default: 5000) */
    char
        export_format[CONFIG_NAME_MAX]; /* Default export format: "json" or "html" (default: json) */
+   /* Extra trusted browser origins for the WS/CSRF same-origin check, beyond the
+    * request's own Host. Comma-separated, exact scheme://host[:port] (e.g. a
+    * separately-hosted front-end / HUD, or a dev server on another port). Empty
+    * = same-origin only. */
+   char allowed_origins[512];
 } webui_config_t;
 
 /* =============================================================================

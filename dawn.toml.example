@@ -443,6 +443,12 @@
                                   # Env: DAWN_WEBUI_SSL_CERT_PATH
 # ssl_key_path = ""               # Path to SSL private key (.pem or .key)
                                   # Env: DAWN_WEBUI_SSL_KEY_PATH
+# allowed_origins = ""            # Extra trusted browser origins for the WS/CSRF same-origin
+                                  # check, beyond the request's own Host. Comma-separated,
+                                  # exact scheme://host[:port] — e.g. a separately-hosted
+                                  # front-end/HUD or a dev server on another port:
+                                  #   "https://localhost:5273,https://hud.example.com"
+                                  # Empty = same-origin only (default).
 
 # =============================================================================
 # Image Storage (vision uploads)
