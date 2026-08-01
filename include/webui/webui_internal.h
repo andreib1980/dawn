@@ -645,6 +645,20 @@ bool conn_require_admin(ws_connection_t *conn);
 void send_json_response(ws_connection_t *conn, json_object *response);
 
 /**
+ * @brief Broadcast a JSON frame to one user's authenticated sessions.
+ *
+ * Fans @p root out to every authenticated connection whose auth_user_id matches
+ * @p user_id (or all users when @p user_id <= 0).  TAKES OWNERSHIP of @p root and
+ * frees it before the connection walk — the caller must not reuse or free it.
+ *
+ * @param user_id       Target user; <= 0 broadcasts to all authenticated users.
+ * @param root          JSON frame (ownership transferred).
+ * @param browsers_only Skip satellite connections when true.
+ * @return Number of connections the frame was queued to.
+ */
+int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_only);
+
+/**
  * @brief Effective model name for a resolved LLM config (session model if set,
  *        else the provider/type default). Never empty for a valid provider.
  * @param resolved Resolved LLM config to read the model from.

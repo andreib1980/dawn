@@ -35,12 +35,17 @@
 extern "C" {
 #endif
 
+/* Forward decl so callers can pass service data without pulling json-c into this
+ * widely-included header. */
+struct json_object;
+
 /* =============================================================================
  * Constants
  * ============================================================================= */
 #define HA_MAX_ENTITIES 512
 #define HA_MAX_ENTITY_ID 128
 #define HA_MAX_FRIENDLY_NAME 128
+#define HA_MAX_HVAC_MODES 12        /* climate hvac_modes option list cap */
 #define HA_ENTITY_CACHE_TTL_SEC 300 /* 5 minutes */
 #define HA_AREA_CACHE_TTL_SEC 3600  /* 1 hour — areas rarely change */
 #define HA_API_TIMEOUT_SEC 30
@@ -107,7 +112,12 @@ typedef struct {
    double temperature;  /* current (climate/sensor) */
    double target_temp;  /* setpoint (climate) */
    char hvac_mode[32];
-   int cover_position; /* 0-100 */
+   int cover_position;                     /* 0-100 */
+   int fan_percentage;                     /* 0-100 (fan speed) */
+   char hvac_modes[HA_MAX_HVAC_MODES][32]; /* climate: available modes (dropdown options) */
+   int hvac_modes_count;                   /* number of entries in hvac_modes */
+   char unit_of_measurement[16];           /* sensor readout unit, e.g. "°F" */
+   char device_class[32];                  /* sensor/binary_sensor class, e.g. "temperature" */
 } ha_entity_t;
 
 /**
@@ -189,6 +199,20 @@ ha_error_t homeassistant_list_entities(const ha_entity_list_t **list);
 ha_error_t homeassistant_refresh_entities(const ha_entity_list_t **list);
 
 /**
+ * @brief Copy the entity cache into caller-owned memory under the read lock.
+ *
+ * Race-safe alternative to the bare-pointer accessors: the caller serializes
+ * from its own snapshot, never the live cache (which a worker thread can rewrite
+ * in place). @p out is large (~sizeof(ha_entity_list_t)) — heap-allocate it.
+ *
+ * @param out           Destination buffer (filled on HA_OK).
+ * @param force_refresh When true, re-poll /api/states first (entity-only — the
+ *                      area cache keeps its own TTL, no area round-trip).
+ * @return HA_OK, or a not-configured/not-connected/transport error.
+ */
+ha_error_t homeassistant_snapshot_entities(ha_entity_list_t *out, bool force_refresh);
+
+/**
  * @brief Find entity by name with domain-aware fuzzy matching
  *
  * @param name Friendly name, entity_id, or partial match
@@ -229,6 +253,28 @@ ha_error_t homeassistant_close_cover(const char *entity_id);
 ha_error_t homeassistant_activate_scene(const char *entity_id);
 ha_error_t homeassistant_run_script(const char *entity_id);
 ha_error_t homeassistant_trigger_automation(const char *entity_id);
+
+/**
+ * @brief Generic Home Assistant service call (mirrors HA's own service model).
+ *
+ * Thin public wrapper over the internal service-call path so a WebUI/tool caller
+ * can invoke any current or future HA service without a dedicated function.
+ *
+ * @param domain    Service domain (e.g. "light"). If NULL/empty, derived from the
+ *                  entity_id prefix (e.g. "light.kitchen" → "light").
+ * @param service   Service name (e.g. "turn_on"). Required.
+ * @param entity_id Target entity (e.g. "light.kitchen"). Required for entity services.
+ * @param data      Optional per-service data object (e.g. {"brightness":180}).
+ *                  Ownership is TAKEN by this call and freed internally on every
+ *                  path (including validation failure) — the caller must not reuse
+ *                  or free it after the call.
+ * @return HA_OK on success; HA_ERR_INVALID_PARAM on a malformed domain/service/
+ *         entity_id; otherwise the underlying transport error.
+ */
+ha_error_t homeassistant_call_service(const char *domain,
+                                      const char *service,
+                                      const char *entity_id,
+                                      struct json_object *data);
 
 /* =============================================================================
  * Utility Functions

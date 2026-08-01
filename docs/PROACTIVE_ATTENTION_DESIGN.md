@@ -276,7 +276,7 @@ typedef struct {
 | AURA | `helmet/telemetry` MQTT — **EXISTS (PRE shipped 2026-07-06)**: MIRAGE `suit_telemetry.c` republishes the parsed Enviro/Motion/GPS; DAWN `suit_service.c` ingests | CO2 slope, air-quality band change, heat index, GPS geofence enter/leave |
 | SPARK | `armor/telemetry` MQTT — **EXISTS (PRE shipped)**: per-piece temp/voltage republished (SPARK reaches MIRAGE via AURA's ESP-NOW→serial relay); DAWN keeps a bounded armor roster | armor-piece voltage low, temp high, telemetry timeout (piece offline) |
 | ECHO | `echo/events` — **exists** (`src/tools/phone_service.c`) | missed call, SMS from VIP contact, modem lost, signal degraded |
-| Home Assistant | REST polling / webhooks (`homeassistant_service.c`) | entity state changes matching watch rules (door open, device offline) |
+| Home Assistant | REST polling / webhooks (`homeassistant_service.c`). The `state_changed` WS subscription that would feed this is also **signal-map #3** — it doubles as the real-time push for the shipped interactive HA board (see `PROACTIVE_ALERTS_SCOPE.md` §3 + `DAWN_UI_SIGNAL_MAP.md §9.4`) | entity state changes matching watch rules (door open, device offline) |
 | Scheduler | in-process (`src/core/scheduler.c`) | overdue task, upcoming event T-15min (calendar via CalDAV cache) |
 | Messaging | in-process (`messaging_engine_inbound.c`) | unanswered inbound past threshold on a channel the user isn't watching |
 | Memory | extraction pipeline (`memory_extraction.c`) | new fact contradicting an active plan; commitment detected ("I need to X by Friday") |

@@ -447,6 +447,24 @@ static int broadcast_json_to_user_ex(int user_id, json_object *root, bool browse
    return sent;
 }
 
+/* Public export of the user-scoped fan-out so other webui modules (HA control
+ * reconcile, etc.) can push a frame to one user's sessions without hand-rolling
+ * the connection walk.  Thin pass-through — ownership semantics are identical
+ * (takes ownership of root). */
+int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_only) {
+   /* Fail closed at the public boundary: the internal helper treats user_id <= 0
+    * as "all authenticated users" (a capability the in-file all-users caller
+    * relies on), but an external caller with an unresolved/0 id must NOT
+    * accidentally fan a user-scoped frame to everyone.  Still consume `root` so
+    * ownership transfer is unconditional. */
+   if (user_id <= 0) {
+      if (root)
+         json_object_put(root);
+      return 0;
+   }
+   return broadcast_json_to_user_ex(user_id, root, browsers_only);
+}
+
 /* =============================================================================
  * Conversation Title Broadcast (called from memory extraction thread)
  * ============================================================================= */

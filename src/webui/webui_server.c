@@ -702,6 +702,10 @@ bool handle_smart_home_message(ws_connection_t *conn,
       handle_ha_refresh_entities(conn);
       return true;
    }
+   if (strcmp(type, "ha_call_service") == 0) {
+      handle_ha_call_service(conn, payload);
+      return true;
+   }
 #endif /* DAWN_ENABLE_HOMEASSISTANT_TOOL */
 
 #ifdef DAWN_ENABLE_PHONE_TOOL

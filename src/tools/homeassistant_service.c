@@ -372,12 +372,19 @@ static ha_error_t call_service_json(const char *domain,
                                     const char *service,
                                     const char *entity_id,
                                     json_object *data) {
+   /* Ownership of 'data' is taken unconditionally: free it on every path,
+    * including the validation-failure early returns below, so an untrusted
+    * caller (e.g. the WebUI ha_call_service handler) cannot leak it. */
    if (!is_valid_service_name(domain) || !is_valid_service_name(service)) {
       OLOG_ERROR("Home Assistant: Invalid domain/service name");
+      if (data)
+         json_object_put(data);
       return HA_ERR_INVALID_PARAM;
    }
    if (entity_id && !is_valid_entity_id(entity_id)) {
       OLOG_ERROR("Home Assistant: Invalid entity_id format");
+      if (data)
+         json_object_put(data);
       return HA_ERR_INVALID_PARAM;
    }
 
@@ -413,6 +420,25 @@ static ha_error_t call_service_json(const char *domain,
    }
 
    return err;
+}
+
+/* Public generic service call — derives the domain from the entity_id prefix when
+ * the caller omits it, then delegates to call_service_json (which validates and
+ * takes ownership of 'data'). */
+ha_error_t homeassistant_call_service(const char *domain,
+                                      const char *service,
+                                      const char *entity_id,
+                                      json_object *data) {
+   char derived[32];
+   if ((!domain || !domain[0]) && entity_id) {
+      const char *dot = strchr(entity_id, '.');
+      if (dot && (size_t)(dot - entity_id) < sizeof(derived)) {
+         memcpy(derived, entity_id, (size_t)(dot - entity_id));
+         derived[dot - entity_id] = '\0';
+         domain = derived;
+      }
+   }
+   return call_service_json(domain, service, entity_id, data);
 }
 
 /* =============================================================================
@@ -735,6 +761,30 @@ static void parse_entity_attributes(json_object *attrs, ha_entity_t *ent) {
    }
    if (json_object_object_get_ex(attrs, "current_position", &val))
       ent->cover_position = json_object_get_int(val);
+   if (json_object_object_get_ex(attrs, "percentage", &val))
+      ent->fan_percentage = json_object_get_int(val);
+   if (json_object_object_get_ex(attrs, "hvac_modes", &val) &&
+       json_object_is_type(val, json_type_array)) {
+      int n = json_object_array_length(val);
+      ent->hvac_modes_count = 0;
+      for (int i = 0; i < n && ent->hvac_modes_count < HA_MAX_HVAC_MODES; i++) {
+         const char *m = json_object_get_string(json_object_array_get_idx(val, i));
+         if (m && m[0]) {
+            strncpy(ent->hvac_modes[ent->hvac_modes_count], m, sizeof(ent->hvac_modes[0]) - 1);
+            ent->hvac_modes_count++;
+         }
+      }
+   }
+   if (json_object_object_get_ex(attrs, "unit_of_measurement", &val)) {
+      const char *u = json_object_get_string(val);
+      if (u)
+         strncpy(ent->unit_of_measurement, u, sizeof(ent->unit_of_measurement) - 1);
+   }
+   if (json_object_object_get_ex(attrs, "device_class", &val)) {
+      const char *dc = json_object_get_string(val);
+      if (dc)
+         strncpy(ent->device_class, dc, sizeof(ent->device_class) - 1);
+   }
 }
 
 /* =============================================================================
@@ -896,6 +946,41 @@ ha_error_t homeassistant_refresh_entities(const ha_entity_list_t **list) {
       *list = &s_ha.entity_cache;
    }
    return err;
+}
+
+ha_error_t homeassistant_snapshot_entities(ha_entity_list_t *out, bool force_refresh) {
+   if (!out)
+      return HA_ERR_INVALID_PARAM;
+   if (!s_ha.initialized)
+      return HA_ERR_NOT_CONFIGURED;
+   if (!__atomic_load_n(&s_ha.connected, __ATOMIC_ACQUIRE))
+      return HA_ERR_NOT_CONNECTED;
+
+   /* Bring the cache up to date OUTSIDE the read lock (fetch_entities takes the
+    * write lock internally).  Entity-only: unlike homeassistant_refresh_entities
+    * we do NOT zero the area cache, so a control-reconcile / board poll re-polls
+    * /api/states without a wasted /api/template area round-trip — areas keep
+    * their own 1h TTL and still refresh via fetch_area_data when it expires. */
+   if (force_refresh) {
+      ha_error_t err = fetch_entities();
+      if (err != HA_OK)
+         return err;
+   } else {
+      int64_t now = (int64_t)time(NULL);
+      if (!(s_ha.entity_cache.cached_at > 0 &&
+            (now - s_ha.entity_cache.cached_at) < HA_ENTITY_CACHE_TTL_SEC)) {
+         ha_error_t err = fetch_entities();
+         if (err != HA_OK)
+            return err;
+      }
+   }
+
+   /* Copy the cache into caller memory under the read lock so the caller never
+    * serializes the live struct while fetch_entities rewrites it in place. */
+   pthread_rwlock_rdlock(&s_ha.rwlock);
+   *out = s_ha.entity_cache;
+   pthread_rwlock_unlock(&s_ha.rwlock);
+   return HA_OK;
 }
 
 ha_error_t homeassistant_find_entity(const char *name,

@@ -558,6 +558,13 @@ void handle_ha_list_entities(ws_connection_t *conn);
  * @brief Force refresh Home Assistant entity cache
  */
 void handle_ha_refresh_entities(ws_connection_t *conn);
+
+/**
+ * @brief Call a Home Assistant service (the interactive board's write path).
+ * @param conn    Admin-authenticated connection.
+ * @param payload Request payload: entity_id, service (required), domain, data (optional).
+ */
+void handle_ha_call_service(ws_connection_t *conn, struct json_object *payload);
 #endif /* DAWN_ENABLE_HOMEASSISTANT_TOOL */
 
 /* =============================================================================
