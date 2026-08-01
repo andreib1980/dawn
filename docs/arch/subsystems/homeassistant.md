@@ -98,7 +98,9 @@ error strings) is documented for the consumer in `dawn-nextgen/docs/DAWN_UI_SIGN
   remains as the areas-inclusive primitive; the snapshot path is entity-only so a
   per-control reconcile doesn't trigger a wasted area re-poll.
 
-> **Security residual (deferred)**: the WS surface has no `Origin`/CSRF check, so the
-> allowlisted `lock`/`cover` writes are protected only by cookie auth against a cross-origin
-> admin-cookie ride. A WS `Origin` allowlist is the paired hardening — see the
-> THREAT_MODEL/tool-audit item in `docs/TODO.md`.
+> **Security (hardened 2026-08-01)**: the WS upgrade is now CSRF-origin-checked
+> (`webui_is_same_origin_request` at `LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION` in
+> `webui_server.c`) — a cross-origin browser can no longer open an authed WS to ride the
+> admin cookie into the allowlisted `lock`/`cover` writes. Browser-shaped origins are matched
+> against the Host; `null`/opaque origins are rejected; native clients (satellites, CLI) that
+> send no browser Origin are allowed. Backed by the `SameSite=Strict` session cookie.

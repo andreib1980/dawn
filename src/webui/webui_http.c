@@ -823,39 +823,78 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
 }
 
 /**
- * @brief Check if request Origin/Referer matches our host (CSRF protection)
- * @param wsi HTTP connection
- * @return true if same-origin, false if cross-origin
+ * @brief Check if request Origin/Referer matches our host (CSRF protection).
+ *
+ * Same-origin if the Origin (or, as fallback, the Referer) host matches our own
+ * Host header. A request with NEITHER header is allowed (non-browser clients —
+ * curl, satellites — don't send them, and CSRF is a browser-only attack). Used
+ * for state-changing REST endpoints AND the WebSocket upgrade
+ * (webui_server.c, LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION).
+ *
+ * @param wsi connection (must be called while request headers are still present,
+ *            i.e. during the HTTP request / WS handshake, not post-establish).
+ * @return true if same-origin (or no Origin/Referer), false if cross-origin.
  */
-static bool is_same_origin_request(struct lws *wsi) {
+bool webui_is_same_origin_request(struct lws *wsi) {
    char host[256] = { 0 };
    char origin[256] = { 0 };
    char referer[512] = { 0 };
 
-   /* Get our Host header (what the browser thinks we are) */
-   int host_len = lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST);
-   if (host_len <= 0) {
-      return true; /* No host header - allow (unlikely) */
-   }
+   /* Detect header presence with total_length (independent of our buffer): a
+    * present-but-too-long header makes lws_hdr_copy return -1, which must be a
+    * REJECT (can't validate), never a silent fall-through/allow. */
+   int host_total = lws_hdr_total_length(wsi, WSI_TOKEN_HOST);
+   int origin_total = lws_hdr_total_length(wsi, WSI_TOKEN_ORIGIN);
+   int referer_total = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_REFERER);
 
-   /* Check Origin header (preferred for CORS/CSRF) */
-   int origin_len = lws_hdr_copy(wsi, origin, sizeof(origin), WSI_TOKEN_ORIGIN);
-   if (origin_len > 0) {
-      /* Origin should be https://host or http://host */
+   /* Check Origin (preferred). */
+   if (origin_total > 0) {
+      if (lws_hdr_copy(wsi, origin, sizeof(origin), WSI_TOKEN_ORIGIN) <= 0) {
+         OLOG_WARNING("CSRF: Origin present but unreadable (too long); rejecting");
+         return false;
+      }
+      /* Enforce ONLY browser-shaped origins (scheme://host). Browsers send
+       * either scheme://host (RFC 6455) or the literal "null" (opaque origin:
+       * sandboxed iframe / cross-origin redirect) — the latter is attacker-
+       * inducible, so REJECT "null"/empty. A bare host with no scheme is a
+       * native (non-browser) client — e.g. a DAP satellite sets a bare host as
+       * its origin — and is allowed, since a browser can never emit that. */
+      if (strncmp(origin, "http://", 7) != 0 && strncmp(origin, "https://", 8) != 0) {
+         if (origin[0] == '\0' || strcmp(origin, "null") == 0) {
+            OLOG_WARNING("CSRF: opaque/null Origin; rejecting");
+            return false;
+         }
+         return true; /* bare-host non-browser client (satellite/CLI) */
+      }
+      /* Browser origin: must match our Host. No readable Host ⇒ can't validate
+       * ⇒ reject. */
+      if (host_total <= 0 || lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST) <= 0) {
+         OLOG_WARNING("CSRF: browser Origin '%s' but no readable Host; rejecting", origin);
+         return false;
+      }
       char expected_https[280], expected_http[280];
       snprintf(expected_https, sizeof(expected_https), "https://%s", host);
       snprintf(expected_http, sizeof(expected_http), "http://%s", host);
       if (strcmp(origin, expected_https) == 0 || strcmp(origin, expected_http) == 0) {
          return true;
       }
-      OLOG_WARNING("CSRF: Origin mismatch - expected %s, got %s", host, origin);
+      OLOG_WARNING("CSRF: Origin mismatch - expected host %s, got %s", host, origin);
       return false;
    }
 
-   /* No Origin - check Referer as fallback */
-   int referer_len = lws_hdr_copy(wsi, referer, sizeof(referer), WSI_TOKEN_HTTP_REFERER);
-   if (referer_len > 0) {
-      /* Referer should start with https://host/ or http://host/ */
+   /* No Origin - check Referer as fallback (same browser-shaped treatment). */
+   if (referer_total > 0) {
+      if (lws_hdr_copy(wsi, referer, sizeof(referer), WSI_TOKEN_HTTP_REFERER) <= 0) {
+         OLOG_WARNING("CSRF: Referer present but unreadable (too long); rejecting");
+         return false;
+      }
+      if (strncmp(referer, "http://", 7) != 0 && strncmp(referer, "https://", 8) != 0) {
+         return true; /* non-browser */
+      }
+      if (host_total <= 0 || lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST) <= 0) {
+         OLOG_WARNING("CSRF: browser Referer but no readable Host; rejecting");
+         return false;
+      }
       char expected_https[280], expected_http[280];
       snprintf(expected_https, sizeof(expected_https), "https://%s/", host);
       snprintf(expected_http, sizeof(expected_http), "http://%s/", host);
@@ -863,11 +902,11 @@ static bool is_same_origin_request(struct lws *wsi) {
           strncmp(referer, expected_http, strlen(expected_http)) == 0) {
          return true;
       }
-      OLOG_WARNING("CSRF: Referer mismatch - expected %s, got %s", host, referer);
+      OLOG_WARNING("CSRF: Referer mismatch - expected host %s, got %s", host, referer);
       return false;
    }
 
-   /* No Origin or Referer - allow for API/curl usage */
+   /* No Origin or Referer - non-browser client (curl, satellite). Allow. */
    return true;
 }
 
@@ -878,7 +917,7 @@ static bool is_same_origin_request(struct lws *wsi) {
  */
 static int handle_auth_logout(struct lws *wsi) {
    /* CSRF protection: verify request is same-origin */
-   if (!is_same_origin_request(wsi)) {
+   if (!webui_is_same_origin_request(wsi)) {
       OLOG_WARNING("WebUI: Blocked cross-origin logout attempt");
       lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
       return LWS_CLOSE_CONNECTION;
@@ -1021,7 +1060,7 @@ static int handle_memory_entity_link_post(struct lws *wsi, int64_t source_id, in
     * /api/auth/logout pattern at handle_auth_logout above).  Without this
     * a cross-site POST to /api/memory/entities/X/link-to/Y could ride a
     * session cookie and silently soft-link entities for the victim. */
-   if (!is_same_origin_request(wsi)) {
+   if (!webui_is_same_origin_request(wsi)) {
       OLOG_WARNING("WebUI: Blocked cross-origin entity link-to attempt");
       send_auth_response(wsi, HTTP_STATUS_FORBIDDEN, "{\"success\":false,\"error\":\"forbidden\"}",
                          NULL, 0);

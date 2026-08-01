@@ -631,6 +631,17 @@ bool conn_require_auth(ws_connection_t *conn);
 bool conn_require_admin(ws_connection_t *conn);
 
 /**
+ * @brief CSRF same-origin check (Origin/Referer host vs our Host header).
+ *
+ * Allows requests with no Origin/Referer (non-browser clients). Used for
+ * state-changing REST endpoints and the WebSocket upgrade. Must be called while
+ * the request headers are still present (during the HTTP request / WS handshake).
+ *
+ * @return true if same-origin (or no Origin/Referer), false if cross-origin.
+ */
+bool webui_is_same_origin_request(struct lws *wsi);
+
+/**
  * @brief Send JSON response to WebSocket client via the response queue
  *
  * Serializes the JSON object to a string and queues it as WS_RESP_JSON.

@@ -734,6 +734,21 @@ static int callback_websocket(struct lws *wsi,
    ws_connection_t *conn = (ws_connection_t *)user;
 
    switch (reason) {
+      case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
+         /* CSRF: reject a cross-origin WebSocket upgrade before it establishes.
+          * The cookie authenticates the socket, so without this a page on another
+          * origin loaded in a logged-in admin's browser could open an authed WS
+          * and drive any verb (incl. HA lock/cover writes). Checked HERE, during
+          * the handshake, because the Origin/Host headers are guaranteed present
+          * (at LWS_CALLBACK_ESTABLISHED lws may already have freed them, which
+          * would fail OPEN). Non-browser clients (satellites, CLI) send no Origin
+          * and are allowed — same posture as the REST endpoints. */
+         if (!webui_is_same_origin_request(wsi)) {
+            OLOG_WARNING("WebUI: rejected cross-origin WebSocket upgrade");
+            return -1; /* reject the handshake (lws API contract) */
+         }
+         break;
+
       case LWS_CALLBACK_ESTABLISHED: {
          /*
           * New WebSocket connection - defer session creation until init message.
