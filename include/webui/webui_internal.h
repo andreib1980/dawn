@@ -659,6 +659,19 @@ void send_json_response(ws_connection_t *conn, json_object *response);
 int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_only);
 
 /**
+ * @brief Broadcast a JSON frame to every admin user's browser sessions.
+ *
+ * Resolves the admin user_id set via auth_db BEFORE taking the connection
+ * registry lock (never nests conn_registry -> auth_db), then walks the registry
+ * once. TAKES OWNERSHIP of @p root. For admin-only data (e.g. HA realtime state
+ * deltas) where there is no single acting user to scope to.
+ *
+ * @param browsers_only Skip satellite connections when true.
+ * @return Number of connections the frame was queued to.
+ */
+int broadcast_json_to_admins(json_object *root, bool browsers_only);
+
+/**
  * @brief Effective model name for a resolved LLM config (session model if set,
  *        else the provider/type default). Never empty for a valid provider.
  * @param resolved Resolved LLM config to read the model from.

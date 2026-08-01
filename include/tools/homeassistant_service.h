@@ -223,6 +223,36 @@ ha_error_t homeassistant_refresh_entities(const ha_entity_list_t **list);
 ha_error_t homeassistant_cache_replace_from_states(struct json_object *states_array);
 
 /**
+ * @brief Rebuild the area cache from HA's WS registries (realtime area data,
+ *        replacing the REST /api/template scrape). Joins entity -> (direct
+ *        area_id, else device-inherited area_id) -> area name. Takes the write
+ *        lock internally.
+ * @param area_reg   config/area_registry/list result array.
+ * @param entity_reg config/entity_registry/list result array.
+ * @param device_reg config/device_registry/list result array.
+ * @return HA_OK, HA_ERR_INVALID_PARAM (non-array), or HA_ERR_MEMORY.
+ */
+ha_error_t homeassistant_cache_replace_areas(struct json_object *area_reg,
+                                             struct json_object *entity_reg,
+                                             struct json_object *device_reg);
+
+/**
+ * @brief Apply a batch of state_changed events to the entity cache under ONE
+ *        write lock (realtime live updates). Batched, not per-event, so an event
+ *        flood doesn't storm the lock the REST command path also takes.
+ * @param dirty_map A json object mapping entity_id -> new_state (JSON null value
+ *                  removes the entity). Upsert semantics; unknown-domain entities
+ *                  ignored; a malformed event never corrupts an existing slot.
+ */
+ha_error_t homeassistant_cache_apply_batch(struct json_object *dirty_map);
+
+/**
+ * @brief Copy one cached entity by id under the read lock (for delta broadcast).
+ * @return true if found (out filled), false otherwise.
+ */
+bool homeassistant_copy_entity(const char *entity_id, ha_entity_t *out);
+
+/**
  * @brief Copy the entity cache into caller-owned memory under the read lock.
  *
  * Race-safe alternative to the bare-pointer accessors: the caller serializes

@@ -973,6 +973,186 @@ ha_error_t homeassistant_cache_replace_from_states(struct json_object *states_ar
    return HA_OK;
 }
 
+/* Linear lookups over the HA registries (home-scale sizes — dozens to low
+ * hundreds — so O(n) scans are fine and avoid building temp hash maps). */
+static const char *reg_area_name_for_id(json_object *area_reg, const char *area_id) {
+   if (!area_id || !area_id[0])
+      return NULL;
+   int n = json_object_array_length(area_reg);
+   for (int i = 0; i < n; i++) {
+      json_object *a = json_object_array_get_idx(area_reg, i);
+      json_object *id_obj, *name_obj;
+      if (json_object_object_get_ex(a, "area_id", &id_obj) &&
+          json_object_object_get_ex(a, "name", &name_obj)) {
+         const char *id = json_object_get_string(id_obj);
+         if (id && strcmp(id, area_id) == 0)
+            return json_object_get_string(name_obj);
+      }
+   }
+   return NULL;
+}
+
+static const char *reg_device_area_id(json_object *device_reg, const char *device_id) {
+   if (!device_id || !device_id[0])
+      return NULL;
+   int n = json_object_array_length(device_reg);
+   for (int i = 0; i < n; i++) {
+      json_object *d = json_object_array_get_idx(device_reg, i);
+      json_object *id_obj;
+      if (json_object_object_get_ex(d, "id", &id_obj)) {
+         const char *id = json_object_get_string(id_obj);
+         if (id && strcmp(id, device_id) == 0) {
+            json_object *aid_obj;
+            if (json_object_object_get_ex(d, "area_id", &aid_obj) &&
+                !json_object_is_type(aid_obj, json_type_null))
+               return json_object_get_string(aid_obj);
+            return NULL;
+         }
+      }
+   }
+   return NULL;
+}
+
+ha_error_t homeassistant_cache_replace_areas(struct json_object *area_reg_v,
+                                             struct json_object *entity_reg_v,
+                                             struct json_object *device_reg_v) {
+   json_object *area_reg = (json_object *)area_reg_v;
+   json_object *entity_reg = (json_object *)entity_reg_v;
+   json_object *device_reg = (json_object *)device_reg_v;
+   if (!area_reg || !entity_reg || !device_reg || !json_object_is_type(area_reg, json_type_array) ||
+       !json_object_is_type(entity_reg, json_type_array) ||
+       !json_object_is_type(device_reg, json_type_array)) {
+      return HA_ERR_INVALID_PARAM;
+   }
+
+   /* Build the entity_id -> area_name join into a temp cache (no lock; pure CPU).
+    * area_cache is large (~98 KB), so heap-allocate rather than stack. */
+   ha_area_cache_t *tmp = malloc(sizeof(*tmp));
+   if (!tmp) {
+      return HA_ERR_MEMORY;
+   }
+   tmp->count = 0;
+
+   int ne = json_object_array_length(entity_reg);
+   for (int i = 0; i < ne && tmp->count < HA_MAX_AREAS * 4; i++) {
+      json_object *e = json_object_array_get_idx(entity_reg, i);
+      json_object *eid_obj;
+      if (!json_object_object_get_ex(e, "entity_id", &eid_obj))
+         continue;
+      const char *eid = json_object_get_string(eid_obj);
+      if (!eid || !eid[0])
+         continue;
+
+      /* Area: direct entity area_id, else inherited from the entity's device. */
+      const char *area_id = NULL;
+      json_object *aid_obj;
+      if (json_object_object_get_ex(e, "area_id", &aid_obj) &&
+          !json_object_is_type(aid_obj, json_type_null)) {
+         area_id = json_object_get_string(aid_obj);
+      }
+      if (!area_id || !area_id[0]) {
+         json_object *did_obj;
+         if (json_object_object_get_ex(e, "device_id", &did_obj) &&
+             !json_object_is_type(did_obj, json_type_null)) {
+            area_id = reg_device_area_id(device_reg, json_object_get_string(did_obj));
+         }
+      }
+      if (!area_id || !area_id[0])
+         continue;
+
+      const char *name = reg_area_name_for_id(area_reg, area_id);
+      if (!name || !name[0])
+         continue;
+
+      ha_area_entry_t *entry = &tmp->entries[tmp->count];
+      strncpy(entry->entity_id, eid, sizeof(entry->entity_id) - 1);
+      entry->entity_id[sizeof(entry->entity_id) - 1] = '\0';
+      strncpy(entry->area_name, name, sizeof(entry->area_name) - 1);
+      entry->area_name[sizeof(entry->area_name) - 1] = '\0';
+      tmp->count++;
+   }
+   if (tmp->count > 1) {
+      qsort(tmp->entries, tmp->count, sizeof(ha_area_entry_t), area_entry_compare);
+   }
+   tmp->cached_at = (int64_t)time(NULL);
+
+   pthread_rwlock_wrlock(&s_ha.rwlock);
+   s_ha.area_cache = *tmp;
+   pthread_rwlock_unlock(&s_ha.rwlock);
+   int count = tmp->count;
+   free(tmp);
+
+   OLOG_INFO("Home Assistant: WS registry — %d entity-area assignments", count);
+   return HA_OK;
+}
+
+/* Apply one state_changed to the cache. Caller holds s_ha.rwlock for WRITE.
+ * new_state == null (or NULL) removes the entity; otherwise upsert. Parses into
+ * a temp first so a malformed/unknown-domain event never corrupts an existing
+ * slot (parse_one_state memsets its output). */
+static void cache_apply_one_locked(const char *entity_id, json_object *new_state) {
+   int idx = -1;
+   for (int i = 0; i < s_ha.entity_cache.count; i++) {
+      if (strcasecmp(s_ha.entity_cache.entities[i].entity_id, entity_id) == 0) {
+         idx = i;
+         break;
+      }
+   }
+   bool is_null = !new_state || json_object_is_type(new_state, json_type_null);
+   if (is_null) {
+      if (idx >= 0) {
+         for (int i = idx; i < s_ha.entity_cache.count - 1; i++) {
+            s_ha.entity_cache.entities[i] = s_ha.entity_cache.entities[i + 1];
+         }
+         s_ha.entity_cache.count--;
+      }
+      /* The matching area_cache row (if any) is left until the next reconnect's
+       * registry rebuild — harmless, since nothing reads an area row for an
+       * entity no longer in entity_cache. */
+      return;
+   }
+   ha_entity_t tmp;
+   if (!parse_one_state(new_state, &tmp)) {
+      return; /* unknown domain / malformed — leave any existing slot intact */
+   }
+   if (idx >= 0) {
+      s_ha.entity_cache.entities[idx] = tmp;
+   } else if (s_ha.entity_cache.count < HA_MAX_ENTITIES) {
+      s_ha.entity_cache.entities[s_ha.entity_cache.count++] = tmp;
+   }
+}
+
+ha_error_t homeassistant_cache_apply_batch(struct json_object *dirty_map) {
+   json_object *map = (json_object *)dirty_map;
+   if (!map || !json_object_is_type(map, json_type_object)) {
+      return HA_ERR_INVALID_PARAM;
+   }
+   pthread_rwlock_wrlock(&s_ha.rwlock);
+   json_object_object_foreach(map, key, val) {
+      cache_apply_one_locked(key, val);
+   }
+   s_ha.entity_cache.cached_at = (int64_t)time(NULL);
+   pthread_rwlock_unlock(&s_ha.rwlock);
+   return HA_OK;
+}
+
+bool homeassistant_copy_entity(const char *entity_id, ha_entity_t *out) {
+   if (!entity_id || !out) {
+      return false;
+   }
+   bool found = false;
+   pthread_rwlock_rdlock(&s_ha.rwlock);
+   for (int i = 0; i < s_ha.entity_cache.count; i++) {
+      if (strcasecmp(s_ha.entity_cache.entities[i].entity_id, entity_id) == 0) {
+         *out = s_ha.entity_cache.entities[i];
+         found = true;
+         break;
+      }
+   }
+   pthread_rwlock_unlock(&s_ha.rwlock);
+   return found;
+}
+
 ha_error_t homeassistant_list_entities(const ha_entity_list_t **list) {
    if (!list)
       return HA_ERR_INVALID_PARAM;

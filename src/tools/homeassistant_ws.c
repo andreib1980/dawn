@@ -77,6 +77,20 @@ bool homeassistant_ws_is_connected(void) {
 #include "tools/homeassistant_service.h"
 
 /* =============================================================================
+ * Layer-3 -> Layer-4 hooks (weak no-op defaults; strong overrides in the WebUI
+ * layer for the browser delta, and later in a SAGE adapter for observe).
+ * ============================================================================= */
+void __attribute__((weak)) ha_broadcast_state_changed(struct json_object *dirty_map) {
+   (void)dirty_map;
+}
+void __attribute__((weak))
+ha_observe_state_changed(const char *entity_id, const char *old_state, const char *new_state) {
+   (void)entity_id;
+   (void)old_state;
+   (void)new_state;
+}
+
+/* =============================================================================
  * Constants
  * ============================================================================= */
 
@@ -97,6 +111,19 @@ bool homeassistant_ws_is_connected(void) {
 /* Self-clocked liveness: HA's WS heartbeat is a client-sent ping. */
 #define HA_WS_PING_INTERVAL_MS 25000
 #define HA_WS_PONG_TIMEOUT_MS 10000
+/* Coalesce live state_changed events: flush the dirty set after this much
+ * quiescence, but never hold a change longer than the max-latency cap (bounds a
+ * scene flip of many entities to one broadcast). */
+#define HA_WS_COALESCE_MS 200
+#define HA_WS_COALESCE_MAX_MS 500
+/* Cap the dirty set so a hostile/misbehaving HA event flood can't grow it
+ * unbounded: at LIVE this forces a flush; pre-LIVE (during the handshake, when
+ * we can't flush yet) new entities past the cap are dropped. */
+#define HA_WS_DIRTY_MAX 2048
+/* If the handshake (auth -> subscribe -> registries -> seed -> LIVE) doesn't
+ * complete within this window, a stalling/hostile HA is holding us pre-LIVE —
+ * reconnect rather than buffer forever. */
+#define HA_WS_HANDSHAKE_TIMEOUT_MS 30000
 
 /* lws callback returns -1 to close — the lws API contract, NOT DAWN's
  * SUCCESS/FAILURE convention (mirrors messaging_discord.c:132). */
@@ -104,13 +131,26 @@ bool homeassistant_ws_is_connected(void) {
 
 /* What the next CLIENT_WRITEABLE should send. Bitmask (OR-in) so a ping
  * scheduled while an auth is still pending doesn't clobber it. Drained one op
- * per callback in priority order: ping > auth > get_states. (A later phase adds
- * subscribe for live state_changed events.) */
+ * per callback in priority order: ping > auth > command. */
 enum ha_pending_op {
    HA_PENDING_NONE = 0,
    HA_PENDING_AUTH = 1 << 0,
    HA_PENDING_PING = 1 << 1,
-   HA_PENDING_GET_STATES = 1 << 2,
+   HA_PENDING_COMMAND = 1 << 2, /* a simple {"id":N,"type":<s_pending_command>} request */
+};
+
+/* Connect handshake stages. The listener advances through these one result frame
+ * at a time (single-pending-id correlation, not a concurrent map): fetch the
+ * three registries (for area enrichment), then seed the entity cache, then LIVE.
+ * (A later phase inserts a subscribe stage before the registries.) */
+enum ha_conn_stage {
+   HA_STAGE_PREAUTH = 0,
+   HA_STAGE_SUBSCRIBE, /* subscribe FIRST so events buffer during the seed window */
+   HA_STAGE_AREA_REG,
+   HA_STAGE_ENTITY_REG,
+   HA_STAGE_DEVICE_REG,
+   HA_STAGE_GET_STATES,
+   HA_STAGE_LIVE,
 };
 
 /* =============================================================================
@@ -148,12 +188,26 @@ static bool s_tx_is_auth = false; /* the pending TX frame carries the token */
 
 /* Handshake / liveness state. */
 static bool s_authed = false;
-static int64_t s_next_id = 1;        /* HA command id counter, reset per connection */
-static int64_t s_get_states_id = -1; /* id of the outstanding get_states seed, -1 = none */
+static int64_t s_handshake_deadline_ms = 0; /* reconnect if not LIVE by this time */
+static int64_t s_next_id = 1;               /* HA command id counter, reset per connection */
+static int64_t s_expected_result_id = -1;   /* id of the outstanding command result, -1 = none */
+static int s_conn_stage = HA_STAGE_PREAUTH;
+static const char *s_pending_command = NULL; /* command type to build in WRITEABLE */
+/* Registry results held (incref'd) across the sequential fetch until the join. */
+static struct json_object *s_area_reg = NULL;
+static struct json_object *s_entity_reg = NULL;
+static struct json_object *s_device_reg = NULL;
 static int64_t s_ping_interval_ms = 0;
 static int64_t s_ping_next_due_ms = 0;
 static int64_t s_last_pong_ms = 0;
 static bool s_awaiting_pong = false;
+
+/* Live-event coalescing: dirty set { entity_id -> new_state|null }, deduped by
+ * entity_id (last event wins). Buffered pre-LIVE (during the seed window) and
+ * coalesced while LIVE; flushed on quiescence / max-latency. */
+static struct json_object *s_dirty = NULL;
+static int64_t s_flush_due_ms = 0;      /* quiescence deadline (0 = none pending) */
+static int64_t s_flush_deadline_ms = 0; /* hard max-latency deadline */
 
 /* =============================================================================
  * Helpers
@@ -325,17 +379,23 @@ static void prepare_ping_payload(void) {
    json_object_put(obj);
 }
 
-/* {"id":N,"type":"get_states"} — the seed request. Records the id so the
- * matching result frame can be correlated (single-pending-id, not a map). */
-static void prepare_get_states_payload(void) {
+/* {"id":N,"type":"<s_pending_command>"} — a simple id-correlated request
+ * (registries, get_states). Records the id for the matching result frame. */
+static void prepare_command_payload(void) {
    s_tx_payload_len = 0;
+   if (!s_pending_command) {
+      return;
+   }
    int64_t id = s_next_id++;
    struct json_object *obj = json_object_new_object();
    if (!obj) {
       return;
    }
    json_object_object_add(obj, "id", json_object_new_int64(id));
-   json_object_object_add(obj, "type", json_object_new_string("get_states"));
+   json_object_object_add(obj, "type", json_object_new_string(s_pending_command));
+   if (strcmp(s_pending_command, "subscribe_events") == 0) {
+      json_object_object_add(obj, "event_type", json_object_new_string("state_changed"));
+   }
    const char *s = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
    size_t len = s ? strlen(s) : 0;
    if (len == 0 || len > HA_WS_TX_BUF_MAX) {
@@ -344,7 +404,7 @@ static void prepare_get_states_payload(void) {
    }
    memcpy(s_tx_buf + LWS_PRE, s, len);
    s_tx_payload_len = len;
-   s_get_states_id = id;
+   s_expected_result_id = id;
    json_object_put(obj);
 }
 
@@ -355,6 +415,40 @@ static void schedule_writable(enum ha_pending_op op) {
    }
 }
 
+/* Advance the connect state machine: record the next stage + command type and
+ * arm the writeable callback to send it. */
+static void send_command(int stage, const char *type) {
+   s_conn_stage = stage;
+   s_pending_command = type;
+   schedule_writable(HA_PENDING_COMMAND);
+}
+
+static void release_registries(void) {
+   if (s_area_reg) {
+      json_object_put(s_area_reg);
+      s_area_reg = NULL;
+   }
+   if (s_entity_reg) {
+      json_object_put(s_entity_reg);
+      s_entity_reg = NULL;
+   }
+   if (s_device_reg) {
+      json_object_put(s_device_reg);
+      s_device_reg = NULL;
+   }
+}
+
+/* Drop the coalesced dirty set (on reconnect the fresh re-seed supersedes any
+ * buffered pre-reconnect events) and clear the flush timers. */
+static void drop_dirty(void) {
+   if (s_dirty) {
+      json_object_put(s_dirty);
+      s_dirty = NULL;
+   }
+   s_flush_due_ms = 0;
+   s_flush_deadline_ms = 0;
+}
+
 /* =============================================================================
  * Frame dispatch
  * ============================================================================= */
@@ -362,22 +456,73 @@ static void schedule_writable(enum ha_pending_op op) {
 static void on_auth_ok(void) {
    s_authed = true;
    s_next_id = 1;
-   /* NOTE: the reconnect backoff is reset only AFTER the seed actually applies
-    * (see the get_states result handler), NOT here. Resetting on auth_ok would
-    * make an over-cap/unreceivable seed tight-loop: connect -> auth_ok (reset
-    * to floor) -> seed dropped -> reconnect in ~1s -> repeat. Deferring the
-    * reset lets the backoff grow on a persistently-failing seed. */
-   int64_t now = now_monotonic_ms();
-   s_ping_interval_ms = HA_WS_PING_INTERVAL_MS;
-   s_ping_next_due_ms = now + s_ping_interval_ms;
-   s_last_pong_ms = now;
-   s_awaiting_pong = false;
-   atomic_store(&s_ws_connected, true);
-   OLOG_INFO("ha_ws: authenticated; requesting state seed");
-   /* Seed the cache from a full get_states. (Phase 4 will subscribe FIRST, then
-    * seed, then apply live state_changed events; this first delivery seeds at
-    * connect and the board keeps polling the WS-seeded cache.) */
-   schedule_writable(HA_PENDING_GET_STATES);
+   /* s_ws_connected + the ping timer + the backoff reset are set only when we
+    * reach LIVE (see the get_states result handler), NOT here: is_connected must
+    * mean "fully live" so the WebUI reconcile-suppression gate is correct, and
+    * resetting backoff at auth would let an unreceivable seed tight-loop. */
+   s_handshake_deadline_ms = now_monotonic_ms() + HA_WS_HANDSHAKE_TIMEOUT_MS;
+   OLOG_INFO("ha_ws: authenticated; subscribing + fetching registries + seed");
+   /* Subscribe FIRST so state_changed events arriving during the registry/seed
+    * round-trips are buffered (invariant): they accumulate in s_dirty and are
+    * applied on top of the seed when we go LIVE. */
+   send_command(HA_STAGE_SUBSCRIBE, "subscribe_events");
+}
+
+/* Extract the "state" string from a new_state object (NULL if removed/absent). */
+static const char *state_str_of(struct json_object *new_state) {
+   if (!new_state || json_object_is_type(new_state, json_type_null)) {
+      return NULL;
+   }
+   struct json_object *st;
+   if (json_object_object_get_ex(new_state, "state", &st)) {
+      return json_object_get_string(st);
+   }
+   return NULL;
+}
+
+/* Buffer/coalesce a state_changed into the dirty set (deduped by entity_id, so
+ * it's naturally bounded by the entity count). Applied + broadcast on the next
+ * flush; buffered (no flush) until LIVE so it lands on top of the seed. */
+static void handle_state_changed(struct json_object *event_data) {
+   struct json_object *eid_obj = NULL;
+   if (!json_object_object_get_ex(event_data, "entity_id", &eid_obj)) {
+      return;
+   }
+   const char *eid = json_object_get_string(eid_obj);
+   if (!eid || !eid[0] || strlen(eid) >= HA_MAX_ENTITY_ID) {
+      return; /* bound the key length (defends against a hostile HA) */
+   }
+   if (!s_dirty) {
+      s_dirty = json_object_new_object();
+      if (!s_dirty) {
+         return;
+      }
+   }
+   /* Cap growth in EVERY stage. Pre-LIVE we can't flush (would clobber the seed),
+    * so a NEW entity past the cap is dropped; an already-present key overwrites
+    * (no growth). At LIVE the cap additionally forces a flush below. */
+   if (json_object_object_length(s_dirty) >= HA_WS_DIRTY_MAX) {
+      struct json_object *existing = NULL;
+      if (!json_object_object_get_ex(s_dirty, eid, &existing)) {
+         return; /* new entity would exceed the cap — drop it */
+      }
+   }
+   struct json_object *new_state = NULL;
+   json_object_object_get_ex(event_data, "new_state",
+                             &new_state); /* json null or absent = removal */
+   struct json_object *stored = new_state ? json_object_get(new_state) : json_object_new_null();
+   json_object_object_add(s_dirty, eid, stored); /* replaces (+ puts) any prior — last wins */
+
+   if (s_conn_stage == HA_STAGE_LIVE) {
+      int64_t now = now_monotonic_ms();
+      s_flush_due_ms = now + HA_WS_COALESCE_MS;
+      if (s_flush_deadline_ms == 0) {
+         s_flush_deadline_ms = now + HA_WS_COALESCE_MAX_MS;
+      }
+      if (json_object_object_length(s_dirty) >= HA_WS_DIRTY_MAX) {
+         s_flush_due_ms = now; /* cap reached — flush ASAP */
+      }
+   }
 }
 
 static void handle_ha_frame(const char *data, size_t len) {
@@ -410,33 +555,107 @@ static void handle_ha_frame(const char *data, size_t len) {
       s_awaiting_pong = false;
       s_last_pong_ms = now_monotonic_ms();
    } else if (strcmp(type, "result") == 0) {
-      /* Correlate by the single outstanding request id. */
+      /* Correlate by the single outstanding request id, then advance the stage
+       * machine. */
       struct json_object *id_obj = NULL;
       int64_t id = -1;
       if (json_object_object_get_ex(root, "id", &id_obj) && id_obj) {
          id = json_object_get_int64(id_obj);
       }
-      if (id >= 0 && id == s_get_states_id) {
-         s_get_states_id = -1;
-         struct json_object *success_obj = NULL;
-         bool ok = true;
-         if (json_object_object_get_ex(root, "success", &success_obj)) {
-            ok = json_object_get_boolean(success_obj);
-         }
-         struct json_object *result_obj = NULL;
-         if (ok && json_object_object_get_ex(root, "result", &result_obj) &&
-             json_object_is_type(result_obj, json_type_array)) {
-            OLOG_INFO("ha_ws: seed frame %zu bytes (rx cap %d)", len, HA_WS_RX_BUF_MAX);
-            homeassistant_cache_replace_from_states(result_obj);
-            /* Fully connected + seeded: NOW reset the reconnect backoff to floor
-             * (see on_auth_ok for why this isn't done at auth time). */
-            ws_reconnect_record_success(&s_reconnect, NULL, NULL);
-         } else {
-            OLOG_WARNING("ha_ws: get_states result unusable (success=%d)", (int)ok);
+      if (id < 0 || id != s_expected_result_id) {
+         json_object_put(root);
+         return;
+      }
+      s_expected_result_id = -1;
+
+      struct json_object *success_obj = NULL;
+      bool ok = true;
+      if (json_object_object_get_ex(root, "success", &success_obj)) {
+         ok = json_object_get_boolean(success_obj);
+      }
+      struct json_object *result_obj = NULL;
+      bool has_arr = ok && json_object_object_get_ex(root, "result", &result_obj) &&
+                     json_object_is_type(result_obj, json_type_array);
+
+      switch (s_conn_stage) {
+         case HA_STAGE_SUBSCRIBE:
+            /* Subscribed; events now buffer into s_dirty. Fetch registries next.
+             * A non-admin token gets success:false here (HA gates subscribe to
+             * admins) — log it, since it means no live deltas will ever arrive. */
+            if (!ok) {
+               OLOG_WARNING("ha_ws: subscribe_events rejected — token likely lacks "
+                            "admin; no live updates (board falls back to REST poll)");
+            }
+            send_command(HA_STAGE_AREA_REG, "config/area_registry/list");
+            break;
+         case HA_STAGE_AREA_REG:
+            if (has_arr) {
+               s_area_reg = json_object_get(result_obj);
+            }
+            send_command(HA_STAGE_ENTITY_REG, "config/entity_registry/list");
+            break;
+         case HA_STAGE_ENTITY_REG:
+            if (has_arr) {
+               s_entity_reg = json_object_get(result_obj);
+            }
+            send_command(HA_STAGE_DEVICE_REG, "config/device_registry/list");
+            break;
+         case HA_STAGE_DEVICE_REG:
+            if (has_arr) {
+               s_device_reg = json_object_get(result_obj);
+            }
+            if (s_area_reg && s_entity_reg && s_device_reg) {
+               homeassistant_cache_replace_areas(s_area_reg, s_entity_reg, s_device_reg);
+            } else {
+               OLOG_WARNING("ha_ws: incomplete registries; areas may be blank until reconnect");
+            }
+            release_registries();
+            send_command(HA_STAGE_GET_STATES, "get_states");
+            break;
+         case HA_STAGE_GET_STATES:
+            if (has_arr) {
+               OLOG_INFO("ha_ws: seed frame %zu bytes (rx cap %d)", len, HA_WS_RX_BUF_MAX);
+               homeassistant_cache_replace_from_states(result_obj);
+               /* Fully connected + seeded: NOW reset the reconnect backoff to
+                * floor (see on_auth_ok for why this isn't done at auth time). */
+               ws_reconnect_record_success(&s_reconnect, NULL, NULL);
+            } else {
+               OLOG_WARNING("ha_ws: get_states result unusable (success=%d)", (int)ok);
+            }
+            s_conn_stage = HA_STAGE_LIVE;
+            s_handshake_deadline_ms = 0;
+            /* Fully live now: start liveness + mark connected (is_connected means
+             * "live", so the WebUI reconcile-suppression gate is correct). */
+            {
+               int64_t now2 = now_monotonic_ms();
+               s_ping_interval_ms = HA_WS_PING_INTERVAL_MS;
+               s_ping_next_due_ms = now2 + s_ping_interval_ms;
+               s_last_pong_ms = now2;
+               s_awaiting_pong = false;
+               atomic_store(&s_ws_connected, true);
+            }
+            OLOG_INFO("ha_ws: live (subscribed to state_changed)");
+            /* Apply any events buffered during the seed window on the next flush. */
+            if (s_dirty && json_object_object_length(s_dirty) > 0) {
+               s_flush_due_ms = now_monotonic_ms(); /* due now */
+               if (s_flush_deadline_ms == 0) {
+                  s_flush_deadline_ms = now_monotonic_ms();
+               }
+            }
+            break;
+         default:
+            break;
+      }
+   } else if (strcmp(type, "event") == 0) {
+      struct json_object *event_obj = NULL, *etype_obj = NULL, *data_obj = NULL;
+      if (json_object_object_get_ex(root, "event", &event_obj) &&
+          json_object_object_get_ex(event_obj, "event_type", &etype_obj)) {
+         const char *et = json_object_get_string(etype_obj);
+         if (et && strcmp(et, "state_changed") == 0 &&
+             json_object_object_get_ex(event_obj, "data", &data_obj)) {
+            handle_state_changed(data_obj);
          }
       }
-   } else {
-      /* "event" (state_changed) lands in Phase 4. */
    }
    json_object_put(root);
 }
@@ -496,9 +715,9 @@ static int ha_ws_callback(struct lws *wsi,
             prepare_auth_payload();
             s_tx_is_auth = true;
             sent = HA_PENDING_AUTH;
-         } else if (s_pending_op & HA_PENDING_GET_STATES) {
-            prepare_get_states_payload();
-            sent = HA_PENDING_GET_STATES;
+         } else if (s_pending_op & HA_PENDING_COMMAND) {
+            prepare_command_payload();
+            sent = HA_PENDING_COMMAND;
          } else {
             s_pending_op = HA_PENDING_NONE;
             return 0;
@@ -613,10 +832,19 @@ static void close_active_connection(void) {
 /* Self-clocked liveness: send a ping every interval; if a pong doesn't arrive
  * within the timeout, the socket is half-open -> close, backoff, reconnect. */
 static void check_liveness(void) {
+   int64_t now = now_monotonic_ms();
+   /* Handshake stall guard: authed but never reached LIVE within the timeout
+    * (a stalling/hostile HA that never returns results, keeping us buffering
+    * pre-LIVE) — close and reconnect. */
+   if (s_authed && s_conn_stage != HA_STAGE_LIVE && s_handshake_deadline_ms != 0 &&
+       now > s_handshake_deadline_ms) {
+      OLOG_WARNING("ha_ws: handshake stalled (no LIVE within timeout); reconnecting");
+      close_active_connection();
+      return;
+   }
    if (!s_authed || s_ping_interval_ms <= 0) {
       return;
    }
-   int64_t now = now_monotonic_ms();
    if (s_awaiting_pong && now - s_last_pong_ms > HA_WS_PONG_TIMEOUT_MS + s_ping_interval_ms) {
       OLOG_WARNING("ha_ws: pong timeout — connection half-open, closing for reconnect");
       s_awaiting_pong = false;
@@ -631,6 +859,41 @@ static void check_liveness(void) {
    }
 }
 
+/* Flush the coalesced dirty set: apply to the cache, feed the SAGE seam, and
+ * broadcast a delta to the admin board. Runs on the listener thread between
+ * lws_service calls, so s_dirty is single-owner and lock-free here. */
+static void check_flush(void) {
+   if (!s_dirty || s_conn_stage != HA_STAGE_LIVE) {
+      return;
+   }
+   if (json_object_object_length(s_dirty) == 0) {
+      return;
+   }
+   int64_t now = now_monotonic_ms();
+   bool due = (s_flush_due_ms != 0 && now >= s_flush_due_ms) ||
+              (s_flush_deadline_ms != 0 && now >= s_flush_deadline_ms);
+   if (!due) {
+      return;
+   }
+
+   struct json_object *batch = s_dirty;
+   s_dirty = NULL;
+   s_flush_due_ms = 0;
+   s_flush_deadline_ms = 0;
+
+   /* Three SEQUENTIAL, non-overlapping critical sections (never nested):
+    * 1) apply to the cache (wrlock, internal to the service),
+    * 2) SAGE observe (leaf mutex, internal; no-op weak default today),
+    * 3) broadcast the delta to admins (registry mutex, internal to WebUI).
+    * The broadcast reads the freshly-applied cache, so it must run after 1. */
+   homeassistant_cache_apply_batch(batch);
+   json_object_object_foreach(batch, key, val) {
+      ha_observe_state_changed(key, NULL, state_str_of(val));
+   }
+   ha_broadcast_state_changed(batch);
+   json_object_put(batch);
+}
+
 static void *ha_ws_listener_thread(void *arg) {
    (void)arg;
    OLOG_INFO("ha_ws: listener thread started");
@@ -640,11 +903,16 @@ static void *ha_ws_listener_thread(void *arg) {
          atomic_store(&s_ws_connected, false);
          /* Reset per-connection transient state (keep reconnect backoff). */
          s_authed = false;
+         s_handshake_deadline_ms = 0;
          s_ping_interval_ms = 0;
          s_awaiting_pong = false;
          s_pending_op = HA_PENDING_NONE;
          s_next_id = 1;
-         s_get_states_id = -1;
+         s_expected_result_id = -1;
+         s_conn_stage = HA_STAGE_PREAUTH;
+         s_pending_command = NULL;
+         release_registries();
+         drop_dirty();
          rx_buf_reset();
 
          int delay = ws_reconnect_next_delay_seconds(&s_reconnect);
@@ -669,6 +937,7 @@ static void *ha_ws_listener_thread(void *arg) {
          close_active_connection();
       }
       check_liveness();
+      check_flush();
    }
 
    close_active_connection();
@@ -745,6 +1014,8 @@ void homeassistant_ws_stop(void) {
    s_rx_buf = NULL;
    s_rx_buf_cap = 0;
    s_rx_buf_len = 0;
+   release_registries();
+   drop_dirty();
    secure_zero(s_tx_buf, sizeof(s_tx_buf));
    atomic_store(&s_ws_connected, false);
    OLOG_INFO("ha_ws: realtime listener stopped");

@@ -32,6 +32,28 @@
 extern "C" {
 #endif
 
+struct json_object;
+
+/**
+ * @brief Layer-3 -> Layer-4 hooks for a coalesced batch of state_changed events
+ *        (weak no-op default in homeassistant_ws.c; strong overrides elsewhere).
+ *
+ * ha_broadcast_state_changed: push a delta frame to the admin board (strong
+ * override in src/webui/webui_homeassistant.c). @param dirty_map is a json
+ * object {entity_id -> new_state|null}; the callee reads it, does not free it.
+ *
+ * ha_observe_state_changed: the SAGE proactive-attention seam (no strong
+ * override yet — design-only). Called once per changed entity at flush time.
+ * NOTE: this is a coalesced, new-state-oriented signal — events are deduped
+ * last-wins per flush window, so intermediate transitions are lost and
+ * @p old_state is NOT tracked (always NULL today). A future SAGE adapter that
+ * needs transition predicates ("home -> away") must extend the dirty value to
+ * carry old_state; don't design against a before/after promise this seam can't
+ * currently keep.
+ */
+void ha_broadcast_state_changed(struct json_object *dirty_map);
+void ha_observe_state_changed(const char *entity_id, const char *old_state, const char *new_state);
+
 /**
  * @brief Start the realtime WebSocket listener (idempotent).
  *

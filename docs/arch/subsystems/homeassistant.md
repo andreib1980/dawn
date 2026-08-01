@@ -72,12 +72,25 @@ error strings) is documented for the consumer in `dawn-nextgen/docs/DAWN_UI_SIGN
   co-located sites in one change: this table, `serialize_entity_attributes()`, and the
   client widget map (§9.4) — a boxed comment on the table names all three.
 
+- **Realtime WS ingest** (`homeassistant_ws.c`, `[home_assistant] realtime`, default on):
+  a persistent listener thread on HA's own `/api/websocket` — a hybrid split where this
+  READ/EVENT plane rides the socket while commands stay on REST (per-call independence, so a
+  WS reconnect backoff never blocks control). Handshake: `auth` → `subscribe_events`
+  (state_changed) → `config/{area,entity,device}_registry/list` (the area join, retiring the
+  `/api/template` scrape on this path) → `get_states` seed → LIVE. Self-clocked ping/pong
+  liveness; `ws_reconnect` backoff; `s_ws_connected` is kept SEPARATE from the REST
+  `connected` flag. Live `state_changed` events are coalesced (dirty-set, ~200 ms) and
+  batch-applied under one write lock (`homeassistant_cache_apply_batch`), then pushed as an
+  `ha_state_changed` **delta** to admin browsers (`ha_broadcast_state_changed` weak hook →
+  `broadcast_json_to_admins`). A `ha_observe_state_changed` weak hook is the (unbuilt) SAGE
+  seam. See `docs/WEBSOCKET_PROTOCOL.md` (`ha_state_changed`) + `DAWN_UI_SIGNAL_MAP.md §9.4`.
+
 - **Server-authoritative reconcile**: on a successful `ha_call_service`, the handler
   re-polls HA (entity-only, via `homeassistant_snapshot_entities(force_refresh=true)`) and
   broadcasts a fresh `ha_entities_response` to the acting admin's browser sessions
-  (`webui_broadcast_json_to_user`, browsers-only, user-scoped). The UI renders the truth it
-  receives rather than orchestrating its own re-poll. A future per-entity `ha_state_changed`
-  push (SAGE) would replace the full-list broadcast with a delta, no client rework.
+  (`webui_broadcast_json_to_user`, browsers-only, user-scoped) — but ONLY when realtime is
+  off/disconnected; when the WS is live the `state_changed` event delta is the reconcile.
+  The UI renders the truth it receives rather than orchestrating its own re-poll.
 
 - **Race-safe reads**: all three entity serializers copy the cache into caller memory under
   `s_ha.rwlock` (`homeassistant_snapshot_entities`) rather than serializing the live struct

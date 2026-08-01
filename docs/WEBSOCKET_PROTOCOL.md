@@ -1483,6 +1483,32 @@ The count of pending memory proposals changed (signal to refresh a proposals vie
 { "type": "memory_proposals_changed", "payload": { "count": 3 } }
 ```
 
+#### `ha_state_changed`
+Real-time Home Assistant state delta. When `[home_assistant] realtime` is on (default),
+DAWN subscribes to HA's own `/api/websocket` `state_changed` stream and pushes a
+**coalesced delta of changed entities** (~200 ms window, so one scene-flip = one frame).
+**Admin-only, browsers only.** Merge each element by `entity_id` into the entity model you
+already build from `ha_entities_response`; a `{ "entity_id", "removed": true }` element is a
+tombstone (drop it). Each non-removed element has the **same per-domain shape** as an
+`ha_entities_response` entity (so it's a clean upsert). Feature-detect the frame `type` — a
+client that ignores it stays correct via the entity poll backstop. **Bind these strings via
+`textContent`/escaped templating, never `innerHTML`** (HA-controlled, unsolicited push).
+```json
+{
+   "type": "ha_state_changed",
+   "payload": {
+      "entities": [
+         { "entity_id": "light.office", "friendly_name": "Office Light", "domain": "light",
+           "state": "on", "area": "Office", "attributes": { "brightness": 180 } },
+         { "entity_id": "sensor.old", "removed": true }
+      ]
+   }
+}
+```
+The HA request verbs (`ha_list_entities` / `ha_refresh_entities` / `ha_call_service` etc.)
+and the `ha_entities_response` per-domain `attributes` shape are documented consumer-side in
+`dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md §9.4`.
+
 ---
 
 ### Phone

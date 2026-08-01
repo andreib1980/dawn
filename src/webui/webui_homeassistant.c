@@ -28,6 +28,7 @@
 #include "logging.h"
 #include "tools/homeassistant_service.h"
 #include "tools/homeassistant_tool.h"
+#include "tools/homeassistant_ws.h"
 #include "webui/webui_internal.h"
 
 /* =============================================================================
@@ -150,6 +151,19 @@ static void serialize_entity_attributes(struct json_object *obj, const ha_entity
       json_object_object_add(obj, "attributes", attrs);
 }
 
+/* Serialize one entity into `obj` (entity_id/friendly_name/domain/state/area? +
+ * domain-switched attributes). Shared by the full list and the realtime delta. */
+static void serialize_one_entity(struct json_object *obj, const ha_entity_t *ent) {
+   json_object_object_add(obj, "entity_id", json_object_new_string(ent->entity_id));
+   json_object_object_add(obj, "friendly_name", json_object_new_string(ent->friendly_name));
+   json_object_object_add(obj, "domain", json_object_new_string(ent->domain_str));
+   json_object_object_add(obj, "state", json_object_new_string(ent->state));
+   if (ent->area_name[0]) {
+      json_object_object_add(obj, "area", json_object_new_string(ent->area_name));
+   }
+   serialize_entity_attributes(obj, ent);
+}
+
 /* =============================================================================
  * Helper: serialize entity list into a JSON payload
  * ============================================================================= */
@@ -160,19 +174,54 @@ static void serialize_entity_list(struct json_object *payload, const ha_entity_l
 
    struct json_object *arr = json_object_new_array();
    for (int i = 0; i < entities->count; i++) {
-      const ha_entity_t *ent = &entities->entities[i];
       struct json_object *obj = json_object_new_object();
-      json_object_object_add(obj, "entity_id", json_object_new_string(ent->entity_id));
-      json_object_object_add(obj, "friendly_name", json_object_new_string(ent->friendly_name));
-      json_object_object_add(obj, "domain", json_object_new_string(ent->domain_str));
-      json_object_object_add(obj, "state", json_object_new_string(ent->state));
-      if (ent->area_name[0]) {
-         json_object_object_add(obj, "area", json_object_new_string(ent->area_name));
-      }
-      serialize_entity_attributes(obj, ent);
+      serialize_one_entity(obj, &entities->entities[i]);
       json_object_array_add(arr, obj);
    }
    json_object_object_add(payload, "entities", arr);
+}
+
+/* =============================================================================
+ * Strong override of the ha_broadcast_state_changed weak hook (homeassistant_ws.c):
+ * turn a coalesced batch of state_changed events into a delta frame and push it
+ * to the admin board. The delta reuses the SAME per-domain shape as the full
+ * list so the client's widget-value contract is unchanged. Runs on the WS
+ * listener thread; reads the freshly-applied cache (copy-out under the service
+ * lock) and fans out to admins only (HA state is admin-gated).
+ * ============================================================================= */
+void ha_broadcast_state_changed(struct json_object *dirty_map) {
+   if (!dirty_map) {
+      return;
+   }
+   struct json_object *arr = json_object_new_array();
+   json_object_object_foreach(dirty_map, entity_id, val) {
+      if (!val || json_object_is_type(val, json_type_null)) {
+         struct json_object *e = json_object_new_object();
+         json_object_object_add(e, "entity_id", json_object_new_string(entity_id));
+         json_object_object_add(e, "removed", json_object_new_boolean(1));
+         json_object_array_add(arr, e);
+         continue;
+      }
+      ha_entity_t ent;
+      if (!homeassistant_copy_entity(entity_id, &ent)) {
+         continue; /* not in cache (unsupported domain / not applied) — skip */
+      }
+      struct json_object *e = json_object_new_object();
+      serialize_one_entity(e, &ent); /* adds entity_id + fields + attributes */
+      json_object_array_add(arr, e);
+   }
+
+   if (json_object_array_length(arr) == 0) {
+      json_object_put(arr);
+      return;
+   }
+
+   struct json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("ha_state_changed"));
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "entities", arr);
+   json_object_object_add(root, "payload", payload);
+   broadcast_json_to_admins(root, /*browsers_only=*/true); /* takes ownership */
 }
 
 /* =============================================================================
@@ -413,8 +462,10 @@ void handle_ha_call_service(ws_connection_t *conn, struct json_object *payload) 
 
    /* Server-authoritative reconcile: on success, re-poll HA and push fresh truth
     * to the acting admin's browsers so the board reflects reality without the UI
-    * orchestrating a re-poll. */
-   if (called_ok)
+    * orchestrating a re-poll. When realtime is live, SKIP the blocking full
+    * re-poll — HA emits a state_changed for the controlled entity and the WS
+    * listener already pushes that delta to all admin boards. */
+   if (called_ok && !homeassistant_ws_is_connected())
       broadcast_fresh_entities(conn->auth_user_id);
 }
 

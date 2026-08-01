@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db.h"
 #include "core/attention/attention.h"
@@ -463,6 +464,93 @@ int webui_broadcast_json_to_user(int user_id, json_object *root, bool browsers_o
       return 0;
    }
    return broadcast_json_to_user_ex(user_id, root, browsers_only);
+}
+
+/* Collect admin user_ids via auth_db_list_users (callback ctx). */
+#define BROADCAST_MAX_ADMIN_IDS 64
+typedef struct {
+   int ids[BROADCAST_MAX_ADMIN_IDS];
+   int count;
+} admin_id_set_t;
+
+static int collect_admin_id_cb(const auth_user_summary_t *user, void *ctx) {
+   admin_id_set_t *set = (admin_id_set_t *)ctx;
+   if (user && user->is_admin && set->count < BROADCAST_MAX_ADMIN_IDS) {
+      set->ids[set->count++] = user->id;
+   }
+   return 0; /* continue enumeration */
+}
+
+/* Broadcast a frame to every admin user's browser sessions. Resolves the admin
+ * user_id set via auth_db FIRST (a leaf lock — done with NO registry lock held,
+ * so we never nest conn_registry -> auth_db or do DB I/O under the registry
+ * lock), then does one registry walk. Used for HA realtime deltas: HA device
+ * state is admin-only, so filtering to admins is required, not optional. Takes
+ * ownership of root. */
+/* The admin-id set changes rarely (user CRUD) but broadcast_json_to_admins can
+ * fire as often as every coalesce window (~200 ms) under sustained HA activity.
+ * Cache it behind a short TTL so we don't hit the global auth_db lock — shared
+ * with sessions/conversations/memory — from the realtime event hot path. */
+#define ADMIN_CACHE_TTL_SEC 30
+static admin_id_set_t s_admin_cache = { .count = 0 };
+static time_t s_admin_cache_at = 0;
+static pthread_mutex_t s_admin_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int broadcast_json_to_admins(json_object *root, bool browsers_only) {
+   if (!root)
+      return 0;
+
+   admin_id_set_t admins;
+   time_t now = time(NULL);
+   pthread_mutex_lock(&s_admin_cache_mutex);
+   if (s_admin_cache_at == 0 || now - s_admin_cache_at > ADMIN_CACHE_TTL_SEC) {
+      s_admin_cache.count = 0;
+      auth_db_list_users(collect_admin_id_cb, &s_admin_cache);
+      s_admin_cache_at = now;
+   }
+   admins = s_admin_cache; /* copy out under the lock */
+   pthread_mutex_unlock(&s_admin_cache_mutex);
+
+   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *json_cached = json_str ? strdup(json_str) : NULL;
+   json_object_put(root); /* drop the tree before the walk */
+   if (!json_cached || admins.count == 0) {
+      free(json_cached);
+      return 0;
+   }
+
+   int sent = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (!conn || !conn->session || !conn->authenticated)
+         continue;
+      if (browsers_only && conn->is_satellite)
+         continue;
+      bool is_admin_conn = false;
+      for (int a = 0; a < admins.count; a++) {
+         if (conn->auth_user_id == admins.ids[a]) {
+            is_admin_conn = true;
+            break;
+         }
+      }
+      if (!is_admin_conn)
+         continue;
+
+      char *json_copy = strdup(json_cached);
+      if (!json_copy)
+         continue;
+
+      ws_response_t resp = { .session = conn->session,
+                             .type = WS_RESP_JSON,
+                             .generic_json = { .json = json_copy } };
+      queue_response(&resp);
+      sent++;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+
+   free(json_cached);
+   return sent;
 }
 
 /* =============================================================================

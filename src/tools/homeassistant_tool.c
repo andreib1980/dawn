@@ -62,7 +62,7 @@ typedef struct {
 static ha_tool_config_t s_config = { .enabled = true,
                                      .url = "",
                                      .led_hue_correction = 20,
-                                     .realtime = false,
+                                     .realtime = true,
                                      .insecure_tls = false };
 static pthread_mutex_t s_reconfig_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -262,9 +262,13 @@ int homeassistant_tool_update_config(const char *url, int enabled, int led_hue_c
    /* Serialize cleanup+init so concurrent callers don't see partially-initialized state */
    pthread_mutex_lock(&s_reconfig_mutex);
 
+   /* Stop the realtime listener before reconfig so it reconnects with the new
+    * URL/token (it re-reads credentials at each connect). Idempotent. */
+   homeassistant_ws_stop();
    homeassistant_cleanup();
 
    int result = 0;
+   bool inited = false;
    if (!s_config.enabled || !s_config.url[0]) {
       OLOG_INFO("Home Assistant: Disabled or URL not configured");
    } else {
@@ -273,7 +277,11 @@ int homeassistant_tool_update_config(const char *url, int enabled, int led_hue_c
          OLOG_INFO("Home Assistant: Token not configured");
       } else {
          result = homeassistant_init(s_config.url, token) == HA_OK ? 0 : 1;
+         inited = (result == 0);
       }
+   }
+   if (inited && s_config.realtime) {
+      homeassistant_ws_start(s_config.insecure_tls);
    }
 
    pthread_mutex_unlock(&s_reconfig_mutex);
