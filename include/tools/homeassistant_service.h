@@ -182,6 +182,21 @@ ha_error_t homeassistant_test_connection(void);
  */
 ha_error_t homeassistant_get_status(ha_status_t *status);
 
+/**
+ * @brief Copy the configured base URL + token into caller buffers under the
+ *        service read lock.
+ *
+ * For the realtime WS listener, which re-reads credentials at each connect so a
+ * token/URL rotation is picked up without caching a stale copy. The caller MUST
+ * secure_zero the token buffer after use.
+ *
+ * @return HA_OK, or HA_ERR_NOT_CONFIGURED if url/token are unset (buffers emptied).
+ */
+ha_error_t homeassistant_copy_credentials(char *url_out,
+                                          size_t url_len,
+                                          char *token_out,
+                                          size_t token_len);
+
 /* =============================================================================
  * Entity Discovery
  * ============================================================================= */
@@ -197,6 +212,15 @@ ha_error_t homeassistant_list_entities(const ha_entity_list_t **list);
  * @brief Force refresh entity list
  */
 ha_error_t homeassistant_refresh_entities(const ha_entity_list_t **list);
+
+/**
+ * @brief Rebuild the entity cache from a WS get_states result array (realtime
+ *        seed). Takes the write lock internally, reuses the shared per-entity
+ *        parser, and does NOT touch the REST-owned connected flag.
+ * @param states_array A json_object array of HA state objects.
+ * @return HA_OK, or HA_ERR_INVALID_PARAM if not an array.
+ */
+ha_error_t homeassistant_cache_replace_from_states(struct json_object *states_array);
 
 /**
  * @brief Copy the entity cache into caller-owned memory under the read lock.

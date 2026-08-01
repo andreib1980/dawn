@@ -510,6 +510,28 @@ bool homeassistant_is_connected(void) {
    return s_ha.initialized && __atomic_load_n(&s_ha.connected, __ATOMIC_ACQUIRE);
 }
 
+ha_error_t homeassistant_copy_credentials(char *url_out,
+                                          size_t url_len,
+                                          char *token_out,
+                                          size_t token_len) {
+   if (!url_out || !token_out || url_len == 0 || token_len == 0) {
+      return HA_ERR_INVALID_PARAM;
+   }
+   pthread_rwlock_rdlock(&s_ha.rwlock);
+   if (!s_ha.initialized || !s_ha.base_url[0] || !s_ha.token[0]) {
+      pthread_rwlock_unlock(&s_ha.rwlock);
+      url_out[0] = '\0';
+      token_out[0] = '\0';
+      return HA_ERR_NOT_CONFIGURED;
+   }
+   strncpy(url_out, s_ha.base_url, url_len - 1);
+   url_out[url_len - 1] = '\0';
+   strncpy(token_out, s_ha.token, token_len - 1);
+   token_out[token_len - 1] = '\0';
+   pthread_rwlock_unlock(&s_ha.rwlock);
+   return HA_OK;
+}
+
 ha_error_t homeassistant_test_connection(void) {
    if (!s_ha.initialized)
       return HA_ERR_NOT_CONFIGURED;
@@ -787,6 +809,86 @@ static void parse_entity_attributes(json_object *attrs, ha_entity_t *ent) {
    }
 }
 
+/* Parse one HA state object (an /api/states element, or a state_changed
+ * new_state) into a caller-owned cache slot. Zeroes `out` first (so every fixed
+ * string is NUL-terminated regardless of strncpy). Returns SUCCESS if the entity
+ * has a known domain and was populated, FAILURE if it should be skipped (missing
+ * entity_id, malformed, or an unsupported domain).
+ *
+ * LOCK CONTRACT: call with s_ha.rwlock held for WRITE — it reads the area cache
+ * via find_area_for_entity() (no internal locking) and writes into `out`.
+ * Shared by the REST fetch (fetch_entities) and the WS seed/apply paths. */
+static bool parse_one_state(json_object *entity_obj, ha_entity_t *out) {
+   if (!entity_obj || !out) {
+      return false;
+   }
+   json_object *eid_obj;
+   if (!json_object_object_get_ex(entity_obj, "entity_id", &eid_obj)) {
+      return false;
+   }
+   const char *eid = json_object_get_string(eid_obj);
+   if (!eid) {
+      return false;
+   }
+   const char *dot = strchr(eid, '.');
+   if (!dot) {
+      return false;
+   }
+   size_t domain_len = (size_t)(dot - eid);
+   char domain_str[32];
+   if (domain_len >= sizeof(domain_str)) {
+      return false;
+   }
+   memcpy(domain_str, eid, domain_len);
+   domain_str[domain_len] = '\0';
+
+   /* Filter: only keep known domains (bsearch on sorted list) */
+   if (!bsearch(domain_str, s_domain_map, s_domain_map_count, sizeof(domain_map_entry_t),
+                domain_compare)) {
+      return false;
+   }
+
+   memset(out, 0, sizeof(*out));
+   strncpy(out->entity_id, eid, sizeof(out->entity_id) - 1);
+   strncpy(out->domain_str, domain_str, sizeof(out->domain_str) - 1);
+   out->domain = homeassistant_parse_domain(eid);
+
+   /* State */
+   json_object *state_obj;
+   if (json_object_object_get_ex(entity_obj, "state", &state_obj)) {
+      const char *state = json_object_get_string(state_obj);
+      if (state)
+         strncpy(out->state, state, sizeof(out->state) - 1);
+   }
+
+   /* Attributes */
+   json_object *attrs;
+   if (json_object_object_get_ex(entity_obj, "attributes", &attrs)) {
+      json_object *fname_obj;
+      if (json_object_object_get_ex(attrs, "friendly_name", &fname_obj)) {
+         const char *fname = json_object_get_string(fname_obj);
+         if (fname) {
+            strncpy(out->friendly_name, fname, sizeof(out->friendly_name) - 1);
+            str_fuzzy_tolower(out->friendly_name_lower, fname, sizeof(out->friendly_name_lower));
+         }
+      }
+      if (!out->friendly_name[0]) {
+         /* Use entity_id after dot as fallback */
+         strncpy(out->friendly_name, dot + 1, sizeof(out->friendly_name) - 1);
+         str_fuzzy_tolower(out->friendly_name_lower, dot + 1, sizeof(out->friendly_name_lower));
+      }
+      parse_entity_attributes(attrs, out);
+   }
+
+   /* Area enrichment */
+   const char *area = find_area_for_entity(eid);
+   if (area) {
+      strncpy(out->area_name, area, sizeof(out->area_name) - 1);
+   }
+
+   return true;
+}
+
 /* =============================================================================
  * Entity Discovery
  * ============================================================================= */
@@ -824,73 +926,10 @@ static ha_error_t fetch_entities(void) {
    int total = json_object_array_length(root);
    for (int i = 0; i < total && s_ha.entity_cache.count < HA_MAX_ENTITIES; i++) {
       json_object *entity_obj = json_object_array_get_idx(root, i);
-
-      json_object *eid_obj;
-      if (!json_object_object_get_ex(entity_obj, "entity_id", &eid_obj))
-         continue;
-      const char *eid = json_object_get_string(eid_obj);
-      if (!eid)
-         continue;
-
-      /* Extract domain and filter */
-      const char *dot = strchr(eid, '.');
-      if (!dot)
-         continue;
-      size_t domain_len = (size_t)(dot - eid);
-      char domain_str[32];
-      if (domain_len >= sizeof(domain_str))
-         continue;
-      memcpy(domain_str, eid, domain_len);
-      domain_str[domain_len] = '\0';
-
-      /* Filter: only keep known domains (bsearch on sorted list) */
-      if (!bsearch(domain_str, s_domain_map, s_domain_map_count, sizeof(domain_map_entry_t),
-                   domain_compare)) {
-         continue;
-      }
-
       ha_entity_t *ent = &s_ha.entity_cache.entities[s_ha.entity_cache.count];
-      memset(ent, 0, sizeof(*ent));
-
-      strncpy(ent->entity_id, eid, sizeof(ent->entity_id) - 1);
-      strncpy(ent->domain_str, domain_str, sizeof(ent->domain_str) - 1);
-      ent->domain = homeassistant_parse_domain(eid);
-
-      /* State */
-      json_object *state_obj;
-      if (json_object_object_get_ex(entity_obj, "state", &state_obj)) {
-         const char *state = json_object_get_string(state_obj);
-         if (state)
-            strncpy(ent->state, state, sizeof(ent->state) - 1);
+      if (parse_one_state(entity_obj, ent)) {
+         s_ha.entity_cache.count++;
       }
-
-      /* Attributes */
-      json_object *attrs;
-      if (json_object_object_get_ex(entity_obj, "attributes", &attrs)) {
-         json_object *fname_obj;
-         if (json_object_object_get_ex(attrs, "friendly_name", &fname_obj)) {
-            const char *fname = json_object_get_string(fname_obj);
-            if (fname) {
-               strncpy(ent->friendly_name, fname, sizeof(ent->friendly_name) - 1);
-               str_fuzzy_tolower(ent->friendly_name_lower, fname, sizeof(ent->friendly_name_lower));
-            }
-         }
-         if (!ent->friendly_name[0]) {
-            /* Use entity_id after dot as fallback */
-            strncpy(ent->friendly_name, dot + 1, sizeof(ent->friendly_name) - 1);
-            str_fuzzy_tolower(ent->friendly_name_lower, dot + 1, sizeof(ent->friendly_name_lower));
-         }
-
-         parse_entity_attributes(attrs, ent);
-      }
-
-      /* Area enrichment */
-      const char *area = find_area_for_entity(eid);
-      if (area) {
-         strncpy(ent->area_name, area, sizeof(ent->area_name) - 1);
-      }
-
-      s_ha.entity_cache.count++;
    }
 
    s_ha.entity_cache.cached_at = (int64_t)time(NULL);
@@ -905,6 +944,32 @@ static ha_error_t fetch_entities(void) {
       OLOG_INFO("Home Assistant: Cached %d entities", s_ha.entity_cache.count);
    }
 
+   return HA_OK;
+}
+
+ha_error_t homeassistant_cache_replace_from_states(struct json_object *states_array) {
+   if (!states_array || !json_object_is_type((json_object *)states_array, json_type_array)) {
+      return HA_ERR_INVALID_PARAM;
+   }
+   json_object *arr = (json_object *)states_array;
+
+   pthread_rwlock_wrlock(&s_ha.rwlock);
+   s_ha.entity_cache.count = 0;
+   int total = json_object_array_length(arr);
+   for (int i = 0; i < total && s_ha.entity_cache.count < HA_MAX_ENTITIES; i++) {
+      json_object *entity_obj = json_object_array_get_idx(arr, i);
+      ha_entity_t *ent = &s_ha.entity_cache.entities[s_ha.entity_cache.count];
+      if (parse_one_state(entity_obj, ent)) {
+         s_ha.entity_cache.count++;
+      }
+   }
+   s_ha.entity_cache.cached_at = (int64_t)time(NULL);
+   int count = s_ha.entity_cache.count;
+   /* NOTE: the WS plane must NOT touch s_ha.connected (the REST command-plane
+    * reachability flag). This only rebuilds the read cache. */
+   pthread_rwlock_unlock(&s_ha.rwlock);
+
+   OLOG_INFO("Home Assistant: WS-seeded %d entities", count);
    return HA_OK;
 }
 

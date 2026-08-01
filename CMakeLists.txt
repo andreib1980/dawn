@@ -304,6 +304,18 @@ endif()
 # Provides options to enable/disable individual tools
 include(cmake/DawnTools.cmake)
 
+# Home Assistant realtime (WebSocket state_changed ingest) requires libwebsockets,
+# which is only linked under ENABLE_WEBUI. Gate the REAL homeassistant_ws.c
+# implementation on resolved lws availability (not on intent) — the file always
+# compiles (it is in TOOL_SOURCES when the HA tool is on) but selects a no-op stub
+# unless this define is set, so every preset links.
+if(ENABLE_WEBUI AND DAWN_ENABLE_HOMEASSISTANT_TOOL)
+    add_definitions(-DDAWN_ENABLE_HA_REALTIME)
+    message(STATUS "Home Assistant realtime (WebSocket): ENABLED")
+elseif(DAWN_ENABLE_HOMEASSISTANT_TOOL)
+    message(STATUS "Home Assistant realtime (WebSocket): DISABLED (needs ENABLE_WEBUI/libwebsockets)")
+endif()
+
 # CUDA configuration — shared module handles auto-detection on any platform
 include(cmake/DawnCUDA.cmake)
 if(DAWN_CUDA_FOUND)

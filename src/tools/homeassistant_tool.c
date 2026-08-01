@@ -36,6 +36,7 @@
 #include "core/buf_printf.h"
 #include "logging.h"
 #include "tools/homeassistant_service.h"
+#include "tools/homeassistant_ws.h"
 #include "tools/toml.h"
 #include "tools/tool_registry.h"
 
@@ -54,9 +55,15 @@ typedef struct {
    bool enabled;
    char url[256];
    int led_hue_correction; /* degrees to shift magenta region toward red (0-60) */
+   bool realtime;          /* subscribe to HA's WS state_changed stream for live updates */
+   bool insecure_tls;      /* wss:// only — accept self-signed / skip hostname (self-hosted HA) */
 } ha_tool_config_t;
 
-static ha_tool_config_t s_config = { .enabled = true, .url = "", .led_hue_correction = 20 };
+static ha_tool_config_t s_config = { .enabled = true,
+                                     .url = "",
+                                     .led_hue_correction = 20,
+                                     .realtime = false,
+                                     .insecure_tls = false };
 static pthread_mutex_t s_reconfig_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ========== Config Parser ========== */
@@ -89,6 +96,16 @@ static void ha_parse_config(toml_table_t *table, void *config) {
          val = 60;
       cfg->led_hue_correction = val;
    }
+
+   toml_datum_t realtime = toml_bool_in(table, "realtime");
+   if (realtime.ok) {
+      cfg->realtime = realtime.u.b;
+   }
+
+   toml_datum_t insecure_tls = toml_bool_in(table, "insecure_tls");
+   if (insecure_tls.ok) {
+      cfg->insecure_tls = insecure_tls.u.b;
+   }
 }
 
 /* ========== Config Writer ========== */
@@ -111,6 +128,8 @@ static void ha_write_config(void *fp, const void *config) {
       }
    }
    fprintf(f, "led_hue_correction = %d\n", cfg->led_hue_correction);
+   fprintf(f, "realtime = %s\n", cfg->realtime ? "true" : "false");
+   fprintf(f, "insecure_tls = %s\n", cfg->insecure_tls ? "true" : "false");
 }
 
 /* ========== Secret Requirements ========== */
@@ -201,10 +220,18 @@ static int ha_tool_init(void) {
       OLOG_INFO("Home Assistant tool: Not configured (url or token missing)");
       return 0; /* Not configured, not an error */
    }
-   return homeassistant_init(s_config.url, token) == HA_OK ? 0 : 1;
+   int rc = homeassistant_init(s_config.url, token) == HA_OK ? 0 : 1;
+   if (rc == 0 && s_config.realtime) {
+      /* Read/event plane: subscribe to HA's state_changed stream. Command plane
+       * stays on REST regardless (see homeassistant_ws.h). No-op stub unless
+       * built with DAWN_ENABLE_HA_REALTIME. */
+      homeassistant_ws_start(s_config.insecure_tls);
+   }
+   return rc;
 }
 
 static void ha_tool_cleanup(void) {
+   homeassistant_ws_stop();
    homeassistant_cleanup();
 }
 

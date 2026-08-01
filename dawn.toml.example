@@ -904,6 +904,12 @@
 # url = "http://homeassistant.local:8123/"  # Base URL of the HA instance
 # led_hue_correction = 20          # Degrees to shift magenta region toward red (0-60),
                                     # for RGB light color-name matching
+# realtime = false                 # Subscribe to HA's WebSocket state_changed stream for
+                                    # live entity updates (real-time board). Commands stay on
+                                    # REST regardless. Requires a WebUI/libwebsockets build and
+                                    # an ADMIN long-lived token. Default false.
+# insecure_tls = false             # wss:// only: accept a self-signed cert / skip hostname
+                                    # verification (self-hosted HA). Ignored for plain ws://.
 
 # =============================================================================
 # Calendar (CalDAV)
