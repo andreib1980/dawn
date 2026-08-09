@@ -22,7 +22,7 @@ DAP2 is the unified WebSocket protocol for all remote access to the DAWN daemon.
 
 This unified architecture means the session manager, response queue, LLM pipeline, tool system, and conversation history are shared infrastructure — adding a new client type requires only a registration handler and a routing decision, not a new server.
 
-**Tier 2 audio reuses the WebUI audio subsystem** (see [webui-audio.md](webui-audio.md)) — same binary message types, same `webui_audio.c` worker threads, same ASR→LLM→TTS pipeline. The only difference is raw PCM at 16kHz instead of Opus at 48kHz (no codec or resample step on the server). TTS audio is sent at native Piper rate (22050Hz); the ESP32 resamples to 48kHz for I2S output. Music streaming (Opus over a dedicated WebSocket) is Tier 1 only.
+**Tier 2 audio reuses the WebUI audio subsystem** (see [webui-audio.md](webui-audio.md)) — same binary message types, same `webui_audio.c` worker threads, same ASR→LLM→TTS pipeline. The only difference is raw PCM at 16kHz instead of Opus at 48kHz (no codec or resample step on the server). TTS audio is sent at native Piper rate (22050Hz); the ESP32 resamples to 48kHz for I2S output. Music streaming (Opus over a dedicated WebSocket) is Tier 1 only, and runs under the same **closed-loop flow control** as the browser: the satellite reports its decoded-buffer depth (`music_buffer`) so the server's pacer holds a ~2s lead instead of free-running. The dedicated socket is the sole music transport — there is no main-WS music fallback.
 
 **Tier 2 implementation**: `dawn_satellite_arduino/` — Arduino sketch for Adafruit ESP32-S3 TFT Feather. Uses arduinoWebSockets (Links2004), power-of-two ring buffer in PSRAM with spinlock producer/consumer, NVS-persistent UUID and reconnect_secret, TFT status display, NeoPixel state feedback. Credentials in gitignored `arduino_secrets.h`.
 
@@ -76,6 +76,7 @@ Tier 1 satellites handle speech recognition and text-to-speech locally and send 
 - **music_stream.c/h**: Dedicated Opus audio WebSocket
    - Separate connection for music audio streaming
    - Opus decode → ALSA playback
+   - Periodic `music_buffer` reports (closed-loop flow control, ~200 ms cadence)
    - Goertzel FFT analysis on live audio for visualizer
 
 - **`dawn_satellite/src/ui/sdl_ui.c`, `dawn_satellite/include/sdl_ui.h`**: Touchscreen UI coordinator (SDL2 + KMSDRM)
