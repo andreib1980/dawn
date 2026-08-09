@@ -1235,39 +1235,6 @@ int memory_db_fact_search_since(int user_id,
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_fact_list_since(int user_id,
-                              time_t since_ts,
-                              memory_fact_t *out_facts,
-                              int max_facts,
-                              int *count_out) {
-   if (count_out)
-      *count_out = 0;
-   if (!out_facts || max_facts <= 0) {
-      return MEMORY_DB_FAILURE;
-   }
-
-   AUTH_DB_LOCK_OR_FAIL();
-
-   sqlite3_stmt *stmt = s_db.stmt_memory_fact_list_since;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int64(stmt, 2, (int64_t)since_ts);
-   sqlite3_bind_int(stmt, 3, max_facts);
-   sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
-
-   int count = 0;
-   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
-      populate_fact_from_row(stmt, &out_facts[count]);
-      count++;
-   }
-
-   sqlite3_reset(stmt);
-   AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
-   return MEMORY_DB_SUCCESS;
-}
-
 int memory_db_fact_list_window(int user_id,
                                time_t since_ts,
                                time_t until_ts,

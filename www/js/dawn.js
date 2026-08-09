@@ -1223,7 +1223,8 @@
 
             // Music audio is delivered only over the dedicated "dawn-music" socket
             // (port 3001); it is never carried on the main WS, so there is no music
-            // case here. WS_BIN_MUSIC_DATA falls through to the default log if ever seen.
+            // case here. Any stray music-range byte (0x20-0x2F) falls through to the
+            // default log below if ever seen.
 
             default:
                console.log('Unknown binary message type:', '0x' + msgType.toString(16));

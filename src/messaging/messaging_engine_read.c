@@ -283,11 +283,11 @@ static int resolve_channel(struct json_object *arr,
 /* Parse the driver's read_history JSON (newest-first) into a heap array of
  * displayable messages, applying type filtering, the injection filter, and
  * delimiter neutralization.  Returns count; *out set to a malloc'd array
- * (caller frees each .author/.content then the array).  *filtered_out counts
- * messages dropped by the injection filter. */
-static int parse_messages(const char *hist_json, read_msg_t **out, int *filtered_out) {
+ * (caller frees each .author/.content then the array).  *withheld_out counts
+ * messages the injection filter replaced with a placeholder (kept, not dropped). */
+static int parse_messages(const char *hist_json, read_msg_t **out, int *withheld_out) {
    *out = NULL;
-   *filtered_out = 0;
+   *withheld_out = 0;
    struct json_object *arr = hist_json ? json_tokener_parse(hist_json) : NULL;
    if (!arr || !json_object_is_type(arr, json_type_array)) {
       if (arr) {
@@ -324,8 +324,8 @@ static int parse_messages(const char *hist_json, read_msg_t **out, int *filtered
 
       char *body;
       if (content && content[0] && memory_filter_check(content)) {
-         OLOG_WARNING("messaging: read filtered an injection-pattern message from '%s'", author);
-         *filtered_out += 1;
+         OLOG_WARNING("messaging: read withheld an injection-pattern message from '%s'", author);
+         *withheld_out += 1;
          body = strdup("[message withheld by the injection-safety filter]");
       } else if (!content || !content[0]) {
          body = strdup("[no text content]");
@@ -575,16 +575,16 @@ int messaging_engine_read_channel(int user_id,
    }
 
    read_msg_t *msgs = NULL;
-   int filtered = 0;
-   int count = parse_messages(hist_json, &msgs, &filtered);
+   int withheld = 0;
+   int count = parse_messages(hist_json, &msgs, &withheld);
    free(hist_json);
 
    /* Audit: who read what, how much.  Requested + resolved name (so a
     * surprising fuzzy match is visible), channel id + container; never the
     * message bodies, never any token. */
-   OLOG_INFO("messaging: user %d read discord '%s'→#%s (id=%s, server=%s): %d msgs (%d filtered)",
+   OLOG_INFO("messaging: user %d read discord '%s'→#%s (id=%s, server=%s): %d msgs (%d withheld)",
              user_id, channel_name, matched_name, channel_id, container[0] ? container : "?", count,
-             filtered);
+             withheld);
 
    if (count == 0) {
       free_messages(msgs, count);
@@ -782,7 +782,7 @@ int messaging_engine_read_server(int user_id,
    int channels_done = 0;
    int channels_total = 0;
    int total_msgs = 0;
-   int total_filtered = 0;
+   int total_withheld = 0;
    bool length_cap_hit = false; /* transcript char budget exhausted (vs channel cap) */
 
    for (int i = 0; i < n; i++) {
@@ -841,10 +841,10 @@ int messaging_engine_read_server(int user_id,
          continue;
       }
       read_msg_t *msgs = NULL;
-      int filtered = 0;
-      int count = parse_messages(hist_json, &msgs, &filtered);
+      int withheld = 0;
+      int count = parse_messages(hist_json, &msgs, &withheld);
       free(hist_json);
-      total_filtered += filtered;
+      total_withheld += withheld;
       total_msgs += count;
       if (count == 0) {
          strbuf_append(&sb, windowed ? "(no messages in the requested range)\n"
@@ -878,9 +878,9 @@ int messaging_engine_read_server(int user_id,
    }
 
    OLOG_INFO("messaging: user %d read discord server '%s' (id=%s): %d/%d channels, %d msgs "
-             "(%d filtered)",
+             "(%d withheld)",
              user_id, target_name[0] ? target_name : "?", target_id, channels_done, channels_total,
-             total_msgs, total_filtered);
+             total_msgs, total_withheld);
 
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);

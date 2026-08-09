@@ -16,18 +16,19 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Reconnect helper for persistent-WebSocket messaging drivers.
+ * Reconnect helper for persistent-WebSocket clients.
  *
- * Shared between the Discord Gateway driver and (future, Phase 4) the
- * Slack Socket Mode driver.  Both protocols share the same resume
- * pattern — session_id + last-seen sequence + exponential backoff on
- * disconnect.  Telegram long-poll doesn't use this (it just retries
- * with the same offset).
+ * A dependency-free data-structure helper (no DAWN deps), so it lives in
+ * Layer 1 (core) rather than any one subsystem.  Current consumers: the
+ * Discord Gateway driver, the Slack Socket Mode driver, and the Home
+ * Assistant realtime WebSocket ingest.  All share the same resume pattern —
+ * session_id + last-seen sequence + exponential backoff on disconnect.
+ * Telegram long-poll doesn't use this (it just retries with the same offset).
  *
  * See docs/MESSAGING_CHANNELS_DESIGN.md §4 (Reconnect state machine).
  */
-#ifndef MESSAGING_WS_RECONNECT_H
-#define MESSAGING_WS_RECONNECT_H
+#ifndef CORE_WS_RECONNECT_H
+#define CORE_WS_RECONNECT_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -124,4 +125,4 @@ bool ws_reconnect_has_resumable_session(const ws_reconnect_state_t *state);
 }
 #endif
 
-#endif /* MESSAGING_WS_RECONNECT_H */
+#endif /* CORE_WS_RECONNECT_H */

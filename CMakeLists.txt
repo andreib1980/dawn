@@ -702,6 +702,9 @@ if(ENABLE_WEBUI)
         src/core/worker_pool.c
         src/core/text_filter.c
         src/core/rate_limiter.c
+        # Reconnect helper (Layer 1, no DAWN deps) — shared by the Discord/Slack
+        # WS drivers and Home Assistant realtime; all consumers are ENABLE_WEBUI-gated.
+        src/core/ws_reconnect.c
         # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c
         src/messaging/messaging_engine_session.c
@@ -717,7 +720,6 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_split.c
         src/messaging/messaging_format.c
         src/messaging/messaging_format_telegram.c
-        src/messaging/ws_reconnect.c
         src/tools/messaging_tool.c
     )
 endif()

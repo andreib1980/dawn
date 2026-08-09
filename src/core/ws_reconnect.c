@@ -18,7 +18,7 @@
  *
  * Shared reconnect state for persistent-WS messaging drivers.
  */
-#include "messaging/ws_reconnect.h"
+#include "core/ws_reconnect.h"
 
 #include <stdio.h>
 #include <string.h>

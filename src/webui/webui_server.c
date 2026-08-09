@@ -1938,18 +1938,6 @@ int webui_server_get_port(void) {
    return s_port;
 }
 
-int webui_get_queue_fill_pct(void) {
-   pthread_mutex_lock(&s_queue_mutex);
-   int count;
-   if (s_queue_tail >= s_queue_head) {
-      count = s_queue_tail - s_queue_head;
-   } else {
-      count = WEBUI_RESPONSE_QUEUE_SIZE - s_queue_head + s_queue_tail;
-   }
-   pthread_mutex_unlock(&s_queue_mutex);
-   return (count * 100) / WEBUI_RESPONSE_QUEUE_SIZE;
-}
-
 /* webui_clear_login_rate_limit moved to webui_http.c */
 
 /* =============================================================================

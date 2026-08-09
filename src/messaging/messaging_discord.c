@@ -56,12 +56,12 @@
 
 #include "core/curl_buffer.h"
 #include "core/iso8601.h"
+#include "core/ws_reconnect.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "messaging/messaging_discord_internal.h"
 #include "messaging/messaging_driver.h"
 #include "messaging/messaging_engine.h"
-#include "messaging/ws_reconnect.h"
 
 /* =============================================================================
  * Constants

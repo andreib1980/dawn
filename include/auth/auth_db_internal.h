@@ -213,8 +213,6 @@ typedef struct {
    /* Date-filtered memory queries */
    sqlite3_stmt *stmt_memory_fact_search_since;
    sqlite3_stmt *stmt_memory_summary_search_since;
-   sqlite3_stmt *stmt_memory_fact_list_since;
-   sqlite3_stmt *stmt_memory_summary_list_since;
 
    /* Bundle 3 (2026-05-13) — windowed/sorted variants for the LLM 'recent'
     * and 'search' tool actions.  Cover (since, until, sort) parameter space

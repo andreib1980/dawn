@@ -212,19 +212,6 @@ int webui_server_get_port(void);
  */
 void webui_clear_login_rate_limit(const char *ip_address);
 
-/**
- * @brief Get response queue fill level (0-100)
- *
- * Returns the current queue utilization as a percentage.
- * Used by high-frequency senders (e.g., music streaming) to implement
- * backpressure and avoid starving low-frequency control messages.
- *
- * @return Queue fill percentage (0 = empty, 100 = full)
- *
- * @note Thread-safe
- */
-int webui_get_queue_fill_pct(void);
-
 /* =============================================================================
  * Worker-Callable Response Functions (Thread-Safe)
  *

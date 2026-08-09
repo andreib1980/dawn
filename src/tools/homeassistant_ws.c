@@ -73,7 +73,7 @@ bool homeassistant_ws_is_connected(void) {
 #include <strings.h>
 #include <time.h>
 
-#include "messaging/ws_reconnect.h"
+#include "core/ws_reconnect.h"
 #include "tools/homeassistant_service.h"
 
 /* =============================================================================

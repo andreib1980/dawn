@@ -565,42 +565,10 @@ int memory_db_summary_search_since(int user_id,
                                    int *count_out);
 
 /**
- * @brief List facts created since a timestamp (ordered by recency)
- *
- * @param user_id User ID
- * @param since_ts Only return facts created at or after this timestamp
- * @param out_facts Output: array of facts
- * @param max_facts Maximum facts to return
- * @param count_out Output: number of facts returned
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_fact_list_since(int user_id,
-                              time_t since_ts,
-                              memory_fact_t *out_facts,
-                              int max_facts,
-                              int *count_out);
-
-/**
- * @brief List summaries created since a timestamp
- *
- * @param user_id User ID
- * @param since_ts Only return summaries created at or after this timestamp
- * @param out_summaries Output: array of summaries
- * @param max_summaries Maximum to return
- * @param count_out Output: number of summaries
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_summary_list_since(int user_id,
-                                 time_t since_ts,
-                                 memory_summary_t *out_summaries,
-                                 int max_summaries,
-                                 int *count_out);
-
-/**
  * @brief List facts within a time window with explicit sort order
  *
- * Generalization of memory_db_fact_list_since() that adds an upper bound
- * and a configurable sort direction.  Used by the LLM 'recent' tool action
+ * Lists facts created within [since_ts, until_ts] with an explicit sort
+ * direction.  Used by the LLM 'recent' tool action
  * to support queries like "find my oldest stored memory" (sort_asc=true)
  * or "show me memories from a slice in the past" (until_ts < now).
  *
