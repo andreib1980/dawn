@@ -124,28 +124,85 @@ window.DawnJobsActivity = (function () {
       return n + ' background task' + (n === 1 ? '' : 's') + ' running';
    }
 
+   var SVG_NS = 'http://www.w3.org/2000/svg';
+
+   /* Build the OASIS arc-reactor badge once per pill (idempotent): the same
+    * circle + inscribed inverted triangle as the web icon (favicon.svg), plus a
+    * pulsing glow ring, with the count in the core.  Strokes use currentColor so
+    * the amber colour + glow come from CSS (.jobs-pill), matching the composer
+    * "working" reactor — no per-instance SVG gradient/filter ids to collide.
+    * The whole SVG is aria-hidden decorative; the button's aria-label carries the
+    * screen-reader text.  DOM-built (never innerHTML). */
+   function ensureReactor(el) {
+      var svg = el.querySelector('svg.jobs-reactor');
+      if (svg) {
+         return svg;
+      }
+      svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('class', 'jobs-reactor');
+      svg.setAttribute('viewBox', '0 0 64 64');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.setAttribute('focusable', 'false');
+
+      function circle(cls, w) {
+         var c = document.createElementNS(SVG_NS, 'circle');
+         c.setAttribute('class', cls);
+         c.setAttribute('cx', '32');
+         c.setAttribute('cy', '32');
+         c.setAttribute('r', '26');
+         c.setAttribute('fill', 'none');
+         c.setAttribute('stroke', 'currentColor');
+         c.setAttribute('stroke-width', w);
+         return c;
+      }
+      svg.appendChild(circle('reactor-glow', '5'));
+      svg.appendChild(circle('reactor-ring', '2.5'));
+
+      /* Inverted equilateral triangle inscribed in the r=26 circle — identical
+       * geometry to favicon.svg. */
+      var tri = document.createElementNS(SVG_NS, 'polygon');
+      tri.setAttribute('class', 'reactor-tri');
+      tri.setAttribute('points', '32,58 9.48,19 54.52,19');
+      tri.setAttribute('fill', 'none');
+      tri.setAttribute('stroke', 'currentColor');
+      tri.setAttribute('stroke-width', '2');
+      tri.setAttribute('stroke-linejoin', 'round');
+      svg.appendChild(tri);
+
+      var txt = document.createElementNS(SVG_NS, 'text');
+      txt.setAttribute('class', 'reactor-count');
+      txt.setAttribute('x', '32');
+      /* y=29, not the geometric centre 32: the inverted triangle is widest at the
+       * top and pinches toward its bottom point, so the count sits in the wide
+       * upper band — more horizontal room for two digits, and optically centred
+       * against the triangle's top-heavy mass. */
+      txt.setAttribute('y', '29');
+      txt.setAttribute('text-anchor', 'middle');
+      txt.setAttribute('dominant-baseline', 'central');
+      svg.appendChild(txt);
+
+      el.appendChild(svg);
+      return svg;
+   }
+
    function renderPill(el, n, tooltip) {
       if (!el) {
          return;
       }
       if (n > 0) {
-         // Visible "⚙︎ N" is aria-hidden so a screen reader reads the descriptive
-         // aria-label instead of the raw gear glyph (announcement of ⚙︎ is AT-dependent).
-         el.textContent = '';
-         const glyph = document.createElement('span');
-         glyph.setAttribute('aria-hidden', 'true');
-         /* Stacked-layers mark, matching #jobs-btn — NOT a gear.  The gear
-          * collides with #settings-btn, which sits in this same header row. */
-         glyph.textContent = '▤ ' + n;
-         el.appendChild(glyph);
+         /* The reactor + count are aria-hidden decoration; the button's
+          * aria-label carries the descriptive text for AT. */
+         var svg = ensureReactor(el);
+         /* Clamp the DISPLAY to two glyphs so a pathological count can't overflow
+          * the core into the strokes; the true n stays in the tooltip/aria-label. */
+         svg.querySelector('.reactor-count').textContent = n > 99 ? '99+' : String(n);
          el.title = tooltip;
          el.setAttribute('aria-label', tooltip);
          el.classList.remove('hidden');
       } else {
-         el.textContent = '';
          el.removeAttribute('title');
          el.removeAttribute('aria-label');
-         el.classList.add('hidden');
+         el.classList.add('hidden'); /* reactor SVG stays parked, hidden */
       }
    }
 
