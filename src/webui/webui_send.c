@@ -48,6 +48,7 @@
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "logging.h"
+#include "version.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_server.h"
@@ -491,8 +492,9 @@ static void build_config_json(char *json, size_t len) {
    int music_port = webui_music_server_get_port();
    snprintf(json, len,
             "{\"type\":\"config\",\"payload\":{\"audio_chunk_ms\":%d,"
-            "\"music_enabled\":%s,\"music_port\":%d}}",
-            g_config.webui.audio_chunk_ms, music_enabled ? "true" : "false", music_port);
+            "\"music_enabled\":%s,\"music_port\":%d,\"version\":\"%s\"}}",
+            g_config.webui.audio_chunk_ms, music_enabled ? "true" : "false", music_port,
+            VERSION_NUMBER);
 }
 
 /* Compile-time constant: feature flags sent to all clients on connect */
