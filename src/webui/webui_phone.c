@@ -45,14 +45,16 @@
  * Outbound: incoming-call banner / in-call panel broadcast
  * ============================================================================= */
 
-/* Serialize a phone_call_notification frame to a heap string (caller frees).
- * Shared by the broadcast and the per-connection snapshot reply. */
-static char *phone_call_json(const char *status_str,
-                             const char *number,
-                             const char *contact_name,
-                             int64_t call_id,
-                             int elapsed_sec,
-                             struct json_object *photo) {
+/* Build a phone_call_notification frame as a json_object.  The caller owns the
+ * returned tree: the broadcast hands it to webui_broadcast_json_to_user (which
+ * CONSUMES it), and phone_call_json serializes+puts it for the per-connection
+ * snapshot reply. */
+static json_object *phone_call_build(const char *status_str,
+                                     const char *number,
+                                     const char *contact_name,
+                                     int64_t call_id,
+                                     int elapsed_sec,
+                                     struct json_object *photo) {
    /* Scrub caller-provided free text before it enters a WS text frame: a stray
     * invalid UTF-8 byte fails the frame (RFC 6455 §5.6) and wedges the client. */
    char name_safe[64];
@@ -76,7 +78,19 @@ static char *phone_call_json(const char *status_str,
       json_object_object_add(payload, "photo", json_object_get(photo));
    }
    json_object_object_add(root, "payload", payload);
+   return root;
+}
 
+/* Serialize a phone_call_notification frame to a heap string (caller frees).
+ * Used by the per-connection snapshot reply. */
+static char *phone_call_json(const char *status_str,
+                             const char *number,
+                             const char *contact_name,
+                             int64_t call_id,
+                             int elapsed_sec,
+                             struct json_object *photo) {
+   json_object *root = phone_call_build(status_str, number, contact_name, call_id, elapsed_sec,
+                                        photo);
    const char *s = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
    char *copy = s ? strdup(s) : NULL;
    json_object_put(root);
@@ -94,37 +108,14 @@ void webui_broadcast_phone_call(int user_id,
                             : (status == PHONE_CALL_NOTIF_ACTIVE) ? "active"
                                                                   : "ended";
 
-   char *json_str = phone_call_json(status_str, number, contact_name, call_id, elapsed_sec, photo);
-   if (!json_str)
-      return;
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session)
-         continue;
-      /* Browser sessions only — the banner is a WebUI surface, not a satellite
-       * or unauthenticated login screen. */
-      if (!conn->authenticated || conn->is_satellite)
-         continue;
-      /* Owner-only.  A non-positive owner id (misconfig) sends to nobody rather
-       * than leaking caller PII to every user's sessions. */
-      if (user_id <= 0 || conn->auth_user_id != user_id)
-         continue;
-
-      char *json_copy = strdup(json_str);
-      if (!json_copy)
-         continue;
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-
-   free(json_str);
+   /* Browser sessions only, owner only (browsers_only): the banner is a WebUI
+    * surface (a satellite has none), and the frame carries caller PII
+    * (name/number/photo), so the shared helper's fail-closed on user_id <= 0
+    * keeps a misconfig from leaking it across accounts.  The helper serializes
+    * once, walks the registry, and CONSUMES root. */
+   json_object *root = phone_call_build(status_str, number, contact_name, call_id, elapsed_sec,
+                                        photo);
+   int sent = webui_broadcast_json_to_user(user_id, root, /*browsers_only=*/true);
 
    if (sent > 0) {
       OLOG_INFO("WebUI: phone call notification (%s) to %d client(s)", status_str, sent);

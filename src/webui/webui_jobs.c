@@ -166,43 +166,12 @@ void webui_broadcast_job_update(int user_id, const job_record_t *rec, bool resum
    }
    json_object_object_add(payload, "job", job);
    json_object_object_add(root, "payload", payload);
-   /* PLAIN to match every other broadcast in the WebUI layer — the default
-    * (_SPACED) would ship ~35 bytes of gratuitous whitespace per frame per
-    * connection and make the job frames the odd family on the wire. */
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-   if (!json_str) {
-      /* Serialization OOM.  Dropping the frame costs a client a stale row until
-       * its next snapshot; strdup(NULL) inside the registry walk would take the
-       * daemon down while holding the connection mutex. */
-      json_object_put(root);
-      return;
-   }
-
-   int sent = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session) {
-         continue;
-      }
-      /* Browser sessions only, owner only.  A job row carries the user's own
-       * prompt-derived title, so a non-positive owner id sends to nobody rather
-       * than fanning it across every account. */
-      if (!conn->authenticated || conn->is_satellite || conn->auth_user_id != user_id) {
-         continue;
-      }
-      char *json_copy = strdup(json_str);
-      if (!json_copy) {
-         continue;
-      }
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-      sent++;
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-   json_object_put(root);
+   /* Browser sessions only, owner only (browsers_only): a job row carries the
+    * user's own prompt-derived title, so it must never fan across accounts, and a
+    * satellite has no place to render it.  The shared helper serializes once (as
+    * PLAIN, matching every other WebUI frame), walks the registry, and CONSUMES
+    * root. */
+   int sent = webui_broadcast_json_to_user(user_id, root, /*browsers_only=*/true);
 
    if (sent > 0) {
       OLOG_INFO("WebUI: job_update conv %lld (%s%s) to %d client(s)", (long long)rec->id,
@@ -219,32 +188,9 @@ void webui_broadcast_jobs_invalidate(int user_id) {
    }
    json_object *root = json_object_new_object();
    json_object_object_add(root, "type", json_object_new_string("jobs_invalidate"));
-   const char *json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-   if (!json_str) {
-      json_object_put(root);
-      return;
-   }
-
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (!conn || !conn->session) {
-         continue;
-      }
-      if (!conn->authenticated || conn->is_satellite || conn->auth_user_id != user_id) {
-         continue;
-      }
-      char *json_copy = strdup(json_str);
-      if (!json_copy) {
-         continue;
-      }
-      ws_response_t resp = { .session = conn->session,
-                             .type = WS_RESP_JSON,
-                             .generic_json = { .json = json_copy } };
-      queue_response(&resp);
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-   json_object_put(root);
+   /* Owner's browser sessions only; the shared helper serializes, walks the
+    * registry, and CONSUMES root. */
+   webui_broadcast_json_to_user(user_id, root, /*browsers_only=*/true);
 }
 
 /* =============================================================================
