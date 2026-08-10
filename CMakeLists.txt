@@ -703,7 +703,9 @@ if(ENABLE_WEBUI)
         src/core/text_filter.c
         src/core/rate_limiter.c
         # Reconnect helper (Layer 1, no DAWN deps) — shared by the Discord/Slack
-        # WS drivers and Home Assistant realtime; all consumers are ENABLE_WEBUI-gated.
+        # WS drivers and Home Assistant realtime. Compiled here as a build-gating
+        # convenience (all consumers are ENABLE_WEBUI-gated), NOT a layering statement;
+        # move to the unconditional core sources if a non-WEBUI core module needs it.
         src/core/ws_reconnect.c
         # Messaging channels (Telegram, SMS, Discord, Slack)
         src/messaging/messaging_engine.c

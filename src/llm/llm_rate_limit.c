@@ -22,7 +22,8 @@
  *
  * Uses a circular buffer of CLOCK_MONOTONIC timestamps to track API calls
  * within a 60-second window. When the window is full, callers sleep in
- * 100ms chunks (checking for interrupts) until a slot frees up.
+ * 250ms chunks (checking for interrupts, via llm_sleep_with_interrupt_check)
+ * until a slot frees up.
  */
 
 #include "llm/llm_rate_limit.h"
@@ -36,6 +37,10 @@
 #include "logging.h"
 
 #define WINDOW_SECONDS 60
+
+/* Chunk size for the interrupt-aware sleep: below the ~400ms wake-word-feels-laggy
+ * threshold, and 2.5x fewer scheduler wakeups than 100ms on a multi-second wait. */
+#define LLM_INTERRUPT_SLEEP_CHUNK_MS 250
 
 typedef struct {
    pthread_mutex_t mutex;
@@ -106,14 +111,14 @@ int llm_sleep_with_interrupt_check(int total_ms) {
     * Integer-ms counting avoids float drift; under heavy load a chunk may
     * oversleep, which only lengthens the wait — safe for both callers (a longer
     * backoff, or a longer rate-limit wait whose retry loop re-checks the count). */
-   struct timespec chunk = { .tv_sec = 0, .tv_nsec = 250000000L }; /* 250ms */
+   struct timespec chunk = { .tv_sec = 0, .tv_nsec = LLM_INTERRUPT_SLEEP_CHUNK_MS * 1000000L };
    int elapsed_ms = 0;
    while (elapsed_ms < total_ms) {
       if (llm_is_interrupt_requested()) {
          return 1;
       }
       nanosleep(&chunk, NULL);
-      elapsed_ms += 250;
+      elapsed_ms += LLM_INTERRUPT_SLEEP_CHUNK_MS;
    }
    return 0;
 }

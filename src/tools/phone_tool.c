@@ -958,7 +958,7 @@ static char *handle_status(void) {
    phone_state_t state = phone_service_get_state();
    const char *state_str[] = { "idle", "dialing", "ringing (incoming)", "active call",
                                "answering" };
-   const char *st = (state >= 0 && state <= 4) ? state_str[state] : "unknown";
+   const char *st = (state >= 0 && state <= PHONE_STATE_ANSWERING) ? state_str[state] : "unknown";
 
    char buf[256];
    snprintf(buf, sizeof(buf), "Phone status: %s. Modem: %s.", st,

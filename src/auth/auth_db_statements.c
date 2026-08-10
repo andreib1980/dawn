@@ -1192,7 +1192,6 @@ int auth_db_prepare_statements(void) {
       return AUTH_DB_FAILURE;
    }
 
-
    /* Bundle 3 (2026-05-13) — windowed/sorted variants.  Shared WHERE clause
     * (user_id + created_at range) so the DESC variant collapses cleanly to
     * the legacy _list_since semantics when callers pass until=INT64_MAX. */

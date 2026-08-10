@@ -193,8 +193,10 @@ window.DawnJobsActivity = (function () {
          /* The reactor + count are aria-hidden decoration; the button's
           * aria-label carries the descriptive text for AT. */
          var svg = ensureReactor(el);
-         /* Clamp the DISPLAY to two glyphs so a pathological count can't overflow
-          * the core into the strokes; the true n stays in the tooltip/aria-label. */
+         /* Clamp the DISPLAY to a short token so a pathological count can't overflow
+          * the core: two digits fit inside the triangle; the effectively-unreachable
+          * 99+ case (jobs concurrency is capped well below 100) sits within the ring.
+          * The true n stays in the tooltip/aria-label. */
          svg.querySelector('.reactor-count').textContent = n > 99 ? '99+' : String(n);
          el.title = tooltip;
          el.setAttribute('aria-label', tooltip);

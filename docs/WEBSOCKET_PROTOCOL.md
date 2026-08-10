@@ -1172,7 +1172,8 @@ WebUI configuration (sent after session).
    "payload": {
       "audio_chunk_ms": 200,
       "music_enabled": true,
-      "music_port": 3001
+      "music_port": 3001,
+      "version": "2.0.0"
    }
 }
 ```
@@ -1180,6 +1181,8 @@ WebUI configuration (sent after session).
   `false`, a client should not open the music socket.
 - `music_port`: Port of the dedicated music-stream server (subprotocol `dawn-music`).
   Advertised so clients don't have to assume `main_port + 1`.
+- `version`: The DAWN daemon version (`VERSION_NUMBER`, compile-time). Advertised so
+  clients can detect the daemon version for compatibility/telemetry.
 
 #### `state`
 State machine update.
