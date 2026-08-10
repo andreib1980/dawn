@@ -208,6 +208,17 @@ int conv_db_job_mark_fired(int64_t conv_id) {
    return AUTH_DB_SUCCESS;
 }
 
+/* The monitor batches its synchronous fires through _many; record the ids the
+ * same way as the single-row stub so fired-set assertions are unaffected. */
+int conv_db_job_mark_fired_many(const int64_t *ids, int n) {
+   pthread_mutex_lock(&g_stub_mutex);
+   for (int i = 0; i < n && g_fired_n < STUB_MAX_ROWS; i++) {
+      g_fired[g_fired_n++] = ids[i];
+   }
+   pthread_mutex_unlock(&g_stub_mutex);
+   return AUTH_DB_SUCCESS;
+}
+
 /* Strong override of job_manager.c's weak toast seam: reports how many clients
  * it reached, which is the whole question the monitor now asks it. */
 static int g_toast_clients = 0;

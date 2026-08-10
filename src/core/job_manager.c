@@ -1044,9 +1044,18 @@ void jobs_monitor_tick(time_t now) {
    int n_reinvoke = 0;
 
    /* Messaging-channel completions deliver off-thread (blocking curl); local
-    * completions get a silent browser toast, pushed here (non-blocking). */
-   job_notify_t *msg_items = calloc((size_t)n, sizeof(job_notify_t));
+    * completions get a silent browser toast, pushed here (non-blocking).
+    * msg_items is allocated lazily on the first channel completion (below): the
+    * common all-toast batch never touches it, so an eager per-tick calloc
+    * (~10 KB) would be pure waste on the 1 Hz heartbeat. */
+   job_notify_t *msg_items = NULL;
    int msg_count = 0;
+
+   /* Rows whose notice is handled synchronously here (none / staleness / toast /
+    * channel give-up) are marked fired in ONE batched UPDATE after the loop —
+    * one transaction + one auth_db lock acquisition instead of up to N. */
+   int64_t fired_ids[JOB_MONITOR_MAX_PER_TICK];
+   int n_fired = 0;
 
    const time_t now_ts = time(NULL);
 
@@ -1088,7 +1097,7 @@ void jobs_monitor_tick(time_t now) {
        * demoted just above, and one in a build with no reinvoke processor linked
        * at all, which can never be re-engaged. */
       if (strcmp(rows[i].on_complete, "none") == 0) {
-         conv_db_job_mark_fired(rows[i].id);
+         fired_ids[n_fired++] = rows[i].id;
          progressed = true;
          continue;
       }
@@ -1101,7 +1110,7 @@ void jobs_monitor_tick(time_t now) {
        * from legacy rows whose fired flag predates the monitor; anything older
        * is left to the jobs panel, which still shows it with its result. */
       if (rows[i].finished_at < now_ts - JOB_NOTIFY_MAX_STALENESS_SEC) {
-         conv_db_job_mark_fired(rows[i].id);
+         fired_ids[n_fired++] = rows[i].id;
          progressed = true;
          continue;
       }
@@ -1114,6 +1123,13 @@ void jobs_monitor_tick(time_t now) {
       const char *tail = (strcmp(rows[i].job_status, "done") == 0) ? " Ask me for the result." : "";
       char text[512];
       snprintf(text, sizeof(text), "Background job \"%s\" %s.%s", rows[i].title, verb, tail);
+
+      /* Lazily allocate the messaging queue on the first channel completion; an
+       * allocation failure leaves msg_items NULL and the row degrades to the
+       * durable browser/missed-notification path below (same as before). */
+      if (rows[i].deliver_to[0] != '\0' && msg_items == NULL) {
+         msg_items = calloc((size_t)n, sizeof(job_notify_t));
+      }
 
       if (rows[i].deliver_to[0] != '\0' && msg_items != NULL) {
          /* Messaging channel: blocking curl, so it is queued to the delivery
@@ -1130,7 +1146,7 @@ void jobs_monitor_tick(time_t now) {
                OLOG_WARNING("job_manager: giving up on job %lld notice to '%s' after %d attempts",
                             (long long)rows[i].id, rows[i].deliver_to, JOB_NOTIFY_MAX_ATTEMPTS);
                job_notify_user(rows[i].user_id, text, rows[i].id, running);
-               conv_db_job_mark_fired(rows[i].id);
+               fired_ids[n_fired++] = rows[i].id;
                delivery_release(rows[i].id, /*finished=*/true);
                progressed = true;
             }
@@ -1151,9 +1167,20 @@ void jobs_monitor_tick(time_t now) {
           * to open a tab would sit at the head of it — blocking every other
           * user's completions, for up to the staleness bound. */
          job_notify_user(rows[i].user_id, text, rows[i].id, running);
-         conv_db_job_mark_fired(rows[i].id);
+         fired_ids[n_fired++] = rows[i].id;
          progressed = true;
       }
+   }
+
+   /* Persist the batch of synchronous fires in one transaction (see fired_ids
+    * above).  Best-effort, like the per-row calls it replaces — but now
+    * all-or-nothing: a mid-batch failure rolls the whole batch back, so every
+    * already-notified row in it re-notifies on a later tick (a duplicate toast,
+    * bounded by the staleness cap) instead of one.  Wider blast radius than the
+    * old independent per-row commits, but still re-notify-not-lose — the safe
+    * direction for a completion the user is owed. */
+   if (n_fired > 0) {
+      conv_db_job_mark_fired_many(fired_ids, n_fired);
    }
 
    /* Drained a full batch AND moved something → likely more waiting behind it. */

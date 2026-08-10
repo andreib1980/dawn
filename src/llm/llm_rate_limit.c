@@ -100,6 +100,24 @@ void llm_rate_limit_init(int max_rpm) {
    }
 }
 
+int llm_sleep_with_interrupt_check(int total_ms) {
+   /* 250ms chunks: below the ~400ms wake-word-feels-laggy threshold, and 2.5x
+    * fewer scheduler wakeups than 100ms on a multi-second backoff / slot wait.
+    * Integer-ms counting avoids float drift; under heavy load a chunk may
+    * oversleep, which only lengthens the wait — safe for both callers (a longer
+    * backoff, or a longer rate-limit wait whose retry loop re-checks the count). */
+   struct timespec chunk = { .tv_sec = 0, .tv_nsec = 250000000L }; /* 250ms */
+   int elapsed_ms = 0;
+   while (elapsed_ms < total_ms) {
+      if (llm_is_interrupt_requested()) {
+         return 1;
+      }
+      nanosleep(&chunk, NULL);
+      elapsed_ms += 250;
+   }
+   return 0;
+}
+
 int llm_rate_limit_wait(void) {
    /* Fast path: disabled — zero overhead */
    if (atomic_load(&s_limiter.max_rpm) <= 0)
@@ -130,21 +148,19 @@ int llm_rate_limit_wait(void) {
 
       pthread_mutex_unlock(&s_limiter.mutex);
 
-      /* Sleep in 100ms chunks, checking for interrupt.
-       * Use CLOCK_MONOTONIC to track elapsed time (avoids floating-point drift). */
-      struct timespec sleep_ts = { .tv_sec = 0, .tv_nsec = 100000000L }; /* 100ms */
-      struct timespec sleep_start;
-      clock_gettime(CLOCK_MONOTONIC, &sleep_start);
-      while (1) {
-         if (llm_is_interrupt_requested()) {
-            OLOG_INFO("Rate limit wait interrupted");
-            return 1;
-         }
-         nanosleep(&sleep_ts, NULL);
-         struct timespec now;
-         clock_gettime(CLOCK_MONOTONIC, &now);
-         if (timespec_diff_sec(&now, &sleep_start) >= wait_sec)
-            break;
+      /* Wait for the slot to free up, interruptibly (shared helper — 250ms
+       * chunks).  The chunk granularity rounds the wait up to the next chunk,
+       * which is fine: the re-locked loop below re-checks the count anyway.
+       * wait_sec is strictly > 0 here (the <= 0 case continued above); floor to
+       * 1ms so a sub-millisecond wait still sleeps a chunk instead of spinning
+       * the retry loop until the tail entry ages out. */
+      int wait_ms = (int)(wait_sec * 1000.0);
+      if (wait_ms < 1) {
+         wait_ms = 1;
+      }
+      if (llm_sleep_with_interrupt_check(wait_ms)) {
+         OLOG_INFO("Rate limit wait interrupted");
+         return 1;
       }
 
       /* Re-lock and re-expire (TOCTOU fix: loop will re-check count) */

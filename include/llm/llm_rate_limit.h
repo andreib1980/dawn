@@ -18,7 +18,11 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Process-wide sliding window rate limiter for cloud LLM API calls.
+ * Process-wide sliding window rate limiter for cloud LLM API calls, plus a
+ * shared interrupt-aware sleep helper (llm_sleep_with_interrupt_check) used by
+ * both the rate-limiter slot wait and the tool-loop transient-error backoff.
+ * (If a third, non-rate-limit caller appears, promote the sleep helper to a
+ * dedicated llm_util.{c,h} — at two co-located callers it lives here.)
  */
 
 #ifndef LLM_RATE_LIMIT_H
@@ -39,6 +43,17 @@ void llm_rate_limit_init(int max_rpm);
  * @return 0 on success, 1 if interrupted (caller should abort the request)
  */
 int llm_rate_limit_wait(void);
+
+/**
+ * Sleep for @p total_ms, in chunks, polling the global LLM interrupt flag
+ * (llm_is_interrupt_requested) between chunks so a wake-word / cancel can cut a
+ * backoff or rate-limit wait short.  Shared by the transient-error backoff in
+ * the tool loop and the rate-limiter's slot wait.
+ * @param total_ms Total time to sleep, in milliseconds (<= 0 returns immediately).
+ * @return 1 if interrupted (caller should bail), 0 if the full duration elapsed.
+ *         The 1/0 is a normal/interrupted sentinel, NOT SUCCESS/FAILURE.
+ */
+int llm_sleep_with_interrupt_check(int total_ms);
 
 /**
  * Update the RPM limit at runtime (e.g., from WebUI settings).

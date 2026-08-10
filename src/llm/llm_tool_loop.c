@@ -56,27 +56,6 @@
 /* Thread-local flag: set when the tool loop skips follow-up */
 static _Thread_local bool s_did_skip_followup = false;
 
-/* Sleep in 250ms chunks honoring llm_is_interrupt_requested().  Returns 1 if
- * the wait was interrupted (caller should bail), 0 if the full duration
- * elapsed normally.  Not SUCCESS/FAILURE — the 1/0 is a normal/interrupted
- * sentinel.  Mirrors the pattern in llm_rate_limit.c (a future refactor could
- * promote both copies to a shared helper — see docs/TODO.md).
- *
- * 250ms is below the ~400ms wake-word-feels-laggy threshold and gives 2.5×
- * fewer scheduler wakeups than 100ms on the 7s worst-case backoff path. */
-static int sleep_with_interrupt_check(int total_ms) {
-   struct timespec chunk = { .tv_sec = 0, .tv_nsec = 250000000L }; /* 250ms */
-   int elapsed_ms = 0;
-   while (elapsed_ms < total_ms) {
-      if (llm_is_interrupt_requested()) {
-         return 1;
-      }
-      nanosleep(&chunk, NULL);
-      elapsed_ms += 250;
-   }
-   return 0;
-}
-
 bool llm_tool_loop_did_skip_followup(void) {
    return s_did_skip_followup;
 }
@@ -641,7 +620,7 @@ char *llm_tool_iteration_loop(llm_tool_loop_params_t *params) {
          OLOG_INFO("Tool loop: transient network error at iteration %d, "
                    "retry %d/%d in %dms",
                    iteration, retry + 1, LLM_TRANSIENT_RETRY_MAX, backoff_ms);
-         if (sleep_with_interrupt_check(backoff_ms)) {
+         if (llm_sleep_with_interrupt_check(backoff_ms)) {
             OLOG_INFO("Tool loop: retry backoff interrupted at iteration %d", iteration);
             llm_tool_response_free(&result);
             return NULL;
