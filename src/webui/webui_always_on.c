@@ -38,6 +38,7 @@
 #include "core/wake_word.h"
 #include "core/worker_pool.h"
 #include "logging.h"
+#include "utils/asr_transcript.h"
 #include "webui/webui_audio.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -390,9 +391,10 @@ static void *cmd_transcribe_worker(void *arg) {
       OLOG_INFO("Always-on: command transcript: \"%s\"", transcript);
    }
 
-   /* Store result under mutex for thread safety */
+   /* Store result under mutex for thread safety.  Drop blank/silence transcripts
+    * (empty, whitespace, or "[BLANK_AUDIO]") so nothing-heard never reaches the LLM. */
    pthread_mutex_lock(&ctx->mutex);
-   if (asr_ret == 0 && transcript && transcript[0] != '\0') {
+   if (asr_ret == 0 && !asr_transcript_is_blank(transcript)) {
       ctx->cmd_transcript = transcript;
    } else {
       ctx->cmd_transcript = NULL;

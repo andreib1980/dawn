@@ -56,6 +56,7 @@
 /* These are always available from common library */
 #ifdef HAVE_VAD_SILERO
 #include "audio/ring_buffer.h"
+#include "utils/asr_transcript.h"
 #include "utils/sentence_buffer.h"
 #endif
 
@@ -1396,7 +1397,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            if (check_wake_word(ctx, result->text, &command_text)) {
                               OLOG_INFO("Wake word detected!");
 
-                              if (command_text && command_text[0]) {
+                              if (command_text && !asr_transcript_is_blank(command_text)) {
                                  /* Command was in the same phrase as wake word */
                                  printf("\n>>> Command: %s\n\n", command_text);
                                  fflush(stdout);
@@ -1498,7 +1499,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                         asr_whisper_process(ctx->asr, ctx->audio_buffer, ctx->audio_buffer_len);
                         asr_whisper_result_t *cmd_result = asr_whisper_finalize(ctx->asr);
 #endif
-                        if (cmd_result && cmd_result->text && cmd_result->text[0]) {
+                        if (cmd_result && !asr_transcript_is_blank(cmd_result->text)) {
                            printf("\n>>> Command: %s\n\n", cmd_result->text);
                            fflush(stdout);
 
@@ -1535,7 +1536,7 @@ int voice_processing_loop(voice_ctx_t *ctx,
                            asr_whisper_result_free(cmd_result);
 #endif
                         } else {
-                           OLOG_INFO("Empty transcription, returning to silence");
+                           OLOG_INFO("Empty or blank transcription, returning to silence");
                            ctx->state = VOICE_STATE_SILENCE;
                            if (cmd_result)
 #ifdef HAVE_ASR_ENGINE

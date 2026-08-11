@@ -26,6 +26,7 @@
 
 #include "dawn_error.h"
 #include "logging.h"
+#include "utils/asr_transcript.h"
 
 /**
  * @brief Chunking manager internal structure
@@ -194,9 +195,9 @@ int chunking_manager_finalize_chunk(chunking_manager_t *cm, char **chunk_text_ou
 
       OLOG_INFO("Chunk %zu finalized: \"%s\"", cm->num_chunks, chunk_text);
 
-      // Filter out [BLANK_AUDIO] chunks (silence/noise detected by Whisper)
+      // Filter out blank/silence chunks ([BLANK_AUDIO], detected by Whisper).
       // Return to caller but don't store in chunk array to avoid contaminating real speech
-      if (strstr(chunk_text, "[BLANK_AUDIO]") != NULL) {
+      if (asr_transcript_is_blank(chunk_text)) {
          OLOG_INFO("Chunk contains [BLANK_AUDIO], skipping storage (not adding to concatenation)");
          cm->finalization_in_progress = 0;
          cm->buffer_samples = 0;

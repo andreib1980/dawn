@@ -44,6 +44,7 @@ set(DAWN_COMMON_SOURCES
     src/audio/chime.c
     src/utils/string_utils.c
     src/utils/sentence_buffer.c
+    src/utils/asr_transcript.c
 )
 
 # Create static library

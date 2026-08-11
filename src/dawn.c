@@ -48,6 +48,7 @@
 
 /* Speech to Text */
 #include "asr/asr_interface.h"
+#include "utils/asr_transcript.h"
 
 /* Local */
 #include "asr/vad_silero.h"
@@ -3729,10 +3730,8 @@ mqtt_disabled:
             buff_size = 0;
             break;
          case DAWN_STATE_PROCESS_COMMAND:
-            // Skip processing if command is empty, whitespace, or [BLANK_AUDIO]
-            if (!command_text || strlen(command_text) == 0 ||
-                strspn(command_text, " \t\n\r") == strlen(command_text) ||
-                strstr(command_text, "[BLANK_AUDIO]") != NULL) {
+            // Skip processing if command is empty, whitespace, or a silence marker
+            if (asr_transcript_is_blank(command_text)) {
                OLOG_INFO("Ignoring empty or invalid command\n");
                if (command_text) {
                   free(command_text);

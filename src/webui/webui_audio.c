@@ -42,6 +42,7 @@
 #include "logging.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
+#include "utils/asr_transcript.h"
 #include "utils/sentence_buffer.h"
 #include "webui/webui_always_on.h"
 #include "webui/webui_internal.h"
@@ -1179,8 +1180,11 @@ static void *audio_worker_thread(void *arg) {
       work->audio_data = NULL;
    }
 
-   if (ret != WEBUI_AUDIO_SUCCESS || !transcript || strlen(transcript) == 0) {
-      OLOG_WARNING("WebUI: Audio transcription failed or empty");
+   /* asr_transcript_is_blank() subsumes NULL/empty/whitespace-only and also drops
+    * a Whisper silence marker ("[BLANK_AUDIO]") — a *successful*, non-empty result
+    * that must not reach the LLM (user pressed the button but nothing was heard). */
+   if (ret != WEBUI_AUDIO_SUCCESS || asr_transcript_is_blank(transcript)) {
+      OLOG_WARNING("WebUI: Audio transcription failed, empty, or blank/silence");
       webui_send_error(session, "ASR_FAILED", "Could not understand audio");
       webui_send_state(session, "idle");
       audio_worker_end(session);
