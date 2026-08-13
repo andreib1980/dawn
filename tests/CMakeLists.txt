@@ -1116,6 +1116,12 @@ dawn_add_unit_test(test_openai_local_reasoning
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+dawn_add_unit_test(test_llm_runtime_identity
+   SOURCES test_llm_runtime_identity.c
+           ${SRC_ROOT}/src/llm/llm_runtime_identity.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 # =============================================================================
 # Hardware-dependent tests (require ONNX, CUDA, or external APIs)
 # =============================================================================
