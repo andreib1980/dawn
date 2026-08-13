@@ -37,10 +37,13 @@ jobs:
          - id: deploy
            name: Deploy the exact validated commit
            env:
+              REPOSITORY_URL: https://github.com/${{ github.repository }}.git
               VALIDATED_COMMIT: ${{ github.event.workflow_run.head_sha }}
            run: |
               set -Eeuo pipefail
               cd /home/andrei/projects/dawn
+              git remote set-url origin "$REPOSITORY_URL"
+              test "$(git remote get-url origin)" = "$REPOSITORY_URL"
               git fetch --prune origin main
               test "$(git rev-parse origin/main)" = "$VALIDATED_COMMIT"
               git switch main
