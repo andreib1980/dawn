@@ -223,7 +223,9 @@ static void emit_content(llm_stream_context_t *ctx,
                          int has_ws_session,
                          session_t *ws_session) {
    if (ctx->inside_think_tag) {
-      emit_thinking(ctx, text, has_ws_session, ws_session);
+      if (!ctx->suppress_thinking) {
+         emit_thinking(ctx, text, has_ws_session, ws_session);
+      }
    } else {
       emit_response(ctx, text, has_ws_session, ws_session);
    }
@@ -239,9 +241,13 @@ static void handle_think_open(llm_stream_context_t *ctx,
       OLOG_WARNING("LLM: Nested <think> tag ignored (already inside think block)");
       return;
    }
+   ctx->inside_think_tag = 1;
+   if (ctx->suppress_thinking) {
+      return;
+   }
+
    ctx->thinking_active = 1;
    ctx->has_thinking = 1;
-   ctx->inside_think_tag = 1;
    OLOG_INFO("LLM: Inline <think> tag detected");
    if (has_ws_session) {
       webui_send_thinking_start(ws_session, "local");
@@ -259,6 +265,10 @@ static void handle_think_close(llm_stream_context_t *ctx,
       return;
    }
    ctx->inside_think_tag = 0;
+   if (ctx->suppress_thinking) {
+      return;
+   }
+
    ctx->thinking_active = 0;
    OLOG_INFO("LLM: Inline </think> tag closed");
    if (has_ws_session) {
@@ -403,7 +413,7 @@ static void stream_emit_thinking(llm_stream_context_t *ctx,
                                  int has_ws_session,
                                  session_t *ws_session,
                                  const char *provider_label) {
-   if (!text || text[0] == '\0') {
+   if (!text || text[0] == '\0' || ctx->suppress_thinking) {
       return;
    }
    /* On the first reasoning chunk, mark thinking active + announce thinking_start. */
@@ -1211,6 +1221,9 @@ llm_stream_context_t *llm_stream_create(llm_type_t llm_type,
    ctx->callback = callback;
    ctx->callback_userdata = userdata;
    ctx->stream_complete = 0;
+
+   const char *thinking_mode = llm_get_current_thinking_mode();
+   ctx->suppress_thinking = thinking_mode && strcmp(thinking_mode, "disabled") == 0;
 
    /* Provider-specific state is zero-initialized by calloc */
 

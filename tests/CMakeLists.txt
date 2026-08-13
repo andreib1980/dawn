@@ -1103,6 +1103,13 @@ dawn_add_unit_test(test_email_db
    LIBS    dawn_common unity sqlite3 pthread m stemmer
    LABEL   ci)
 
+dawn_add_unit_test(test_streaming_thinking_mode
+   SOURCES test_streaming_thinking_mode.c
+           test_streaming_thinking_mode_stub.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # =============================================================================
 # Hardware-dependent tests (require ONNX, CUDA, or external APIs)
 # =============================================================================

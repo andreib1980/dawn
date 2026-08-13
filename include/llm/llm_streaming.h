@@ -168,6 +168,7 @@ typedef struct {
    size_t thinking_capacity;   /**< Allocated thinking buffer size */
    int thinking_active;        /**< 1 if thinking content is being received */
    int has_thinking;           /**< 1 if any thinking content was received */
+   int suppress_thinking;      /**< Discard reasoning when resolved mode is disabled */
    int reasoning_tokens;       /**< OpenAI o-series reasoning tokens (from usage) */
 
    /* Inline <think> tag filtering state (for models that emit think tags in content) */
