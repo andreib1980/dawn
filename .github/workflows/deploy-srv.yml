@@ -1,0 +1,130 @@
+name: DAWN Deploy SRV
+
+on:
+   workflow_run:
+      workflows:
+         - CI
+      types:
+         - completed
+
+permissions:
+   contents: read
+
+concurrency:
+   group: dawn-srv-deployment
+   cancel-in-progress: false
+
+jobs:
+   deploy:
+      name: Deploy validated commit to SRV
+      if: >-
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == 'main' &&
+         github.event.workflow_run.head_repository.full_name == github.repository
+      runs-on:
+         - self-hosted
+         - linux
+         - x64
+         - dawn-srv
+      timeout-minutes: 30
+      outputs:
+         duration_seconds: ${{ steps.deploy.outputs.duration_seconds }}
+         image: ${{ steps.deploy.outputs.image }}
+         ingress_image: ${{ steps.deploy.outputs.ingress_image }}
+
+      steps:
+         - id: deploy
+           name: Deploy the exact validated commit
+           env:
+              VALIDATED_COMMIT: ${{ github.event.workflow_run.head_sha }}
+           run: |
+              set -Eeuo pipefail
+              cd /home/andrei/projects/dawn
+              git fetch --prune origin main
+              test "$(git rev-parse origin/main)" = "$VALIDATED_COMMIT"
+              git switch main
+              git pull --ff-only origin main
+              test "$(git rev-parse HEAD)" = "$VALIDATED_COMMIT"
+              git submodule sync --recursive
+              git submodule update --init --recursive
+              exec ./scripts/deploy-srv.sh "$VALIDATED_COMMIT"
+
+   notify:
+      name: Notify Telegram
+      needs:
+         - deploy
+      if: >-
+         always() &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == 'main' &&
+         github.event.workflow_run.head_repository.full_name == github.repository
+      runs-on:
+         - self-hosted
+         - linux
+         - x64
+         - dawn-srv
+      timeout-minutes: 5
+
+      steps:
+         - name: Send deployment result
+           env:
+              DEPLOY_RESULT: ${{ needs.deploy.result }}
+              DEPLOYMENT_DURATION_SECONDS: ${{ needs.deploy.outputs.duration_seconds }}
+              DEPLOYED_IMAGE: ${{ needs.deploy.outputs.image }}
+              DEPLOYED_INGRESS_IMAGE: ${{ needs.deploy.outputs.ingress_image }}
+              RUN_URL: ${{ github.event.workflow_run.html_url }}
+              TELEGRAM_BOT_TOKEN: ${{ secrets.DAWN_TELEGRAM_BOT_TOKEN }}
+              TELEGRAM_CHAT_ID: ${{ secrets.DAWN_TELEGRAM_CHAT_ID }}
+              TRIGGERING_COMMIT: ${{ github.event.workflow_run.head_sha }}
+           run: |
+              python3 - <<'PY'
+              import os
+              from urllib.parse import urlencode
+              from urllib.request import Request, urlopen
+
+              token = os.environ["TELEGRAM_BOT_TOKEN"]
+              chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+              if not token or not chat_id:
+                  raise SystemExit("DAWN Telegram deployment secrets are missing.")
+
+              commit = os.environ["TRIGGERING_COMMIT"][:7]
+              result = os.environ["DEPLOY_RESULT"]
+              duration = os.environ["DEPLOYMENT_DURATION_SECONDS"]
+              image = os.environ["DEPLOYED_IMAGE"]
+              ingress_image = os.environ["DEPLOYED_INGRESS_IMAGE"]
+
+              lines = [
+                  f"DAWN CI/CD: {result}",
+                  f"Commit: {commit}",
+              ]
+
+              if image:
+                  lines.append(f"DAWN image: {image}")
+              if ingress_image:
+                  lines.append(f"Ingress image: {ingress_image}")
+              if duration:
+                  lines.append(f"Deployment duration: {duration}s")
+              if result == "success":
+                  lines.append(
+                      "Diagnostics: DAWN and HTTPS ingress healthy; "
+                      "Ollama gemma4:12b available"
+                  )
+
+              lines.append(f'Details: {os.environ["RUN_URL"]}')
+
+              request = Request(
+                  f"https://api.telegram.org/bot{token}/sendMessage",
+                  data=urlencode(
+                      {
+                          "chat_id": chat_id,
+                          "text": "\n".join(lines)[:4096],
+                      }
+                  ).encode(),
+                  method="POST",
+              )
+
+              with urlopen(request, timeout=30) as response:
+                  response.read()
+              PY
