@@ -258,6 +258,7 @@ budget_high = 16384
 | OpenAI (o-series, GPT-5) | `reasoning_effort` parameter | Maps directly to low/medium/high |
 | Claude | `budget_tokens` parameter | Uses the token budget for the selected effort level |
 | Gemini (2.5+) | `reasoning_effort` parameter | Cannot fully disable thinking on 2.5+ models |
+| Local (Ollama) | OpenAI-compatible `reasoning_effort` parameter | Disabled maps to `none`; enabled maps to low/medium/high |
 | Local (llama.cpp) | `budget_tokens` parameter | Works with models that support thinking (Qwen3, DeepSeek-R1) |
 
 ### Streaming with Thinking

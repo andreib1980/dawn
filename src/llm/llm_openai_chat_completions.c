@@ -116,51 +116,6 @@ static void openai_sse_event_handler(const char *event_type,
    llm_stream_handle_event(ctx->stream_ctx, event_data);
 }
 
-/* ── Local LLM thinking parameters ─────────────────────────────────────── */
-
-static void add_local_thinking_params(json_object *root) {
-   const char *thinking_mode = llm_get_current_thinking_mode();
-   local_provider_t provider = llm_local_get_provider();
-
-   if (provider == LOCAL_PROVIDER_OLLAMA) {
-      if (strcmp(thinking_mode, "disabled") != 0 && !llm_tools_suppressed()) {
-         json_object_object_add(root, "think", json_object_new_boolean(1));
-         OLOG_INFO("Local LLM (Ollama): Thinking enabled (think: true)");
-      } else {
-         json_object_object_add(root, "think", json_object_new_boolean(0));
-         OLOG_INFO("Local LLM (Ollama): Thinking disabled (think: false)");
-      }
-   } else {
-      if (strcmp(thinking_mode, "disabled") != 0 && !llm_tools_suppressed()) {
-         json_object *thinking = json_object_new_object();
-         json_object_object_add(thinking, "type", json_object_new_string("enabled"));
-
-         int budget = llm_get_effective_budget_tokens();
-         json_object_object_add(thinking, "budget_tokens", json_object_new_int(budget));
-
-         json_object_object_add(root, "thinking", thinking);
-
-         json_object_object_add(root, "thinking_forced_open", json_object_new_boolean(1));
-
-         json_object *template_kwargs = json_object_new_object();
-         json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(1));
-         json_object_object_add(root, "chat_template_kwargs", template_kwargs);
-
-         OLOG_INFO("Local LLM (llama.cpp): Extended thinking enabled (budget: %d tokens, "
-                   "forced_open: true, chat_template_kwargs.enable_thinking: true)",
-                   budget);
-      } else if (strcmp(thinking_mode, "disabled") == 0) {
-         json_object_object_add(root, "reasoning_budget", json_object_new_int(0));
-
-         json_object *template_kwargs = json_object_new_object();
-         json_object_object_add(template_kwargs, "enable_thinking", json_object_new_boolean(0));
-         json_object_object_add(root, "chat_template_kwargs", template_kwargs);
-
-         OLOG_INFO("Local LLM (llama.cpp): Reasoning explicitly disabled (reasoning_budget: 0)");
-      }
-   }
-}
-
 /* ── Cloud reasoning effort ─────────────────────────────────────────────── */
 
 static void add_cloud_reasoning_effort(json_object *root,
@@ -285,6 +240,7 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
 
    if (api_key == NULL) {
       json_object_object_add(root, "max_tokens", json_object_new_int(g_config.llm.max_tokens));
+      llm_openai_add_local_thinking_params(root);
    } else {
       json_object_object_add(root, "max_completion_tokens",
                              json_object_new_int(g_config.llm.max_tokens));
@@ -567,7 +523,7 @@ static char *llm_openai_streaming_internal(struct json_object *conversation_hist
 
    if (api_key == NULL) {
       json_object_object_add(root, "timings_per_token", json_object_new_boolean(1));
-      add_local_thinking_params(root);
+      llm_openai_add_local_thinking_params(root);
    } else {
       add_cloud_reasoning_effort(root, model_name, base_url);
    }
@@ -1121,7 +1077,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
 
    if (api_key == NULL) {
       json_object_object_add(root, "timings_per_token", json_object_new_boolean(1));
-      add_local_thinking_params(root);
+      llm_openai_add_local_thinking_params(root);
    } else {
       add_cloud_reasoning_effort(root, model_name, base_url);
    }
