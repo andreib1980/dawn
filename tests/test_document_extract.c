@@ -88,7 +88,11 @@ static void test_get_extension(void) {
  * ============================================================================= */
 
 static void test_content_type_mapping(void) {
+#ifdef HAVE_MUPDF
    TEST_ASSERT_EQUAL_STRING(".pdf", document_extension_from_content_type("application/pdf"));
+#else
+   TEST_ASSERT_NULL(document_extension_from_content_type("application/pdf"));
+#endif
    TEST_ASSERT_EQUAL_STRING(".html", document_extension_from_content_type("text/html"));
    TEST_ASSERT_EQUAL_STRING(".html",
                             document_extension_from_content_type("text/html; charset=utf-8"));
