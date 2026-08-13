@@ -545,6 +545,7 @@ set(DAWN_SOURCES
     src/llm/llm_silent_observe.c
     src/llm/llm_openai.c
     src/llm/llm_openai_cache.c
+    src/llm/llm_openai_reasoning.c
     src/llm/llm_openai_chat_completions.c
     src/llm/llm_openai_history.c
     src/llm/llm_openai_responses.c

@@ -140,6 +140,15 @@ json_object *llm_openai_apply_vision_images(json_object *history,
  */
 int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *out_array);
 
+/**
+ * @brief Add provider-specific reasoning control to a local
+ *        OpenAI-compatible request.
+ *
+ * Ollama uses reasoning_effort on /v1/chat/completions. llama.cpp retains
+ * its existing native thinking controls.
+ */
+void llm_openai_add_local_thinking_params(json_object *root);
+
 /* ── Chat-completions implementation (llm_openai_chat_completions.c) ────── */
 
 /**
