@@ -41,6 +41,9 @@
 #include "core/prompt_compose.h"
 #include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_interface.h"
+#include "llm/llm_local_provider.h"
+#include "llm/llm_runtime_identity.h"
 #include "logging.h"
 #include "memory/memory_context.h"
 #include "webui/build_focus_block.h"
@@ -840,6 +843,76 @@ static char *append_block_directive(char *base, const char *text) {
    return out;
 }
 
+static const char *resolved_cloud_provider_name(cloud_provider_t provider) {
+   switch (provider) {
+      case CLOUD_PROVIDER_OPENAI:
+         return "OpenAI";
+      case CLOUD_PROVIDER_CLAUDE:
+         return "Claude";
+      case CLOUD_PROVIDER_GEMINI:
+         return "Gemini";
+      case CLOUD_PROVIDER_OPENROUTER:
+         return "OpenRouter";
+      case CLOUD_PROVIDER_NONE:
+      default:
+         return "Cloud";
+   }
+}
+
+static const char *resolved_local_provider_name(void) {
+   local_provider_t provider = llm_local_get_provider();
+
+   if (provider != LOCAL_PROVIDER_UNKNOWN) {
+      return llm_local_provider_name(provider);
+   }
+
+   if (strcmp(g_config.llm.local.provider, "ollama") == 0) {
+      return "Ollama";
+   }
+   if (strcmp(g_config.llm.local.provider, "llama_cpp") == 0) {
+      return "llama.cpp";
+   }
+
+   return "Local OpenAI-compatible";
+}
+
+static char *append_runtime_identity_to_stable(char *stable_prefix) {
+   session_llm_config_t session_config;
+   llm_resolved_config_t resolved = { 0 };
+   session_t *session = session_get_dispatch_session();
+
+   if (session != NULL) {
+      session_get_llm_config(session, &session_config);
+   } else {
+      llm_get_default_config(&session_config);
+   }
+
+   if (llm_resolve_config(&session_config, &resolved) != 0) {
+      OLOG_WARNING("Runtime identity: failed to resolve LLM configuration");
+      return stable_prefix;
+   }
+
+   char model[LLM_MODEL_NAME_MAX];
+   LLM_COPY_MODEL_SAFE(model, resolved.model);
+
+   if (model[0] == '\0') {
+      OLOG_WARNING("Runtime identity: resolved model is empty");
+      return stable_prefix;
+   }
+
+   const char *provider = resolved.type == LLM_LOCAL
+                              ? resolved_local_provider_name()
+                              : resolved_cloud_provider_name(resolved.cloud_provider);
+
+   char directive[512];
+   if (llm_runtime_identity_format(provider, model, directive, sizeof(directive)) != SUCCESS) {
+      OLOG_WARNING("Runtime identity: failed to format prompt directive");
+      return stable_prefix;
+   }
+
+   return append_block_directive(stable_prefix, directive);
+}
+
 /* Headless-worker directive, baked into the stable prefix for SESSION_TYPE_JOB
  * sessions (background jobs).  A job worker inherits the full interactive persona
  * via the shared dispatch, so without this it behaves like a live assistant —
@@ -882,6 +955,8 @@ int dawn_build_prompt(int user_id,
    out->stable_prefix = build_stable_segment(user_id);
    if (out->stable_prefix == NULL)
       return FAILURE;
+
+   out->stable_prefix = append_runtime_identity_to_stable(out->stable_prefix);
 
    /* DAP2 satellite context (Room + HomeAssistant_Area) lands INSIDE
     * the stable prefix — must happen before session_update_system_

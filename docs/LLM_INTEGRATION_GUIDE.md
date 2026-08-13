@@ -146,6 +146,8 @@ openrouter_default_model_idx = 0
 
 Each provider has a configurable model list. The first model is the default; users can switch via the WebUI settings panel or by voice ("Use GPT-5" / "Switch to Claude Opus").
 
+DAWN injects the active session's resolved provider and exact model identifier into the system prompt. This keeps model-identity answers accurate when switching between local Ollama and cloud providers such as OpenAI.
+
 ```toml
 [llm.cloud]
 provider = "openai"
