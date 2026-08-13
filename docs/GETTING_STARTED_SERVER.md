@@ -3,6 +3,10 @@
 Step-by-step guide to building and running DAWN on an x86_64 Linux system in server mode.
 Server mode provides WebUI + satellite connections without local audio hardware.
 
+For the maintained SRV deployment in this fork, including the private DAWN
+network, Caddy ingress, persistent state, CI/CD, and rollback contract, see
+[SRV Deployment](SRV_DEPLOYMENT.md).
+
 Tested on Ubuntu 24.04 LTS (x86_64) with NVIDIA GPU (optional).
 
 ---

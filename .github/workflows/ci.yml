@@ -108,6 +108,23 @@ jobs:
       - name: Smoke test (daemon links + starts)
         run: docker run --rm dawn --help
 
+      - name: Build ingress image
+        run: >
+          docker build
+          --file deploy/ingress/Dockerfile
+          --tag dawn-ingress:test
+          deploy/ingress
+
+      - name: Validate SRV deployment contract
+        env:
+          DAWN_CLOUDFLARE_DNS_API_TOKEN: ci-placeholder
+          DAWN_IMAGE: dawn:test
+          DAWN_INGRESS_IMAGE: dawn-ingress:test
+          DAWN_SERVICE_ROOT: /tmp/dawn-service
+        run: |
+          bash -n scripts/deploy-srv.sh
+          docker compose             --file deploy/docker-compose.srv.yml             config             --quiet
+
   # -------------------------------------------------------------------------
   # Job 4: Tier 1 Satellite Build (~1 min)
   # Headless config (no ML deps): VAD/ASR/TTS/SDL all OFF, so it builds with

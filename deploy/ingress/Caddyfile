@@ -1,0 +1,27 @@
+{
+	admin off
+}
+
+http:// {
+	@health path /healthz
+	respond @health "healthy\n" 200
+
+	redir https://jarvis.abpfa.network{uri} permanent
+}
+
+jarvis.abpfa.network {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	reverse_proxy dawn:3000
+}
