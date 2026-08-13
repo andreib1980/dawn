@@ -10,6 +10,7 @@ services:
          - --server
          - --config
          - /var/lib/dawn/dawn.toml
+      working_dir: /var/lib/dawn
       environment:
          HOME: /var/lib/dawn
       expose:
